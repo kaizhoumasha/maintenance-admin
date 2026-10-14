@@ -1,6 +1,7 @@
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
 os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
 
 import pytest  # noqa: E402
