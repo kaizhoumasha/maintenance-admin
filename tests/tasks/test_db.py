@@ -1,12 +1,16 @@
+import asyncio
 import os
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.asyncio.session import AsyncSession
 
-from app.models import Base, User
+from app.models import User
 
 PG_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -15,7 +19,7 @@ PG_URL = os.environ.get(
 
 
 async def test_pg_smoke() -> None:
-    """冒烟：asyncpg 链路通 → 建表 → 写读一次 → 清理。PG 没起则跳过。"""
+    """冒烟：asyncpg 链路通 → alembic 建表 → 写读一次 → 清理。PG 没起则跳过。"""
     engine = create_async_engine(PG_URL)
     try:
         async with engine.connect() as conn:
@@ -24,8 +28,16 @@ async def test_pg_smoke() -> None:
         await engine.dispose()
         pytest.skip("Postgres(25432) 未启动，先 docker-compose up -d")
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # 建表走真实迁移而不是 create_all,否则会在没有版本记录的情况下建表,
+        # 之后 alembic upgrade 会报 already exists。用子进程是因为 env.py 自带 asyncio.run,
+        # 且只读 DATABASE_URL
+        await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=Path(__file__).parents[2],
+            env={**os.environ, "DATABASE_URL": PG_URL},
+            check=True,
+        )
         factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         username = f"smoke_{uuid.uuid4().hex[:8]}"
         async with factory() as session:

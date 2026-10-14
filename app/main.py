@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 
 from app.controllers.auth import router as auth_router
+from app.controllers.permissions import router as permissions_router
+from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
 from app.core import get_settings, register_exception_handlers, setup_logging
 from app.middlewares import trace_id_middleware
@@ -23,6 +25,8 @@ register_exception_handlers(app)
 setup_logging()
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(roles_router, prefix="/api/v1")
+app.include_router(permissions_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["health"])

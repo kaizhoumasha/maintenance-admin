@@ -1,6 +1,6 @@
 from .config import Settings, get_settings
 from .database import SessionDep
-from .deps import get_current_user
+from .deps import get_current_user, require_permission
 from .errors import HTTP_STATUS, AppError, ErrorCode, ErrorResponse
 from .handlers import register_exception_handlers
 from .logger import logger, setup_logging
@@ -17,6 +17,7 @@ __all__ = [
     "get_settings",
     "get_trace_id",
     "get_current_user",
+    "require_permission",
     "logger",
     "register_exception_handlers",
     "set_trace_id",

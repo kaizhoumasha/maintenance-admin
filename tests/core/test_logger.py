@@ -48,8 +48,8 @@ def test_endpoint_src_handles_lambda_and_is_unambiguous():
     assert endpoint_src(user_service.get_user).startswith("services/user_service.py:")
 
 
-async def test_handler_log_points_to_raise_site(client, caplog):
-    await client.get("/api/v1/users/999")
+async def test_handler_log_points_to_raise_site(client, admin, caplog):
+    await client.get("/api/v1/users/999", headers=admin)
     rec = next(
         r for r in caplog.records if r.levelname == "WARNING" and "NOT_FOUND" in r.getMessage()
     )

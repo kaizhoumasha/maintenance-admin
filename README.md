@@ -31,6 +31,17 @@ uv run pytest        # 测试用内存 SQLite，不依赖 docker
 scripts/lint.sh      # ruff check --fix + format
 ```
 
+### 2.5 初始化管理员(RBAC)
+
+用户接口需要权限,首个管理员无法通过 API 创建,用脚本引导(可重复执行;admin 角色会被授予表里的全部权限):
+
+```bash
+uv run python -m scripts.seed_admin <username> <email> <password>
+```
+
+权限存在 `permission` 表里(`GET/POST /permissions` 管理);路由加 `dependencies=[Depends(require_permission("user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。注意权限码写错不会报错,只会让所有人 403。seed 脚本里的 `INITIAL_PERMISSIONS` 只是初始数据。
+模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
+
 ### 3. 目录结构（Controller / Service / Model 三层）
 
 ```bash

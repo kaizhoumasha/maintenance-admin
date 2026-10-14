@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
+from scripts.seed_admin import seed_admin  # noqa: E402
 
 
 @pytest.fixture
@@ -35,3 +36,16 @@ async def client():
         yield c
     app.dependency_overrides.clear()
     await engine.dispose()
+
+
+@pytest.fixture
+async def admin(client):
+    """种子化 admin 用户(id=1,拥有全部权限)并返回其 Authorization 头。"""
+    gen = app.dependency_overrides[get_session]()
+    session = await anext(gen)
+    await seed_admin(session, "root", "root@example.com", "password123")
+    await gen.aclose()
+    r = await client.post(
+        "/api/v1/auth/login", json={"username": "root", "password": "password123"}
+    )
+    return {"Authorization": f"Bearer {r.json()['access_token']}"}

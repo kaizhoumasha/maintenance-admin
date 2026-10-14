@@ -9,8 +9,8 @@ from app.models import User
 PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
 
 
-async def test_login_then_me(client):
-    await client.post("/api/v1/users", json=PAYLOAD)
+async def test_login_then_me(client, admin):
+    await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     r = await client.post("/api/v1/auth/login", json={"username": "kai", "password": "password123"})
     assert r.status_code == 200
     token = r.json()["access_token"]
@@ -19,8 +19,8 @@ async def test_login_then_me(client):
     assert r.status_code == 200 and r.json()["username"] == "kai"
 
 
-async def test_bad_credentials_and_token(client):
-    await client.post("/api/v1/users", json=PAYLOAD)
+async def test_bad_credentials_and_token(client, admin):
+    await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     r = await client.post("/api/v1/auth/login", json={"username": "kai", "password": "wrong-pass"})
     assert r.status_code == 401 and r.json()["code"] == "UNAUTHORIZED"
     r = await client.get("/api/v1/users/me", headers={"Authorization": "Bearer garbage"})
@@ -42,8 +42,8 @@ async def _deactivate_user(user_id):
     await gen.aclose()
 
 
-async def test_unknown_user_same_error_as_wrong_password(client):
-    await client.post("/api/v1/users", json=PAYLOAD)
+async def test_unknown_user_same_error_as_wrong_password(client, admin):
+    await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     wrong_pw = await client.post(
         "/api/v1/auth/login", json={"username": "kai", "password": "x" * 8}
     )
@@ -55,12 +55,12 @@ async def test_unknown_user_same_error_as_wrong_password(client):
     assert unknown.json()["message"] == wrong_pw.json()["message"]
 
 
-async def test_inactive_user_cannot_login_or_use_token(client):
-    await client.post("/api/v1/users", json=PAYLOAD)
+async def test_inactive_user_cannot_login_or_use_token(client, admin):
+    await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     login = {"username": "kai", "password": "password123"}
     token = (await client.post("/api/v1/auth/login", json=login)).json()["access_token"]
 
-    await _deactivate_user(1)
+    await _deactivate_user(2)  # 1 号是 admin fixture
 
     r = await client.post("/api/v1/auth/login", json=login)
     assert r.status_code == 401
@@ -68,8 +68,8 @@ async def test_inactive_user_cannot_login_or_use_token(client):
     assert r.status_code == 401
 
 
-async def test_valid_signature_but_bad_subject_rejected(client):
-    await client.post("/api/v1/users", json=PAYLOAD)
+async def test_valid_signature_but_bad_subject_rejected(client, admin):
+    await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     for sub in ("abc", "999"):  # 非数字 / 用户不存在
         r = await client.get("/api/v1/users/me", headers=_bearer(create_access_token(sub)))
         assert r.status_code == 401 and r.json()["code"] == "UNAUTHORIZED"
