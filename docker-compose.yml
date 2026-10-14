@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: timescale/timescaledb@sha256:6e4b469dee0395a8a6d8c818384b0226a749997a29a312f314413f98e4161f82
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: maintenance
+    ports: ["25432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin"]
+      interval: 5s
+  redis:
+    image: redis:8-alpine
+    ports: ["26379:6379"]
+    volumes: [redisdata:/data]
+volumes:
+  pgdata:
+  redisdata:
