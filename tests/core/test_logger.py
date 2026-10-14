@@ -1,3 +1,4 @@
+import functools
 import importlib
 import logging
 import sys
@@ -64,3 +65,11 @@ def test_uvicorn_loggers_use_root_handler(monkeypatch):
     monkeypatch.setattr(logger_mod, "_done", False)
     logger_mod.setup_logging()
     assert uv.handlers == [] and uv.propagate
+
+
+def test_endpoint_src_survives_missing_source():
+    # 源码取不到(只有 .pyc、跨机器缓存的路径等)时不能抛异常,退回到代码对象记录的位置
+    ns: dict = {}
+    exec(compile("def f():\n    pass\n", "/nonexistent/dir/x.py", "exec"), ns)
+    assert endpoint_src(ns["f"]) == "x.py:1"
+    assert endpoint_src(functools.partial(print)) == "-"  # 没有 __code__ 的可调用对象

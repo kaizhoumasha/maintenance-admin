@@ -58,12 +58,20 @@ def endpoint_src(endpoint: Callable | None) -> str:
     """命中的接口函数的 `目录/文件:def 所在行`；没匹配到路由（如 404）返回 `-`。"""
     if endpoint is None:
         return "-"
-    lines, start = inspect.getsourcelines(endpoint)
+    code = getattr(endpoint, "__code__", None)
+    if code is None:
+        return "-"
+    try:
+        lines, start = inspect.getsourcelines(endpoint)
+    except (OSError, TypeError):
+        # 源码取不到(只有 .pyc、zip 部署等):退回到代码对象记录的位置。
+        # 这个函数在每个请求的访问日志里调用,不能因为日志而让请求失败。
+        return f"{_short(Path(code.co_filename))}:{code.co_firstlineno}"
     # lambda 等没有 def 行时退回到起始行
     offset = next(
         (i for i, ln in enumerate(lines) if ln.lstrip().startswith(("def ", "async def "))), 0
     )
-    return f"{_short(Path(inspect.getsourcefile(endpoint) or '?'))}:{start + offset}"
+    return f"{_short(Path(code.co_filename))}:{start + offset}"
 
 
 class DevFormatter(logging.Formatter):
