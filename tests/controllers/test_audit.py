@@ -11,8 +11,8 @@ import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import DataError
 
-from app.core import logger
 from app.main import app
 from app.models import AuditLog
 from tests.controllers.test_rbac import PAYLOAD, _bearer, _make_user_with_perms
@@ -165,14 +165,20 @@ async def test_reads_are_not_audited(client, admin):
 # ---------- 旁路:审计失败不影响业务 ----------
 
 
-async def test_audit_failure_does_not_break_business(client, admin, monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("audit db down"),
+        DataError(
+            "INSERT INTO audit_logs ...", {"body": "audit-secret"}, ValueError("audit-secret")
+        ),
+    ],
+)
+async def test_audit_failure_does_not_break_business(client, admin, monkeypatch, caplog, failure):
     def broken_factory():
-        raise RuntimeError("audit db down")
+        raise failure
 
     monkeypatch.setattr(app.state, "audit_session_factory", broken_factory)
-    errors = []
-    monkeypatch.setattr(logger, "error", lambda *a, **k: errors.append(a))
-    monkeypatch.setattr(logger, "exception", lambda *a, **k: errors.append(a))
 
     # raise_app_exceptions=True:后台任务里的异常若没被审计代码自己吞掉,会直接抛进这个 await
     transport = ASGITransport(app=app, raise_app_exceptions=True)
@@ -180,7 +186,8 @@ async def test_audit_failure_does_not_break_business(client, admin, monkeypatch)
         r = await strict.post(USERS, json=PAYLOAD, headers=admin)
     assert r.status_code == 201
     assert (await client.get(f"{USERS}/{r.json()['id']}", headers=admin)).status_code == 200
-    assert errors, "审计写入失败必须打 error 日志,不能静默吞掉"
+    assert any("审计日志写入失败" in rec.getMessage() for rec in caplog.records)
+    assert "audit-secret" not in caplog.text
 
 
 # ---------- GET /audit-logs ----------
@@ -225,12 +232,12 @@ async def test_audit_logs_allowed_with_audit_read(client, admin):
 # ---------- 黑名单标记 ----------
 
 
-def test_hidden_fields_by_marker_and_by_name():
+def test_audit_fields_exclude_marked_and_sensitive_fields():
     from types import SimpleNamespace
 
     from pydantic import BaseModel, Field
 
-    from app.middlewares.audit_middleware import _hidden_fields
+    from app.middlewares.audit_middleware import _audit_fields
     from app.schemas.base import NO_AUDIT
 
     class Body(BaseModel):
@@ -239,8 +246,8 @@ def test_hidden_fields_by_marker_and_by_name():
         api_token: str  # 忘了标,靠名字兜底
 
     route = SimpleNamespace(body_field=SimpleNamespace(field_info=SimpleNamespace(annotation=Body)))
-    assert _hidden_fields(route) == {"pin", "api_token"}
-    assert _hidden_fields(SimpleNamespace()) == set()  # 没有请求体的路由
+    assert _audit_fields(route) == {"name"}
+    assert _audit_fields(SimpleNamespace()) == set()  # 没有请求体的路由
 
 
 async def test_oversized_body_is_not_recorded(client, admin):
@@ -251,6 +258,37 @@ async def test_oversized_body_is_not_recorded(client, admin):
 
 async def test_undeclared_sensitive_key_is_not_recorded(client, admin):
     # schema 里没声明的字段会被 Pydantic 忽略,但原始请求体里有,不能被记下来
-    body = {**PAYLOAD, "api_token": "tok-should-not-leak"}
+    body = {
+        **PAYLOAD,
+        "api_token": "tok-should-not-leak",
+        "metadata": {"password": "tok-should-not-leak"},
+        "items": [{"api_token": "tok-should-not-leak"}],
+    }
     assert (await client.post(USERS, json=body, headers=admin)).status_code == 201
     assert "tok-should-not-leak" not in json.dumps(await _logs(client, admin))
+
+
+async def test_nested_body_is_redacted(client, admin):
+    from types import SimpleNamespace
+
+    from pydantic import BaseModel
+
+    from app.middlewares.audit_middleware import AuditMiddleware
+
+    class Body(BaseModel):
+        metadata: dict
+
+    route = SimpleNamespace(
+        path="/example", body_field=SimpleNamespace(field_info=SimpleNamespace(annotation=Body))
+    )
+    scope = {"app": app, "route": route, "path": "/example", "method": "POST", "headers": []}
+    payload = {"metadata": {"name": "kept", "items": [{"token": "hidden", "count": 2}]}}
+    await AuditMiddleware(app)._record(
+        scope,
+        {"audit_user_id": 1, "audit_action": "test:example:create"},
+        "test",
+        b"",
+        json.dumps(payload).encode(),
+    )
+    item = await _newest(client, admin)
+    assert item["detail"]["body"] == {"metadata": {"name": "kept", "items": [{"count": 2}]}}

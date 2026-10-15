@@ -49,7 +49,13 @@ async def create_role(session: AsyncSession, name: str, codes: Iterable[str]) ->
 
 
 async def set_role_permissions(session: AsyncSession, role_id: int, codes: Iterable[str]) -> Role:
-    stmt = select(Role).where(Role.id == role_id).options(selectinload(Role.permissions))
+    stmt = (
+        select(Role)
+        .where(Role.id == role_id)
+        .with_for_update()
+        .options(selectinload(Role.permissions))
+        .execution_options(populate_existing=True)
+    )
     role = await session.scalar(stmt)
     if role is None:
         raise AppError(ErrorCode.NOT_FOUND, "角色不存在")
@@ -59,7 +65,13 @@ async def set_role_permissions(session: AsyncSession, role_id: int, codes: Itera
 
 
 async def set_user_roles(session: AsyncSession, user_id: int, role_ids: Iterable[int]) -> None:
-    stmt = select(User).where(User.id == user_id).options(selectinload(User.roles))
+    stmt = (
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .options(selectinload(User.roles))
+        .execution_options(populate_existing=True)
+    )
     user = await session.scalar(stmt)
     if user is None:
         raise AppError(ErrorCode.NOT_FOUND, "用户不存在")

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, status
 
 from app.core import ErrorResponse, SessionDep, get_current_user, require_permission
 from app.models import User
+from app.schemas.base import DatabaseId
 from app.schemas.rbac import UserRolesIn
 from app.schemas.user import UserCreate, UserRead
 from app.services import rbac_service, user_service
@@ -33,7 +34,7 @@ async def create_user(data: UserCreate, session: SessionDep):
     responses={404: {"model": ErrorResponse}},
     dependencies=[Depends(require_permission("admin:user:read"))],
 )
-async def get_user(user_id: int, session: SessionDep):
+async def get_user(user_id: DatabaseId, session: SessionDep):
     return await user_service.get_user(session, user_id)
 
 
@@ -43,5 +44,5 @@ async def get_user(user_id: int, session: SessionDep):
     responses={404: {"model": ErrorResponse}},
     dependencies=[Depends(require_permission("admin:user:assign_role"))],
 )
-async def set_user_roles(user_id: int, data: UserRolesIn, session: SessionDep) -> None:
+async def set_user_roles(user_id: DatabaseId, data: UserRolesIn, session: SessionDep) -> None:
     await rbac_service.set_user_roles(session, user_id, data.role_ids)

@@ -4,6 +4,34 @@ from app.core import AppError, ErrorCode, get_settings
 from app.core.security import create_access_token, create_refresh_token
 from app.models import User
 
+# shortcut: 脚本按现有命名拼接 key,仅支持单机 Redis;上 Cluster 时统一 hash tag 并显式传入 key。
+_ISSUE_TOKENS = """
+local sessions, token = KEYS[1], KEYS[2]
+local sub, ttl, jti, old, multi = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[5]
+if old ~= '' then
+  if redis.call('GET', 'refresh:' .. old) ~= sub then return 0 end
+  redis.call('DEL', 'refresh:' .. old)
+  redis.call('SREM', sessions, old)
+end
+for _, member in ipairs(redis.call('SMEMBERS', sessions)) do
+  if multi == '0' then redis.call('DEL', 'refresh:' .. member) end
+  if multi == '0' or redis.call('EXISTS', 'refresh:' .. member) == 0 then
+    redis.call('SREM', sessions, member)
+  end
+end
+redis.call('SET', token, sub, 'EX', ttl)
+redis.call('SADD', sessions, jti)
+redis.call('EXPIRE', sessions, ttl)
+return 1
+"""
+
+_REVOKE_ALL = """
+for _, jti in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  redis.call('DEL', 'refresh:' .. jti)
+end
+return redis.call('DEL', KEYS[1])
+"""
+
 
 def _refresh_key(jti: str) -> str:
     return f"refresh:{jti}"
@@ -13,29 +41,25 @@ def _sessions_key(user_id: str) -> str:
     return f"user_refresh:{user_id}"
 
 
-async def issue_tokens(redis: Redis, user: User) -> tuple[str, str]:
-    """签发 (access, refresh) 并登记 refresh 会话。单点用户会先踢掉其旧会话。"""
+async def issue_tokens(redis: Redis, user: User, refresh_jti: str | None = None) -> tuple[str, str]:
+    """原子签发/轮换会话,与全部撤销互斥;沿用现有 SET 索引并清理过期成员。"""
     sub = str(user.id)
     ttl = get_settings().REFRESH_TOKEN_EXPIRE_SECONDS
-    # shortcut: 读旧会话与写入之间有竞态,并发登录的单点用户可能多留一个会话;需严格时改 Lua
-    old = set() if user.allow_multi_login else await redis.smembers(_sessions_key(sub))
     refresh, jti = create_refresh_token(sub)
-    async with redis.pipeline() as pipe:  # MULTI/EXEC:全部写入或全部不写,不留孤儿 jti
-        if not user.allow_multi_login:
-            pipe.delete(_sessions_key(sub), *(_refresh_key(j) for j in old))
-        pipe.set(_refresh_key(jti), sub, ex=ttl)
-        pipe.sadd(_sessions_key(sub), jti)
-        pipe.expire(_sessions_key(sub), ttl)
-        await pipe.execute()
-    return create_access_token(sub), refresh
-
-
-async def claim_refresh(redis: Redis, payload: dict) -> None:
-    """轮换的第一步:原子取走并删除旧 jti,并发重放同一个 refresh 只有一个能成功。"""
-    sub = await redis.getdel(_refresh_key(payload["jti"]))
-    if sub != payload["sub"]:
+    issued = await redis.eval(
+        _ISSUE_TOKENS,
+        2,
+        _sessions_key(sub),
+        _refresh_key(jti),
+        sub,
+        ttl,
+        jti,
+        refresh_jti or "",
+        int(user.allow_multi_login),
+    )
+    if not issued:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
-    await redis.srem(_sessions_key(sub), payload["jti"])
+    return create_access_token(sub), refresh
 
 
 async def revoke_refresh(redis: Redis, payload: dict) -> None:
@@ -44,5 +68,4 @@ async def revoke_refresh(redis: Redis, payload: dict) -> None:
 
 
 async def revoke_all(redis: Redis, user_id: str) -> None:
-    jtis = await redis.smembers(_sessions_key(user_id))
-    await redis.delete(_sessions_key(user_id), *(_refresh_key(j) for j in jtis))
+    await redis.eval(_REVOKE_ALL, 1, _sessions_key(user_id))

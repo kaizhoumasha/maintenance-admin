@@ -74,9 +74,7 @@ async def refresh(
     user = await session.get(User, int(payload["sub"]))
     if user is None or not user.is_active:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
-    await session_service.claim_refresh(redis, payload)
-    # shortcut: claim 之后 Redis 写入失败(503)会丢这一个会话,用户需重新登录
-    return _token_out(response, *await session_service.issue_tokens(redis, user))
+    return _token_out(response, *await session_service.issue_tokens(redis, user, payload["jti"]))
 
 
 @router.post(

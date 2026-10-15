@@ -226,9 +226,6 @@ async def test_redis_down_returns_503(client, admin):
         async def eval(self, *a):  # 限流 fail-open 放行后,才轮到登录自己的 Redis 调用报 503
             raise RedisConnectionError("down")
 
-        def pipeline(self):
-            raise RedisConnectionError("down")
-
     app.dependency_overrides[get_redis] = lambda: Down()
     r = await client.post("/api/v1/auth/login", json=LOGIN)
     assert r.status_code == 503 and r.json()["code"] == "DATABASE_UNAVAILABLE"

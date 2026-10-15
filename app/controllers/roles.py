@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, status
 
 from app.core import ErrorResponse, SessionDep, require_permission
+from app.schemas.base import DatabaseId
 from app.schemas.rbac import RoleCreate, RolePermissionsIn, RoleRead
 from app.services import rbac_service
 
@@ -31,5 +32,5 @@ async def create_role(data: RoleCreate, session: SessionDep):
     responses={404: {"model": ErrorResponse}},
     dependencies=[Depends(require_permission("admin:role:set_permissions"))],
 )
-async def set_role_permissions(role_id: int, data: RolePermissionsIn, session: SessionDep):
+async def set_role_permissions(role_id: DatabaseId, data: RolePermissionsIn, session: SessionDep):
     return await rbac_service.set_role_permissions(session, role_id, data.permissions)

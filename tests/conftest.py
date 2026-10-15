@@ -1,6 +1,9 @@
 import math
 import os
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
@@ -8,6 +11,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+from redis.asyncio import Redis  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -15,7 +19,41 @@ from app.core.database import get_session  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
+from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E402
 from scripts.seed_admin import seed_admin  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def pg_url():
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("设置 TEST_DATABASE_URL 指向独立测试库后运行 PostgreSQL 测试")
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=Path(__file__).parents[1],
+        env={**os.environ, "DATABASE_URL": url},
+        check=True,
+    )
+    return url
+
+
+@pytest.fixture
+async def pg_sessions(pg_url):
+    engine = create_async_engine(pg_url)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def real_redis():
+    url = os.environ.get("TEST_REDIS_URL")
+    if not url:
+        pytest.skip("设置 TEST_REDIS_URL 指向独立测试实例后运行 Redis 测试")
+    async with Redis.from_url(url, decode_responses=True) as instance:
+        await instance.ping()
+        yield instance
 
 
 class FakeRedis:
@@ -26,9 +64,6 @@ class FakeRedis:
 
     async def set(self, key, value, ex=None):
         self.data[key], self.ttl[key] = value, ex
-
-    async def getdel(self, key):
-        return self.data.pop(key, None)
 
     async def delete(self, *keys):
         for k in keys:
@@ -46,8 +81,30 @@ class FakeRedis:
     async def expire(self, key, seconds):
         self.ttl[key] = seconds
 
-    async def eval(self, script, numkeys, key, window, limit, member):
-        """按 ratelimit.py 里 Lua 脚本的逻辑用 Python 复刻(测试环境没有真 Redis)。"""
+    async def eval(self, script, numkeys, *args):
+        """单元测试模拟脚本行为;原子性及过期由真实 Redis 集成测试覆盖。"""
+        key = args[0]
+        if script == _REVOKE_ALL:
+            members = await self.smembers(key)
+            await self.delete(key, *(f"refresh:{jti}" for jti in members))
+            return 1
+        if script == _ISSUE_TOKENS:
+            _, token_key, sub, ttl, jti, old, multi = args
+            if old:
+                if self.data.get(f"refresh:{old}") != sub:
+                    return 0
+                await self.delete(f"refresh:{old}")
+                await self.srem(key, old)
+            for member in await self.smembers(key):
+                if not multi:
+                    await self.delete(f"refresh:{member}")
+                if not multi or f"refresh:{member}" not in self.data:
+                    await self.srem(key, member)
+            await self.set(token_key, sub, ex=ttl)
+            await self.sadd(key, jti)
+            await self.expire(key, ttl)
+            return 1
+        key, window, limit, member = args
         now, zset = time.time() * 1000, self.data.setdefault(key, {})
         for m in [m for m, s in zset.items() if s <= now - window * 1000]:
             del zset[m]
@@ -55,32 +112,6 @@ class FakeRedis:
             return [0, math.ceil((min(zset.values()) + window * 1000 - now) / 1000)]
         zset[member] = now
         return [1, 0]
-
-    def pipeline(self):
-        return FakePipeline(self)
-
-
-class FakePipeline:
-    """记录命令,execute 时依次执行;不模拟 MULTI 的原子性。"""
-
-    def __init__(self, redis):
-        self.redis, self.ops = redis, []
-
-    def __getattr__(self, name):
-        def queue(*args, **kwargs):
-            self.ops.append((name, args, kwargs))
-
-        return queue
-
-    async def execute(self):
-        for name, args, kwargs in self.ops:
-            await getattr(self.redis, name)(*args, **kwargs)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
 
 
 @pytest.fixture

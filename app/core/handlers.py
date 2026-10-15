@@ -7,7 +7,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .errors import HTTP_STATUS, AppError, ErrorCode, ErrorResponse
-from .logger import endpoint_src, logger, origin_src
+from .logger import endpoint_src, logger, origin_src, safe_db_exception
 from .request_context import get_trace_id
 
 # 由 HTTP_STATUS 反查,新增错误码只需在 errors.py 定义一次;未列出的状态码统一按 INVALID_REQUEST 处理
@@ -136,6 +136,7 @@ async def db_error_handler(request: Request, exc: Exception) -> JSONResponse:
         f"orig={type(cause).__name__} sql={sql} | {request.method} {request.url.path}"
     )
     detail = type(exc).__name__
+    safe_exc = safe_db_exception(exc)
     if isinstance(exc, IntegrityError):
         # 唯一/外键/非空约束冲突:调用方的问题,不记堆栈
         logger.warning("database integrity error: %s", info, extra=_src(request, exc))
@@ -146,10 +147,10 @@ async def db_error_handler(request: Request, exc: Exception) -> JSONResponse:
         # ConnectionError/TimeoutError:连不上库时 asyncpg 抛的是原生异常,不是 SQLAlchemyError
         # shortcut: OperationalError 也含死锁等,统一按 503;需区分时按 sqlstate 细分
         # shortcut: 原生 ConnectionError 一律视为数据库问题,接入其他外部服务后按来源区分
-        logger.error("database unavailable: %s", info, exc_info=exc, extra=_src(request, exc))
+        logger.error("database unavailable: %s", info, exc_info=safe_exc, extra=_src(request, exc))
         code, message = ErrorCode.DATABASE_UNAVAILABLE, "数据库暂不可用，请稍后重试"
     else:
-        logger.error("database error: %s", info, exc_info=exc, extra=_src(request, exc))
+        logger.error("database error: %s", info, exc_info=safe_exc, extra=_src(request, exc))
         code, message = ErrorCode.INTERNAL_ERROR, "系统内部错误，请稍后重试"
     return _error_response(HTTP_STATUS[code], code, message, detail)
 

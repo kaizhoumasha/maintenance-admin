@@ -6,7 +6,10 @@
 import json
 import re
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core import logger
+from app.core.logger import safe_db_exception
 from app.models import AuditLog
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -23,8 +26,8 @@ def _resource(route_path: str) -> str | None:
     return None
 
 
-def _hidden_fields(route) -> set[str]:
-    """路由请求体 schema 里不该记录的字段:标了 NO_AUDIT 的,或名字像敏感信息的。"""
+def _audit_fields(route) -> set[str]:
+    """只允许记录 schema 声明且未标为敏感的字段。"""
     # FastAPI 的 ModelField 没有 type_,请求体 schema 在 field_info.annotation
     field = getattr(getattr(route, "body_field", None), "field_info", None)
     model = getattr(field, "annotation", None)
@@ -32,8 +35,17 @@ def _hidden_fields(route) -> set[str]:
     return {
         name
         for name, f in fields.items()
-        if (f.json_schema_extra or {}).get("audit") is False or SENSITIVE.search(name)
+        if (f.json_schema_extra or {}).get("audit") is not False and not SENSITIVE.search(name)
     }
+
+
+def _redact(value):
+    # shortcut: 嵌套值仅按字段名脱敏;引入带 NO_AUDIT 的嵌套模型时按 schema 递归。
+    if isinstance(value, dict):
+        return {k: _redact(v) for k, v in value.items() if not SENSITIVE.search(k)}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
 
 
 class AuditMiddleware:
@@ -81,8 +93,11 @@ class AuditMiddleware:
                 await self._record(
                     scope, state, trace_id, bytes(body), None if req_too_big else bytes(req_body)
                 )
-            except Exception:
-                logger.exception("审计日志写入失败")
+            except Exception as exc:
+                logger.exception(
+                    "审计日志写入失败",
+                    exc_info=safe_db_exception(exc) if isinstance(exc, SQLAlchemyError) else exc,
+                )
 
     async def _record(
         self, scope, state, trace_id: str, body: bytes, req_body: bytes | None
@@ -103,11 +118,8 @@ class AuditMiddleware:
         except ValueError:
             payload = None
         if isinstance(payload, dict):
-            hidden = _hidden_fields(scope.get("route"))
-            # 名字兜底也用在 payload 的 key 上:客户端多发的、schema 里没声明的字段也要挡住
-            detail["body"] = {
-                k: v for k, v in payload.items() if k not in hidden and not SENSITIVE.search(k)
-            }
+            allowed = _audit_fields(scope.get("route"))
+            detail["body"] = _redact({k: v for k, v in payload.items() if k in allowed})
         ua = dict(scope["headers"]).get(b"user-agent", b"").decode(errors="replace")
         client = scope.get("client")
         log = AuditLog(

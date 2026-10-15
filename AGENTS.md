@@ -35,7 +35,7 @@ Use four spaces, type hints, `snake_case` functions/modules, and `PascalCase` cl
 
 ## Testing Guidelines
 
-Use pytest, pytest-asyncio, and HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, and `admin` fixtures. Most tests use SQLite/fake Redis; Celery runs eagerly. PostgreSQL smoke tests migrate `TEST_DATABASE_URL` and skip when unavailable; use a disposable database. No coverage threshold is configured. Cover changed behavior and failure cases.
+Use pytest, pytest-asyncio, HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, `admin` fixtures. Unit tests use SQLite/fake Redis; Celery runs eagerly. Integration tests require explicit `TEST_DATABASE_URL`/`TEST_REDIS_URL` for disposable stores; unset configuration skips tests, configured connection failures fail. PostgreSQL applies migrations. No coverage threshold. Cover changes and failures.
 
 ## Commit & Pull Request Guidelines
 

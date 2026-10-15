@@ -27,9 +27,18 @@ uv run alembic upgrade head     # 应用 migrations/versions 下已有的迁移
 # uv run alembic revision --autogenerate -m "说明"   # 生成后先检查再 upgrade
 uv run uvicorn app.main:app --reload
 uv run celery -A app.tasks.celery_app worker -l info
-uv run pytest        # 测试用内存 SQLite，不依赖 docker
+uv run pytest        # 默认使用 SQLite/FakeRedis；未显式配置的集成测试会跳过
 scripts/lint.sh      # ruff check --fix + format
 ```
+
+PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
+
+```bash
+TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/maintenance_test \
+TEST_REDIS_URL=redis://localhost:26379/15 uv run pytest
+```
+
+运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`。
 
 ### 2.5 初始化管理员(RBAC)
 

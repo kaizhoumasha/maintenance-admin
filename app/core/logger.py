@@ -7,6 +7,8 @@ from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.core.request_context import get_trace_id
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +21,11 @@ _LEVEL_COLOR = {
     logging.ERROR: "\x1b[31m",
     logging.CRITICAL: "\x1b[1;97;41m",
 }
+
+
+def safe_db_exception(exc: BaseException) -> SQLAlchemyError:
+    """驱动异常及异常链可能回显参数;只保留异常类型与原始栈位置。"""
+    return SQLAlchemyError(type(exc).__name__).with_traceback(exc.__traceback__)
 
 
 class TraceIdFilter(logging.Filter):

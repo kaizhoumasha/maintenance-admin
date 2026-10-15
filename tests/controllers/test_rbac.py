@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.security import create_access_token
 
 PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
@@ -91,3 +93,22 @@ async def test_permissions_are_data(client, admin):
         "/api/v1/roles", json={"name": "q", "permissions": ["admin:report:export"]}, headers=admin
     )
     assert r.status_code == 201 and r.json()["permissions"] == [new]
+
+
+@pytest.mark.parametrize("value", [0, -1, 2147483648, 2**100])
+async def test_invalid_ids_are_rejected_before_database_access(client, admin, value):
+    requests = [
+        await client.get(f"/api/v1/users/{value}", headers=admin),
+        await client.put(f"/api/v1/users/{value}/roles", json={"role_ids": []}, headers=admin),
+        await client.put(
+            f"/api/v1/roles/{value}/permissions", json={"permissions": []}, headers=admin
+        ),
+        await client.put("/api/v1/users/1/roles", json={"role_ids": [value]}, headers=admin),
+    ]
+    for response in requests:
+        assert response.status_code == 400
+        assert response.json()["code"] == "INVALID_REQUEST"
+
+
+async def test_largest_valid_id_reaches_not_found_handling(client, admin):
+    assert (await client.get("/api/v1/users/2147483647", headers=admin)).status_code == 404

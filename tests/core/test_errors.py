@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError, SQLAlchemyError
 
 from app.core import HTTP_STATUS, ErrorCode
 from app.core.security import create_access_token
@@ -78,7 +78,7 @@ def test_http_status_unique():
             ErrorCode.CONFLICT,
         ),
         (
-            OperationalError("SELECT 1", {}, Exception("conn refused")),
+            OperationalError("SELECT 1", {"email": "a@b.c"}, Exception("conn refused")),
             503,
             ErrorCode.DATABASE_UNAVAILABLE,
         ),
@@ -88,6 +88,15 @@ def test_http_status_unique():
             ErrorCode.DATABASE_UNAVAILABLE,
         ),
         (SQLAlchemyError("boom password=abc"), 500, ErrorCode.INTERNAL_ERROR),
+        (
+            DataError(
+                "INSERT INTO user ...",
+                {"email": "a@b.c", "hash": "password=abc"},
+                ValueError("invalid value: a@b.c"),
+            ),
+            500,
+            ErrorCode.INTERNAL_ERROR,
+        ),
     ],
 )
 async def test_db_errors(client, admin, monkeypatch, caplog, exc, status, code):
@@ -101,3 +110,6 @@ async def test_db_errors(client, admin, monkeypatch, caplog, exc, status, code):
     assert "a@b.c" not in r.text and "password=abc" not in r.text  # 参数和内部信息不返回
     assert any("database" in rec.getMessage() for rec in caplog.records)  # 定位信息进了日志
     assert "a@b.c" not in caplog.text  # SQL 参数不进日志
+    assert "password=abc" not in caplog.text
+    if not isinstance(exc, IntegrityError):
+        assert "Traceback" in caplog.text

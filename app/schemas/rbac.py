@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.deps import PERMISSION_CODE_PATTERN
+from app.schemas.base import DatabaseId
 
 
 class PermissionRead(BaseModel):
@@ -33,4 +34,4 @@ class RolePermissionsIn(BaseModel):
 
 
 class UserRolesIn(BaseModel):
-    role_ids: list[int]
+    role_ids: list[DatabaseId]
