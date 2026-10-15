@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
@@ -7,6 +7,7 @@ from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
 from app.core import get_settings, register_exception_handlers, setup_logging
 from app.core.database import session_factory
+from app.core.ratelimit import RateLimit
 from app.middlewares import AuditMiddleware, trace_id_middleware
 
 settings = get_settings()
@@ -16,6 +17,8 @@ app = FastAPI(
     title="maintenance-admin",
     description="管理系统后端",
     version="0.1.0",
+    # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
+    dependencies=[Depends(RateLimit(100))],
     # 刷新页面后保留已填的 token
     swagger_ui_parameters={"persistAuthorization": True},
     docs_url="/docs" if settings.ENVIRONMENT == "local" else None,

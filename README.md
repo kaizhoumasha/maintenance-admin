@@ -73,3 +73,15 @@ maintenance-admin/
 - 新错误码同时加到 `core/errors.py` 的 `ErrorCode` 和 `HTTP_STATUS`（状态码需唯一），并补 `tests/core/test_errors.py`。
 - 响应体统一为 `{trace_id, code, message, detail}`；参数校验、404/405 和未捕获异常都由 `core/handlers.py` 转成同一格式，未知异常详情只进日志。
 - 数据库异常（`SQLAlchemyError`）也由 handler 统一处理：约束冲突 → 409 `CONFLICT`，连接/超时 → 503 `DATABASE_UNAVAILABLE`，其余 → 500。响应只含 `trace_id` 和异常类型名；用 `trace_id` 到日志里查 SQLSTATE、约束名、SQL 语句和堆栈（不记 SQL 参数）。service 里不要 `try/except SQLAlchemyError` 吞掉异常。
+
+### 限流(SPEC-015)
+
+Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{key}:{窗口秒数}`(如 `ratelimit:ip:1.2.3.4:/api/v1/users:60`、`ratelimit:login:1.2.3.4:60`)。
+
+- 全局默认:100 次/分钟/IP/路由(`main.py` 的 `RateLimit(100)`)。
+- 路由覆盖:在路由装饰器加 `dependencies=[Depends(RateLimit(10))]`,同名的全局默认自动跳过。
+- 登录:`login:{ip}` 5 次/分钟(`RateLimit(5, name="login", per_route=False)`),与全局默认叠加。
+- 超限返回 429 `TOO_MANY_REQUESTS`(统一错误结构),`Retry-After` 为最早一次请求滑出窗口的剩余秒数;被拒请求不计入窗口。
+- 只作用于已匹配的路由,404/405 不计数。
+- Redis 连接/超时故障时 **fail-open**(放行并记 warning 日志);脚本报错不放行,会变成 500:限流是保护不是门禁。
+- IP 取对端地址;部署在反向代理后需改为解析可信的 `X-Forwarded-For`,否则所有用户共用一个配额。

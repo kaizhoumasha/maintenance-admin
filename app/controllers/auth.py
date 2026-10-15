@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.core import get_current_user, get_settings
 from app.core.database import SessionDep
 from app.core.errors import AppError, ErrorCode, ErrorResponse
+from app.core.ratelimit import RateLimit
 from app.core.redis import RedisDep
 from app.core.security import decode_token, verify_password
 from app.models import User
@@ -44,7 +45,13 @@ def _refresh_payload(request: Request) -> dict:
     return decode_token(token, "refresh")
 
 
-@router.post("/login", response_model=TokenOut, responses={401: {"model": ErrorResponse}})
+# 防暴力破解:同一 IP 每分钟 5 次(_DUMMY_HASH 只防枚举)
+@router.post(
+    "/login",
+    response_model=TokenOut,
+    dependencies=[Depends(RateLimit(5, name="login", per_route=False))],
+    responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
+)
 async def login(
     data: LoginIn, session: SessionDep, redis: RedisDep, response: Response
 ) -> TokenOut:

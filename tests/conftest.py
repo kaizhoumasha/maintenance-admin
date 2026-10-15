@@ -1,4 +1,6 @@
+import math
 import os
+import time
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
@@ -43,6 +45,16 @@ class FakeRedis:
 
     async def expire(self, key, seconds):
         self.ttl[key] = seconds
+
+    async def eval(self, script, numkeys, key, window, limit, member):
+        """按 ratelimit.py 里 Lua 脚本的逻辑用 Python 复刻(测试环境没有真 Redis)。"""
+        now, zset = time.time() * 1000, self.data.setdefault(key, {})
+        for m in [m for m, s in zset.items() if s <= now - window * 1000]:
+            del zset[m]
+        if len(zset) >= limit:
+            return [0, math.ceil((min(zset.values()) + window * 1000 - now) / 1000)]
+        zset[member] = now
+        return [1, 0]
 
     def pipeline(self):
         return FakePipeline(self)

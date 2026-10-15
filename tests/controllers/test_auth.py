@@ -223,6 +223,9 @@ async def test_logout_all_revokes_every_session(client, admin):
 
 async def test_redis_down_returns_503(client, admin):
     class Down:
+        async def eval(self, *a):  # 限流 fail-open 放行后,才轮到登录自己的 Redis 调用报 503
+            raise RedisConnectionError("down")
+
         def pipeline(self):
             raise RedisConnectionError("down")
 

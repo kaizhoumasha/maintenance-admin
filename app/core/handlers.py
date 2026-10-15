@@ -27,7 +27,11 @@ def _src(request: Request, exc: BaseException) -> dict[str, str]:
 
 
 def _error_response(
-    status: int, code: ErrorCode, message: str, detail: str | None = None
+    status: int,
+    code: ErrorCode,
+    message: str,
+    detail: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """
     构建统一的错误响应。
@@ -48,7 +52,7 @@ def _error_response(
     return JSONResponse(
         status_code=status,
         content=body.model_dump(mode="json"),
-        headers={"X-Trace-Id": trace_id},
+        headers={**(headers or {}), "X-Trace-Id": trace_id},
     )
 
 
@@ -74,7 +78,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         exc_info=exc if status >= 500 else None,
         extra=_src(request, exc),
     )
-    return _error_response(status, exc.code, exc.message, exc.detail)
+    return _error_response(status, exc.code, exc.message, exc.detail, exc.headers)
 
 
 async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

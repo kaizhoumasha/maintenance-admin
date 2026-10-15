@@ -55,6 +55,15 @@ async def test_unhandled_error_hides_internals(client, admin, monkeypatch):
     assert body["detail"] is None and "secret" not in r.text
 
 
+async def test_too_many_requests_has_retry_after(client):
+    body = {"username": "nobody", "password": "whatever123"}
+    for _ in range(5):
+        await client.post("/api/v1/auth/login", json=body)
+    r = await client.post("/api/v1/auth/login", json=body)
+    _assert_error(r, 429, ErrorCode.TOO_MANY_REQUESTS)
+    assert r.headers["Retry-After"].isdigit()
+
+
 def test_http_status_unique():
     # handlers.py 按状态码反查错误码，状态码重复会让结果不确定
     assert len(set(HTTP_STATUS.values())) == len(HTTP_STATUS)
