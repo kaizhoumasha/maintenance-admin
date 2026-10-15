@@ -5,6 +5,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.security import (
     ALGORITHM,
     create_access_token,
+    create_refresh_token,
     decode_token,
     hash_password,
     verify_password,
@@ -43,3 +44,12 @@ def test_token_signed_with_other_key_rejected():
     with pytest.raises(AppError) as e:
         decode_token(forged)
     assert e.value.code == ErrorCode.UNAUTHORIZED and e.value.message == "凭证无效"
+
+
+def test_token_type_mixup_rejected():
+    refresh, jti = create_refresh_token("42")
+    assert decode_token(refresh, "refresh")["jti"] == jti
+    for token, wanted in ((refresh, "access"), (create_access_token("42"), "refresh")):
+        with pytest.raises(AppError) as e:
+            decode_token(token, wanted)
+        assert e.value.code == ErrorCode.UNAUTHORIZED

@@ -1,9 +1,12 @@
 """写入初始权限、确保 admin 角色拥有表里全部权限,并创建/授权一个管理员用户。可重复执行。
 
-用法: uv run python -m scripts.seed_admin <username> <email> <password>
+用法: uv run python -m scripts.seed_admin <username> <email>
+密码取自环境变量 ADMIN_PASSWORD,未设置则交互式 getpass 输入(不进 shell 历史)。
 """
 
 import asyncio
+import getpass
+import os
 import sys
 
 from sqlalchemy import select
@@ -48,6 +51,7 @@ async def seed_admin(session: AsyncSession, username: str, email: str, password:
             hashed_password=await asyncio.to_thread(hash_password, password),
         )
         session.add(user)
+    user.allow_multi_login = True
     if role not in user.roles:
         user.roles.append(role)
     await session.commit()
@@ -59,4 +63,5 @@ async def main(username: str, email: str, password: str) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(*sys.argv[1:4]))
+    password = os.environ.get("ADMIN_PASSWORD") or getpass.getpass("Admin password: ")
+    asyncio.run(main(sys.argv[1], sys.argv[2], password))

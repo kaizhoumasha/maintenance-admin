@@ -24,6 +24,7 @@ async def create_user(session: AsyncSession, data: UserCreate) -> User:
     user = User(
         username=data.username,
         email=data.email,
+        allow_multi_login=data.allow_multi_login,
         # scrypt 是 CPU 密集操作,放线程池避免阻塞事件循环
         hashed_password=await asyncio.to_thread(hash_password, data.password),
     )

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -149,6 +150,22 @@ async def db_error_handler(request: Request, exc: Exception) -> JSONResponse:
     return _error_response(HTTP_STATUS[code], code, message, detail)
 
 
+async def redis_error_handler(request: Request, exc: RedisError) -> JSONResponse:
+    """Redis 不可用时认证无法完成,明确返回 503 而不是 500。"""
+    logger.error(
+        "redis unavailable | %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+        extra=_src(request, exc),
+    )
+    # shortcut: 与数据库不可用共用 503/DATABASE_UNAVAILABLE(状态码须唯一),需区分时新增错误码并改映射
+    code = ErrorCode.DATABASE_UNAVAILABLE
+    return _error_response(
+        HTTP_STATUS[code], code, "缓存服务暂不可用，请稍后重试", type(exc).__name__
+    )
+
+
 async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """
     处理所有未被捕获的异常（兜底异常处理器）。
@@ -201,4 +218,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     )
     app.add_exception_handler(ConnectionError, db_error_handler)
     app.add_exception_handler(TimeoutError, db_error_handler)
+    app.add_exception_handler(RedisError, redis_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, unhandled_error_handler)
