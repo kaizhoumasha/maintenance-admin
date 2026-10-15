@@ -26,7 +26,7 @@ async def test_forbidden(client, admin):
     token = create_access_token(str(uid))  # 已登录但没有任何角色
     r = await client.get("/api/v1/users/1", headers={"Authorization": f"Bearer {token}"})
     body = _assert_error(r, 403, ErrorCode.FORBIDDEN)
-    assert body["detail"] == "user:read"
+    assert body["detail"] == "admin:user:read"
 
 
 async def test_validation_error(client, admin):

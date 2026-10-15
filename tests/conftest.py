@@ -92,6 +92,7 @@ async def client(redis):
 
     app.dependency_overrides[get_session] = override
     app.dependency_overrides[get_redis] = lambda: redis
+    app.state.audit_session_factory = factory
     async with AsyncClient(
         transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
     ) as c:

@@ -19,11 +19,15 @@ from app.models import Permission, Role, User
 
 # 仅是初始数据;之后新权限走 POST /permissions,不必改这里
 INITIAL_PERMISSIONS = {
-    "user:create": "创建用户",
-    "user:read": "查看用户",
-    "role:read": "查看角色与权限",
-    "role:write": "管理角色与权限",
-    "role:assign": "分配用户角色",
+    "admin:user:create": "创建用户",
+    "admin:user:read": "查看用户",
+    "admin:user:assign_role": "分配用户角色",
+    "admin:role:read": "查看角色",
+    "admin:role:create": "创建角色",
+    "admin:role:set_permissions": "设置角色权限",
+    "admin:permission:read": "查看权限",
+    "admin:permission:create": "创建权限",
+    "admin:audit:read": "查看审计日志",
 }
 
 

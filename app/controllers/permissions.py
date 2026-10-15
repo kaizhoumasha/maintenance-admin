@@ -10,7 +10,7 @@ router = APIRouter(prefix="/permissions", tags=["permissions"])
 @router.get(
     "",
     response_model=list[PermissionRead],
-    dependencies=[Depends(require_permission("role:read"))],
+    dependencies=[Depends(require_permission("admin:permission:read"))],
 )
 async def list_permissions(session: SessionDep):
     return await rbac_service.list_permissions(session)
@@ -21,7 +21,7 @@ async def list_permissions(session: SessionDep):
     response_model=PermissionRead,
     status_code=status.HTTP_201_CREATED,
     responses={409: {"model": ErrorResponse}},
-    dependencies=[Depends(require_permission("role:write"))],
+    dependencies=[Depends(require_permission("admin:permission:create"))],
 )
 async def create_permission(data: PermissionCreate, session: SessionDep):
     return await rbac_service.create_permission(session, data.code, data.name)

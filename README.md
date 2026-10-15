@@ -39,7 +39,7 @@ scripts/lint.sh      # ruff check --fix + format
 uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSWORD 环境变量或交互输入
 ```
 
-权限存在 `permission` 表里(`GET/POST /permissions` 管理);路由加 `dependencies=[Depends(require_permission("user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。注意权限码写错不会报错,只会让所有人 403。seed 脚本里的 `INITIAL_PERMISSIONS` 只是初始数据。
+权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),且一个权限码只能用于一个路由。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误或重复使用会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
 
 ### 3. 目录结构（Controller / Service / Model 三层）

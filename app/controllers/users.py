@@ -21,7 +21,7 @@ async def read_me(current: Annotated[User, Depends(get_current_user)]) -> User:
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
     responses={409: {"model": ErrorResponse}},
-    dependencies=[Depends(require_permission("user:create"))],
+    dependencies=[Depends(require_permission("admin:user:create"))],
 )
 async def create_user(data: UserCreate, session: SessionDep):
     return await user_service.create_user(session, data)
@@ -31,7 +31,7 @@ async def create_user(data: UserCreate, session: SessionDep):
     "/{user_id}",
     response_model=UserRead,
     responses={404: {"model": ErrorResponse}},
-    dependencies=[Depends(require_permission("user:read"))],
+    dependencies=[Depends(require_permission("admin:user:read"))],
 )
 async def get_user(user_id: int, session: SessionDep):
     return await user_service.get_user(session, user_id)
@@ -41,7 +41,7 @@ async def get_user(user_id: int, session: SessionDep):
     "/{user_id}/roles",
     status_code=status.HTTP_204_NO_CONTENT,
     responses={404: {"model": ErrorResponse}},
-    dependencies=[Depends(require_permission("role:assign"))],
+    dependencies=[Depends(require_permission("admin:user:assign_role"))],
 )
 async def set_user_roles(user_id: int, data: UserRolesIn, session: SessionDep) -> None:
     await rbac_service.set_user_roles(session, user_id, data.role_ids)

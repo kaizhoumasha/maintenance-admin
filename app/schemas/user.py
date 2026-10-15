@@ -2,11 +2,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import NO_AUDIT
+
 
 class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=64)
     email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=255)
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=8, max_length=128, json_schema_extra=NO_AUDIT)
     allow_multi_login: bool = False
 
 

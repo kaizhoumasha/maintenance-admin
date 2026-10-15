@@ -29,18 +29,18 @@ async def test_user_without_role_is_forbidden(client, admin):
 
 
 async def test_permission_is_per_code(client, admin):
-    uid = await _make_user_with_perms(client, admin, ["user:read"])
+    uid = await _make_user_with_perms(client, admin, ["admin:user:read"])
     assert (await client.get("/api/v1/users/1", headers=_bearer(uid))).status_code == 200
     r = await client.post(
         "/api/v1/users",
         json={**PAYLOAD, "username": "x" * 3, "email": "x@e.com"},
         headers=_bearer(uid),
     )
-    assert r.status_code == 403 and r.json()["detail"] == "user:create"
+    assert r.status_code == 403 and r.json()["detail"] == "admin:user:create"
 
 
 async def test_revoking_permission_takes_effect_immediately(client, admin):
-    uid = await _make_user_with_perms(client, admin, ["user:read"])
+    uid = await _make_user_with_perms(client, admin, ["admin:user:read"])
     h = _bearer(uid)
     assert (await client.get("/api/v1/users/1", headers=h)).status_code == 200
     r = await client.put("/api/v1/roles/2/permissions", json={"permissions": []}, headers=admin)
@@ -49,7 +49,7 @@ async def test_revoking_permission_takes_effect_immediately(client, admin):
 
 
 async def test_role_admin_endpoints_need_permission(client, admin):
-    uid = await _make_user_with_perms(client, admin, ["user:read"])
+    uid = await _make_user_with_perms(client, admin, ["admin:user:read"])
     h = _bearer(uid)
     assert (await client.get("/api/v1/roles", headers=h)).status_code == 403
     assert (await client.post("/api/v1/roles", json={"name": "y"}, headers=h)).status_code == 403
@@ -82,12 +82,12 @@ async def test_unauthenticated_gets_401_not_403(client):
 
 async def test_permissions_are_data(client, admin):
     r = await client.get("/api/v1/permissions", headers=admin)
-    assert "user:read" in [x["code"] for x in r.json()]
-    new = {"code": "report:export", "name": "导出报表"}
+    assert "admin:user:read" in [x["code"] for x in r.json()]
+    new = {"code": "admin:report:export", "name": "导出报表"}
     assert (await client.post("/api/v1/permissions", json=new, headers=admin)).status_code == 201
     assert (await client.post("/api/v1/permissions", json=new, headers=admin)).status_code == 409
     # 新建的权限可立即授予角色,并被鉴权识别
     r = await client.post(
-        "/api/v1/roles", json={"name": "q", "permissions": ["report:export"]}, headers=admin
+        "/api/v1/roles", json={"name": "q", "permissions": ["admin:report:export"]}, headers=admin
     )
     assert r.status_code == 201 and r.json()["permissions"] == [new]

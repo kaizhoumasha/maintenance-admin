@@ -1,5 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.deps import PERMISSION_CODE_PATTERN
+
 
 class PermissionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -9,7 +11,7 @@ class PermissionRead(BaseModel):
 
 
 class PermissionCreate(BaseModel):
-    code: str = Field(min_length=1, max_length=64)
+    code: str = Field(max_length=64, pattern=PERMISSION_CODE_PATTERN)
     name: str = Field(min_length=1, max_length=64)
 
 
