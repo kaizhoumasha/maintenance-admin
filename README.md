@@ -2,6 +2,8 @@
 
 维保协同后台管理系统（RBAC）。
 
+开发约定见 [AGENTS.md](AGENTS.md) 和 [CLAUDE.md](CLAUDE.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 技术栈
 
 - FastAPI + SQLAlchemy 2.0 async（Postgres，Alembic 迁移）
@@ -122,6 +124,7 @@ maintenance-admin/
 
 ### 9. 统一错误处理（沿用 maintenance-agent）
 
+- 新增路由统一用 `app.core.routing.new_router()` 创建 router；OpenAPI 根据参数和依赖自动补 400/401/403/429，路由只需声明额外的业务错误（如 404/409/503），参数校验统一返回 400，不声明 422。
 - 业务错误一律 `raise AppError(ErrorCode.X, "中文消息", detail)`，路由里不手写错误响应。
 - 新错误码同时加到 `core/errors.py` 的 `ErrorCode` 和 `HTTP_STATUS`（状态码需唯一），并补 `tests/core/test_errors.py`。
 - 响应体统一为 `{trace_id, code, message, detail}`；参数校验、404/405 和未捕获异常都由 `core/handlers.py` 转成同一格式，未知异常详情只进日志。
@@ -153,6 +156,8 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 权限码前缀 `admin:` 只是约定（`<module>:<resource>:<action>`），业务模块用自己的 module 即可。
 
 ## 列表筛选与分页（SPEC-018）
+
+完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，实施与验收记录见 [实现计划](docs/superpowers/plans/2026-10-17-list-query-plan.md)。
 
 `GET /api/v1/users`、`/api/v1/audit-logs`、`/api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
 
