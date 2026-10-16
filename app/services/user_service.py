@@ -1,15 +1,19 @@
 import asyncio
+from datetime import datetime
 from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core import AppError, ErrorCode, hash_password, verify_password
-from app.models import User
-from app.schemas.base import PageParams
+from app.models import User, user_role
+from app.schemas.base import DatabaseId, PageParams
+from app.schemas.query import FilterGroup
 from app.schemas.user import UserCreate, UserMeRead, UserRead, UserUpdate
 from app.services import rbac_service, session_service
+from app.services.filtering import FieldSpec, apply_filter
 from app.services.pagination import paginate
 
 # 用户不存在时也跑一次哈希，避免用时差暴露"这个用户名是否存在"
@@ -56,8 +60,25 @@ async def get_me(session: AsyncSession, user: User) -> UserMeRead:
     return UserMeRead(**UserRead.model_validate(user).model_dump(), permissions=codes)
 
 
-async def list_users(session: AsyncSession, params: PageParams) -> dict[str, Any]:
-    return await paginate(session, select(User).order_by(User.id.desc()), params)
+def _role_clause(op: str, value: Any) -> ColumnElement[bool]:
+    match_role = user_role.c.role_id.in_(value) if op == "in" else user_role.c.role_id == value
+    return exists().where(user_role.c.user_id == User.id, match_role)
+
+
+_USER_FIELDS = {
+    "username": FieldSpec(User.username, str, ("eq", "in", "ilike")),
+    "email": FieldSpec(User.email, str, ("eq", "in", "ilike")),
+    "is_active": FieldSpec(User.is_active, bool, ("eq",)),
+    "created_at": FieldSpec(User.created_at, datetime, ("ge", "le", "between")),
+    "role_id": FieldSpec(user_role.c.role_id, DatabaseId, ("eq", "in"), _role_clause),
+}
+
+
+async def list_users(
+    session: AsyncSession, params: PageParams, filters: FilterGroup | None = None
+) -> dict[str, Any]:
+    stmt = apply_filter(select(User).order_by(User.id.desc()), filters, _USER_FIELDS)
+    return await paginate(session, stmt, params)
 
 
 async def create_user(session: AsyncSession, data: UserCreate) -> User:

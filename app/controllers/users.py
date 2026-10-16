@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from fastapi import Depends, Response, status
+from fastapi import Depends, Query, Response, status
 
 from app.core import (
     SessionDep,
@@ -13,8 +13,9 @@ from app.core.redis import RedisDep
 from app.core.routing import new_router
 from app.core.security import REFRESH_COOKIE, REFRESH_COOKIE_PATH
 from app.models import User
-from app.schemas.base import DatabaseId, Page, PageQuery
+from app.schemas.base import DatabaseId, Page
 from app.schemas.menu import RouteRecord
+from app.schemas.query import UserListParams, parse_filter
 from app.schemas.rbac import UserRolesIn
 from app.schemas.user import (
     PasswordChange,
@@ -71,8 +72,10 @@ async def change_my_password(
     response_model=Page[UserRead],
     dependencies=[Depends(require_permission("admin:user:list"))],
 )
-async def list_users(session: SessionDep, params: PageQuery) -> dict[str, Any]:
-    return await user_service.list_users(session, params)
+async def list_users(
+    session: SessionDep, params: Annotated[UserListParams, Query()]
+) -> dict[str, Any]:
+    return await user_service.list_users(session, params, parse_filter(params.filter))
 
 
 @router.post(

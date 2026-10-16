@@ -10,7 +10,7 @@ import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DataError
 
 from app.main import app
@@ -29,7 +29,8 @@ async def _logs(client, admin, **params):
 
 
 async def _total(client, admin):
-    return (await _logs(client, admin))["total"]
+    async with app.state.audit_session_factory() as session:
+        return await session.scalar(select(func.count()).select_from(AuditLog))
 
 
 async def _newest(client, admin):
@@ -202,18 +203,40 @@ async def test_audit_logs_pagination(client, admin):
         ids.append(r.json()["id"])
     newest_first = ids[::-1]
 
-    pages = [await _logs(client, admin, page=p, page_size=2) for p in (1, 2, 3, 4)]
-    # total == 5 同时钉住:admin fixture 的 login 不产生审计记录
-    assert all(p["total"] == 5 for p in pages)
-    assert [(p["page"], p["page_size"]) for p in pages] == [(n, 2) for n in (1, 2, 3, 4)]
+    pages, params = [], {"limit": 2}
+    while True:
+        page = await _logs(client, admin, **params)
+        pages.append(page)
+        if page["next_cursor"] is None:
+            break
+        params["cursor"] = page["next_cursor"]
+    assert [len(p["items"]) for p in pages] == [2, 2, 1]
     got = [[i["resource_id"] for i in p["items"]] for p in pages]
-    assert got == [newest_first[:2], newest_first[2:4], newest_first[4:], []]
+    assert got == [newest_first[:2], newest_first[2:4], newest_first[4:]]
 
 
-@pytest.mark.parametrize("params", [{"page": 0}, {"page_size": 0}, {"page_size": 101}])
-async def test_audit_logs_rejects_bad_paging(client, admin, params):
+# page/page_size 是旧分页参数,审计接口已改用 limit/cursor,收到即 400
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"page": 1},
+        {"page_size": 20},
+        {"limit": 0},
+        {"limit": 101},
+        {"cursor": "x" * 65},
+        {"cursor": "bad!"},
+    ],
+)
+async def test_audit_logs_rejects_bad_params(client, admin, params):
     r = await client.get(AUDIT, params=params, headers=admin)
     assert r.status_code == 400
+
+
+async def test_audit_action_rejects_ilike(client, admin):
+    # 必须是合法条件组,才能走到算子白名单;action 只允许 eq/in
+    group = '{"conditions":[{"field":"action","op":"ilike","value":"admin%"}]}'
+    r = await client.get(AUDIT, params={"filter": group}, headers=admin)
+    assert r.status_code == 400 and r.json()["message"] == "筛选算子不支持"
 
 
 async def test_audit_logs_requires_audit_read(client, admin):
