@@ -19,6 +19,20 @@ class FieldSpec:
     clause: Callable[[str, Any], ColumnElement[bool]] | None = None
 
 
+# 算子 -> SQL 子句。新增算子要和 FilterOp、FilterCondition.check_value 同步,
+# tests/services/test_filtering.py::test_every_op_is_handled 会拦住漏项
+_CLAUSES: dict[str, Callable[[Any, Any], ColumnElement[bool]]] = {
+    "eq": lambda col, v: col == v,
+    "in": lambda col, v: col.in_(v),
+    "ilike": lambda col, v: col.ilike(v, escape="\\"),
+    "ge": lambda col, v: col >= v,
+    "le": lambda col, v: col <= v,
+    "between": lambda col, v: col.between(*v),
+    "is_null": lambda col, _: col.is_(None),
+    "not_null": lambda col, _: col.is_not(None),
+}
+
+
 def _invalid(message: str, location: str) -> AppError:
     return AppError(ErrorCode.INVALID_REQUEST, message, f"{location}: {message}")
 
@@ -32,10 +46,8 @@ def _condition(
     op, value = node.op, node.value
     if op not in spec.ops:
         raise _invalid("筛选算子不支持", f"{location}.op")
-    if op == "is_null":
-        return spec.column.is_(None)
-    if op == "not_null":
-        return spec.column.is_not(None)
+    if op in ("is_null", "not_null"):
+        return _CLAUSES[op](spec.column, None)
 
     adapter = TypeAdapter(spec.value_type)
 
@@ -61,20 +73,7 @@ def _condition(
         value = convert(value, path)
     if spec.clause:
         return spec.clause(op, value)
-    column = spec.column
-    match op:
-        case "eq":
-            return column == value
-        case "in":
-            return column.in_(value)
-        case "ilike":
-            return column.ilike(value, escape="\\")
-        case "ge":
-            return column >= value
-        case "le":
-            return column <= value
-        case "between":
-            return column.between(*value)
+    return _CLAUSES[op](spec.column, value)
 
 
 def apply_filter(
