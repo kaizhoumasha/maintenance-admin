@@ -191,3 +191,39 @@ def test_unknown_and_forbidden_fields_have_identical_errors():
             apply_filter(select(User), parse(group(condition(name))), SPECS)
         messages.append((error.value.message, error.value.detail))
     assert len(set(messages)) == 1
+
+
+# 新增算子时:FilterOp、check_value、filtering._CLAUSES 三处必须同步;这里按 FilterOp 逐个验证
+_SAMPLES = {
+    "eq": "x",
+    "in": ["x"],
+    "ilike": "x%",
+    "ge": "2026-01-01T00:00:00Z",
+    "le": "2026-01-01T00:00:00Z",
+    "between": ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"],
+    "is_null": None,
+    "not_null": None,
+}
+
+
+def test_every_op_is_handled():
+    from typing import get_args
+
+    from app.schemas.query import FilterOp
+    from app.services.filtering import _CLAUSES
+
+    ops = set(get_args(FilterOp))
+    assert ops == set(_CLAUSES) == set(_SAMPLES)
+    for op in ops:
+        field, value_type = (
+            ("created_at", datetime)
+            if op in ("ge", "le", "between")
+            else (
+                "username",
+                str,
+            )
+        )
+        spec = {field: FieldSpec(getattr(User, field), value_type, (op,))}
+        node = group(condition(field, op, _SAMPLES[op]))
+        stmt = apply_filter(select(User), parse(node), spec)
+        assert "WHERE" in str(stmt), op
