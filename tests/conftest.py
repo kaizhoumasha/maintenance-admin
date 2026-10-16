@@ -1,3 +1,4 @@
+import asyncio
 import math
 import os
 import subprocess
@@ -8,10 +9,12 @@ from pathlib import Path
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
 os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
+os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from redis.asyncio import Redis  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
@@ -56,11 +59,36 @@ async def real_redis():
         yield instance
 
 
+@pytest.fixture
+def wait_for_lock(pg_sessions):
+    """并发测试用:轮询 pg_stat_activity,等到有会话在等锁(给 pid 则只看它)或 pending 已结束。"""
+
+    async def wait(pending, pid=None):
+        where = "pid = :pid" if pid else "datname = current_database()"
+        query = text(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+            f"WHERE wait_event_type = 'Lock' AND {where})"
+        )
+        async with pg_sessions() as observer, asyncio.timeout(5):
+            while not pending.done():
+                if await observer.scalar(query, {"pid": pid} if pid else {}):
+                    return
+                await (
+                    observer.rollback()
+                )  # pg_stat_activity 在事务内是快照,必须结束事务才能看到新状态
+                await asyncio.sleep(0.01)
+
+    return wait
+
+
 class FakeRedis:
     """只实现 auth 用到的命令;TTL 不模拟,只记录下来供断言。"""
 
     def __init__(self):
         self.data, self.ttl = {}, {}
+
+    async def ping(self):
+        return True
 
     async def set(self, key, value, ex=None):
         self.data[key], self.ttl[key] = value, ex
@@ -112,6 +140,19 @@ class FakeRedis:
             return [0, math.ceil((min(zset.values()) + window * 1000 - now) / 1000)]
         zset[member] = now
         return [1, 0]
+
+
+@pytest.fixture
+async def db():
+    """service 层测试用的独立会话(内存 SQLite)。"""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        yield session
+    await engine.dispose()
 
 
 @pytest.fixture

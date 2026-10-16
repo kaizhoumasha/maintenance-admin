@@ -113,3 +113,12 @@ async def test_db_errors(client, admin, monkeypatch, caplog, exc, status, code):
     assert "password=abc" not in caplog.text
     if not isinstance(exc, IntegrityError):
         assert "Traceback" in caplog.text
+
+
+def test_error_responses_builds_openapi_responses():
+    from app.core import ErrorResponse, error_responses
+
+    assert error_responses(400, 409) == {
+        400: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+    }

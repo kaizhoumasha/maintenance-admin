@@ -29,6 +29,10 @@ class RoleCreate(BaseModel):
     permissions: list[str] = []
 
 
+class RoleUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
 class RolePermissionsIn(BaseModel):
     permissions: list[str]
 

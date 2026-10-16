@@ -44,6 +44,8 @@ async def test_downgrade_requires_empty_archive(pg_url, pg_sessions, has_archive
         if has_archive:
             assert await archive_old(session, 90) == 1
         role_id, permission_id = role.id, permission.id
+    async with pg_sessions() as session:
+        head = await session.scalar(text("SELECT version_num FROM alembic_version"))
     try:
         result = await _migrate(pg_url, "downgrade", "d52e8a6b1f93")
         if has_archive:
@@ -61,10 +63,7 @@ async def test_downgrade_requires_empty_archive(pg_url, pg_sessions, has_archive
                     )
                     == permission_id
                 )
-                assert (
-                    await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "e7a41c9b3d20"
-                )
+                assert await session.scalar(text("SELECT version_num FROM alembic_version")) == head
         else:
             assert result.returncode == 0, result.stdout + result.stderr
             async with pg_sessions() as session:

@@ -1,3 +1,15 @@
+# 默认只起依赖(postgres/redis);带应用一起起:docker compose --profile app up -d --build
+# 应用的 JWT_SECRET_KEY、CORS_ORIGINS 等从 shell 或 .env 取;非 local 环境密钥至少 32 字符,否则启动失败
+x-app: &app
+  build: .
+  profiles: [app]
+  environment:
+    ENVIRONMENT: ${ENVIRONMENT:-production}
+    DATABASE_URL: postgresql+asyncpg://admin:admin123@postgres:5432/maintenance
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
+    CORS_ORIGINS: ${CORS_ORIGINS:-}
+
 services:
   postgres:
     image: timescale/timescaledb@sha256:6e4b469dee0395a8a6d8c818384b0226a749997a29a312f314413f98e4161f82
@@ -14,6 +26,39 @@ services:
     image: redis:8-alpine
     ports: ["127.0.0.1:26379:6379"]
     volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+
+  migrate:
+    <<: *app
+    command: alembic upgrade head
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *app
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+  worker:
+    <<: *app
+    command: celery -A app.tasks.celery_app worker -l info
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  # 只能起一个实例,否则定时任务会重复触发;调度文件写 /tmp(应用目录对非 root 用户只读)
+  beat:
+    <<: *app
+    command: celery -A app.tasks.celery_app beat -l info -s /tmp/celerybeat-schedule
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+
 volumes:
   pgdata:
   redisdata:

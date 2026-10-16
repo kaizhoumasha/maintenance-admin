@@ -1,6 +1,7 @@
 """统一错误处理：错误码、HTTP 状态码映射、错误响应模型和自定义异常。"""
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -36,6 +37,11 @@ class ErrorResponse(BaseModel):
     code: ErrorCode
     message: str
     detail: str | None
+
+
+def error_responses(*statuses: int) -> dict[int | str, dict[str, Any]]:
+    """路由 responses= 的简写:error_responses(400, 404) → 这些状态码都用 ErrorResponse。"""
+    return {status: {"model": ErrorResponse} for status in statuses}
 
 
 class AppError(Exception):

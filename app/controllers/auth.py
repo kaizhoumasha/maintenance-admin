@@ -1,27 +1,18 @@
-import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response, status
-from sqlalchemy import select
 
 from app.core import get_current_user, get_settings
 from app.core.database import SessionDep
 from app.core.errors import AppError, ErrorCode, ErrorResponse
 from app.core.ratelimit import RateLimit
 from app.core.redis import RedisDep
-from app.core.security import decode_token, verify_password
+from app.core.security import REFRESH_COOKIE, REFRESH_COOKIE_PATH, decode_token
 from app.models import User
 from app.schemas.auth import LoginIn, TokenOut
-from app.services import session_service
+from app.services import session_service, user_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-# 用户不存在时也跑一次哈希，避免用时差暴露"这个用户名是否存在"
-_DUMMY_HASH = "$".join(["0" * 32, "0" * 64])
-
-REFRESH_COOKIE = "refresh_token"
-# 与 main.py 的 /api/v1 前缀一致;cookie 只会被发往认证接口
-REFRESH_COOKIE_PATH = "/api/v1/auth"
 
 
 def _token_out(response: Response, access: str, refresh: str) -> TokenOut:
@@ -45,7 +36,7 @@ def _refresh_payload(request: Request) -> dict:
     return decode_token(token, "refresh")
 
 
-# 防暴力破解:同一 IP 每分钟 5 次(_DUMMY_HASH 只防枚举)
+# 防暴力破解:同一 IP 每分钟 5 次
 @router.post(
     "/login",
     response_model=TokenOut,
@@ -55,13 +46,7 @@ def _refresh_payload(request: Request) -> dict:
 async def login(
     data: LoginIn, session: SessionDep, redis: RedisDep, response: Response
 ) -> TokenOut:
-    user = await session.scalar(select(User).where(User.username == data.username))
-    if user is None:
-        await asyncio.to_thread(verify_password, data.password, _DUMMY_HASH)
-        raise AppError(ErrorCode.UNAUTHORIZED, "用户名或密码错误")
-    valid = await asyncio.to_thread(verify_password, data.password, user.hashed_password)
-    if not valid or not user.is_active:
-        raise AppError(ErrorCode.UNAUTHORIZED, "用户名或密码错误")
+    user = await user_service.authenticate(session, data.username, data.password)
     return _token_out(response, *await session_service.issue_tokens(redis, user))
 
 
@@ -71,7 +56,7 @@ async def refresh(
 ) -> TokenOut:
     payload = _refresh_payload(request)
     # 先校验用户再消费旧 jti:停用用户不会白白烧掉 token;sub 来自已验签的 payload
-    user = await session.get(User, int(payload["sub"]))
+    user = await user_service.lock_user(session, int(payload["sub"]))
     if user is None or not user.is_active:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
     return _token_out(response, *await session_service.issue_tokens(redis, user, payload["jti"]))

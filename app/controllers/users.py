@@ -1,20 +1,71 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Response, status
 
-from app.core import ErrorResponse, SessionDep, get_current_user, require_permission
+from app.core import (
+    ErrorResponse,
+    SessionDep,
+    error_responses,
+    get_current_user,
+    require_permission,
+)
+from app.core.ratelimit import RateLimit
+from app.core.redis import RedisDep
+from app.core.security import REFRESH_COOKIE, REFRESH_COOKIE_PATH
 from app.models import User
 from app.schemas.base import DatabaseId, Page, PageQuery
+from app.schemas.menu import RouteRecord
 from app.schemas.rbac import UserRolesIn
-from app.schemas.user import UserCreate, UserRead
-from app.services import rbac_service, user_service
+from app.schemas.user import (
+    PasswordChange,
+    PasswordReset,
+    UserCreate,
+    UserMeRead,
+    UserRead,
+    UserUpdate,
+)
+from app.services import menu_service, rbac_service, user_service
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("/me", response_model=UserRead, responses={401: {"model": ErrorResponse}})
-async def read_me(current: Annotated[User, Depends(get_current_user)]) -> User:
-    return current
+@router.get("/me", response_model=UserMeRead, responses=error_responses(401))
+async def read_me(
+    current: Annotated[User, Depends(get_current_user)], session: SessionDep
+) -> UserMeRead:
+    return await user_service.get_me(session, current)
+
+
+@router.get(
+    "/me/menus",
+    response_model=list[RouteRecord],
+    response_model_exclude_none=True,
+    responses=error_responses(401),
+)
+async def read_my_menus(
+    current: Annotated[User, Depends(get_current_user)], session: SessionDep
+) -> list[dict[str, Any]]:
+    return await menu_service.get_user_routes(session, current.id)
+
+
+# 旧密码可被盗用的 access token 暴力猜测,所以限流
+@router.post(
+    "/me/password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(RateLimit(5))],
+    responses=error_responses(400, 429),
+)
+async def change_my_password(
+    data: PasswordChange,
+    response: Response,
+    session: SessionDep,
+    redis: RedisDep,
+    current: Annotated[User, Depends(get_current_user)],
+) -> None:
+    await user_service.change_password(
+        session, redis, current, data.old_password, data.new_password
+    )
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_COOKIE_PATH)
 
 
 @router.get(
@@ -55,3 +106,30 @@ async def get_user(user_id: DatabaseId, session: SessionDep):
 )
 async def set_user_roles(user_id: DatabaseId, data: UserRolesIn, session: SessionDep) -> None:
     await rbac_service.set_user_roles(session, user_id, data.role_ids)
+
+
+@router.put(
+    "/{user_id}",
+    response_model=UserRead,
+    responses=error_responses(400, 404, 409),
+)
+async def update_user(
+    user_id: DatabaseId,
+    data: UserUpdate,
+    session: SessionDep,
+    redis: RedisDep,
+    actor: Annotated[User, Depends(require_permission("admin:user:update"))],
+):
+    return await user_service.update_user(session, redis, actor.id, user_id, data)
+
+
+@router.post(
+    "/{user_id}/reset-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(404),
+    dependencies=[Depends(require_permission("admin:user:reset_password"))],
+)
+async def reset_password(
+    user_id: DatabaseId, data: PasswordReset, session: SessionDep, redis: RedisDep
+) -> None:
+    await user_service.reset_password(session, redis, user_id, data.new_password)

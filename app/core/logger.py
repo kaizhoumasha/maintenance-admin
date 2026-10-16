@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.config import get_settings
 from app.core.request_context import get_trace_id
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -135,4 +136,4 @@ def setup_logging() -> None:
     _done = True
 
 
-logger = logging.getLogger("maintenance-admin")
+logger = logging.getLogger(get_settings().APP_NAME)

@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import get_settings
 
-engine = create_async_engine(get_settings().DATABASE_URL, hide_parameters=True)
+# pool_pre_ping:取连接前探测,数据库重启/空闲连接被回收后丢弃失效连接,而不是让首个请求报错
+engine = create_async_engine(get_settings().DATABASE_URL, hide_parameters=True, pool_pre_ping=True)
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 

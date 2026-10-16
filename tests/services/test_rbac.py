@@ -7,11 +7,16 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Permission, Role, User
 from app.services import rbac_service
+from scripts.seed_admin import seed_admin
 
 
 @pytest.mark.parametrize("target", ["permissions", "roles"])
-async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, target):
+async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, wait_for_lock, target):
     suffix = uuid.uuid4().hex
+    admin_name = f"admin_{suffix[:16]}"
+    async with pg_sessions() as session:
+        # 保留管理员检查要求库里至少有一个活跃管理员
+        await seed_admin(session, admin_name, f"{admin_name}@e.com", "password123")
     async with pg_sessions() as session:
         if target == "permissions":
             first, second = [
@@ -26,7 +31,7 @@ async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, target):
         session.add_all([parent, first, second])
         await session.commit()
     try:
-        async with pg_sessions() as writer, pg_sessions() as other, pg_sessions() as observer:
+        async with pg_sessions() as writer, pg_sessions() as other:
             locked = await writer.scalar(
                 select(model)
                 .where(model.id == parent.id)
@@ -37,16 +42,7 @@ async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, target):
             values = [second.code] if target == "permissions" else [second.id]
             pending = asyncio.create_task(update(other, parent.id, values))
             try:
-                async with asyncio.timeout(5):
-                    while not pending.done():
-                        waiting = await observer.scalar(
-                            text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
-                            {"pid": pid},
-                        )
-                        await observer.rollback()
-                        if waiting == "Lock":
-                            break
-                        await asyncio.sleep(0.01)
+                await wait_for_lock(pending, pid)
                 setattr(locked, relation.key, [first])
                 await writer.commit()
                 await asyncio.wait_for(pending, 5)
@@ -64,4 +60,5 @@ async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, target):
             await session.execute(delete(model).where(model.id == parent.id))
             child = Permission if target == "permissions" else Role
             await session.execute(delete(child).where(child.id.in_([first.id, second.id])))
+            await session.execute(delete(User).where(User.username == admin_name))
             await session.commit()

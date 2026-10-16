@@ -11,6 +11,10 @@ from app.core.errors import AppError, ErrorCode
 
 ALGORITHM = "HS256"
 
+REFRESH_COOKIE = "refresh_token"
+# 与 main.py 的 /api/v1 前缀一致;cookie 只会被发往认证接口
+REFRESH_COOKIE_PATH = "/api/v1/auth"
+
 # hash 与 verify 必须用同一组参数,集中在这里定义
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 

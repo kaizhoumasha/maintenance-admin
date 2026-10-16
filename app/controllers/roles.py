@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, status
 
-from app.core import ErrorResponse, SessionDep, require_permission
+from app.core import ErrorResponse, SessionDep, error_responses, require_permission
 from app.schemas.base import DatabaseId
-from app.schemas.rbac import RoleCreate, RolePermissionsIn, RoleRead
+from app.schemas.rbac import RoleCreate, RolePermissionsIn, RoleRead, RoleUpdate
 from app.services import rbac_service
 
 router = APIRouter(prefix="/roles", tags=["roles"])
@@ -34,3 +34,23 @@ async def create_role(data: RoleCreate, session: SessionDep):
 )
 async def set_role_permissions(role_id: DatabaseId, data: RolePermissionsIn, session: SessionDep):
     return await rbac_service.set_role_permissions(session, role_id, data.permissions)
+
+
+@router.put(
+    "/{role_id}",
+    response_model=RoleRead,
+    responses=error_responses(404, 409),
+    dependencies=[Depends(require_permission("admin:role:update"))],
+)
+async def update_role(role_id: DatabaseId, data: RoleUpdate, session: SessionDep):
+    return await rbac_service.update_role(session, role_id, data.name)
+
+
+@router.delete(
+    "/{role_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=error_responses(404, 409),
+    dependencies=[Depends(require_permission("admin:role:delete"))],
+)
+async def delete_role(role_id: DatabaseId, session: SessionDep) -> None:
+    await rbac_service.delete_role(session, role_id)
