@@ -2,6 +2,7 @@ from fastapi import Depends, FastAPI
 
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
+from app.controllers.maintenance import router as maintenance_router
 from app.controllers.permissions import router as permissions_router
 from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
@@ -35,6 +36,7 @@ app.include_router(audit_log_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 app.include_router(permissions_router, prefix="/api/v1")
+app.include_router(maintenance_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["health"])

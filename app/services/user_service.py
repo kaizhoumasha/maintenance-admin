@@ -1,11 +1,14 @@
 import asyncio
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import AppError, ErrorCode, hash_password
 from app.models import User
+from app.schemas.base import PageParams
 from app.schemas.user import UserCreate
+from app.services.pagination import paginate
 
 
 async def get_user(session: AsyncSession, user_id: int) -> User:
@@ -13,6 +16,10 @@ async def get_user(session: AsyncSession, user_id: int) -> User:
     if not user:
         raise AppError(ErrorCode.NOT_FOUND, "用户不存在")
     return user
+
+
+async def list_users(session: AsyncSession, params: PageParams) -> dict[str, Any]:
+    return await paginate(session, select(User).order_by(User.id.desc()), params)
 
 
 async def create_user(session: AsyncSession, data: UserCreate) -> User:

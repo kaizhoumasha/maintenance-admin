@@ -17,8 +17,9 @@ class AuditLogRead(BaseModel):
     created_at: datetime
 
 
-class AuditLogPage(BaseModel):
-    items: list[AuditLogRead]
-    total: int
-    page: int
-    page_size: int
+class AuditLogArchiveRead(AuditLogRead):
+    archived_at: datetime
+
+
+class ArchiveResult(BaseModel):
+    archived: int

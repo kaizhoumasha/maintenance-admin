@@ -1,10 +1,10 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, status
 
 from app.core import ErrorResponse, SessionDep, get_current_user, require_permission
 from app.models import User
-from app.schemas.base import DatabaseId
+from app.schemas.base import DatabaseId, Page, PageQuery
 from app.schemas.rbac import UserRolesIn
 from app.schemas.user import UserCreate, UserRead
 from app.services import rbac_service, user_service
@@ -15,6 +15,15 @@ router = APIRouter(prefix="/users", tags=["users"])
 @router.get("/me", response_model=UserRead, responses={401: {"model": ErrorResponse}})
 async def read_me(current: Annotated[User, Depends(get_current_user)]) -> User:
     return current
+
+
+@router.get(
+    "",
+    response_model=Page[UserRead],
+    dependencies=[Depends(require_permission("admin:user:list"))],
+)
+async def list_users(session: SessionDep, params: PageQuery) -> dict[str, Any]:
+    return await user_service.list_users(session, params)
 
 
 @router.post(

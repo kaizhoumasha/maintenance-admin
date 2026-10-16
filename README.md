@@ -27,6 +27,7 @@ uv run alembic upgrade head     # 应用 migrations/versions 下已有的迁移
 # uv run alembic revision --autogenerate -m "说明"   # 生成后先检查再 upgrade
 uv run uvicorn app.main:app --reload
 uv run celery -A app.tasks.celery_app worker -l info
+uv run celery -A app.tasks.celery_app beat -l info    # 定时任务(审计归档,每天 03:00 Asia/Shanghai);单独进程,只启动一个
 uv run pytest        # 默认使用 SQLite/FakeRedis；未显式配置的集成测试会跳过
 scripts/lint.sh      # ruff check --fix + format
 ```

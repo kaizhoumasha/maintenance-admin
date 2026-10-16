@@ -26,6 +26,7 @@ Services own business logic. Register routers in `app/main.py`; export models fr
 - `uv run alembic upgrade head`: apply migrations.
 - `uv run uvicorn app.main:app --reload`: start the API.
 - `uv run celery -A app.tasks.celery_app worker -l info`: start workers.
+- `uv run celery -A app.tasks.celery_app beat -l info`: start the scheduler (run exactly one).
 - `uv run pytest`: run tests.
 - `scripts/lint.sh`: fix/format with Ruff; review its diff. Check without edits using `uv run ruff check .` and `uv run ruff format --check .`.
 
