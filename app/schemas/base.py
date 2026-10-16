@@ -2,7 +2,6 @@
 
 from typing import Annotated, Self
 
-from fastapi import Query
 from pydantic import BaseModel, Field, model_validator
 
 NO_AUDIT = {"audit": False}
@@ -24,9 +23,6 @@ class PageParams(BaseModel):
     @property
     def offset(self) -> int:
         return (self.page - 1) * self.page_size
-
-
-PageQuery = Annotated[PageParams, Query()]
 
 
 class Page[T](BaseModel):

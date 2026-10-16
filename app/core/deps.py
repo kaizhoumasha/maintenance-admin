@@ -66,4 +66,5 @@ def require_permission(perm: str):
         request.state.audit_action = perm  # 通过后才写,403 因此不会被审计
         return user
 
+    check.requires_permission = perm  # type: ignore[attr-defined]  # 供 DocumentedRoute 识别
     return check

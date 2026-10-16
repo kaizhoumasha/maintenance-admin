@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
@@ -14,14 +15,24 @@ os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from redis.asyncio import Redis  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import delete, exists, func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Base  # noqa: E402
+from app.models import (  # noqa: E402
+    AuditLog,
+    AuditLogArchive,
+    Base,
+    Menu,
+    Permission,
+    Role,
+    User,
+    role_permission,
+)
 from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E402
 from scripts.seed_admin import seed_admin  # noqa: E402
 
@@ -196,3 +207,98 @@ async def admin(client):
         "/api/v1/auth/login", json={"username": "root", "password": "password123"}
     )
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+@pytest.fixture
+async def pg_client(pg_sessions, redis):
+    """自建最小授权数据,清理后检查公共 RBAC 数据未变;不运行生产种子。"""
+    suffix = uuid.uuid4().hex
+    users, roles, created_permissions = [], [], []
+    overrides = app.dependency_overrides.copy()
+    audit_factory = app.state.audit_session_factory
+
+    async def snapshot(session):
+        admin_permissions = set(
+            await session.scalars(
+                select(role_permission.c.permission_id).join(Role).where(Role.name == "admin")
+            )
+        )
+        return (
+            admin_permissions,
+            await session.scalar(select(func.count()).select_from(Permission)),
+            await session.scalar(select(func.count()).select_from(Menu)),
+        )
+
+    async def sessions():
+        async with pg_sessions() as session:
+            yield session
+
+    async with pg_sessions() as session:
+        before = await snapshot(session)
+    try:
+        async with pg_sessions() as session:
+            permissions = []
+            for code in ("admin:user:list", "admin:audit:read", "admin:audit:read_archive"):
+                permission = await session.scalar(select(Permission).where(Permission.code == code))
+                if permission is None:
+                    permission = Permission(code=code, name=code)
+                    session.add(permission)
+                    await session.flush()
+                    created_permissions.append(permission.id)
+                permissions.append(permission)
+            role = Role(name=suffix, permissions=permissions)
+            roles.append(role)
+            password_hash = await asyncio.to_thread(hash_password, "password123")
+            for prefix, assigned_roles in (("reader", [role]), ("denied", [])):
+                user = User(
+                    username=f"{prefix}_{suffix}",
+                    email=f"{prefix}_{suffix}@example.test",
+                    hashed_password=password_hash,
+                    roles=assigned_roles,
+                )
+                users.append(user)
+                session.add(user)
+            await session.commit()
+        app.dependency_overrides[get_session] = sessions
+        app.dependency_overrides[get_redis] = lambda: redis
+        app.state.audit_session_factory = pg_sessions
+        transport = ASGITransport(app=app, client=(suffix, 123), raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = []
+            for user in users:
+                response = await client.post(
+                    "/api/v1/auth/login",
+                    json={
+                        "username": user.username,
+                        "password": "password123",
+                    },
+                )
+                assert response.status_code == 200, response.text
+                headers.append({"Authorization": f"Bearer {response.json()['access_token']}"})
+            yield {
+                "client": client,
+                "headers": headers[0],
+                "denied": headers[1],
+                "tag": suffix,
+                "users": users,
+                "roles": roles,
+            }
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+        app.state.audit_session_factory = audit_factory
+        async with pg_sessions() as session:
+            for model in (AuditLog, AuditLogArchive):
+                await session.execute(delete(model).where(model.resource == suffix))
+            await session.execute(delete(User).where(User.id.in_([u.id for u in users if u.id])))
+            await session.execute(delete(Role).where(Role.id.in_([r.id for r in roles if r.id])))
+            await session.execute(
+                delete(Permission).where(
+                    Permission.id.in_(created_permissions),
+                    ~exists().where(role_permission.c.permission_id == Permission.id),
+                )
+            )
+            await session.commit()
+            assert await snapshot(session) == before
+        assert app.dependency_overrides == overrides
+        assert app.state.audit_session_factory is audit_factory

@@ -122,3 +122,38 @@ def test_error_responses_builds_openapi_responses():
         400: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
     }
+
+
+def test_openapi_error_responses_are_derived_from_route():
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+    codes = lambda m, p: set(paths[p][m]["responses"])  # noqa: E731
+    assert {"400", "401", "403", "404", "429"} <= codes("get", "/api/v1/users/{user_id}")
+    assert {"401", "403", "429"} <= codes("get", "/api/v1/roles")  # 无参数:没有 400
+    assert "400" not in codes("get", "/api/v1/roles")
+    assert "422" not in codes("get", "/api/v1/users")  # 校验失败实际是 400
+    assert "429" in codes("get", "/health")
+
+
+def test_openapi_keeps_business_errors_and_cleans_validation_errors():
+    from app.main import app
+
+    schema = app.openapi()
+    cases = [
+        ("post", "/api/v1/auth/login", {"200", "400", "401", "429"}),
+        ("get", "/api/v1/users/me", {"200", "401", "429"}),
+        ("post", "/api/v1/users", {"201", "400", "401", "403", "409", "429"}),
+        ("get", "/ready", {"200", "429", "503"}),
+    ]
+    for method, path, expected in cases:
+        responses = schema["paths"][path][method]["responses"]
+        assert set(responses) == expected
+        for code in expected - {"200", "201"}:
+            assert responses[code]["content"]["application/json"]["schema"] == {
+                "$ref": "#/components/schemas/ErrorResponse"
+            }
+    for operations in schema["paths"].values():
+        assert all("422" not in operation["responses"] for operation in operations.values())
+    assert "HTTPValidationError" not in schema["components"]["schemas"]
+    assert "ValidationError" not in schema["components"]["schemas"]

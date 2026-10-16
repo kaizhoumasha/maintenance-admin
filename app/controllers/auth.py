@@ -1,18 +1,19 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import Depends, Request, Response, status
 
 from app.core import get_current_user, get_settings
 from app.core.database import SessionDep
-from app.core.errors import AppError, ErrorCode, ErrorResponse
+from app.core.errors import AppError, ErrorCode, error_responses
 from app.core.ratelimit import RateLimit
 from app.core.redis import RedisDep
+from app.core.routing import new_router
 from app.core.security import REFRESH_COOKIE, REFRESH_COOKIE_PATH, decode_token
 from app.models import User
 from app.schemas.auth import LoginIn, TokenOut
 from app.services import session_service, user_service
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = new_router(prefix="/auth", tags=["auth"])
 
 
 def _token_out(response: Response, access: str, refresh: str) -> TokenOut:
@@ -41,7 +42,7 @@ def _refresh_payload(request: Request) -> dict:
     "/login",
     response_model=TokenOut,
     dependencies=[Depends(RateLimit(5, name="login", per_route=False))],
-    responses={401: {"model": ErrorResponse}, 429: {"model": ErrorResponse}},
+    responses=error_responses(401),
 )
 async def login(
     data: LoginIn, session: SessionDep, redis: RedisDep, response: Response
@@ -50,7 +51,7 @@ async def login(
     return _token_out(response, *await session_service.issue_tokens(redis, user))
 
 
-@router.post("/refresh", response_model=TokenOut, responses={401: {"model": ErrorResponse}})
+@router.post("/refresh", response_model=TokenOut, responses=error_responses(401))
 async def refresh(
     request: Request, response: Response, session: SessionDep, redis: RedisDep
 ) -> TokenOut:
@@ -65,7 +66,6 @@ async def refresh(
 @router.post(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={401: {"model": ErrorResponse}},
 )
 async def logout(
     request: Request,
@@ -89,7 +89,6 @@ async def logout(
 @router.post(
     "/logout-all",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={401: {"model": ErrorResponse}},
 )
 async def logout_all(
     response: Response, redis: RedisDep, current: Annotated[User, Depends(get_current_user)]
