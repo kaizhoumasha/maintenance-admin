@@ -122,3 +122,15 @@ def test_error_responses_builds_openapi_responses():
         400: {"model": ErrorResponse},
         409: {"model": ErrorResponse},
     }
+
+
+def test_openapi_error_responses_are_derived_from_route():
+    from app.main import app
+
+    paths = app.openapi()["paths"]
+    codes = lambda m, p: set(paths[p][m]["responses"])  # noqa: E731
+    assert {"400", "401", "403", "404", "429"} <= codes("get", "/api/v1/users/{user_id}")
+    assert {"401", "403", "429"} <= codes("get", "/api/v1/roles")  # 无参数:没有 400
+    assert "400" not in codes("get", "/api/v1/roles")
+    assert "422" not in codes("get", "/api/v1/users")  # 校验失败实际是 400
+    assert "429" in codes("get", "/health")

@@ -1,13 +1,14 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import Depends
 
 from app.core import SessionDep, require_permission
+from app.core.routing import new_router
 from app.schemas.audit import AuditLogArchiveRead, AuditLogRead
 from app.schemas.base import Page, PageQuery
 from app.services import audit_service
 
-router = APIRouter(prefix="/audit-logs", tags=["audit-logs"])
+router = new_router(prefix="/audit-logs", tags=["audit-logs"])
 
 
 @router.get(
