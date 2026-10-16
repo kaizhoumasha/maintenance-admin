@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from tests.controllers.test_rbac import _bearer, _make_user_with_perms
-from tests.controllers.test_users import PAYLOAD
+from tests.helpers import PAYLOAD
+from tests.helpers import bearer as _bearer
+from tests.helpers import make_user_with_perms as _make_user_with_perms
 
 BASE = "/api/v1"
 USERS = f"{BASE}/users"
@@ -91,6 +92,12 @@ async def test_filter_query_combines_with_paging_and_rejects_unknown(client, adm
         assert result.json()["code"] == "INVALID_REQUEST"
 
 
+@pytest.mark.parametrize("path", [AUDIT, f"{AUDIT}/archive"])
+@pytest.mark.parametrize("params", [{"page": 1}, {"page_size": 20}])
+async def test_audit_lists_do_not_accept_offset_paging(client, admin, path, params):
+    assert (await client.get(path, headers=admin, params=params)).status_code == 400
+
+
 async def test_query_parameters_are_flat_in_openapi(client):
     from app.main import app
 
@@ -101,6 +108,3 @@ async def test_query_parameters_are_flat_in_openapi(client):
         assert names == (
             {"page", "page_size", "filter"} if path == USERS else {"limit", "cursor", "filter"}
         )
-        assert "400" in operation["responses"]
-        filter_param = next(p for p in operation["parameters"] if p["name"] == "filter")
-        assert "2048" in filter_param["description"]

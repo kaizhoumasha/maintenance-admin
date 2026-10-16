@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 
 from app.main import app
 from app.models import AuditLog, AuditLogArchive
-from tests.controllers.test_rbac import _bearer, _make_user_with_perms
+from tests.helpers import bearer as _bearer
+from tests.helpers import make_user_with_perms as _make_user_with_perms
 
 BASE = "/api/v1"
 TRIGGER = f"{BASE}/admin/maintenance/archive-audit"
@@ -100,8 +101,6 @@ async def test_archive_list_pagination_and_permission(client, admin):
 
 async def test_archive_list_rejects_bad_params(client, admin):
     for params in (
-        {"page": 1},
-        {"page_size": 20},
         {"limit": 0},
         {"limit": 101},
         {"cursor": "x" * 65},
