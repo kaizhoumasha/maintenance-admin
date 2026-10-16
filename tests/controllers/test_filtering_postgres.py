@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import delete, event, func, select
 
 from app.models import AuditLog, AuditLogArchive, Role, User
-from app.services.pagination import _decode_cursor, _encode_cursor
+from tests.helpers import raw_cursor
 
 PATHS = ("/api/v1/users", "/api/v1/audit-logs", "/api/v1/audit-logs/archive")
 
@@ -53,11 +53,9 @@ async def test_pg_permissions_and_invalid_inputs(pg_client, path, caplog):
             assert response.status_code == 400, response.text
     if path != PATHS[0]:
         for params in (
-            {"page": 1},
-            {"page_size": 20},
             {"limit": 0},
             {"limit": 101},
-            {"cursor": _encode_cursor(2147483648)},
+            {"cursor": raw_cursor({"id": 2147483648})},
             {"cursor": "*"},
         ):
             assert (await query(pg_client, path, **params)).status_code == 400
@@ -239,7 +237,6 @@ async def test_pg_audit_fields_cursor_sql_and_no_writes(
             cursor = body["next_cursor"]
             if cursor is None:
                 break
-            assert _decode_cursor(cursor) == body["items"][-1]["id"]
         assert ids == expected
         assert sql and all("COUNT(" not in s and "OFFSET" not in s for s in sql)
         assert all(("AUDIT_LOGS_ARCHIVE" in s) == (index == 1) for s in sql)

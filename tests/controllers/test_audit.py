@@ -15,7 +15,9 @@ from sqlalchemy.exc import DataError
 
 from app.main import app
 from app.models import AuditLog
-from tests.controllers.test_rbac import PAYLOAD, _bearer, _make_user_with_perms
+from tests.helpers import PAYLOAD
+from tests.helpers import bearer as _bearer
+from tests.helpers import make_user_with_perms as _make_user_with_perms
 
 BASE = "/api/v1"
 USERS = f"{BASE}/users"
@@ -215,12 +217,9 @@ async def test_audit_logs_pagination(client, admin):
     assert got == [newest_first[:2], newest_first[2:4], newest_first[4:]]
 
 
-# page/page_size 是旧分页参数,审计接口已改用 limit/cursor,收到即 400
 @pytest.mark.parametrize(
     "params",
     [
-        {"page": 1},
-        {"page_size": 20},
         {"limit": 0},
         {"limit": 101},
         {"cursor": "x" * 65},

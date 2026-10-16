@@ -7,8 +7,8 @@ from app.core.redis import get_redis
 from app.core.security import ALGORITHM, create_access_token
 from app.main import app
 from app.models import User
+from tests.helpers import PAYLOAD
 
-PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
 LOGIN = {"username": "root", "password": "password123"}
 KAI = {"username": "kai", "password": "password123"}
 

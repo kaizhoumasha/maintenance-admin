@@ -4,8 +4,7 @@ import threading
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import user_service
-
-PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
+from tests.helpers import PAYLOAD
 
 
 async def test_create_and_get_user(client, admin):

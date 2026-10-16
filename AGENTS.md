@@ -36,7 +36,7 @@ Use four spaces, type hints, `snake_case` functions/modules, and `PascalCase` cl
 
 ## Testing Guidelines
 
-Use pytest, pytest-asyncio, HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, `admin` fixtures. Unit tests use SQLite/fake Redis; Celery runs eagerly. Integration tests require explicit `TEST_DATABASE_URL`/`TEST_REDIS_URL` for disposable stores; unset configuration skips tests, configured connection failures fail. PostgreSQL applies migrations. No coverage threshold. Cover changes and failures.
+Use pytest, pytest-asyncio, HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, `admin` fixtures. Unit tests use SQLite/fake Redis; Celery runs eagerly. Integration tests require explicit `TEST_DATABASE_URL`/`TEST_REDIS_URL` for disposable stores; unset configuration skips tests, configured connection failures fail. PostgreSQL applies migrations. No coverage threshold. Cover changes and failures. Tests pin long-lived behavior contracts, not the change that introduced them: assert observable behavior through public entry points (HTTP, service functions), not private helpers or exact internal shapes. Prefer rules over snapshots (e.g. "every route with a permission documents 403", not a hard-coded response set per route). Keep regression tests for fixed bugs; do not keep one-off verification of a refactor, transitional states (e.g. "old parameter now rejected"), or fixture wiring smoke tests. Shared helpers live in `tests/helpers.py` or `conftest.py`; test files never import from each other. Name tests and comments by behavior, not by SPEC number.
 
 ## Commit & Pull Request Guidelines
 
