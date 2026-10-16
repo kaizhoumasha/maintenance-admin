@@ -22,7 +22,7 @@ Services own business logic. Register routers in `app/main.py`; export models fr
 
 - `uv sync`: install locked dependencies.
 - `cp .env.example .env`: initialize configuration; do not overwrite existing settings.
-- `docker-compose up -d`: start PostgreSQL (25432) and Redis (26379).
+- `docker compose up -d`: start PostgreSQL (25432) and Redis (26379).
 - `uv run alembic upgrade head`: apply migrations.
 - `uv run uvicorn app.main:app --reload`: start the API.
 - `uv run celery -A app.tasks.celery_app worker -l info`: start workers.
