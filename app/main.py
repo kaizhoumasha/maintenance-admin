@@ -36,7 +36,7 @@ app = FastAPI(
     lifespan=lifespan,
     title=settings.APP_NAME,
     description="管理系统后端",
-    version="0.1.0",
+    version="0.2.0",
     # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
     dependencies=[Depends(RateLimit(100))],
     # 刷新页面后保留已填的 token
