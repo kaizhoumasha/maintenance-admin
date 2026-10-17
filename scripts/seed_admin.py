@@ -9,6 +9,7 @@ import getpass
 import os
 import sys
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,6 +17,7 @@ from sqlalchemy.orm import selectinload
 from app.core import hash_password
 from app.core.database import session_factory
 from app.models import Menu, Permission, Role, User
+from app.schemas.user import UserCreate
 
 # 仅是初始数据;之后新权限走 POST /permissions,不必改这里
 INITIAL_PERMISSIONS = {
@@ -112,6 +114,7 @@ INITIAL_MENUS = [
 
 
 async def seed_admin(session: AsyncSession, username: str, email: str, password: str) -> None:
+    UserCreate(username=username, email=email, password=password)
     existing = {p.code: p for p in await session.scalars(select(Permission))}
     for code, perm_name in INITIAL_PERMISSIONS.items():
         if code not in existing:
@@ -162,4 +165,11 @@ async def main(username: str, email: str, password: str) -> None:
 
 if __name__ == "__main__":
     password = os.environ.get("ADMIN_PASSWORD") or getpass.getpass("Admin password: ")
-    asyncio.run(main(sys.argv[1], sys.argv[2], password))
+    try:
+        asyncio.run(main(sys.argv[1], sys.argv[2], password))
+    except ValidationError as exc:
+        reasons = "; ".join(
+            f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False)
+        )
+        sys.exit(f"管理员参数无效: {reasons}")
