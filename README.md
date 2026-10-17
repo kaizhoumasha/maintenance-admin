@@ -1,5 +1,7 @@
 # maintenance-admin
 
+当前目标版本 0.2.0(未发布)。发布准备、固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+
 维保协同后台管理系统（RBAC）。
 
 开发约定见 [AGENTS.md](AGENTS.md) 和 [CLAUDE.md](CLAUDE.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
@@ -42,7 +44,7 @@ TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/maintenanc
 TEST_REDIS_URL=redis://localhost:26379/15 uv run pytest
 ```
 
-运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
+运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
 
 ### 3. 容器运行
 
@@ -56,7 +58,7 @@ docker compose --profile app ps -a    # migrate 应为 Exited (0)，api 为 heal
 docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m scripts.seed_admin <用户名> <邮箱>
 ```
 
-容器里 `ENVIRONMENT` 默认 `production`（隐藏 API 文档，要求 `JWT_SECRET_KEY` 至少 32 字符，否则启动失败）；compose 会读项目根的 `.env`，其中 `ENVIRONMENT=local` 会让容器也按 local 运行。健康检查：`/health`（存活）、`/ready`（数据库和 Redis 都可用才 200，否则 503）。CI 见 `.github/workflows/ci.yml`（ruff + pytest，含 PostgreSQL/Redis 集成测试）。
+容器里 `ENVIRONMENT` 默认 `production`（隐藏 API 文档，要求 `JWT_SECRET_KEY` 至少 32 字符，否则启动失败）；compose 会读项目根的 `.env`，其中 `ENVIRONMENT=local` 会让容器也按 local 运行。生产部署（nginx 同域反代前端、多实例、备份、升级回退）见 [docs/deploy.md](docs/deploy.md)。健康检查：`/health`（存活）、`/ready`（数据库和 Redis 都可用才 200，否则 503）。CI 见 `.github/workflows/ci.yml`（ruff + pytest，含 PostgreSQL/Redis 集成测试）。
 
 ### 4. 配置项
 
@@ -69,6 +71,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` | 默认 30 分钟 / 7 天 |
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
+| `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)
 
@@ -77,6 +80,8 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 ```bash
 uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSWORD 环境变量或交互输入
 ```
+
+初始化参数复用用户创建接口的用户名、邮箱和密码校验,非法输入在任何种子写入前拒绝,不会回显密码。重复执行也须提供合法参数;已有用户的邮箱和密码仍保持原值。
 
 权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),且一个权限码只能用于一个路由。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误或重复使用会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。

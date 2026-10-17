@@ -1,11 +1,18 @@
 # 默认只起依赖(postgres/redis);带应用一起起:docker compose --profile app up -d --build
-# 应用的 JWT_SECRET_KEY、CORS_ORIGINS 等从 shell 或 .env 取;非 local 环境密钥至少 32 字符,否则启动失败
+# 应用配置:.env 里的变量原样传入容器(令牌时长、审计保留天数等),下面显式写的优先;
+# DATABASE_URL/REDIS_URL 固定指向容器内服务(.env 里的 localhost 是本机开发用的),数据库密码用 POSTGRES_PASSWORD。
+# 非 local 环境 JWT_SECRET_KEY 至少 32 字符,否则启动失败
 x-app: &app
   build: .
+  image: ${APP_IMAGE:-maintenance-admin:dev}
   profiles: [app]
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
   environment:
     ENVIRONMENT: ${ENVIRONMENT:-production}
-    DATABASE_URL: postgresql+asyncpg://admin:admin123@postgres:5432/maintenance
+    DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/maintenance
     REDIS_URL: redis://redis:6379/0
     JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
     CORS_ORIGINS: ${CORS_ORIGINS:-}
@@ -13,9 +20,10 @@ x-app: &app
 services:
   postgres:
     image: timescale/timescaledb@sha256:6e4b469dee0395a8a6d8c818384b0226a749997a29a312f314413f98e4161f82
+    restart: unless-stopped
     environment:
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
       POSTGRES_DB: maintenance
     ports: ["127.0.0.1:25432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
@@ -24,6 +32,9 @@ services:
       interval: 5s
   redis:
     image: redis:8-alpine
+    restart: unless-stopped
+    # AOF 每秒刷盘:重启/重建容器后会话和队列从 redisdata 卷恢复,最坏丢最近 1 秒写入
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports: ["127.0.0.1:26379:6379"]
     volumes: [redisdata:/data]
     healthcheck:
@@ -36,9 +47,11 @@ services:
     restart: "no"
     depends_on:
       postgres: {condition: service_healthy}
+  # api 不发布宿主机端口(可 --scale api=N),只经 nginx 访问;本机调试可临时加 ports。
+  # --forwarded-allow-ips 默认 *,因为只有 Compose 内网的 nginx 能连到 api;跨机部署必须改成 nginx 的地址
   api:
     <<: *app
-    ports: ["127.0.0.1:8000:8000"]
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-*}
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -58,6 +71,17 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+  # 前端是独立仓库:把它的 dist 放到 FRONTEND_DIST(默认 ./frontend-dist);HTTP 端口 NGINX_PORT(默认 80)
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: [app]
+    restart: unless-stopped
+    ports: ["${NGINX_PORT:-80}:80"]
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${FRONTEND_DIST:-./frontend-dist}:/usr/share/nginx/html:ro
+    depends_on:
+      api: {condition: service_healthy}
 
 volumes:
   pgdata:
