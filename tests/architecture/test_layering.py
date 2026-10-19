@@ -7,6 +7,20 @@ APP = Path(__file__).parents[2] / "app"
 
 # 目录 → 它不能导入的包
 FORBIDDEN = {
+    "http_client": (
+        "app.core",
+        "app.interop",
+        "app.integrations",
+        "app.services",
+        "app.controllers",
+        "app.models",
+        "app.schemas",
+        "app.tasks",
+        "sqlalchemy",
+        "redis",
+        "celery",
+        "fastapi",
+    ),
     "models": ("app.services", "app.controllers", "app.schemas"),
     "schemas": ("app.services", "app.controllers"),
     "services": ("app.controllers",),
@@ -47,3 +61,11 @@ def test_checker_detects_violation(tmp_path):
         "app.services",
         "app.controllers.users",
     ]
+
+
+def test_http_client_cannot_import_application_infrastructure(tmp_path):
+    (tmp_path / "http_client").mkdir()
+    (tmp_path / "http_client" / "bad.py").write_text(
+        "from app.core import logger\nimport sqlalchemy\n"
+    )
+    assert len(violations(tmp_path)) == 2

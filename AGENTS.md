@@ -13,6 +13,7 @@ Python 3.13+ FastAPI backend for maintenance administration and RBAC:
 
 - `app/controllers/` → `app/services/` → `app/models/`: routes, business rules/transactions, SQLAlchemy models.
 - `app/schemas/`: Pydantic contracts; `core/`, `middlewares/`, `tasks/` under `app/`: infrastructure, middleware, Celery jobs.
+- `app/http_client/`: standalone HTTP client; no `app.core`, business, database, Redis, Celery, or FastAPI imports. H1/H2/H4 only; no application assembly.
 - `tests/`: mirrors application areas; `scripts/`: development/bootstrap tools.
 - `migrations/versions/`: Alembic migrations (`YYYY-MM-DD_slug.py`).
 
