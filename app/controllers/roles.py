@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import Depends, status
 
-from app.core import ErrorResponse, SessionDep, error_responses, require_permission
+from app.core import SessionDep, error_responses, require_permission
+from app.core.routing import new_router
 from app.schemas.base import DatabaseId
 from app.schemas.rbac import RoleCreate, RolePermissionsIn, RoleRead, RoleUpdate
 from app.services import rbac_service
 
-router = APIRouter(prefix="/roles", tags=["roles"])
+router = new_router(prefix="/roles", tags=["roles"])
 
 
 @router.get(
@@ -19,7 +20,7 @@ async def list_roles(session: SessionDep):
     "",
     response_model=RoleRead,
     status_code=status.HTTP_201_CREATED,
-    responses={409: {"model": ErrorResponse}},
+    responses=error_responses(409),
     dependencies=[Depends(require_permission("admin:role:create"))],
 )
 async def create_role(data: RoleCreate, session: SessionDep):
@@ -29,7 +30,7 @@ async def create_role(data: RoleCreate, session: SessionDep):
 @router.put(
     "/{role_id}/permissions",
     response_model=RoleRead,
-    responses={404: {"model": ErrorResponse}},
+    responses=error_responses(404),
     dependencies=[Depends(require_permission("admin:role:set_permissions"))],
 )
 async def set_role_permissions(role_id: DatabaseId, data: RolePermissionsIn, session: SessionDep):

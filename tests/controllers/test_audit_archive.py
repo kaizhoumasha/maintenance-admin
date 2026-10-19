@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 
 from app.main import app
 from app.models import AuditLog, AuditLogArchive
-from tests.controllers.test_rbac import _bearer, _make_user_with_perms
+from tests.helpers import bearer as _bearer
+from tests.helpers import make_user_with_perms as _make_user_with_perms
 
 BASE = "/api/v1"
 TRIGGER = f"{BASE}/admin/maintenance/archive-audit"
@@ -81,15 +82,16 @@ async def test_archive_list_pagination_and_permission(client, admin):
     old = await _seed_logs(100, 101, 102)
     await client.post(TRIGGER, headers=admin)
 
-    r = await client.get(ARCHIVE, params={"page": 1, "page_size": 2}, headers=admin)
+    r = await client.get(ARCHIVE, params={"limit": 2}, headers=admin)
     body = r.json()
     assert r.status_code == 200
-    assert set(body) == {"items", "total", "page", "page_size"}
-    assert (body["total"], body["page"], body["page_size"]) == (3, 1, 2)
+    assert set(body) == {"items", "next_cursor"}
+    assert body["next_cursor"] is not None
     assert [i["id"] for i in body["items"]] == sorted(old, reverse=True)[:2]  # id 倒序
     assert body["items"][0]["archived_at"]
-    r = await client.get(ARCHIVE, params={"page": 2, "page_size": 2}, headers=admin)
+    r = await client.get(ARCHIVE, params={"limit": 2, "cursor": body["next_cursor"]}, headers=admin)
     assert [i["id"] for i in r.json()["items"]] == [min(old)]
+    assert r.json()["next_cursor"] is None
 
     uid = await _make_user_with_perms(client, admin, ["admin:audit:read"])  # 只有 read 不够
     r = await client.get(ARCHIVE, headers=_bearer(uid))
@@ -97,9 +99,20 @@ async def test_archive_list_pagination_and_permission(client, admin):
     assert (await client.get(ARCHIVE)).status_code == 401
 
 
-async def test_archive_list_rejects_bad_paging(client, admin):
-    for params in ({"page": 0}, {"page_size": 0}, {"page_size": 101}):
+async def test_archive_list_rejects_bad_params(client, admin):
+    for params in (
+        {"limit": 0},
+        {"limit": 101},
+        {"cursor": "x" * 65},
+        {"cursor": "bad!"},
+    ):
         assert (await client.get(ARCHIVE, params=params, headers=admin)).status_code == 400
+
+
+async def test_archive_action_rejects_ilike(client, admin):
+    group = '{"conditions":[{"field":"action","op":"ilike","value":"admin%"}]}'
+    r = await client.get(ARCHIVE, params={"filter": group}, headers=admin)
+    assert r.status_code == 400 and r.json()["message"] == "筛选算子不支持"
 
 
 async def test_retention_days_comes_from_settings(client, admin, monkeypatch):

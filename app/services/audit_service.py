@@ -6,18 +6,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import logger
 from app.models import AuditLog, AuditLogArchive
-from app.schemas.base import PageParams
-from app.services.pagination import paginate
+from app.schemas.base import DatabaseId
+from app.schemas.query import CursorParams, FilterGroup
+from app.services.filtering import FieldSpec, apply_filter
+from app.services.pagination import paginate_cursor
 
 
-async def list_audit_logs(session: AsyncSession, params: PageParams) -> dict[str, Any]:
-    return await paginate(session, select(AuditLog).order_by(AuditLog.id.desc()), params)
+def _fields(model: type[AuditLog] | type[AuditLogArchive]) -> dict[str, FieldSpec]:
+    return {
+        "user_id": FieldSpec(model.user_id, DatabaseId, ("eq", "in", "is_null", "not_null")),
+        "resource_id": FieldSpec(model.resource_id, DatabaseId, ("eq", "in")),
+        "action": FieldSpec(model.action, str, ("eq", "in")),
+        "resource": FieldSpec(model.resource, str, ("eq", "in")),
+        "created_at": FieldSpec(model.created_at, datetime, ("ge", "le", "between")),
+    }
 
 
-async def list_archived_logs(session: AsyncSession, params: PageParams) -> dict[str, Any]:
-    return await paginate(
-        session, select(AuditLogArchive).order_by(AuditLogArchive.id.desc()), params
-    )
+_FIELDS = {model: _fields(model) for model in (AuditLog, AuditLogArchive)}
+
+
+async def _list(
+    session: AsyncSession,
+    model: type[AuditLog] | type[AuditLogArchive],
+    params: CursorParams,
+    filters: FilterGroup | None,
+) -> dict[str, Any]:
+    stmt = apply_filter(select(model), filters, _FIELDS[model])
+    return await paginate_cursor(session, stmt, model.id, params)
+
+
+async def list_audit_logs(
+    session: AsyncSession, params: CursorParams, filters: FilterGroup | None = None
+) -> dict[str, Any]:
+    return await _list(session, AuditLog, params, filters)
+
+
+async def list_archived_logs(
+    session: AsyncSession, params: CursorParams, filters: FilterGroup | None = None
+) -> dict[str, Any]:
+    return await _list(session, AuditLogArchive, params, filters)
 
 
 async def archive_old(session: AsyncSession, days: int) -> int:

@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import Depends, status
 
 from app.core import SessionDep, error_responses, require_permission
+from app.core.routing import new_router
 from app.schemas.base import DatabaseId
 from app.schemas.menu import MenuIn, MenuNode, MenuRead
 from app.services import menu_service
 
-router = APIRouter(prefix="/menus", tags=["menus"])
+router = new_router(prefix="/menus", tags=["menus"])
 
-_ERRORS = error_responses(400, 404, 409)
+_ERRORS = error_responses(404, 409)
 
 
 @router.get(

@@ -1,9 +1,8 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import Depends, Query, Response, status
 
 from app.core import (
-    ErrorResponse,
     SessionDep,
     error_responses,
     get_current_user,
@@ -11,10 +10,12 @@ from app.core import (
 )
 from app.core.ratelimit import RateLimit
 from app.core.redis import RedisDep
+from app.core.routing import new_router
 from app.core.security import REFRESH_COOKIE, REFRESH_COOKIE_PATH
 from app.models import User
-from app.schemas.base import DatabaseId, Page, PageQuery
+from app.schemas.base import DatabaseId, Page
 from app.schemas.menu import RouteRecord
+from app.schemas.query import UserListParams, parse_filter
 from app.schemas.rbac import UserRolesIn
 from app.schemas.user import (
     PasswordChange,
@@ -26,10 +27,10 @@ from app.schemas.user import (
 )
 from app.services import menu_service, rbac_service, user_service
 
-router = APIRouter(prefix="/users", tags=["users"])
+router = new_router(prefix="/users", tags=["users"])
 
 
-@router.get("/me", response_model=UserMeRead, responses=error_responses(401))
+@router.get("/me", response_model=UserMeRead)
 async def read_me(
     current: Annotated[User, Depends(get_current_user)], session: SessionDep
 ) -> UserMeRead:
@@ -40,7 +41,6 @@ async def read_me(
     "/me/menus",
     response_model=list[RouteRecord],
     response_model_exclude_none=True,
-    responses=error_responses(401),
 )
 async def read_my_menus(
     current: Annotated[User, Depends(get_current_user)], session: SessionDep
@@ -53,7 +53,6 @@ async def read_my_menus(
     "/me/password",
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(RateLimit(5))],
-    responses=error_responses(400, 429),
 )
 async def change_my_password(
     data: PasswordChange,
@@ -73,15 +72,17 @@ async def change_my_password(
     response_model=Page[UserRead],
     dependencies=[Depends(require_permission("admin:user:list"))],
 )
-async def list_users(session: SessionDep, params: PageQuery) -> dict[str, Any]:
-    return await user_service.list_users(session, params)
+async def list_users(
+    session: SessionDep, params: Annotated[UserListParams, Query()]
+) -> dict[str, Any]:
+    return await user_service.list_users(session, params, parse_filter(params.filter))
 
 
 @router.post(
     "",
     response_model=UserRead,
     status_code=status.HTTP_201_CREATED,
-    responses={409: {"model": ErrorResponse}},
+    responses=error_responses(409),
     dependencies=[Depends(require_permission("admin:user:create"))],
 )
 async def create_user(data: UserCreate, session: SessionDep):
@@ -91,7 +92,7 @@ async def create_user(data: UserCreate, session: SessionDep):
 @router.get(
     "/{user_id}",
     response_model=UserRead,
-    responses={404: {"model": ErrorResponse}},
+    responses=error_responses(404),
     dependencies=[Depends(require_permission("admin:user:read"))],
 )
 async def get_user(user_id: DatabaseId, session: SessionDep):
@@ -101,7 +102,7 @@ async def get_user(user_id: DatabaseId, session: SessionDep):
 @router.put(
     "/{user_id}/roles",
     status_code=status.HTTP_204_NO_CONTENT,
-    responses={404: {"model": ErrorResponse}},
+    responses=error_responses(404),
     dependencies=[Depends(require_permission("admin:user:assign_role"))],
 )
 async def set_user_roles(user_id: DatabaseId, data: UserRolesIn, session: SessionDep) -> None:
@@ -111,7 +112,7 @@ async def set_user_roles(user_id: DatabaseId, data: UserRolesIn, session: Sessio
 @router.put(
     "/{user_id}",
     response_model=UserRead,
-    responses=error_responses(400, 404, 409),
+    responses=error_responses(404, 409),
 )
 async def update_user(
     user_id: DatabaseId,

@@ -1,6 +1,10 @@
 # maintenance-admin
 
+当前目标版本 0.2.0(`release/0.2.0` 准备中,未发布)。本次发布范围是后端模板,固定镜像目前仅验收 `linux/arm64`,配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md);固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+
 维保协同后台管理系统（RBAC）。
+
+开发约定见 [AGENTS.md](AGENTS.md) 和 [CLAUDE.md](CLAUDE.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 技术栈
 
@@ -40,7 +44,7 @@ TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/maintenanc
 TEST_REDIS_URL=redis://localhost:26379/15 uv run pytest
 ```
 
-运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
+运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
 
 ### 3. 容器运行
 
@@ -54,7 +58,7 @@ docker compose --profile app ps -a    # migrate 应为 Exited (0)，api 为 heal
 docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m scripts.seed_admin <用户名> <邮箱>
 ```
 
-容器里 `ENVIRONMENT` 默认 `production`（隐藏 API 文档，要求 `JWT_SECRET_KEY` 至少 32 字符，否则启动失败）；compose 会读项目根的 `.env`，其中 `ENVIRONMENT=local` 会让容器也按 local 运行。健康检查：`/health`（存活）、`/ready`（数据库和 Redis 都可用才 200，否则 503）。CI 见 `.github/workflows/ci.yml`（ruff + pytest，含 PostgreSQL/Redis 集成测试）。
+容器里 `ENVIRONMENT` 默认 `production`（隐藏 API 文档，要求 `JWT_SECRET_KEY` 至少 32 字符，否则启动失败）；compose 会读项目根的 `.env`，其中 `ENVIRONMENT=local` 会让容器也按 local 运行。生产部署（nginx 同域反代前端、多实例、备份、升级回退）见 [docs/deploy.md](docs/deploy.md)。健康检查：`/health`（存活）、`/ready`（数据库和 Redis 都可用才 200，否则 503）。CI 见 `.github/workflows/ci.yml`（ruff + pytest，含 PostgreSQL/Redis 集成测试）。
 
 ### 4. 配置项
 
@@ -67,6 +71,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` | 默认 30 分钟 / 7 天 |
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
+| `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)
 
@@ -75,6 +80,8 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 ```bash
 uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSWORD 环境变量或交互输入
 ```
+
+初始化参数复用用户创建接口的用户名、邮箱和密码校验,非法输入在任何种子写入前拒绝,不会回显密码。重复执行也须提供合法参数;已有用户的邮箱和密码仍保持原值。
 
 权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),且一个权限码只能用于一个路由。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误或重复使用会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
@@ -122,6 +129,7 @@ maintenance-admin/
 
 ### 9. 统一错误处理（沿用 maintenance-agent）
 
+- 新增路由统一用 `app.core.routing.new_router()` 创建 router；OpenAPI 根据参数和依赖自动补 400/401/403/429，路由只需声明额外的业务错误（如 404/409/503），参数校验统一返回 400，不声明 422。
 - 业务错误一律 `raise AppError(ErrorCode.X, "中文消息", detail)`，路由里不手写错误响应。
 - 新错误码同时加到 `core/errors.py` 的 `ErrorCode` 和 `HTTP_STATUS`（状态码需唯一），并补 `tests/core/test_errors.py`。
 - 响应体统一为 `{trace_id, code, message, detail}`；参数校验、404/405 和未捕获异常都由 `core/handlers.py` 转成同一格式，未知异常详情只进日志。
@@ -151,3 +159,45 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 6. `uv run pytest` 全绿后再开始写业务。
 
 权限码前缀 `admin:` 只是约定（`<module>:<resource>:<action>`），业务模块用自己的 module 即可。
+
+## 列表筛选与分页（SPEC-018）
+
+完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，实施与验收记录见 [实现计划](docs/superpowers/plans/2026-10-17-list-query-plan.md)。
+
+`GET /api/v1/users`、`/api/v1/audit-logs`、`/api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
+
+```bash
+curl -G "$HOST/api/v1/users" -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode 'page=1' --data-urlencode 'page_size=20' \
+  --data-urlencode 'filter={"conditions":[{"field":"username","op":"ilike","value":"%kai%"},{"field":"is_active","op":"eq","value":true}]}'
+
+curl -G "$HOST/api/v1/audit-logs" -H "Authorization: Bearer $TOKEN" \
+  --data-urlencode 'limit=20' \
+  --data-urlencode 'filter={"conditions":[{"field":"user_id","op":"eq","value":1}]}'
+# 后续页沿用 filter,增加 --data-urlencode "cursor=$NEXT_CURSOR"；归档列表用 /audit-logs/archive。
+```
+
+Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL 编码）,另填对应的分页参数,Authorization 选 Bearer Token。
+
+| 列表 | 筛选字段及算子 |
+|---|---|
+| 用户 | `username/email`: `eq/in/ilike`;`is_active`: `eq`;`created_at`: `ge/le/between`;`role_id`: `eq/in` |
+| 审计、归档 | `user_id`: `eq/in/is_null/not_null`;`action/resource/resource_id`: `eq/in`;`created_at`: `ge/le/between` |
+
+`in` 为 1–100 个非 null 值,`between` 为两个非 null 端点（闭区间）,`eq/ge/le` 不接受 null。ID 必须为 JSON 整数 1–2147483647,布尔必须为 `true/false`;日期必须为带时区的 ISO 日期时间,如 `2026-10-17T13:00:00+08:00`,按 UTC 比较。数字时间戳、无时区、UTC 转换越界均拒绝。`is_null/not_null` 的值省略或为 null;`not` 遵循 SQL 三值逻辑,需要包含 NULL 行时显式加 `or` + `is_null`。
+
+`ilike` 由调用方传完整 pattern（最多 64 字符）,服务端不补 `%`:
+
+| pattern | 含义 | JSON 中的 value |
+|---|---|---|
+| `foo` | 忽略大小写精确匹配 | `"foo"` |
+| `foo%` / `%foo%` | 前缀 / 包含 | `"foo%"` / `"%foo%"` |
+| `foo\%` / `foo\_` / `foo\\` | 匹配字面 `%` / `_` / `\` | `"foo\\%"` / `"foo\\_"` / `"foo\\\\"` |
+
+字符串不能含 NUL,pattern 不能以奇数个反斜杠结尾。
+
+**兼容变化**:用户仍返回 `{items,total,page,page_size}`,参数为 `page/page_size/filter`。审计与归档改为 `{items,next_cursor}`,删除 `total/page/page_size`;参数为 `limit`（默认 20,1–100）、`cursor`、`filter`,旧的 `page/page_size` 返回 400。三个列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
+
+审计响应示例:`{"items":[{"id":42,"user_id":1,"action":"admin:user:create","resource":"users","resource_id":7,"detail":null,"ip":null,"created_at":"2026-10-17T12:00:00Z"}],"next_cursor":"eyJpZCI6IDQyfQ"}`。归档条目另有 `archived_at`。`next_cursor=null` 表示末页;按 `id desc` 向后翻页,不能随机跳页。改变筛选条件时丢弃旧游标。翻页期间新记录不会重复进入后续页,记录被归档后会从热表后续页消失;较小 ID 的并发事务晚提交时可能漏过本轮遍历,重新查询可见。
+
+`filter` 上限为 **2048 UTF-8 字节**,URL 编码后最多约 6KB,部署时还须计入路径和其他参数,核对代理的请求行长度限制。筛选值可能含用户名、邮箱等个人信息;应用日志不记录 query string,反向代理和网关也应避免记录完整查询参数。筛选不保证所有组合都走索引,出现慢查询后再评估索引。

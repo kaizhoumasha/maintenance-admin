@@ -1,0 +1,15 @@
+# 与 docker-compose.yml 合并使用;生产不构建,四个应用服务必须使用同一固定镜像。
+# !reset 要求 Docker Compose >= 2.24.4。
+x-release: &release
+  build: !reset null
+  image: ${APP_IMAGE:?从发布目录的 image.env 加载固定镜像}
+
+services:
+  api:
+    <<: *release
+  worker:
+    <<: *release
+  beat:
+    <<: *release
+  migrate:
+    <<: *release

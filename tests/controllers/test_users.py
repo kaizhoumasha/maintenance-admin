@@ -1,10 +1,10 @@
+import json
 import threading
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import user_service
-
-PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
+from tests.helpers import PAYLOAD
 
 
 async def test_create_and_get_user(client, admin):
@@ -61,6 +61,53 @@ async def test_password_hashing_runs_off_event_loop(client, admin, monkeypatch):
     monkeypatch.setattr(user_service, "hash_password", spy)
     await client.post("/api/v1/users", json=PAYLOAD, headers=admin)
     assert threads and threads[0] is not threading.main_thread()
+
+
+async def test_user_filter_fields_roles_and_paging(client, admin):
+    roles = []
+    for name in ("first", "second"):
+        response = await client.post(
+            "/api/v1/roles", json={"name": name, "permissions": []}, headers=admin
+        )
+        assert response.status_code == 201
+        roles.append(response.json()["id"])
+    uid = await _new_user(client, admin, role_ids=roles)
+    other = await _new_user(client, admin, username="other")
+    cases = [
+        ("username", "eq", "kai", [uid]),
+        ("username", "in", ["kai", "other"], [other, uid]),
+        ("username", "ilike", "KA%", [uid]),
+        ("email", "eq", "kai@example.com", [uid]),
+        ("email", "in", ["kai@example.com"], [uid]),
+        ("email", "ilike", "KAI@%", [uid]),
+        ("is_active", "eq", False, []),
+        (
+            "created_at",
+            "between",
+            ["2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z"],
+            [other, uid, 1],
+        ),
+        ("role_id", "eq", roles[0], [uid]),
+        ("role_id", "in", roles, [uid]),
+        ("role_id", "eq", 2147483647, []),
+    ]
+    for field, op, value, expected in cases:
+        raw = json.dumps({"conditions": [{"field": field, "op": op, "value": value}]})
+        response = await client.get(
+            "/api/v1/users", headers=admin, params={"filter": raw, "page_size": 100}
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert [u["id"] for u in body["items"]] == expected
+        assert body["total"] == len(expected)
+        assert all("hashed_password" not in u for u in body["items"])
+    raw = json.dumps({"conditions": [{"field": "username", "op": "in", "value": ["kai", "other"]}]})
+    body = (
+        await client.get(
+            "/api/v1/users", headers=admin, params={"filter": raw, "page": 2, "page_size": 1}
+        )
+    ).json()
+    assert body["total"] == 2 and [u["id"] for u in body["items"]] == [uid]
 
 
 # ---- 用户管理(SPEC-017):修改 / 启停 / 改密 / 重置密码 / 保留管理员 ----

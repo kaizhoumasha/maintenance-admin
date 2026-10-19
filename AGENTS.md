@@ -36,11 +36,23 @@ Use four spaces, type hints, `snake_case` functions/modules, and `PascalCase` cl
 
 ## Testing Guidelines
 
-Use pytest, pytest-asyncio, HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, `admin` fixtures. Unit tests use SQLite/fake Redis; Celery runs eagerly. Integration tests require explicit `TEST_DATABASE_URL`/`TEST_REDIS_URL` for disposable stores; unset configuration skips tests, configured connection failures fail. PostgreSQL applies migrations. No coverage threshold. Cover changes and failures.
+Use pytest, pytest-asyncio, HTTPX; name tests `test_*.py` / `test_<behavior>`. Reuse `client`, `redis`, `admin` fixtures. Unit tests use SQLite/fake Redis; Celery runs eagerly. Integration tests require explicit `TEST_DATABASE_URL`/`TEST_REDIS_URL` for disposable stores; unset configuration skips tests, configured connection failures fail. PostgreSQL applies migrations. No coverage threshold. Cover changes and failures. Tests pin long-lived behavior contracts, not the change that introduced them: assert observable behavior through public entry points (HTTP, service functions), not private helpers or exact internal shapes. Prefer rules over snapshots (e.g. "every route with a permission documents 403", not a hard-coded response set per route). Keep regression tests for fixed bugs; do not keep one-off verification of a refactor, transitional states (e.g. "old parameter now rejected"), or fixture wiring smoke tests. Shared helpers live in `tests/helpers.py` or `conftest.py`; test files never import from each other. Name tests and comments by behavior, not by SPEC number.
 
 ## Commit & Pull Request Guidelines
 
 Follow history: `feat:`, `fix:`, `test:`, `chore:`, concise Chinese descriptions, optional `(SPEC-015)` references. Keep commits focused. PRs should explain behavior changes, link issues/specifications, list validation, and identify migrations/configuration changes.
+
+## Branching (Git Flow)
+
+Baseline is `main` at tag `v0.1.0`; work follows Git Flow from there.
+
+- `main`: released code only. Every commit is a release or hotfix merge, tagged `vX.Y.Z` (annotated). Never commit directly.
+- `develop`: integration branch, always green (CI runs ruff and pytest on every push and PR). All new work branches from it.
+- `feature/<slug>` (from `develop`, e.g. `feature/spec-017-dictionary`): merge back with `--no-ff` or a PR into `develop`, then delete the branch.
+- `release/X.Y.Z` (from `develop`): only the version bump (`pyproject.toml` and `version=` in `app/main.py`), upgrade notes, and fixes. Merge into `main` with `--no-ff`, tag `vX.Y.Z` on `main`, merge back into `develop`, delete the branch.
+- `hotfix/X.Y.Z` (from `main`): urgent production fix. Merge into `main` (tag) and `develop`.
+- One Alembic head at all times: when two branches each add a migration, the later one to merge rebases its `down_revision` onto the new head.
+- Agents work on `feature/*` branches created from `develop`, never directly on `main` or `develop`, and commit or push only when asked.
 
 ## Security & Configuration
 

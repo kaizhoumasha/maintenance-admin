@@ -10,5 +10,5 @@ perl -pi -e '
   s/maintenance-admin/$ENV{NAME}/g;
   s/maintenance_test/$ENV{DB}_test/g;
   s{(/|POSTGRES_DB: )maintenance\b(?![-/.])}{$1$ENV{DB}}g;
-' pyproject.toml app/core/config.py docker-compose.yml .env.example .github/workflows/ci.yml README.md AGENTS.md
+' pyproject.toml app/core/config.py docker-compose.yml .env.example .github/workflows/ci.yml README.md AGENTS.md docs/deploy.md
 uv lock

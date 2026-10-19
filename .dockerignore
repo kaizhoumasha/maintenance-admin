@@ -6,3 +6,6 @@
 .serena
 __pycache__
 tests
+releases
+backups
+frontend-dist

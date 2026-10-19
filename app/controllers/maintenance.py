@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends
+from fastapi import Depends
 
 from app.core import SessionDep, get_settings, require_permission
+from app.core.routing import new_router
 from app.schemas.audit import ArchiveResult
 from app.services import audit_service
 
-router = APIRouter(prefix="/admin/maintenance", tags=["maintenance"])
+router = new_router(prefix="/admin/maintenance", tags=["maintenance"])
 
 
 @router.post(
