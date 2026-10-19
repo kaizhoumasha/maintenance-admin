@@ -16,7 +16,7 @@
 - max_connections=100、max_keepalive_connections=20、keepalive_expiry=5s。
 - trust_env=False、follow_redirects=False、http2=False、retries=0;TLS 校验保持启用,可显式注入 SSLContext。
 - 不实现 H3、R、业务接入、应用装配、路由、表、权限、Celery、重试或信封处理。
-- 已从 develop 创建 feature/spec-019-interop-framework 分支;保护已有暂存文件,不自动暂存、提交或推送。
+- 已从 develop 创建 feature/spec-019-interop-framework 分支;提交与推送仅按用户授权执行,保留已有提交。
 
 ## Review Focus
 
@@ -28,7 +28,7 @@
 
 ---
 
-对应设计:`docs/superpowers/specs/2026-10-20-interop-framework-design.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限 H 阶段**:`app/http_client/` 与其测试、依赖变更。H3(出口并发/速率限流)、R 阶段(可靠交互层)、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**H1/H2/H4 基线已实现、验证并复审通过,已本地提交、未推送;后续修复见 §8**。
+对应设计:`docs/superpowers/specs/2026-10-20-interop-framework-design.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限 H 阶段**:`app/http_client/` 与其测试、依赖变更。H3(出口并发/速率限流)、R 阶段(可靠交互层)、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**H1/H2/H4 及后续修复已实现、验证并复审通过,已提交并推送功能分支,准备面向 develop 的 PR;后续修复见 §8**。
 
 ## 0. 前置复审结论
 
@@ -179,14 +179,14 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 
 ## 7. 提交与交付约定
 
-- 分支 `feature/spec-019-interop-framework`(来自 `develop`);只在用户要求时提交,不推送。
+- 分支 `feature/spec-019-interop-framework`(来自 `develop`);用户已授权提交、推送并创建面向 `develop` 的 PR,保留已有提交,不升版、不创建 TODOS.md、不合并、不部署。
 - 提交信息沿用历史风格:`feat: ...` / `test: ...` / `chore: ...`,简明中文,可带 `(SPEC-019)`;依赖变更单独一个 `chore:` 提交。
 - PR 说明需写清:仅新增非业务 HttpClient、无路由/表/权限变化、`httpx` 移入正式依赖、H3/R/D 未做。
 - 不得把本交付称为幂等、可靠投递或物理完成的验收(SPEC §14.1 第 7 条)。
 
 ## 8. 计划自检与验证记录
 
-计划自检已完成:首期每项需求均映射到 T1–T7;07/08/12 不落入首期实现;配置/结果命名一致;测试覆盖 Review Focus 五类条件。SPEC 的 H 阶段范围与行为合同保持不变,原始流读取及独立清理的实现措辞已同步。用户已明确授权实施 H1/H2/H4,仍禁止暂存、提交或推送。
+计划自检已完成:首期每项需求均映射到 T1–T7;07/08/12 不落入首期实现;配置/结果命名一致;测试覆盖 Review Focus 五类条件。SPEC 的 H 阶段范围与行为合同保持不变,原始流读取及独立清理的实现措辞已同步。用户已授权本轮提交、推送并创建 PR;以下各轮验证中的未提交或未推送描述保留为当时状态。
 
 | 需求 | 任务 |
 |---|---|
