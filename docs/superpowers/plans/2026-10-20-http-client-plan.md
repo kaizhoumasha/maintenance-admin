@@ -1,6 +1,6 @@
 # SPEC-019 H 阶段实施计划:纯异步 HttpClient
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. H1/H2/H4 已实施、验证并复审通过;未授权暂存、提交或推送。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. H1/H2/H4 基线已实施、验证并复审通过,已形成本地提交 f4e9427、9beb783;后续评审修复单独记录,不自动暂存、提交或推送。
 
 **Goal:** 交付可通过构造参数注入的单次异步 HTTP 客户端,只覆盖 H1/H2/H4。
 
@@ -28,7 +28,7 @@
 
 ---
 
-对应设计:`docs/superpowers/specs/2026-10-20-interop-framework-design.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限 H 阶段**:`app/http_client/` 与其测试、依赖变更。H3(出口并发/速率限流)、R 阶段(可靠交互层)、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**H1/H2/H4 已实现、验证并复审通过,未暂存/提交/推送本轮改动**。
+对应设计:`docs/superpowers/specs/2026-10-20-interop-framework-design.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限 H 阶段**:`app/http_client/` 与其测试、依赖变更。H3(出口并发/速率限流)、R 阶段(可靠交互层)、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**H1/H2/H4 基线已实现、验证并复审通过,已本地提交、未推送;后续修复见 §8**。
 
 ## 0. 前置复审结论
 
@@ -85,7 +85,7 @@ aclose():幂等,释放连接池                                            [T5]
 
 | # | 决策 | 理由 |
 |---|---|---|
-| D1 | `base_url` 允许可选路径前缀(根地址按 httpx 的 `/` 规范化,配置不额外要求调用者书写尾部 `/`);最终 URL 由 httpx 合并,**之后**校验 scheme / host / 有效端口与 `base_url` 完全一致 | SPEC 只要求 path 不得切换 origin;前缀由 httpx 原生支持,无需自写拼接 |
+| D1 | `base_url` 允许可选路径前缀(根地址按 httpx 的 `/` 规范化,配置不额外要求调用者书写尾部 `/`);path 中拒绝 `?`,查询统一由 query 提供;最终 URL 由 httpx 合并,**之后**校验 scheme / host / 有效端口与 `base_url` 完全一致 | SPEC 只要求 path 不得切换 origin;前缀由 httpx 原生支持,无需自写拼接 |
 | D2 | `method` 仅接受大写标准 token;`query` 与 `headers` 用 `tuple[tuple[str, str], ...]` | 保持顺序、保留重复项,调用方不被迫选择映射类型 |
 | D3 | `FailureKind` 取值(计划自定,SPEC 只要求"明确的 failure_kind"):`POOL_TIMEOUT` `CONNECT_TIMEOUT` `CONNECT_ERROR` `WRITE_TIMEOUT` `WRITE_ERROR` `READ_TIMEOUT` `READ_ERROR` `REMOTE_PROTOCOL_ERROR` `TOTAL_TIMEOUT` `RESPONSE_TOO_LARGE` `CONTENT_ENCODING_UNSUPPORTED` `TRANSPORT_ERROR` | 覆盖 SPEC 列出的全部情形;`TRANSPORT_ERROR` 兜底其余 httpx 传输异常,按保守的 `DELIVERY_UNKNOWN` |
 | D4 | 总期限耗尽:进入底层 send 前能证明未发送时为 NOT_SENT;进入后总超时保守归 DELIVERY_UNKNOWN。明确的 PoolTimeout/ConnectTimeout/ConnectError 仍按 NOT_SENT | 不依赖 httpcore 内部 trace 或“未出现事件”推断未发送,也不因注入 transport 改变公开语义 |
@@ -109,7 +109,7 @@ aclose():幂等,释放连接池                                            [T5]
 | `tests/http_client/test_import_isolation.py` | 子进程、干净环境(不设 `DATABASE_URL`/`JWT_SECRET_KEY`/`REDIS_URL`)中 `import app.http_client` 成功,且 `sys.modules` 不含 `app.core`、`sqlalchemy`、`redis`、`celery`、`fastapi`、`app.models`、`app.services`、`app.controllers`、`app.interop` |
 | `tests/architecture/test_layering.py` | `FORBIDDEN` 增加 `"http_client"`:`app.core`、`app.interop`、`app.integrations`、`app.services`、`app.controllers`、`app.models`、`app.schemas`、`app.tasks`、`sqlalchemy`、`redis`、`celery`、`fastapi`;并补一个检测违规的小用例(沿用现有 `test_checker_detects_violation` 写法) |
 
-TLS:本期不新增专用握手端到端测试(SPEC §14.1 无此项,且避免为证书新增依赖)。只验证:传入 `tls_context` 时被用于传输、未传入时使用默认信任库且不读取环境 CA 变量、无 `verify=False` 路径。
+TLS:本期不新增专用握手端到端测试(SPEC §14.1 无此项,且避免为证书新增依赖)。只验证:传入 `tls_context` 时被用于传输、未传入时 HTTP 不加载 CA、HTTPS 仅加载实际存在的默认 CA 路径且不读取环境 CA 变量、无 `verify=False` 路径。
 
 ## 5. 失败模式
 
@@ -136,7 +136,7 @@ TLS:本期不新增专用握手端到端测试(SPEC §14.1 无此项,且避免�
 - `DeliveryState`:NOT_SENT / DELIVERY_UNKNOWN / HTTP_RESPONSE_COMPLETE;`FailureKind` 见 D3。
 - `HttpClient` Protocol:`async send(request: HttpRequest) -> HttpResult`,`async aclose() -> None`。
 - `AsyncHttpClient(config: HttpClientConfig, *, transport: httpx.AsyncBaseTransport | None = None, clock: Callable[[], float] = time.monotonic)` 实现以上接口;拥有并关闭传入 transport,调用方不得共享同一 transport 给多个 owner。`ClientClosedError(RuntimeError)` 对外导出。
-- `tls_context` 必须启用证书与 hostname 校验,不接受放松校验的上下文;默认用标准库默认 context,不读取环境 CA。生产 transport 上显式设置池/verify/retries/trust_env,避免只在外层 AsyncClient 配置导致自建 transport 忽略参数。
+- `tls_context` 必须启用证书与 hostname 校验,不接受放松校验的上下文;未注入时,HTTP 使用不加载 CA 的校验型 context;HTTPS 仅用实际存在的 OpenSSL 默认 CA 文件/目录构造标准库默认 context,两者均不存在则保持空信任库和证书校验,不读取环境 CA。生产 transport 上显式设置池/verify/retries/trust_env,避免只在外层 AsyncClient 配置导致自建 transport 忽略参数。
 
 T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成 AsyncHttpClient;T6 只验证公开行为与依赖边界,不改变接口。
 
@@ -234,3 +234,12 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 - 仅调整文档状态说明及 SPEC Python 示例格式,未改变代码、行为合同或 H 阶段范围。
 - 全库 ruff format --check . 通过(119 files already formatted);此前记录的 SPEC 示例格式差异已消除。git diff --check 通过。
 - 本轮仅改这两份文档,未暂存、提交或推送。
+
+### 2026-10-20 本地提交后 P2 修复
+
+- 基线已提交为 f4e9427(运行时依赖)、9beb783(H1/H2/H4 实现、测试和文档),均未推送;此前各轮未提交描述为当时状态。未改写或拆分既有提交。
+- 先新增 4 条回归并观察失败:含内联查询的 path(有/无 query)、缺失 CA 路径的明文 HTTP 请求、缺失 CA 路径的 HTTPS 校验上下文。
+- path 含字面 ? 时发网前拒绝,query 是唯一查询输入;日志回归改为通过 query 传值,继续验证敏感查询不泄露。
+- HTTPX 构造 transport 时始终需要 TLS 上下文,故 HTTP 使用不加载 CA 的校验型上下文;HTTPS 才加载存在的 OpenSSL 默认 CA 路径,缺失时保持空信任库与证书校验。显式 tls_context 不变,不读取环境 CA,不提供 verify=False。
+- 聚焦测试及分层检查 146 passed;全量 pytest 480 passed、30 skipped;ruff check .、全库 ruff format --check .、uv lock --check、git diff --check 均通过。
+- 本轮修复未暂存、提交或推送,仅 H1/H2/H4;其余 P3 不扩展处理。

@@ -57,6 +57,8 @@ def test_invalid_base_url(url):
         {"path": "//other.test/x"},
         {"path": "\\other.test"},
         {"path": "/x#frag"},
+        {"path": "/x?inline=1"},
+        {"path": "/x?inline=1", "query": (("q", "1"),)},
         {"headers": (("Host", "other"),)},
         {"headers": (("Content-Length", "1"),)},
         {"headers": (("Transfer-Encoding", "chunked"),)},
@@ -155,5 +157,30 @@ async def test_private_ca_context_is_explicitly_used(monkeypatch):
         assert options[0]["trust_env"] is False
         assert options[0]["http2"] is False
         assert options[0]["retries"] == 0
+    finally:
+        await client.aclose()
+
+
+async def test_missing_system_ca_keeps_https_verification_enabled(monkeypatch, tmp_path):
+    import ssl
+
+    paths = ssl.get_default_verify_paths()._replace(
+        openssl_cafile=str(tmp_path / "missing.pem"),
+        openssl_capath=str(tmp_path / "missing-certs"),
+    )
+    monkeypatch.setattr(ssl, "get_default_verify_paths", lambda: paths)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "environment.pem"))
+    contexts = []
+
+    def build_transport(**kwargs):
+        contexts.append(kwargs["verify"])
+        return httpx.MockTransport(lambda req: httpx.Response(204))
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", build_transport)
+    client = AsyncHttpClient(HttpClientConfig("https://example.test", "test"))
+    try:
+        assert contexts[0].verify_mode == ssl.CERT_REQUIRED
+        assert contexts[0].check_hostname
+        assert contexts[0].cert_store_stats()["x509_ca"] == 0
     finally:
         await client.aclose()

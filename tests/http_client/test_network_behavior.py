@@ -18,6 +18,25 @@ async def reply(raw, writer, stats):
     await writer.drain()
 
 
+async def test_plain_http_does_not_require_ca_files(http_server, monkeypatch, tmp_path):
+    import ssl
+
+    paths = ssl.get_default_verify_paths()._replace(
+        openssl_cafile=str(tmp_path / "missing.pem"),
+        openssl_capath=str(tmp_path / "missing-certs"),
+    )
+    monkeypatch.setattr(ssl, "get_default_verify_paths", lambda: paths)
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "environment.pem"))
+    async with http_server(reply) as (url, stats):
+        client = AsyncHttpClient(HttpClientConfig(url, "local"))
+        try:
+            result = await client.send(HttpRequest("GET", "/"))
+            assert result.body == b"ok"
+            assert stats["requests"] == 1
+        finally:
+            await client.aclose()
+
+
 async def test_connections_reused_environment_ignored_and_close_is_idempotent(
     http_server, monkeypatch
 ):

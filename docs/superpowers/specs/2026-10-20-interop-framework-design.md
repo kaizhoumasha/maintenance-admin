@@ -65,7 +65,7 @@ Q2 的字符串枚举、UUIDv7 与毫秒整数保留为后续标准协议决定;
 
 | 对象 | 最小合同 |
 |---|---|
-| `HttpRequest` | method、相对于已配置 base_url 的 path、query、headers、body bytes;不提供业务 JSON 或 operation 字段。path 不得切换 origin;H 阶段不提供逐请求超时覆盖,使用实例配置 |
+| `HttpRequest` | method、相对于已配置 base_url 的 path、query、headers、body bytes;不提供业务 JSON 或 operation 字段。path 不得切换 origin,不得包含查询分隔符 `?`,查询统一通过 query 传入;H 阶段不提供逐请求超时覆盖,使用实例配置 |
 | `HttpResult` | delivery_state、failure_kind、可选 HTTP status、响应 headers(保留重复项)、有界响应 body bytes;响应不完整时带错误类别,不得当作完整响应使用 |
 | 客户端配置 | base_url、connect/read/write/pool timeout、total timeout、max_connections、max_keepalive_connections、keepalive_expiry、max_request_body_bytes、max_response_body_bytes、可选 tls_context(ssl.SSLContext)、destination_key(稳定的非敏感出口诊断标识) |
 | DI | 协议适配器构造参数接收 HttpClient;测试直接注入 fake。生产实现接受可替换的 HTTP transport 和单调时钟,用于网络故障与截止时间计算测试;假时钟不控制事件循环的实际取消计时 |
@@ -95,7 +95,7 @@ Q2 的字符串枚举、UUIDv7 与毫秒整数保留为后续标准协议决定;
 
 #### httpx 生产约束与失败表达
 
-- 显式设置 `trust_env=False`、`follow_redirects=False`、`http2=False`、底层 `retries=0`,不使用代理环境变量或环境凭据;保持标准 TLS 证书校验;私有 CA 由调用方显式构造并注入 tls_context,默认使用系统信任库,不读取环境 CA 配置、不提供 verify=False。自定义测试 transport 也不得隐藏重试。
+- 显式设置 `trust_env=False`、`follow_redirects=False`、`http2=False`、底层 `retries=0`,不使用代理环境变量或环境凭据;保持标准 TLS 证书校验;私有 CA 由调用方显式构造并注入 tls_context,未注入上下文时,仅 HTTPS 加载实际存在的系统 CA 文件/目录;系统 CA 均缺失则保留空信任库并维持证书校验,握手不能因此跳过验证。明文 HTTP 不加载 CA。不读取环境 CA 配置、不提供 verify=False。自定义测试 transport 也不得隐藏重试。
 - URL 合成后校验实际 scheme/host/有效端口与 base_url 一致,拒绝绝对 URL、network-path reference、userinfo 及改变 origin 的 path;不允许调用者覆盖 Host/framing 绕过目标约束。
 - 使用 streaming send,先检查 Content-Encoding(缺省或 identity 才允许),再直接迭代原始 `response.stream` 读取有界正文,完整读取后独立执行有界响应清理,避免 `aiter_raw()` 的 EOF 自动关闭异常覆盖完整响应;不先读取 `.content`/`.aread()` 或使用会自动解码的 `aiter_bytes()`。
 - 对端空闲超时已知时,keepalive_expiry 配置为更短;未知时沿用默认值,不猜对端配置。即使较短也不能保证避免陈旧连接错误,按 REQ-HTTP-09 分类,不自动重发。

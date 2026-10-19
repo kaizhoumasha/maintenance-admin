@@ -17,7 +17,8 @@ async def test_request_diagnostics_do_not_leak_secrets(caplog):
             await client.send(
                 HttpRequest(
                     "POST",
-                    "/?key=secret-query",
+                    "/",
+                    query=(("key", "secret-query"),),
                     headers=(("Authorization", "secret-token"),),
                     body=b"secret-body",
                 )
@@ -39,7 +40,9 @@ async def test_network_exception_text_is_not_logged(caplog):
     )
     try:
         with caplog.at_level(logging.DEBUG):
-            await client.send(HttpRequest("POST", "/?key=secret-query", body=b"secret-body"))
+            await client.send(
+                HttpRequest("POST", "/", query=(("key", "secret-query"),), body=b"secret-body")
+            )
         assert "secret-" not in caplog.text
         record = next(r for r in caplog.records if r.name == "app.http_client")
         assert record.failure_kind == "READ_ERROR"

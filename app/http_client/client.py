@@ -7,6 +7,7 @@ import ssl
 import time
 from collections.abc import Callable
 from contextvars import ContextVar
+from pathlib import Path
 from urllib.parse import unquote
 
 import httpx
@@ -68,12 +69,20 @@ class AsyncHttpClient:
         self._close_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         if transport is None:
+            tls_context = config.tls_context
+            if tls_context is None:
+                # HTTP 不加载 CA;HTTPS 缺少信任根时仍保持证书校验,不回退环境配置。
+                tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                if httpx.URL(config.base_url).scheme == "https":
+                    paths = ssl.get_default_verify_paths()
+                    cafile = paths.openssl_cafile
+                    capath = paths.openssl_capath
+                    cafile = cafile if cafile and Path(cafile).is_file() else None
+                    capath = capath if capath and Path(capath).is_dir() else None
+                    if cafile is not None or capath is not None:
+                        tls_context = ssl.create_default_context(cafile=cafile, capath=capath)
             transport = httpx.AsyncHTTPTransport(
-                verify=config.tls_context
-                or ssl.create_default_context(
-                    cafile=ssl.get_default_verify_paths().openssl_cafile,
-                    capath=ssl.get_default_verify_paths().openssl_capath,
-                ),
+                verify=tls_context,
                 trust_env=False,
                 http2=False,
                 retries=0,
@@ -120,6 +129,7 @@ class AsyncHttpClient:
             or "\\" in decoded_path
             or decoded_path.startswith("//")
             or "#" in path
+            or "?" in path
         ):
             raise ValueError("invalid path")
         try:
