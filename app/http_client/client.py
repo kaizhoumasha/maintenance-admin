@@ -130,6 +130,8 @@ class AsyncHttpClient:
             or decoded_path.startswith("//")
             or "#" in path
             or "?" in path
+            # 点段会被规范化而逃出 base_url 前缀;百分号编码形式服务端同样可能解码。
+            or any(segment in {".", ".."} for segment in decoded_path.split("/"))
         ):
             raise ValueError("invalid path")
         try:

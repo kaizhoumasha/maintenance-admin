@@ -59,6 +59,13 @@ def test_invalid_base_url(url):
         {"path": "/x#frag"},
         {"path": "/x?inline=1"},
         {"path": "/x?inline=1", "query": (("q", "1"),)},
+        {"path": "/../admin"},
+        {"path": "../admin"},
+        {"path": "/a/./b"},
+        {"path": "/a/.."},
+        {"path": "."},
+        {"path": "/a/%2e%2e/b"},
+        {"path": "/%2E%2E/admin"},
         {"headers": (("Host", "other"),)},
         {"headers": (("Content-Length", "1"),)},
         {"headers": (("Transfer-Encoding", "chunked"),)},
@@ -182,5 +189,27 @@ async def test_missing_system_ca_keeps_https_verification_enabled(monkeypatch, t
         assert contexts[0].verify_mode == ssl.CERT_REQUIRED
         assert contexts[0].check_hostname
         assert contexts[0].cert_store_stats()["x509_ca"] == 0
+    finally:
+        await client.aclose()
+
+
+async def test_base_prefix_cannot_be_escaped_but_dots_inside_segments_are_fine():
+    seen = []
+
+    async def handle(req):
+        seen.append(req.url.path)
+        return httpx.Response(204, stream=httpx.ByteStream(b""))
+
+    client = AsyncHttpClient(
+        HttpClientConfig("http://example.test/prefix", "test"),
+        transport=httpx.MockTransport(handle),
+    )
+    try:
+        for escaping in ("/../admin", "../admin", "/a/../../admin"):
+            with pytest.raises(ValueError):
+                await client.send(HttpRequest("GET", escaping))
+        assert seen == []
+        await client.send(HttpRequest("GET", "/v1.0/a..b/..c/d.."))
+        assert seen == ["/prefix/v1.0/a..b/..c/d.."]
     finally:
         await client.aclose()

@@ -85,7 +85,7 @@ aclose():幂等,释放连接池                                            [T5]
 
 | # | 决策 | 理由 |
 |---|---|---|
-| D1 | `base_url` 允许可选路径前缀(根地址按 httpx 的 `/` 规范化,配置不额外要求调用者书写尾部 `/`);path 中拒绝 `?`,查询统一由 query 提供;最终 URL 由 httpx 合并,**之后**校验 scheme / host / 有效端口与 `base_url` 完全一致 | SPEC 只要求 path 不得切换 origin;前缀由 httpx 原生支持,无需自写拼接 |
+| D1 | `base_url` 允许可选路径前缀(根地址按 httpx 的 `/` 规范化,配置不额外要求调用者书写尾部 `/`);path 中拒绝 `?`,查询统一由 query 提供;拒绝 `.`/`..` 路径段(含百分号编码),使前缀成为路径边界;最终 URL 由 httpx 合并,**之后**校验 scheme / host / 有效端口与 `base_url` 完全一致 | SPEC 只要求 path 不得切换 origin;前缀由 httpx 原生支持,无需自写拼接 |
 | D2 | `method` 仅接受大写标准 token;`query` 与 `headers` 用 `tuple[tuple[str, str], ...]` | 保持顺序、保留重复项,调用方不被迫选择映射类型 |
 | D3 | `FailureKind` 取值(计划自定,SPEC 只要求"明确的 failure_kind"):`POOL_TIMEOUT` `CONNECT_TIMEOUT` `CONNECT_ERROR` `WRITE_TIMEOUT` `WRITE_ERROR` `READ_TIMEOUT` `READ_ERROR` `REMOTE_PROTOCOL_ERROR` `TOTAL_TIMEOUT` `RESPONSE_TOO_LARGE` `CONTENT_ENCODING_UNSUPPORTED` `TRANSPORT_ERROR` | 覆盖 SPEC 列出的全部情形;`TRANSPORT_ERROR` 兜底其余 httpx 传输异常,按保守的 `DELIVERY_UNKNOWN` |
 | D4 | 总期限耗尽:进入底层 send 前能证明未发送时为 NOT_SENT;进入后总超时保守归 DELIVERY_UNKNOWN。明确的 PoolTimeout/ConnectTimeout/ConnectError 仍按 NOT_SENT | 不依赖 httpcore 内部 trace 或“未出现事件”推断未发送,也不因注入 transport 改变公开语义 |
@@ -101,7 +101,7 @@ aclose():幂等,释放连接池                                            [T5]
 | 文件 | 必须验证 |
 |---|---|
 | `tests/http_client/conftest.py` | 假单调时钟;本地 asyncio 原始 TCP 服务器 fixture(可脚本化:延迟响应、分块慢速、`Content-Length` 声明大于/小于/缺失实际、中途断开、接受后不响应、统计接受的连接数与收到的请求);共享断言工具 |
-| `tests/http_client/test_request_validation.py` | method 非法/小写;path 绝对 URL、`//host`、含 userinfo、反斜杠/转义 authority 等可疑形式及最终 origin 校验;普通 `..` 不作为改变 origin 的证据;query/headers 含 CR/LF、非 str、空名;禁止的 4 个 header(大小写不敏感)全部拒绝;body 非 bytes;body 恰等于上限通过、超 1 字节拒绝且**不发网**(传输未被调用);配置:各超时/上限为非正、`max_keepalive_connections > max_connections`、`base_url` 非 http(s) 或含 userinfo/query/fragment、`destination_key` 非法均启动即拒绝 |
+| `tests/http_client/test_request_validation.py` | method 非法/小写;path 绝对 URL、`//host`、含 userinfo、反斜杠/转义 authority 等可疑形式及最终 origin 校验;`.`/`..` 路径段(含 `%2e` 编码)被拒绝,base_url 前缀不可逃逸,段内的点(如 `a..b`)允许;query/headers 含 CR/LF、非 str、空名;禁止的 4 个 header(大小写不敏感)全部拒绝;body 非 bytes;body 恰等于上限通过、超 1 字节拒绝且**不发网**(传输未被调用);配置:各超时/上限为非正、`max_keepalive_connections > max_connections`、`base_url` 非 http(s) 或含 userinfo/query/fragment、`destination_key` 非法均启动即拒绝 |
 | `tests/http_client/test_result_mapping.py` | 3xx/4xx/5xx(含 429/503、非 JSON 正文)逐一原样返回为 `HTTP_RESPONSE_COMPLETE`,传输被调用恰好 1 次(不重试/不重定向);`Retry-After` 等头原样保留,重复头不合并;各 httpx 异常(`PoolTimeout`/`ConnectTimeout`/`ConnectError`/`WriteTimeout`/`WriteError`/`ReadTimeout`/`ReadError`/`RemoteProtocolError`/其他传输异常)映射到 D3 表的状态与 `failure_kind`;请求 body 按原字节到达传输;固定 `Accept-Encoding: identity` 已发出 |
 | `tests/http_client/test_response_body.py` | 响应恰等于上限通过、超 1 字节立即停止并返回 `RESPONSE_TOO_LARGE`(保留 status/headers,body 不冒充完整);`Content-Length` 缺省/偏大或 chunked 仍受累计上限约束;偏小按 HTTP framing 边界处理,不声称能观察到框架未交付的尾部字节;**累计正文超过上限时停止继续读取并清理响应**(可跟踪流断言未消费后续块,本地网络测试验证池可继续使用);`Content-Encoding: gzip`/`br` 被拒绝为 `CONTENT_ENCODING_UNSUPPORTED` 且不读取正文;缺省与 `identity` 通过;正文保持原字节(含非 UTF-8) |
 | `tests/http_client/test_network_behavior.py` | 本地真实 TCP:慢速分块各块都在阶段超时内但总时长超过总期限 → `TOTAL_TIMEOUT`;阶段读超时 → `READ_TIMEOUT`;`max_connections=1` 且已被占用时 → `POOL_TIMEOUT`(`NOT_SENT`);连接被拒绝 → `CONNECT_ERROR`(`NOT_SENT`);接受后不响应 → `READ_TIMEOUT`(`DELIVERY_UNKNOWN`);服务器中途断开 → 未知类;连续两次请求复用同一连接(服务器统计只接受 1 个连接);**调用方取消**:CancelledError 被传播、连接被释放(随后同一客户端仍可发送);`aclose()` 调两次不报错;关闭后 `send` 抛 `ClientClosedError` 且服务器未收到新连接;总期限耗尽:调用底层发送前耗尽 → NOT_SENT;已进入发送 → 保守 DELIVERY_UNKNOWN;fake 时钟只验证计算,不验证真实取消 |
@@ -243,3 +243,17 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 - HTTPX 构造 transport 时始终需要 TLS 上下文,故 HTTP 使用不加载 CA 的校验型上下文;HTTPS 才加载存在的 OpenSSL 默认 CA 路径,缺失时保持空信任库与证书校验。显式 tls_context 不变,不读取环境 CA,不提供 verify=False。
 - 聚焦测试及分层检查 146 passed;全量 pytest 480 passed、30 skipped;ruff check .、全库 ruff format --check .、uv lock --check、git diff --check 均通过。
 - 本轮修复未暂存、提交或推送,仅 H1/H2/H4;其余 P3 不扩展处理。
+
+### 2026-10-20 P3 处置
+
+- 上一节的 P2 修复已作为本地提交 8c34328(fix),均未推送;上一节"未暂存、提交"的表述是当时状态。
+- **已修复**:① path 含 `.`/`..` 段(含 `%2e` 编码)原先会被 httpx 规范化而逃出 base_url 前缀,现于发网前拒绝;段内的点(`v1.0`、`a..b`)不受影响。先新增 7 条参数化用例与 1 条前缀用例并观察失败,再实现。② 曾评估为"写超时缺真实 I/O 用例",**决定不保留**:`WRITE_TIMEOUT → DELIVERY_UNKNOWN` 已由结果映射测试固化;真实 I/O 版本要靠 64MiB 请求体写满操作系统 socket 缓冲,依赖环境、占用大且现有行为本就正确,不是长期业务合同,不为填覆盖而写。
+- **评估后有意不改**:
+  - 总期限小于阶段超时时,连接/池等待阶段也归 `DELIVERY_UNKNOWN`:保守且符合 REQ-HTTP-09("能证明才 NOT_SENT"),仅损失确定性信息;不引入对 httpcore 内部事件的依赖。
+  - `LocalProtocolError` 等归 `TRANSPORT_ERROR` + `DELIVERY_UNKNOWN`:无法证明未发送,保持保守分类。
+  - `aclose()` 的共享关闭任务/shield/重试逻辑:是对独立复核 P2(关闭取消、并发、失败重试)的修复结果,有三条测试保护,不简化。
+  - `Connection`/`Upgrade` 等逐跳头不额外拒绝:SPEC REQ-HTTP-02/06 只规定 4 个客户端自有头,超出即越过 SPEC。
+  - HTTPS 握手端到端、陈旧长连接:前者需要为证书引入依赖(SPEC §14.1 无此项);后者 httpcore 在复用前会丢弃已关闭的空闲连接,竞态窗口无法确定性复现。
+  - 将 9beb783 中的文档拆成独立 `docs:` 提交:涉及改写用户已建立的本地提交,留待用户决定。
+- 聚焦测试及分层检查 154 passed;全量 pytest 488 passed、30 skipped;ruff check .、全库 ruff format --check .、git diff --check 均通过。
+- 本轮改动未暂存、提交或推送,仅 H1/H2/H4。

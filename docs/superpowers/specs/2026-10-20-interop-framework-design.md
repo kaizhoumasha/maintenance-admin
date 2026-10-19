@@ -65,7 +65,7 @@ Q2 的字符串枚举、UUIDv7 与毫秒整数保留为后续标准协议决定;
 
 | 对象 | 最小合同 |
 |---|---|
-| `HttpRequest` | method、相对于已配置 base_url 的 path、query、headers、body bytes;不提供业务 JSON 或 operation 字段。path 不得切换 origin,不得包含查询分隔符 `?`,查询统一通过 query 传入;H 阶段不提供逐请求超时覆盖,使用实例配置 |
+| `HttpRequest` | method、相对于已配置 base_url 的 path、query、headers、body bytes;不提供业务 JSON 或 operation 字段。path 不得切换 origin,不得包含查询分隔符 `?`,查询统一通过 query 传入;不得包含 `.` / `..` 路径段(含百分号编码形式),使 base_url 前缀不可被逃逸;H 阶段不提供逐请求超时覆盖,使用实例配置 |
 | `HttpResult` | delivery_state、failure_kind、可选 HTTP status、响应 headers(保留重复项)、有界响应 body bytes;响应不完整时带错误类别,不得当作完整响应使用 |
 | 客户端配置 | base_url、connect/read/write/pool timeout、total timeout、max_connections、max_keepalive_connections、keepalive_expiry、max_request_body_bytes、max_response_body_bytes、可选 tls_context(ssl.SSLContext)、destination_key(稳定的非敏感出口诊断标识) |
 | DI | 协议适配器构造参数接收 HttpClient;测试直接注入 fake。生产实现接受可替换的 HTTP transport 和单调时钟,用于网络故障与截止时间计算测试;假时钟不控制事件循环的实际取消计时 |
