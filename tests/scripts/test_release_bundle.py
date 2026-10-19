@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -50,33 +51,36 @@ def test_external_site_configuration_does_not_change_bundle_integrity(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_site_override_mounts_external_configuration_read_only(tmp_path):
+@pytest.mark.parametrize("site_exists", [True, False])
+def test_site_override_mounts_external_configuration_read_only(tmp_path, site_exists):
     root = SCRIPT.parents[1]
     site = tmp_path / "site-nginx.conf"
-    site.touch()
+    if site_exists:
+        site.touch()
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    command = [
+        "docker",
+        "compose",
+        "-p",
+        f"site-mount-test-{uuid.uuid4().hex[:12]}",
+        "-f",
+        str(root / "docker-compose.yml"),
+        "-f",
+        str(root / "docker-compose.release.yml"),
+        "-f",
+        str(root / "docker-compose.site.yml"),
+        "--profile",
+        "app",
+    ]
+    env = {
+        **os.environ,
+        "APP_IMAGE": "maintenance-admin:0.2.0-test",
+        "SITE_NGINX_CONFIG": str(site),
+        "FRONTEND_DIST": str(frontend),
+    }
     result = subprocess.run(
-        [
-            "docker",
-            "compose",
-            "-f",
-            str(root / "docker-compose.yml"),
-            "-f",
-            str(root / "docker-compose.release.yml"),
-            "-f",
-            str(root / "docker-compose.site.yml"),
-            "--profile",
-            "app",
-            "config",
-            "--format",
-            "json",
-        ],
-        env={
-            **os.environ,
-            "APP_IMAGE": "maintenance-admin:0.2.0-test",
-            "SITE_NGINX_CONFIG": str(site),
-        },
-        capture_output=True,
-        text=True,
+        [*command, "config", "--format", "json"], env=env, capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
     volumes = json.loads(result.stdout)["services"]["nginx"]["volumes"]
@@ -84,7 +88,29 @@ def test_site_override_mounts_external_configuration_read_only(tmp_path):
     assert len(mounts) == 1
     assert mounts[0]["source"] == str(site)
     assert mounts[0]["read_only"] is True
-    assert mounts[0]["bind"]["create_host_path"] is False
+    # Compose 可能省略值为 false 的字段,直接验证 Docker 是否拒绝缺失的绑定源。
+    try:
+        result = subprocess.run(
+            [*command, "run", "--rm", "--no-deps", "-T", "nginx", "true"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if site_exists:
+            assert result.returncode == 0, result.stderr
+            assert site.is_file()
+        else:
+            assert result.returncode != 0
+            assert str(site) in result.stderr
+            assert not site.exists()
+    finally:
+        subprocess.run(
+            [*command, "down", "--volumes", "--remove-orphans"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
 
 def test_restore_completion_requires_selecting_release_instead_of_development_start(tmp_path):
