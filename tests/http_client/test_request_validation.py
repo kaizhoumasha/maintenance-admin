@@ -38,7 +38,7 @@ def test_pool_relationship():
     "url",
     [
         "ftp://example.test",
-        "http://u:p@example.test",
+        "http://user@example.test",
         "http://example.test?q=s",
         "http://example.test/#x",
     ],
