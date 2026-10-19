@@ -1,0 +1,10 @@
+# 在生产配置之后加载;站点文件放在发布包外,避免修改已校验的制品。
+services:
+  nginx:
+    volumes:
+      - type: bind
+        source: ${SITE_NGINX_CONFIG:?请设置发布包外 nginx 配置文件的绝对路径}
+        target: /etc/nginx/conf.d/default.conf
+        read_only: true
+        bind:
+          create_host_path: false

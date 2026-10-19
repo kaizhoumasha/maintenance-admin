@@ -1,0 +1,158 @@
+# 部署(单机 Compose)
+
+结构:`nginx`(同域提供前端静态文件 + 反代 `/api`)→ `api`(可多实例)→ `postgres` / `redis`;`worker` 可多个,`beat` 只能一个,`migrate` 每次升级跑一次。需要 Docker Compose ≥ 2.24.4。第 1–5 节用于本地构建演练;正式交付用第 6 节的固定制品,不在部署机重新构建。
+
+## 1. 首次部署
+
+```bash
+cp .env.example .env
+# 编辑 .env:删除 ENVIRONMENT=local 一行(容器默认 production);
+# 设置 JWT_SECRET_KEY(openssl rand -hex 32)、POSTGRES_PASSWORD(openssl rand -hex 16)、CORS_ORIGINS 留空(同域)
+mkdir frontend-dist && cp -r <前端仓库>/dist/* frontend-dist/    # 或设置 FRONTEND_DIST 指向前端 dist
+docker compose --profile app build api                          # 只构建一次,四个应用服务共用同一镜像
+docker compose --profile app up -d --no-build
+docker compose --profile app ps -a                               # migrate 应为 Exited (0),api 为 healthy
+docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m scripts.seed_admin <用户名> <邮箱>
+```
+
+验收:生产启动后直接检查 API 的文档已关闭(经 nginx 访问 `/docs` 会落入前端 SPA 路由,不能用它判断):`docker compose --profile app exec -T api python -c "import urllib.request as u; u.urlopen('http://localhost:8000/docs')"` 应报 `HTTP Error 404`;浏览器经 https 访问能登录、刷新、退出;`.env` 里改 `ACCESS_TOKEN_EXPIRE_MINUTES` 后重建容器,`docker compose --profile app exec api env | grep EXPIRE` 能看到新值。
+
+## 2. HTTPS
+
+本模板只提供 HTTP(`deploy/nginx/default.conf`),证书由外层 nginx/网关管理,并转发 `X-Forwarded-For`。注意:
+
+- refresh Cookie 带 `Secure`(非 local),浏览器只在 https(或 localhost)下保存。外层必须终止 TLS,不能让用户用 `http://<ip>` 访问。
+- 本层 nginx 总是把 `X-Forwarded-For` 覆盖成它看到的对端地址(客户端自带的头不会传给 api)。在外层网关之后时,对端是网关 IP,需要在站点专属 nginx 配置的 `server` 里加 `set_real_ip_from <网关地址>; real_ip_header X-Forwarded-For;` 还原,且只信任明确的网关地址,否则限流和审计 IP 会失真。生产制品内的 `deploy/nginx/default.conf` 不可修改,按第 6 节在包外配置并挂载。
+- nginx 访问日志不记录查询串和 Referer(用户列表的邮箱/用户名筛选在查询串里)。nginx 的 error 日志在上游出错时仍会带完整请求行,不要把它转发到公共位置。
+- 前端与 `/api` 必须同域(Cookie 是 `SameSite=Strict`)。
+
+## 3. 多实例
+
+- 同机扩容:`docker compose --profile app up -d --scale api=3`(nginx 通过 Docker DNS 轮询,无需重启)。`worker` 同理;**`beat` 不能扩**。
+- 多机:每台机器跑 api/worker,指向同一个 Postgres/Redis;nginx 换成 `upstream` 列表,并把 `FORWARDED_ALLOW_IPS` 改成 nginx 的地址(不要用 `*`)。`migrate` 只在一处执行。
+
+## 4. 数据与备份
+
+- **Postgres 是唯一的业务数据源**:用户、角色、权限、菜单、审计。每天备份并拷到另一台机器:
+
+  ```bash
+  scripts/backup_pg.sh              # 输出到 ./backups,默认保留 7 天(BACKUP_DIR / BACKUP_KEEP_DAYS)
+  # crontab: 30 2 * * * cd /path/to/project && scripts/backup_pg.sh
+  ```
+
+- **Redis** 存 refresh 会话、限流窗口、Celery 队列,已开 AOF(每秒刷盘),不单独备份。数据丢失的后果:全员重新登录;队列中未执行的任务丢失(每日归档任务次日自动重跑)。若以后加了"不能丢"的一次性任务,任务要幂等,待办落 Postgres。
+- 恢复。必须按顺序,换 JWT 密钥是**必做步骤**:数据库回到旧状态后,用户 ID 会被复用,恢复前签发的 access/refresh token(都用 `JWT_SECRET_KEY` 签名)若仍有效,就可能被当成新用户的凭证。
+
+  ```bash
+  docker compose --profile app stop nginx api worker beat
+  # 把 .env 里的 JWT_SECRET_KEY 换成新值(openssl rand -hex 32)
+  JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh backups/db-<时间>.dump
+  docker compose --profile app up -d --force-recreate     # 让所有进程加载新密钥
+  ```
+
+  脚本做的事:恢复到全新的临时库(单事务,失败整体回滚并丢弃临时库,原库不动);成功后在**同一个事务里**把原库改名为 `<库>_old_<时间>`、临时库改为原库名(要么都成功,要么都不变);再调用 `scripts/clear_redis_after_restore.sh` 删除 Redis 里的 `refresh:*`、`user_refresh:*` 会话键,以及 Celery 队列(`celery*`,含 kombu 的 `unacked`、`unacked_index` 未确认消息),并校验已清空;限流等其它键不动。没有设 `JWT_ROTATED=yes` 脚本会拒绝执行。
+  - 数据库已切换但 Redis 清理失败时,脚本报错退出:保持 api/worker/beat 停止,排除 Redis 故障后单独执行 `scripts/clear_redis_after_restore.sh`,**不要重新恢复数据库**。
+  - `JWT_ROTATED=yes` 只是你的操作确认,脚本不会校验密钥真的换了;启动前确认 `.env` 里的 `JWT_SECRET_KEY` 与恢复前不同。
+  - 切换失败时原库保持原名,临时库 `<库>_restore` 保留;排除原因(例如连接占用)后直接重跑即可。
+  - 恢复后检查:能登录,用户/角色/菜单数量与备份时一致,审计列表可查,恢复前签发的 token 返回 401;确认无误后手动删旧库(`DROP DATABASE "<库>_old_<时间>"`,先 `docker compose exec postgres psql -U admin -d postgres`)。
+- 备份文件含密码哈希、邮箱、授权和审计信息:脚本用 `umask 077`、备份目录 `chmod 700`,文件仅当前用户可读。**升级前已存在的备份不会被追溯修正**,请手动 `chmod 600` 并检查拷贝到其它机器后的权限。
+- 脚本的隔离验收:`scripts/test_backup_restore.sh`(起一次性 Postgres 容器,覆盖备份权限、回退后无残留且可再次建表(不等于真实 Alembic 版本回退后再升级)、切换失败(含第二次改名失败)整体回滚并可重试、Redis 会话/队列/未确认消息被清且不误删其它键、Redis 故障时恢复报告未完成且可单独重试清理、损坏备份不破坏原库、备份失败不留文件、未换密钥拒绝恢复)。改动备份/恢复脚本后要跑。
+
+## 5. 升级与回退(允许停机)
+
+升级:
+
+先构建、再停机、最后备份:停机之后才不会再有业务写入,这份备份就是回退点,恢复点之后没有"漏掉的写入"。
+
+```bash
+docker compose --profile app images          # 记下当前镜像 ID,回退时要用到旧版本(构建会覆盖同名标签,需要时先 docker tag 保留)
+git pull && docker compose --profile app build
+docker compose --profile app stop nginx api worker beat
+scripts/backup_pg.sh                         # 停机后的最终备份;把它拷到另一台机器
+docker compose --profile app up -d          # migrate 先跑,成功后才启动 api/worker/beat
+docker compose --profile app ps -a          # migrate 必须 Exited (0)
+docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m scripts.seed_admin <用户名> <邮箱>   # 仅当新版本新增了权限/菜单
+```
+
+`seed_admin` 的副作用:把全部权限赋给 `admin` 角色、把该用户设为允许多端登录;已存在用户的密码不会被修改。
+
+回退:**不要依赖 `alembic downgrade`**(归档迁移在归档表非空时拒绝降级,权限码迁移的降级会放宽权限)。停应用、换新 `JWT_SECRET_KEY`、恢复备份后,按第 6 节选择已保存的旧镜像和配置启动,不要重新构建旧代码。**恢复点之后的所有写入都会丢失**:按上面的顺序,恢复点就是停机后的最终备份,所以丢失的只是升级后到回退前的写入;如果用的是更早的备份(例如每日定时备份),备份到那次停机之间的写入也会丢失,回退前要先确认这个窗口可以接受。
+
+## 6. 发布准备与旧制品保存
+
+当前目标版本是 **0.2.0,未发布**。遵循 AGENTS.md 的 Git Flow:功能分支合入 develop 后,再在 release/0.2.0 整理版本和发布说明,最终 main 的发布提交打 annotated Git 标签;这些动作必须另行授权。`pyproject.toml` 和 FastAPI 版本须一致。审计游标分页和 nginx 入口属于兼容变化,调用方须按 README 迁移。
+
+### 准备交付目录(不会提交、打 Git 标签或推送)
+
+在源码仓库根目录,Python 3.13+、uv、Docker 可用时执行。选择部署机支持的平台构建,不要把 arm64 镜像用于 amd64。以下固定标签仅为格式示例,替换 `<提交短SHA>`:
+
+```bash
+uv run python scripts/release_bundle.py prepare \
+  --image maintenance-admin:0.2.0-<提交短SHA> \
+  --output releases/0.2.0-<提交短SHA>
+```
+
+默认拒绝未提交源码、已存在的输出目录、已存在的镜像标签及 latest/dev 标签。未提交修改仅做隔离验收时加 `--allow-dirty`,清单会记录 `source_dirty=true`、基线提交及实际源码指纹;不能把它标成正式发布。需要重建就用新标签,不能覆盖已验收标签。
+
+工具只构建一次应用镜像,四个应用服务共用它。目录包含:
+
+- `manifest.json`:应用版本、完整源码提交、dirty 标记、源码指纹、构建平台、应用 image ID、Alembic head、基础设施镜像引用和文件摘要。
+- `image.tar`、`image.env`:已构建应用镜像归档及固定标签。标签供选择,image ID 供核对;归档 SHA-256 是文件校验值,不是镜像仓库摘要。
+- `docker-compose.yml`、`docker-compose.release.yml`、`docker-compose.site.yml`、nginx 配置原件、恢复脚本、本工具和文档。生产叠加配置移除 build;基础设施引用在打包时固定为本地已取得的仓库摘要。站点覆盖文件挂载包外配置,原件继续参与制品校验。
+- `SHA256SUMS`:覆盖清单及所有交付文件。不包含真实 `.env`、密码、数据库备份或前端文件。校验只能检测传输损坏;接收时还应从可信渠道核对该校验文件的摘要。
+
+```bash
+python3 scripts/release_bundle.py verify releases/0.2.0-<提交短SHA>
+```
+
+将整个目录复制到独立存储,取回后再次校验。保留当前版本、上一稳定版本以及仍处于回退窗口内的版本,不能只依赖部署机标签或源码。`image.tar` 只含应用镜像;PostgreSQL/Redis/nginx 必须按清单摘要提前拉取并在回退窗口内保留,离线站点另行 `docker image save` 保存这些基础设施制品。数据库备份独立保存,记录它对应的发布清单、时间及摘要,权限与异机传输按第 4 节执行。
+
+### 固定镜像部署与升级
+
+以下示例部署根目录 `/srv/maintenance`,固定 Compose 项目名 `maintenance-prod`。所有版本必须使用同一项目名,否则会创建另一套数据卷。每个发布目录只放制品原件;真实配置放 `/srv/maintenance/shared/.env`,权限 600。`FRONTEND_DIST` 使用绝对路径,如 `/srv/maintenance/shared/frontend-dist`。
+
+首次部署把包内 `deploy/nginx/default.conf` **复制**到包外的 `/srv/maintenance/shared/nginx/default.conf`,在这份副本中配置明确的 HTTPS 网关信任地址;不要编辑包内文件或重新生成包的校验值。shared/.env 设置 `SITE_NGINX_CONFIG=/srv/maintenance/shared/nginx/default.conf`,后续所有生产 Compose 命令在 release 配置后再加载 `docker-compose.site.yml`。覆盖文件按相同挂载目标替换 nginx 原配置,只读挂载且不会自动创建缺失文件。即使没有外层网关也使用该外部副本,无需增加信任地址。
+
+站点文件不属于制品完整性校验范围,须单独审阅和留档:保存站点配置副本及 `sha256sum /srv/maintenance/shared/nginx/default.conf` 的结果,修改后先 `nginx -t` 再重新加载。升级/回退前检查它与目标版本是否兼容,必要时使用该版本留档的站点副本;不能用“发布包校验通过”代替站点安全检查。
+
+取回候选发布目录后,先校验/加载应用镜像,再把同一真实配置链接到该发布目录。不要把真实配置重新打包。以下在选定发布目录执行:
+
+```bash
+python3 scripts/release_bundle.py load .
+ln -s /srv/maintenance/shared/.env .env     # 仅首次创建,已存在时先确认指向正确
+docker compose -p maintenance-prod --env-file .env --env-file image.env \
+  -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app config --images
+```
+
+`config --images` 只核对镜像引用;不要把包含真实环境变量的完整 `config` 输出写进普通日志/清单。部署机须已取得清单中基础设施镜像,核对平台和磁盘空间。首次部署无需备份;升级时先在当前版本目录停应用、制作最终备份并校验/异机保存,备份失败就保持停止,不得继续升级:
+
+```bash
+# 在当前版本目录执行,沿用同一项目名及配置文件组合
+docker compose -p maintenance-prod --env-file .env --env-file image.env \
+  -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app stop nginx api worker beat
+scripts/backup_pg.sh
+```
+
+备份/恢复脚本默认没有 `-p` 参数;此流程必须先 `export COMPOSE_PROJECT_NAME=maintenance-prod`,并从对应发布目录执行。不要并行运行升级、恢复或人工业务写入。
+
+在候选发布目录,先单独执行 migrate,成功后再启动应用。每条失败都应停止后续操作,不允许整段无条件继续:
+
+```bash
+docker compose -p maintenance-prod --env-file .env --env-file image.env \
+  -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app run --rm --no-deps migrate alembic upgrade head
+docker compose -p maintenance-prod --env-file .env --env-file image.env \
+  -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app up -d --no-build --pull never
+python3 scripts/release_bundle.py check . --project maintenance-prod
+```
+
+迁移前须确认 PostgreSQL 已运行(首次部署先启动 postgres/redis)。`up` 仍会保留并执行 migrate 服务,其成功状态供运行核对。`check` 核对四个应用服务的实际 image ID、迁移成功及 beat 单实例,不代替健康/业务检查。之后检查 `/ready`、登录、权限/菜单、审计分页及真实队列任务,按版本需要补种子。保留成功验收记录,不要记录 token/密码。
+
+### 使用旧镜像回退(禁止现场重建)
+
+1. 停机前取回旧版本完整发布目录和正确恢复点,执行 `verify`、`load`,确认应用 image ID、平台及基础设施制品可用。首次给历史版本补档时,逐个记录正在运行的 api/worker/beat/migrate 的镜像 ID;若四者不同就分别打保留标签、`docker image save` 并保存原配置,不能只保存 API 镜像或从旧代码重建冒充原制品。
+2. 在当前版本目录停止 nginx/api/worker/beat,确认无写入。确认恢复点及其后的数据损失可接受,并在 shared/.env 换成全新 JWT 密钥。
+3. 使用已验收的恢复工具恢复该备份(`JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh <备份>`);配置 `COMPOSE_PROJECT_NAME` 保持原项目。Redis 清理失败只重试清理,不重复恢复数据库。
+4. 恢复脚本只报告数据库/Redis 完成,不会选择或启动应用。进入目标旧版本目录,链接同一 shared/.env,确认 `image.env` 选择的是旧镜像及站点配置与旧版本兼容。按上述相同命令(包含 release 和 site 覆盖文件)先检查旧镜像迁移,成功后 `up -d --no-build --pull never --force-recreate`。不得使用 `build`、`--build` 或当前版本的 image.env。恢复前确认待启动配置和数据卷仍属于同一 Compose 项目。
+5. 执行旧包的 `check` 并检查数据库版本,再验收旧版本接口、新登录、旧 access/refresh 均 401、菜单权限、审计及队列任务。全部成功前保留备份、旧库和新旧两套制品。
+
+当前已知边界:没有配套前端,真实管理端浏览器联调待验收;独立目录复制不等于真实异机传输。未完成这些检查前,不要在发布说明中写为已通过。
