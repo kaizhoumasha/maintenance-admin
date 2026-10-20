@@ -74,12 +74,19 @@ class ReliableConfig:
     lease_margin_s: float = 5
     shutdown_grace_s: float = 15
     retention_days: int = 90
+    maintenance_batch_size: int = 100
 
     def __post_init__(self):
         for field in fields(self):
             if field.name != "targets":
                 positive(getattr(self, field.name), field.name)
-        for name in ("max_concurrency", "claim_batch_size", "db_pool_size", "retention_days"):
+        for name in (
+            "max_concurrency",
+            "claim_batch_size",
+            "db_pool_size",
+            "retention_days",
+            "maintenance_batch_size",
+        ):
             if not isinstance(getattr(self, name), int):
                 raise TypeError(f"{name} must be an integer")
         object.__setattr__(self, "targets", MappingProxyType(dict(self.targets)))

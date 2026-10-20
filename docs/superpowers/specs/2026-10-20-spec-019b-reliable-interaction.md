@@ -101,7 +101,7 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 - 目标较多时配置提供 `defaults`,各目标只写差异项。
 - 与某目标共用地址、仅路径不同的下游不需要单独建 target,路径由适配器 `build_request` 决定。
 - 业务对象(如设备)与 target 的对应关系属于业务域。
-- 配置项 `RELIABLE_TARGETS`(JSON,含 `defaults`)、`RELIABLE_MAX_BODY_BYTES`、`RELIABLE_DEFAULT_TIMEOUT_MS`、`RELIABLE_RETENTION_DAYS`、`RELIABLE_MAX_RETRY_AFTER_S`;执行预算(REQ-RUN-01)的 `RELIABLE_MAX_CONCURRENCY`、`RELIABLE_CLAIM_BATCH_SIZE`、`RELIABLE_DB_POOL_SIZE`。轮询间隔、租约余量、停机宽限、连接池等待为内部常量,不暴露为环境变量。
+- 配置项 `RELIABLE_TARGETS`(JSON,含 `defaults`)、`RELIABLE_MAX_BODY_BYTES`、`RELIABLE_DEFAULT_TIMEOUT_MS`、`RELIABLE_RETENTION_DAYS`、`RELIABLE_MAX_RETRY_AFTER_S`;执行预算(REQ-RUN-01)的 `RELIABLE_MAX_CONCURRENCY`、`RELIABLE_CLAIM_BATCH_SIZE`、`RELIABLE_DB_POOL_SIZE`。后台检查间隔与批量、租约余量、停机宽限、连接池等待为内部参数,不暴露为环境变量。
 
 ## 4. 响应分类与结果映射
 
@@ -137,6 +137,23 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 | REQ-OUT-06 | 出站消息带 `expires_at`(= 创建时间 + `ttl`;无 `ttl` 则不过期)。到期时,`PENDING` → `EXPIRED`,不再发送;`SENDING` 中的消息在租约结束后同样处理。已送达的消息不受影响。过期只表示本地停止发起新发送尝试,不表示对端失败,也不撤销已经发出的请求;对端可能在本地过期后接收或执行。发送前必须再次检查期限。 |
 | REQ-OUT-09 | **重复入队**:仅在消息行存续期间保证本地幂等。同一出站身份 `(target, operation, operation_id)` 再次 `enqueue`——`request_raw` 相同则返回已有消息(不改变其状态);不同则抛 `DuplicateMessage`,不覆盖已冻结字节。实现用 `INSERT … ON CONFLICT DO NOTHING` 后回读(或 SAVEPOINT 包裹),冲突处理**不得使调用者的外层事务进入失败状态**;并发首次入队收敛为一条。终态行按 REQ-RET-01 清理后不保留本地去重凭据,相同身份再次入队会成为新投递;调用者必须保证不跨清理边界重放旧动作,新业务意图使用新身份。 |
 | REQ-OUT-10 | **新入队校验**：先识别存续身份行，同字节返回已有引用、异字节抛 DuplicateMessage；仅真正新入队调用适配器 `build_request` 和公开 `validate_request(目标的 HttpClientConfig, request)`，不创建客户端、不发网。非法构建/校验转为 `InvalidMessage`，不落库，不复制 HTTP 校验规则。返回已有引用不代表重发，实际发送仍按当前配置重新构建和校验；清理后的身份须重新走新入队校验。公开校验接缝已实现 |
+
+#### TTL 的含义与到期行为
+
+`ttl` 是 **Time To Live（消息有效时长）**，限制同一条消息发起新发送或重试的期限，不是单次请求等待时长，也不是数据库记录保留时长。
+
+- **起算点**：新消息在 `Outbox.enqueue` 中创建时写入的 `created_at`；固定截止时间为 `expires_at = created_at + ttl`，不是事务提交或首次发送的时间。不设置 `ttl` 时，`expires_at` 为空，不因有效期截止自动过期，但仍可能进入成功或失败终态。
+- **重试不延期**：所有重试复用原 `expires_at`；退避、对端 `retry_after_ms` 等待提示及同身份返回已有行的重复入队均不延长或重置 TTL。即使下一次重试时间晚于截止时间，到期后也不再发起该次发送。
+- **未发送消息到期**：到期的 `PENDING` 消息由后台检查标为 `EXPIRED`；实际发起网络请求前再次检查 `expires_at`，截止时间已到则不发送，不依赖后台检查及时完成才能阻止新发送。
+- **在途请求到期**：TTL 到期不强行取消已发出的请求，也不立即释放 `SENDING` 的租约；请求仍按原 HTTP 超时与协议分类处理，结果回写仍受当前 `lease_id` 和状态条件保护。合法的 `DELIVERED` 响应可能在 TTL 到期后回写为 `DONE`；若需后续重试，也不得再发起过期消息的新请求。租约到期回收时，若 TTL 已过则转为 `EXPIRED`。
+- **不推断对端结果**：`EXPIRED` 仅表示本地不再发起新的发送，不证明对端未接收、未执行或执行失败，也不能撤销对端动作。
+
+| 时间限制 | 起算点 | 控制范围 |
+|---|---|---|
+| TTL（`ttl` / `expires_at`） | 消息入队创建的 `created_at` | 一条消息发起新发送或重试的有效期，重试不重新计时 |
+| HTTP 超时（目标 `timeout_ms`） | 每次 HTTP 调用开始 | 限制该次调用的执行与等待时长；超时可能是结果未知，不能直接当作对端未执行 |
+| 租约时长（`lease_until`） | 每次领取消息时 | 目标 HTTP 超时加租约余量，用于处理权分配、条件回写与崩溃恢复；不延长 TTL，租约到期也不证明旧请求已结束 |
+| 终态保留期（`RELIABLE_RETENTION_DAYS`） | 进入 `DONE` / `FAILED` / `EXPIRED` 时写入的 `updated_at` | 默认保留终态记录 90 天，超过后由定时任务清理；不是发送有效期，不影响已完成的投递事实 |
 
 ### 5.2 领取、租约与崩溃恢复(REQ-LSE)
 
@@ -193,7 +210,10 @@ enqueue -> PENDING --到期前领取--> SENDING --DELIVERED----------> DONE
 - **专用数据库引擎**:发送器(领取、回写、租约回收、过期标记)使用**独立的异步引擎与连接池**,不与 FastAPI 的 `app.core` 引擎共用:池大小为 `RELIABLE_DB_POOL_SIZE`(默认 2),不允许溢出(`max_overflow=0`),获取连接有超时,使对端故障占满发送器连接时不影响管理 API。`Outbox.enqueue` 则使用**调用者自己的会话**(事务发件箱要求消息与业务数据同一事务提交),不走专用池。终态消息清理由 Celery 任务使用自己的短生命周期引擎。代价:每个 api 实例多占 `RELIABLE_DB_POOL_SIZE` 个数据库连接(N 个实例即 N × 该值),数据库 `max_connections` 须计入;应用关闭时需额外释放该引擎(见优雅停机)。
 - **领取范围**:只领取本进程**已配置、已创建客户端且已注册适配器**的目标的消息;其余消息保持 `PENDING`,不因配置漂移或滚动部署被终态失败。
 - 恢复以数据库扫描为准;即时唤醒缺失不丢消息。
-- 空目标仍持续扫描数据库而不创建 HTTP 客户端；每轮有限处理 TTL 到期的 PENDING，再回收过期租约，最后按空闲槽位领取。TTL 扫描不依赖 next_attempt_at 或空闲发送槽位，不撤销 SENDING、不增加未发送尝试次数。
+- 发送尝试完成后唤醒本实例发送器;领取批量小于空闲槽位时继续有限批次领取以填充并发预算。空闲时保留轮询兜底,扫描异常时仍等待一个后台检查间隔再试,完成通知不能绕过异常退避。唤醒不是新的重试调度器,不绕过 `next_attempt_at`、TTL 或租约。
+- **后台检查间隔与触发条件**:后台检查在正常运行期间执行,不需要停机,间隔默认 1 秒。发送器启动首轮、轮询计时器到点、扫描异常等待该间隔后重试时执行后台检查;发送完成唤醒或连续补位时,只有距上次后台检查已满该间隔才执行,否则仅领取发送。直接调用 `Sender.tick()` 默认仍执行后台检查。
+- **每次后台检查**:先扫描 TTL 到期的 `PENDING` 消息并标为 `EXPIRED`,再回收租约到期的 `SENDING` 消息;回收时未过 TTL 的转回 `PENDING` 并退避,已过 TTL 的转为 `EXPIRED`。两项检查默认各最多处理 100 行,批量独立于发送领取,不新增环境变量,不无界清空积压。发送槽满或空目标时仍按上述条件执行,空目标不创建 HTTP 客户端。TTL 扫描不依赖 `next_attempt_at` 或空闲发送槽位,不撤销 `SENDING`、不增加未发送尝试次数;租约回收不推断对端未执行。
+- **时钟同步部署前提**:发送器、入队生产者和清理进程所在主机须使用 NTP/chrony 等保持时钟同步并监控偏差、跳变。`lease_until`、`next_attempt_at`、`expires_at` 等持久时间使用应用 UTC 墙钟,尚未统一由数据库授时;UTC-aware 仅统一时区表达,不校正时钟偏差。实例间时钟偏差与调度、回写延迟合计须远小于默认 5 秒租约余量。超出此前提可能提前接管仍在发送的租约;`lease_id` 只阻止旧回写,不能撤销已发请求或防止重复投递,仍依赖 REQ-DLV-04 对端去重。
 - 装配处按 `RELIABLE_TARGETS` 为**实际启用**的目标创建 HttpClient 并注册适配器;不为没有消费者的目标创建空客户端。
 - 核心不依赖 FastAPI(lifespan 装配在应用层);数据库迁移 `YYYY-MM-DD_reliable_message.py`,`app/models/` 新增并导出消息模型。
 

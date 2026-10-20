@@ -25,10 +25,18 @@ async def test_lease_fences_late_result_and_counts_once(storage, delivered):
     rig.clock.advance(1)
     (current,) = await rig.store.claim(1, rig.targets)
     assert current.lease_id != original.lease_id
-    assert await rig.store.finish(current, delivered)
-    assert not await rig.store.finish(current, delivered)
+    assert not await rig.store.release(original, rig.targets)
     async with rig.factory() as session:
         row = await session.get(ReliableMessage, message_id)
+        assert row.status == "SENDING" and row.lease_id == current.lease_id
+        assert row.attempts == 1
+    assert await rig.store.finish(current, delivered)
+    assert not await rig.store.finish(current, delivered)
+    assert not await rig.store.release(original, rig.targets)
+    assert not await rig.store.release(current, rig.targets)
+    async with rig.factory() as session:
+        row = await session.get(ReliableMessage, message_id)
+        assert row.status == "DONE" and row.response_raw == b"ok"
         assert row.attempts == 2
         assert row.lease_id is None
 

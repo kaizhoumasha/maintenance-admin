@@ -41,6 +41,14 @@ def test_invalid_retry_limit_rejected(value):
         TargetConfig("peer", "http://example.test", "script", max_retry_after_s=value)
 
 
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, math.nan, math.inf])
+def test_invalid_maintenance_batch_rejected(value):
+    from app.reliable.config import ReliableConfig
+
+    with pytest.raises((ValueError, TypeError)):
+        ReliableConfig({}, maintenance_batch_size=value)
+
+
 def test_retry_policy_saturates_and_preserves_peer_hint():
     from app.reliable.config import TargetConfig
     from app.reliable.policy import retry_delay_s

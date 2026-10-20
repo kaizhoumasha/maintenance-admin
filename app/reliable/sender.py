@@ -33,13 +33,15 @@ class Sender:
         self.runner = None
         self.stopping = False
         self.closed = False
+        self._wakeup = asyncio.Event()
 
-    async def tick(self) -> int:
+    async def tick(self, *, maintain: bool = True) -> int:
         if self.stopping:
             return 0
         limit = self.budget.claim_batch_size
-        await self.store.expire_pending(limit)
-        await self.store.recover_expired(limit, self.targets)
+        if maintain:
+            await self.store.expire_pending(self.budget.maintenance_batch_size)
+            await self.store.recover_expired(self.budget.maintenance_batch_size, self.targets)
         free = self.budget.max_concurrency - len(self.inflight)
         if free <= 0 or self.stopping:
             return 0
@@ -68,6 +70,7 @@ class Sender:
     def _completed(self, task):
         self.inflight.pop(task, None)
         self._observe(task)
+        self._wakeup.set()
 
     @staticmethod
     def _observe(task):
@@ -76,12 +79,39 @@ class Sender:
 
     async def run(self) -> None:
         self.runner = asyncio.current_task()
+        maintained_at = None
+        timer_fired = True
         while not self.stopping:
+            self._wakeup.clear()
+            # 过期/租约回收按时间节流:由完成唤醒触发的 tick 只领取,不重复跑维护事务;
+            # 轮询计时器到点或出错重试时一定维护。
+            now = self.monotonic()
+            maintain = (
+                timer_fired
+                or maintained_at is None
+                or now - maintained_at >= self.budget.poll_interval_s
+            )
+            timer_fired = False
             try:
-                await self.tick()
+                claimed = await self.tick(maintain=maintain)
             except Exception as error:
                 logger.error("reliable scan failed error_type=%s", type(error).__name__)
-            await self.wait(self.budget.poll_interval_s)
+                await self.wait(self.budget.poll_interval_s)
+                timer_fired = True
+                continue
+            if maintain:
+                maintained_at = now
+            if claimed and len(self.inflight) < self.budget.max_concurrency:
+                continue
+            polling = asyncio.create_task(self.wait(self.budget.poll_interval_s))
+            wakeup = asyncio.create_task(self._wakeup.wait())
+            try:
+                done, _ = await asyncio.wait({polling, wakeup}, return_when=asyncio.FIRST_COMPLETED)
+                timer_fired = polling in done
+            finally:
+                polling.cancel()
+                wakeup.cancel()
+                await asyncio.gather(polling, wakeup, return_exceptions=True)
 
     async def _bounded(self, tasks, deadline, phase, *, cancel=True):
         if not tasks:
