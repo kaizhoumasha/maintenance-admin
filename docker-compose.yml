@@ -2,9 +2,11 @@
 # 应用配置:.env 里的变量原样传入容器(令牌时长、审计保留天数等),下面显式写的优先;
 # DATABASE_URL/REDIS_URL 固定指向容器内服务(.env 里的 localhost 是本机开发用的),数据库密码用 POSTGRES_PASSWORD。
 # 非 local 环境 JWT_SECRET_KEY 至少 32 字符,否则启动失败
+name: enterprise-backend
+
 x-app: &app
   build: .
-  image: ${APP_IMAGE:-maintenance-admin:dev}
+  image: ${APP_IMAGE:-enterprise-backend:dev}
   profiles: [app]
   restart: unless-stopped
   env_file:
@@ -12,7 +14,7 @@ x-app: &app
       required: false
   environment:
     ENVIRONMENT: ${ENVIRONMENT:-production}
-    DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/maintenance
+    DATABASE_URL: postgresql+asyncpg://admin:${POSTGRES_PASSWORD:-admin123}@postgres:5432/enterprise_backend
     REDIS_URL: redis://redis:6379/0
     JWT_SECRET_KEY: ${JWT_SECRET_KEY:-}
     CORS_ORIGINS: ${CORS_ORIGINS:-}
@@ -24,7 +26,7 @@ services:
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
-      POSTGRES_DB: maintenance
+      POSTGRES_DB: enterprise_backend
     ports: ["127.0.0.1:25432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:

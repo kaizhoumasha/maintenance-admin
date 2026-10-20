@@ -1,7 +1,7 @@
 [project]
-name = "maintenance-admin"
+name = "enterprise-backend"
 version = "0.2.0"
-description = "维保协同后台管理系统（RBAC）"
+description = "面向 WMS、MES、WES 等生产企业业务开发的通用企业级后端管理平台模板，提供第三方与内部 API 对接基础能力"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

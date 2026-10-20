@@ -61,7 +61,7 @@ async def test_pg_permissions_and_invalid_inputs(pg_client, path, caplog):
             assert (await query(pg_client, path, **params)).status_code == 400
         assert (await query(pg_client, path, condition("action", "ilike", "%"))).status_code == 400
     assert tag not in "\n".join(
-        r.getMessage() for r in caplog.records if r.name == "maintenance-admin"
+        r.getMessage() for r in caplog.records if r.name == "enterprise-backend"
     )
     assert (await query(pg_client, path)).status_code == 200
 
@@ -97,7 +97,7 @@ async def test_pg_dates_and_string_validation(pg_client, path, caplog):
     assert (
         await query(pg_client, path, condition(field, "eq", "private\x00value"))
     ).status_code == 400
-    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name == "maintenance-admin")
+    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name == "enterprise-backend")
     for value in bad_dates[1:]:
         assert value not in app_logs
     assert "private" not in app_logs

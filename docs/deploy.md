@@ -2,6 +2,8 @@
 
 结构:`nginx`(同域提供前端静态文件 + 反代 `/api`)→ `api`(可多实例)→ `postgres` / `redis`;`worker` 可多个,`beat` 只能一个,`migrate` 每次升级跑一次。需要 Docker Compose ≥ 2.24.4。第 1–5 节用于本地构建演练;正式交付用第 6 节的固定制品,不在部署机重新构建。
 
+默认 Compose 项目名固定为 `enterprise-backend`，对应数据卷为 `enterprise-backend_pgdata` 和 `enterprise-backend_redisdata`。已有部署未完成备份和数据迁移时，所有 Compose 命令须用 `-p <原项目名>` 或 `COMPOSE_PROJECT_NAME` 覆盖默认名，以继续访问原数据卷；仅改项目名不会迁移数据。
+
 ## 1. 首次部署
 
 ```bash
@@ -80,7 +82,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 
 ## 6. 发布准备与旧制品保存
 
-当前目标版本是 **0.2.0,未发布**。遵循 AGENTS.md 的 Git Flow:功能分支合入 develop 后,再在 release/0.2.0 整理版本和发布说明,最终 main 的发布提交打 annotated Git 标签;这些动作必须另行授权。`pyproject.toml` 和 FastAPI 版本须一致。审计游标分页和 nginx 入口属于兼容变化,调用方须按 README 迁移。
+最近发布基线为 **v0.2.0**，当前分支的改名及 HTTP 客户端等后续变更尚未发布。正式交付遵循 AGENTS.md 的 Git Flow：功能分支合入 develop 后，在 release 分支整理版本和发布说明，最终 main 的发布提交打 annotated Git 标签；这些动作必须另行授权。`pyproject.toml` 和 FastAPI 版本须一致。审计游标分页和 nginx 入口属于兼容变化，调用方须按 README 迁移。
 
 ### 准备交付目录(不会提交、打 Git 标签或推送)
 
@@ -88,7 +90,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 
 ```bash
 uv run python scripts/release_bundle.py prepare \
-  --image maintenance-admin:0.2.0-<提交短SHA> \
+  --image enterprise-backend:0.2.0-<提交短SHA> \
   --output releases/0.2.0-<提交短SHA>
 ```
 
@@ -109,18 +111,18 @@ python3 scripts/release_bundle.py verify releases/0.2.0-<提交短SHA>
 
 ### 固定镜像部署与升级
 
-以下示例部署根目录 `/srv/maintenance`,固定 Compose 项目名 `maintenance-prod`。所有版本必须使用同一项目名,否则会创建另一套数据卷。每个发布目录只放制品原件;真实配置放 `/srv/maintenance/shared/.env`,权限 600。`FRONTEND_DIST` 使用绝对路径,如 `/srv/maintenance/shared/frontend-dist`。
+以下为新站点示例，部署根目录 `/srv/enterprise-backend`，固定 Compose 项目名 `enterprise-backend-prod`。已有站点必须继续使用原部署目录、Compose 项目名及数据卷，不因本次改名迁移；例如原项目名为 `maintenance-prod` 时，以下命令的 `-p`、`COMPOSE_PROJECT_NAME` 和 `--project` 均须使用该原值。仓库目录改名也须显式指定原项目名，否则 Compose 会创建另一套数据卷。数据库名统一为 `enterprise_backend`，旧库按下节原地改名；显式配置的 `APP_NAME` 和 `APP_IMAGE` 按站点需要更新，旧镜像继续保留用于回退。每个发布目录只放制品原件；真实配置放 `/srv/enterprise-backend/shared/.env`，权限 600。`FRONTEND_DIST` 使用绝对路径，如 `/srv/enterprise-backend/shared/frontend-dist`。
 
-首次部署把包内 `deploy/nginx/default.conf` **复制**到包外的 `/srv/maintenance/shared/nginx/default.conf`,在这份副本中配置明确的 HTTPS 网关信任地址;不要编辑包内文件或重新生成包的校验值。shared/.env 设置 `SITE_NGINX_CONFIG=/srv/maintenance/shared/nginx/default.conf`,后续所有生产 Compose 命令在 release 配置后再加载 `docker-compose.site.yml`。覆盖文件按相同挂载目标替换 nginx 原配置,只读挂载且不会自动创建缺失文件。即使没有外层网关也使用该外部副本,无需增加信任地址。
+首次部署把包内 `deploy/nginx/default.conf` **复制**到包外的 `/srv/enterprise-backend/shared/nginx/default.conf`,在这份副本中配置明确的 HTTPS 网关信任地址;不要编辑包内文件或重新生成包的校验值。shared/.env 设置 `SITE_NGINX_CONFIG=/srv/enterprise-backend/shared/nginx/default.conf`,后续所有生产 Compose 命令在 release 配置后再加载 `docker-compose.site.yml`。覆盖文件按相同挂载目标替换 nginx 原配置,只读挂载且不会自动创建缺失文件。即使没有外层网关也使用该外部副本,无需增加信任地址。
 
-站点文件不属于制品完整性校验范围,须单独审阅和留档:保存站点配置副本及 `sha256sum /srv/maintenance/shared/nginx/default.conf` 的结果,修改后先 `nginx -t` 再重新加载。升级/回退前检查它与目标版本是否兼容,必要时使用该版本留档的站点副本;不能用“发布包校验通过”代替站点安全检查。
+站点文件不属于制品完整性校验范围,须单独审阅和留档:保存站点配置副本及 `sha256sum /srv/enterprise-backend/shared/nginx/default.conf` 的结果,修改后先 `nginx -t` 再重新加载。升级/回退前检查它与目标版本是否兼容,必要时使用该版本留档的站点副本;不能用“发布包校验通过”代替站点安全检查。
 
 取回候选发布目录后,先校验/加载应用镜像,再把同一真实配置链接到该发布目录。不要把真实配置重新打包。以下在选定发布目录执行:
 
 ```bash
 python3 scripts/release_bundle.py load .
-ln -s /srv/maintenance/shared/.env .env     # 仅首次创建,已存在时先确认指向正确
-docker compose -p maintenance-prod --env-file .env --env-file image.env \
+ln -s /srv/enterprise-backend/shared/.env .env     # 仅首次创建,已存在时先确认指向正确
+docker compose -p enterprise-backend-prod --env-file .env --env-file image.env \
   -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app config --images
 ```
 
@@ -128,24 +130,49 @@ docker compose -p maintenance-prod --env-file .env --env-file image.env \
 
 ```bash
 # 在当前版本目录执行,沿用同一项目名及配置文件组合
-docker compose -p maintenance-prod --env-file .env --env-file image.env \
+docker compose -p enterprise-backend-prod --env-file .env --env-file image.env \
   -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app stop nginx api worker beat
 scripts/backup_pg.sh
 ```
 
-备份/恢复脚本默认没有 `-p` 参数;此流程必须先 `export COMPOSE_PROJECT_NAME=maintenance-prod`,并从对应发布目录执行。不要并行运行升级、恢复或人工业务写入。
+备份/恢复脚本默认没有 `-p` 参数;此流程必须先 `export COMPOSE_PROJECT_NAME=enterprise-backend-prod`,并从对应发布目录执行。不要并行运行升级、恢复或人工业务写入。
 
 在候选发布目录,先单独执行 migrate,成功后再启动应用。每条失败都应停止后续操作,不允许整段无条件继续:
 
 ```bash
-docker compose -p maintenance-prod --env-file .env --env-file image.env \
+docker compose -p enterprise-backend-prod --env-file .env --env-file image.env \
   -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app run --rm --no-deps migrate alembic upgrade head
-docker compose -p maintenance-prod --env-file .env --env-file image.env \
+docker compose -p enterprise-backend-prod --env-file .env --env-file image.env \
   -f docker-compose.yml -f docker-compose.release.yml -f docker-compose.site.yml --profile app up -d --no-build --pull never
-python3 scripts/release_bundle.py check . --project maintenance-prod
+python3 scripts/release_bundle.py check . --project enterprise-backend-prod
 ```
 
 迁移前须确认 PostgreSQL 已运行(首次部署先启动 postgres/redis)。`up` 仍会保留并执行 migrate 服务,其成功状态供运行核对。`check` 核对四个应用服务的实际 image ID、迁移成功及 beat 单实例,不代替健康/业务检查。之后检查 `/ready`、登录、权限/菜单、审计分页及真实队列任务,按版本需要补种子。保留成功验收记录,不要记录 token/密码。
+
+### 数据库改名
+
+默认数据库为 `enterprise_backend`，独立测试库为 `enterprise_backend_test`。PostgreSQL 镜像仅在空数据卷首次初始化时使用 `POSTGRES_DB`，修改此变量不会改名已有数据库。已有 `maintenance` 库采用原地 `ALTER DATABASE` 改名，保留数据库 OID、表、数据、权限和扩展，不另建空库或复制出两套可写数据。
+
+1. 盘点本地 `.env`、其他进程环境、数据库工具和自动化任务中的连接配置。仅将实际连接旧库的客户端切到新库；使用独立数据库或 PGLite 的工具无需修改。保留主机、端口、用户名、密码和数据卷。
+2. 在当前部署目录停止所有旧库使用方，再执行 `scripts/backup_pg.sh` 保存最终备份并校验；同时记录数据库 OID、表行数和必要的数据摘要。以下命令均沿用该站点原 Compose 项目名及配置文件组合。
+
+   ```bash
+   docker compose --profile app stop api worker beat
+   scripts/backup_pg.sh
+   docker compose exec -T postgres psql -U admin -d maintenance -v ON_ERROR_STOP=1 \
+     -c 'SELECT _timescaledb_functions.stop_background_workers()'
+   docker compose exec -T postgres psql -U admin -d postgres -v ON_ERROR_STOP=1 \
+     -c 'ALTER DATABASE maintenance RENAME TO enterprise_backend'
+   docker compose exec -T postgres psql -U admin -d enterprise_backend -v ON_ERROR_STOP=1 \
+     -c 'SELECT _timescaledb_functions.start_background_workers()'
+   ```
+
+   模板默认使用 TimescaleDB 镜像，调度后台进程也会占用旧库连接，上述暂停及恢复命令仅用于已安装 TimescaleDB 的库；普通 PostgreSQL 不执行这两条扩展函数调用。
+
+3. 将本地及其他实际使用方连接 URL 的数据库部分改为 `/enterprise_backend`，Compose 的 `DATABASE_URL` 和 `POSTGRES_DB` 保持一致。仅在旧库没有活动连接、新库名尚不存在时执行改名；不能连接正在被改名的库来执行此命令。
+4. 在目标发布目录按固定镜像流程重建 PostgreSQL 容器和应用，保持原数据卷；验证新库 OID、表行数和数据摘要与改名前一致，迁移成功、`/ready` 正常、worker 可响应，并逐一核对相关工具连接。改名不要求清空 Redis、轮换 JWT 密钥或重跑管理员种子。
+
+如需回退，先停止使用方，将数据库原地改回原名并恢复相应连接配置；不要仅启动仍连接旧库名的历史镜像。备份恢复属于数据损坏时的恢复手段，不是正常改名步骤。
 
 ### 使用旧镜像回退(禁止现场重建)
 
@@ -155,7 +182,7 @@ python3 scripts/release_bundle.py check . --project maintenance-prod
 4. 恢复脚本只报告数据库/Redis 完成,不会选择或启动应用。进入目标旧版本目录,链接同一 shared/.env,确认 `image.env` 选择的是旧镜像及站点配置与旧版本兼容。按上述相同命令(包含 release 和 site 覆盖文件)先检查旧镜像迁移,成功后 `up -d --no-build --pull never --force-recreate`。不得使用 `build`、`--build` 或当前版本的 image.env。恢复前确认待启动配置和数据卷仍属于同一 Compose 项目。
 5. 执行旧包的 `check` 并检查数据库版本,再验收旧版本接口、新登录、旧 access/refresh 均 401、菜单权限、审计及队列任务。全部成功前保留备份、旧库和新旧两套制品。
 
-0.2.0 发布范围为后端模板,固定镜像目前仅验收 `linux/arm64`;发布准备说明及兼容变化见 [CHANGELOG](../CHANGELOG.md)。其他架构镜像须单独构建验收。当前处于 release/0.2.0 准备阶段,未正式发布。
+最近发布基线 `v0.2.0` 的范围为后端模板,固定镜像目前仅验收 `linux/arm64`;发布说明及兼容变化见 [CHANGELOG](../CHANGELOG.md)。其他架构镜像须单独构建验收。当前分支的改名及 HTTP 客户端等后续变更尚未发布。
 
 剩余验收边界:
 - 没有配套前端,真实管理端浏览器联调待验收;接口与 Cookie 的后端验收不能替代真实浏览器联调。
