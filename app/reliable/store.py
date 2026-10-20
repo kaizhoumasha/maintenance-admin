@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import bindparam, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.http_client import DeliveryState, HttpResult
@@ -219,8 +219,20 @@ class MessageStore:
                 )
             )
             claims = [self._claim(session, row) for row in rows]
-            for claim in claims:
-                await self._recover(session, claim, now, targets)
+            if claims:
+                # 行已被 FOR UPDATE 锁定,无需再带租约条件;一次批量执行代替逐行往返。
+                table = ReliableMessage.__table__
+                await session.execute(
+                    update(table).where(table.c.id == bindparam("row_id")),
+                    [
+                        {
+                            "row_id": claim.message_id,
+                            "attempts": claim.attempt_no,
+                            **self._recovery_values(claim, now, targets),
+                        }
+                        for claim in claims
+                    ],
+                )
         for claim in claims:
             self._recovery_log(claim, now, targets)
         return len(rows)
@@ -260,12 +272,25 @@ class MessageStore:
                 claim.attempt_no,
             )
 
-    async def _recover(self, session, claim, now, targets):
+    def _recovery_values(self, claim, now, targets):
         target = targets.get(claim.message.target)
         if target is None:
             target = TargetConfig("missing", "http://invalid.test", "missing")
         expired = claim.message.expires_at is not None and claim.message.expires_at <= now
-        status = MessageStatus.EXPIRED if expired else MessageStatus.PENDING
+        return dict(
+            status=MessageStatus.EXPIRED if expired else MessageStatus.PENDING,
+            updated_at=now,
+            lease_id=None,
+            lease_until=None,
+            last_http_status=None,
+            last_failure_kind=None,
+            last_verdict=None,
+            last_response_raw=None,
+            next_attempt_at=now
+            + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, self.uniform)),
+        )
+
+    async def _recover(self, session, claim, now, targets):
         changed = await session.scalar(
             update(ReliableMessage)
             .where(
@@ -274,17 +299,8 @@ class MessageStore:
                 ReliableMessage.status == MessageStatus.SENDING,
             )
             .values(
-                status=status,
-                updated_at=now,
                 attempts=ReliableMessage.attempts + 1,
-                lease_id=None,
-                lease_until=None,
-                last_http_status=None,
-                last_failure_kind=None,
-                last_verdict=None,
-                last_response_raw=None,
-                next_attempt_at=now
-                + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, self.uniform)),
+                **self._recovery_values(claim, now, targets),
             )
             .returning(ReliableMessage.id)
         )
