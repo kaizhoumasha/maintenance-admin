@@ -32,6 +32,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 
 - 同机扩容:`docker compose --profile app up -d --scale api=3`(nginx 通过 Docker DNS 轮询,无需重启)。`worker` 同理;**`beat` 不能扩**。
 - 多机:每台机器跑 api/worker,指向同一个 Postgres/Redis;nginx 换成 `upstream` 列表,并把 `FORWARDED_ALLOW_IPS` 改成 nginx 的地址(不要用 `*`)。`migrate` 只在一处执行。
+- 停止宽限:`api` 的 `stop_grace_period` 为 20 秒,必须大于出站发送器的优雅停机预算(默认 15 秒);自行改写 Compose 或使用其它编排时保持这一关系,否则停机时容器会在清理完成前被 SIGKILL,未确认的发送只能靠租约到期恢复。
 
 ## 4. 数据与备份
 

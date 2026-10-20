@@ -54,6 +54,8 @@ services:
   api:
     <<: *app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=${FORWARDED_ALLOW_IPS:-*}
+    # 发送器优雅停机默认最多 15 秒;须大于它,否则 docker 默认 10 秒会在清理完成前 SIGKILL
+    stop_grace_period: 20s
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}

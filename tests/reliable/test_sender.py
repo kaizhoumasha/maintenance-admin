@@ -475,10 +475,11 @@ async def test_loop_survives_scan_error_with_injected_wait(rig, caplog):
     assert "sensitive database text" not in caplog.text
 
 
-async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(rig, caplog):
+async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(storage, caplog):
     from app.reliable.config import ReliableConfig
     from app.reliable.sender import Sender
 
+    rig = storage
     started, cancelled, unblock, closed = (asyncio.Event() for _ in range(4))
 
     class Client:
@@ -501,7 +502,7 @@ async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(rig,
         rig.store,
         rig.targets,
         rig.adapters,
-        {"peer": Client()},
+        {rig.target.name: Client()},
         budget=ReliableConfig(rig.targets, shutdown_grace_s=0.05),
     )
     await sender.tick()
@@ -520,10 +521,11 @@ async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(rig,
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def test_shutdown_uses_one_monotonic_deadline_for_blocked_release_and_close(rig, caplog):
+async def test_shutdown_uses_one_monotonic_deadline_for_blocked_release_and_close(storage, caplog):
     from app.reliable.config import ReliableConfig
     from app.reliable.sender import Sender
 
+    rig = storage
     started, block, disposed = (asyncio.Event() for _ in range(3))
     resources = []
 
@@ -554,7 +556,7 @@ async def test_shutdown_uses_one_monotonic_deadline_for_blocked_release_and_clos
         rig.store,
         rig.targets,
         rig.adapters,
-        {"peer": Client()},
+        {rig.target.name: Client()},
         monotonic=rig.clock.monotonic,
         dispose=dispose,
         budget=ReliableConfig(rig.targets, shutdown_grace_s=0.05),
@@ -571,3 +573,155 @@ async def test_shutdown_uses_one_monotonic_deadline_for_blocked_release_and_clos
     finally:
         block.set()
         await asyncio.gather(*resources, return_exceptions=True)
+
+
+@pytest.mark.parametrize("phase", ["inflight", "release", "http", "database"])
+async def test_cancelled_shutdown_waiters_do_not_abort_cleanup(pg_rig, phase):
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    entered, resume, closed, disposed = (asyncio.Event() for _ in range(4))
+    resources, followers = [], []
+    close_calls = dispose_calls = 0
+
+    class Client:
+        async def send(self, request):
+            if phase == "inflight":
+                entered.set()
+            if phase in ("inflight", "release"):
+                await resume.wait()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            nonlocal close_calls
+            resources.append(asyncio.current_task())
+            close_calls += 1
+            if phase == "http":
+                entered.set()
+                await resume.wait()
+            closed.set()
+
+    async def dispose():
+        nonlocal dispose_calls
+        resources.append(asyncio.current_task())
+        dispose_calls += 1
+        if phase == "database":
+            entered.set()
+            await resume.wait()
+        await rig.engine.dispose()
+        disposed.set()
+
+    if phase == "release":
+        release = rig.store.release
+
+        async def blocked_release(claim, targets):
+            resources.append(asyncio.current_task())
+            entered.set()
+            await resume.wait()
+            return await release(claim, targets)
+
+        rig.store.release = blocked_release
+
+    async with rig.factory() as session:
+        result = await rig.outbox.enqueue(session, rig.draft())
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        dispose=dispose,
+    )
+    await sender.tick()
+    first = asyncio.create_task(sender.aclose())
+    try:
+        async with asyncio.timeout(3):
+            if phase == "release":
+                checkpoint = asyncio.Event()
+                asyncio.get_running_loop().call_soon(checkpoint.set)
+                await checkpoint.wait()
+                for task in tuple(sender.inflight):
+                    task.cancel()
+            await entered.wait()
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            followers = [asyncio.create_task(sender.aclose()) for _ in range(2)]
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+            assert all(not task.done() for task in followers)
+            followers[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await followers[0]
+            assert not disposed.is_set()
+            if phase in ("inflight", "release"):
+                async with rig.factory() as session:
+                    row = await session.get(ReliableMessage, result.message_id)
+                    assert row.status == "SENDING" and row.attempts == 0
+                    assert row.lease_id is not None
+            resume.set()
+            await followers[1]
+            await sender.aclose()
+        assert closed.is_set() and disposed.is_set()
+        assert close_calls == dispose_calls == 1
+        async with rig.factory() as session:
+            row = await session.get(ReliableMessage, result.message_id)
+            assert row.status == ("PENDING" if phase == "release" else "DONE")
+            assert row.response_raw == (None if phase == "release" else b"ok")
+            assert row.attempts == 1
+            assert row.lease_id is None
+    finally:
+        resume.set()
+        await asyncio.gather(first, *followers, *sender.inflight, return_exceptions=True)
+        await asyncio.gather(*resources, return_exceptions=True)
+        await sender.aclose()
+
+
+async def test_cancelled_shutdown_waiter_keeps_original_deadline(rig, caplog):
+    from app.reliable.sender import Sender
+
+    entered, resume, blocked, cancelled = (asyncio.Event() for _ in range(4))
+    resources = []
+    disposal_started = asyncio.Event()
+
+    class Client:
+        async def aclose(self):
+            resources.append(asyncio.current_task())
+            entered.set()
+            await resume.wait()
+
+    async def dispose():
+        resources.append(asyncio.current_task())
+        disposal_started.set()
+        try:
+            await blocked.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    sender = Sender(
+        rig.store, {}, {}, {"peer": Client()}, monotonic=rig.clock.monotonic, dispose=dispose
+    )
+    first = asyncio.create_task(sender.aclose())
+    try:
+        async with asyncio.timeout(1):
+            await entered.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            rig.clock.advance(16)
+            resume.set()
+            await sender.aclose()
+            await disposal_started.wait()
+            await cancelled.wait()
+        assert "database dispose" in caplog.text
+    finally:
+        resume.set()
+        blocked.set()
+        await asyncio.gather(first, *resources, return_exceptions=True)
+        await sender.aclose()

@@ -34,6 +34,7 @@ class Sender:
         self.stopping = False
         self.closed = False
         self._wakeup = asyncio.Event()
+        self._close_task: asyncio.Task[None] | None = None
 
     async def tick(self, *, maintain: bool = True) -> int:
         if self.stopping:
@@ -133,11 +134,15 @@ class Sender:
         return done
 
     async def aclose(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
-        self.stopping = True
-        deadline = self.monotonic() + self.budget.shutdown_grace_s
+        if self._close_task is None:
+            self.closed = True
+            self.stopping = True
+            deadline = self.monotonic() + self.budget.shutdown_grace_s
+            self._close_task = asyncio.create_task(self._close(deadline))
+            self._close_task.add_done_callback(self._observe)
+        await asyncio.shield(self._close_task)
+
+    async def _close(self, deadline: float) -> None:
         if self.runner is not None and not self.runner.done():
             self.runner.cancel()
             await self._bounded(
