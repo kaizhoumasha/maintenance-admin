@@ -1,21 +1,21 @@
-# SPEC-019 H 阶段实施计划:纯异步 HttpClient
+# SPEC-019 HttpClient 实施计划:纯异步 HttpClient
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. H1/H2/H4 基线已实施、验证并复审通过,已形成本地提交 f4e9427、9beb783;后续评审修复单独记录,不自动暂存、提交或推送。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 首期交付 基线已实施、验证并复审通过,已形成本地提交 f4e9427、9beb783;后续评审修复单独记录,不自动暂存、提交或推送。
 
-**Goal:** 交付可通过构造参数注入的单次异步 HTTP 客户端,只覆盖 H1/H2/H4。
+**Goal:** 交付可通过构造参数注入的单次异步 HTTP 客户端,只覆盖首期交付。
 
 **Architecture:** `app/http_client` 只依赖标准库和 httpx,以 Protocol 隔离调用方与生产实现。连接池跟随客户端事件循环生命周期,网络结果与参数异常分开表达;没有业务消费者时不装配实例。
 
 **Tech Stack:** Python ≥3.13、httpx ≥0.28、pytest、pytest-asyncio、标准库 asyncio 本地 HTTP fixture。
 
-**Spec:** [SPEC-019 v4](../specs/2026-10-20-interop-framework-design.md),仅 §2.1、§10.1、§12 H1/H2/H4、§14.1。
+**Spec:** [SPEC-019A](../specs/2026-10-20-spec-019a-http-client.md)(自 SPEC-019 v4 拆出;下文 §2.1、§10.1、§12 首期交付步骤、§14.1 依次对应 019A 的 §2、§3、§4.1、§4.2)。
 
 ## Global Constraints
 
 - 正文默认上限请求/响应均 256KiB;总超时 10000ms;connect/read/write/pool 各 5s。
 - max_connections=100、max_keepalive_connections=20、keepalive_expiry=5s。
 - trust_env=False、follow_redirects=False、http2=False、retries=0;TLS 校验保持启用,可显式注入 SSLContext。
-- 不实现 H3、R、业务接入、应用装配、路由、表、权限、Celery、重试或信封处理。
+- 不实现出口限流、可靠交互层、业务接入、应用装配、路由、表、权限、Celery、重试或信封处理。
 - 已从 develop 创建 feature/spec-019-interop-framework 分支;提交与推送仅按用户授权执行,保留已有提交。
 
 ## Review Focus
@@ -28,13 +28,13 @@
 
 ---
 
-对应设计:`docs/superpowers/specs/2026-10-20-interop-framework-design.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限 H 阶段**:`app/http_client/` 与其测试、依赖变更。H3(出口并发/速率限流)、R 阶段(可靠交互层)、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**H1/H2/H4 及后续修复已实现、验证并复审通过,已提交并推送功能分支,准备面向 develop 的 PR;后续修复见 §8**。
+对应设计:`docs/superpowers/specs/2026-10-20-spec-019a-http-client.md`(契约以 SPEC 为准,实现措辞已随复审修正同步)。**范围仅限首期**:`app/http_client/` 与其测试、依赖变更。出口并发/速率限流、可靠交互层()、业务域接入、应用装配(lifespan / Depends)、Celery 任务均**不纳入**。本计划记录实施步骤与验证结果,**首期交付 及后续修复已实现、验证并复审通过,已提交并推送功能分支,准备面向 develop 的 PR;后续修复见 §8**。
 
 ## 0. 前置复审结论
 
-对 SPEC v4 的完整复审已通过:上轮 P2(R 阶段调度载体措辞、REQ-HTTP-12 的可验收性)与 P3(H4 措辞、Channel 判据重复、私有 CA、假时钟边界)均已在正文闭环;H 阶段范围(§1.2/1.3)、需求(REQ-HTTP-01~06、09~11 生效,07 后移,08/12 为约束)、步骤(§12 H1/H2/H4)与验收(§14.1)互相一致。
+对 SPEC v4 的完整复审已通过:上轮 P2(可靠交互层调度载体措辞、REQ-HTTP-12 的可验收性)与 P3(回归与分层检查措辞、Channel 判据重复、私有 CA、假时钟边界)均已在正文闭环;首期范围(§1.2/1.3)、需求(REQ-HTTP-01~06、09~11 生效,07 后移,08/12 为约束)、步骤(§12 首期交付)与验收(§14.1)互相一致。
 
-本次复审逐段覆盖全文,§3–9 仅作为后续方案核对,不进入 H 任务。未发现阻塞 H 阶段的问题,不据此批准 R 开工。实现时对总超时保守分类:调用底层 send 前已耗尽期限为 NOT_SENT;一旦进入底层 send,若没有明确 pool/connect 异常证据,总超时归 DELIVERY_UNKNOWN。不引入 httpcore trace、内部事件名或跨层状态探针。
+本次复审逐段覆盖全文,§3–9 仅作为后续方案核对,不进入本计划任务。未发现阻塞 首期的问题,不据此批准可靠交互层开工。实现时对总超时保守分类:调用底层 send 前已耗尽期限为 NOT_SENT;一旦进入底层 send,若没有明确 pool/connect 异常证据,总超时归 DELIVERY_UNKNOWN。不引入 httpcore trace、内部事件名或跨层状态探针。
 
 ## 1. 交付物与边界
 
@@ -145,13 +145,13 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 
 | 任务 | SPEC 步骤 | 内容 | 完成条件 |
 |---|---|---|---|
-| T1 | H1 | 分支与依赖:从 `develop` 建 `feature/spec-019-interop-framework`(暂存的 SPEC 随之带入);`httpx` 移入正式依赖并更新 `uv.lock`;建 `app/http_client/` 骨架与 `types.py`(配置校验在构造时完成) | `uv sync` 通过;配置校验测试(§4 第二行配置部分)通过 |
-| T2 | H1 | 请求校验与 URL/origin 校验;`send` 的最小路径(经注入的 MockTransport 把请求交给传输) | `test_request_validation.py` 全绿;非法输入传输调用数为 0 |
-| T3 | H1 | 结果表达与异常映射(D3 表);3xx/4xx/5xx 原样返回;单次发送 | `test_result_mapping.py` 全绿;传输调用数恒为 1 |
-| T4 | H2 | 流式有界读取、`Content-Encoding` 检查、原始 `response.stream`;`Content-Length` 不被信任 | `test_response_body.py` 全绿(验证精确上限成功、跨块超限停止继续读取及资源释放) |
-| T5 | H2 | 阶段超时 + 总期限(D5)、连接池参数、取消、`aclose()` 幂等、关闭后抛错、总期限分类(D4) | `test_network_behavior.py` 全绿;所有计时断言使用事件协调 + 硬截止时间,不依赖真实 `sleep` 的精确时长 |
-| T6 | H4 | 日志约束(D7)、导入隔离、分层规则 | `test_logging.py`、`test_import_isolation.py`、`test_layering.py` 全绿 |
-| T7 | H4 | 全量验证与记录:`uv run pytest`;`uv run ruff check .`;`uv run ruff format --check .`;核对 §14.1 逐条映射;检查 git diff 仅含 `app/http_client/`、`tests/http_client/`、`tests/architecture/test_layering.py`、`pyproject.toml`、`uv.lock` | 全部通过;结果记入 §8 |
+| T1 | 发送与结果分类 | 分支与依赖:从 `develop` 建 `feature/spec-019-interop-framework`(暂存的 SPEC 随之带入);`httpx` 移入正式依赖并更新 `uv.lock`;建 `app/http_client/` 骨架与 `types.py`(配置校验在构造时完成) | `uv sync` 通过;配置校验测试(§4 第二行配置部分)通过 |
+| T2 | 发送与结果分类 | 请求校验与 URL/origin 校验;`send` 的最小路径(经注入的 MockTransport 把请求交给传输) | `test_request_validation.py` 全绿;非法输入传输调用数为 0 |
+| T3 | 发送与结果分类 | 结果表达与异常映射(D3 表);3xx/4xx/5xx 原样返回;单次发送 | `test_result_mapping.py` 全绿;传输调用数恒为 1 |
+| T4 | 超时、连接池与限制 | 流式有界读取、`Content-Encoding` 检查、原始 `response.stream`;`Content-Length` 不被信任 | `test_response_body.py` 全绿(验证精确上限成功、跨块超限停止继续读取及资源释放) |
+| T5 | 超时、连接池与限制 | 阶段超时 + 总期限(D5)、连接池参数、取消、`aclose()` 幂等、关闭后抛错、总期限分类(D4) | `test_network_behavior.py` 全绿;所有计时断言使用事件协调 + 硬截止时间,不依赖真实 `sleep` 的精确时长 |
+| T6 | 回归与分层检查 | 日志约束(D7)、导入隔离、分层规则 | `test_logging.py`、`test_import_isolation.py`、`test_layering.py` 全绿 |
+| T7 | 回归与分层检查 | 全量验证与记录:`uv run pytest`;`uv run ruff check .`;`uv run ruff format --check .`;核对 §14.1 逐条映射;检查 git diff 仅含 `app/http_client/`、`tests/http_client/`、`tests/architecture/test_layering.py`、`pyproject.toml`、`uv.lock` | 全部通过;结果记入 §8 |
 
 ### 逐任务执行记录(已完成项已勾选)
 
@@ -181,12 +181,12 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 
 - 分支 `feature/spec-019-interop-framework`(来自 `develop`);用户已授权提交、推送并创建面向 `develop` 的 PR,保留已有提交,不升版、不创建 TODOS.md、不合并、不部署。
 - 提交信息沿用历史风格:`feat: ...` / `test: ...` / `chore: ...`,简明中文,可带 `(SPEC-019)`;依赖变更单独一个 `chore:` 提交。
-- PR 说明需写清:仅新增非业务 HttpClient、无路由/表/权限变化、`httpx` 移入正式依赖、H3/R/D 未做。
+- PR 说明需写清:仅新增非业务 HttpClient、无路由/表/权限变化、`httpx` 移入正式依赖、出口限流、可靠交互层、业务域接入未做。
 - 不得把本交付称为幂等、可靠投递或物理完成的验收(SPEC §14.1 第 7 条)。
 
 ## 8. 计划自检与验证记录
 
-计划自检已完成:首期每项需求均映射到 T1–T7;07/08/12 不落入首期实现;配置/结果命名一致;测试覆盖 Review Focus 五类条件。SPEC 的 H 阶段范围与行为合同保持不变,原始流读取及独立清理的实现措辞已同步。用户已授权本轮提交、推送并创建 PR;以下各轮验证中的未提交或未推送描述保留为当时状态。
+计划自检已完成:首期每项需求均映射到 T1–T7;07/08/12 不落入首期实现;配置/结果命名一致;测试覆盖 Review Focus 五类条件。SPEC 的 首期范围与行为合同保持不变,原始流读取及独立清理的实现措辞已同步。用户已授权本轮提交、推送并创建 PR;以下各轮验证中的未提交或未推送描述保留为当时状态。
 
 | 需求 | 任务 |
 |---|---|
@@ -208,7 +208,7 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 - 全量验证:`rtk uv run pytest -q` → 464 passed,30 skipped;TEST_DATABASE_URL/TEST_REDIS_URL 均未配置,未连接公共存储。
 - `rtk uv run ruff check .` → 通过;`rtk uv run ruff format --check app tests` → 100 files already formatted;git diff --check → 通过。
 - 当次全库 `ruff format --check .` 存在原有暂存 SPEC Markdown 代码示例格式差异(1 file would be reformatted);为保护用户既有文档现场未改该文件。该限制不是客户端 Python 代码检查失败。
-- 一次最终只读独立复核已完成;唯一发现的凭据日志缺陷已通过回归修正。H3/R/业务接入/应用装配均未实现,未声明可靠交付或物理完成验收。
+- 一次最终只读独立复核已完成;唯一发现的凭据日志缺陷已通过回归修正。出口限流/可靠交互层/业务接入/应用装配均未实现,未声明可靠交付或物理完成验收。
 
 ### 2026-10-20 P2 修复验证
 
@@ -218,7 +218,7 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 - 注入传输的预载响应仅在 Content-Encoding 缺省/identity 时读取缓存并校验大小;gzip 等仍拒绝,不把已解码压缩正文当作 raw。流式生产路径使用原始 response.stream,关闭统一在有界清理块执行。
 - 新增取消读取且清理抛错的组合回归,验证取消透传及日志不含异常敏感文本。
 - 聚焦测试与分层检查:140 passed;全量 pytest:474 passed,30 skipped;ruff check .、ruff format --check app tests、git diff --check 均通过。
-- 未实现 H3/R/业务接入/装配,未暂存、提交或推送;先前全库 Markdown 示例格式差异保持不动。
+- 未实现 出口限流/可靠交互层/业务接入/装配,未暂存、提交或推送;先前全库 Markdown 示例格式差异保持不动。
 
 ### 2026-10-20 完整响应清理 P2 修复验证
 
@@ -226,23 +226,23 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
 - 直接迭代公开原始 response.stream,累计大小限制不变;响应关闭统一进入已有的有界 finally 清理块,避免 aiter_raw 自动关闭覆盖完整结果。同步 §2.1 的实现措辞,不改变交付范围。
 - 回归验证完整正文、status/headers 与 HTTP_RESPONSE_COMPLETE 均保留,failure_kind 为空,清理告警不携带敏感异常文本。
 - 聚焦测试 142 passed;全量测试 476 passed、30 skipped;ruff check .、ruff format --check app tests、git diff --check 均通过。
-- 仍仅 H1/H2/H4,未加入 H3/R/业务接入或应用装配,未暂存、提交或推送。
+- 仍仅 首期交付,未加入 出口限流/可靠交互层/业务接入或应用装配,未暂存、提交或推送。
 
 ### 2026-10-20 文档状态与格式清理
 
-- v4 与计划统一为 H1/H2/H4 已实现、验证并复审通过;分支已创建,H3/R/业务接入及应用装配仍未实施。历史评审与各轮验证结果保留追溯。
-- 仅调整文档状态说明及 SPEC Python 示例格式,未改变代码、行为合同或 H 阶段范围。
+- v4 与计划统一为 首期交付 已实现、验证并复审通过;分支已创建,出口限流/可靠交互层/业务接入及应用装配仍未实施。历史评审与各轮验证结果保留追溯。
+- 仅调整文档状态说明及 SPEC Python 示例格式,未改变代码、行为合同或 首期范围。
 - 全库 ruff format --check . 通过(119 files already formatted);此前记录的 SPEC 示例格式差异已消除。git diff --check 通过。
 - 本轮仅改这两份文档,未暂存、提交或推送。
 
 ### 2026-10-20 本地提交后 P2 修复
 
-- 基线已提交为 f4e9427(运行时依赖)、9beb783(H1/H2/H4 实现、测试和文档),均未推送;此前各轮未提交描述为当时状态。未改写或拆分既有提交。
+- 基线已提交为 f4e9427(运行时依赖)、9beb783(首期交付 实现、测试和文档),均未推送;此前各轮未提交描述为当时状态。未改写或拆分既有提交。
 - 先新增 4 条回归并观察失败:含内联查询的 path(有/无 query)、缺失 CA 路径的明文 HTTP 请求、缺失 CA 路径的 HTTPS 校验上下文。
 - path 含字面 ? 时发网前拒绝,query 是唯一查询输入;日志回归改为通过 query 传值,继续验证敏感查询不泄露。
 - HTTPX 构造 transport 时始终需要 TLS 上下文,故 HTTP 使用不加载 CA 的校验型上下文;HTTPS 才加载存在的 OpenSSL 默认 CA 路径,缺失时保持空信任库与证书校验。显式 tls_context 不变,不读取环境 CA,不提供 verify=False。
 - 聚焦测试及分层检查 146 passed;全量 pytest 480 passed、30 skipped;ruff check .、全库 ruff format --check .、uv lock --check、git diff --check 均通过。
-- 本轮修复未暂存、提交或推送,仅 H1/H2/H4;其余 P3 不扩展处理。
+- 本轮修复未暂存、提交或推送,仅 首期交付;其余 P3 不扩展处理。
 
 ### 2026-10-20 P3 处置
 
@@ -256,4 +256,4 @@ T1 产出配置/请求/结果/Protocol,T2–T5 消费这些公开接口并完成
   - HTTPS 握手端到端、陈旧长连接:前者需要为证书引入依赖(SPEC §14.1 无此项);后者 httpcore 在复用前会丢弃已关闭的空闲连接,竞态窗口无法确定性复现。
   - 将 9beb783 中的文档拆成独立 `docs:` 提交:涉及改写用户已建立的本地提交,留待用户决定。
 - 聚焦测试及分层检查 154 passed;全量 pytest 488 passed、30 skipped;ruff check .、全库 ruff format --check .、git diff --check 均通过。
-- 本轮改动未暂存、提交或推送,仅 H1/H2/H4。
+- 本轮改动未暂存、提交或推送,仅 首期交付。
