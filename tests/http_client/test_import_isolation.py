@@ -10,9 +10,13 @@ def test_import_does_not_load_application_dependencies(tmp_path):
 import sys
 sys.path.insert(0, {str(root)!r})
 import app.http_client
+app.http_client.validate_request(
+    app.http_client.HttpClientConfig('http://example.test', 'isolated'),
+    app.http_client.HttpRequest('POST', '/', body=b'opaque'),
+)
 for name in (
     'app.core', 'sqlalchemy', 'redis', 'celery', 'fastapi', 'app.models',
-    'app.services', 'app.controllers', 'app.interop',
+    'app.services', 'app.controllers', 'app.reliable',
 ):
     assert not any(key == name or key.startswith(name + '.') for key in sys.modules), name
 """

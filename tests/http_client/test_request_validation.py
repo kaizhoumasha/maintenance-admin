@@ -79,6 +79,12 @@ def test_invalid_base_url(url):
     ],
 )
 async def test_invalid_request_never_reaches_transport(changes):
+    from app.http_client import validate_request
+
+    config = HttpClientConfig("http://example.test", "test", max_request_body_bytes=4)
+    request = HttpRequest(**({"method": "POST", "path": "/"} | changes))
+    with pytest.raises((ValueError, TypeError)) as validation_error:
+        validate_request(config, request)
     calls = []
 
     async def handle(req):
@@ -90,8 +96,8 @@ async def test_invalid_request_never_reaches_transport(changes):
         transport=httpx.MockTransport(handle),
     )
     try:
-        with pytest.raises((ValueError, TypeError)):
-            await client.send(HttpRequest(**({"method": "POST", "path": "/"} | changes)))
+        with pytest.raises(type(validation_error.value)):
+            await client.send(request)
         assert calls == []
     finally:
         await client.aclose()
@@ -132,6 +138,49 @@ async def test_exact_request_limit_and_relative_prefix():
         assert (await client.send(HttpRequest("POST", "x", body=b"1234"))).body == b""
         assert seen[0].url.path == "/prefix/x"
         assert seen[0].content == b"1234"
+    finally:
+        await client.aclose()
+
+
+def test_validate_without_client_or_event_loop(monkeypatch):
+    from app.http_client import validate_request
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("validation must not construct a client")
+
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    monkeypatch.setattr(httpx, "Client", forbidden)
+    config = HttpClientConfig("http://example.test/prefix", "test", max_request_body_bytes=4)
+    assert (
+        validate_request(
+            config, HttpRequest("POST", "/x%20y", query=(("q", "1"), ("q", "2")), body=b"1234")
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("headers", [(), (("Accept", "custom/type"), ("User-Agent", "caller"))])
+async def test_send_preserves_default_headers_and_caller_overrides(headers):
+    seen = []
+
+    async def handle(request):
+        seen.append(request)
+        return httpx.Response(200, content=b"ok")
+
+    transport = httpx.MockTransport(handle)
+    async with httpx.AsyncClient(
+        base_url="http://example.test/prefix", transport=transport
+    ) as reference:
+        expected = reference.build_request(
+            "POST", "/opaque", headers=(*headers, ("Accept-Encoding", "identity")), content=b"raw"
+        )
+    client = AsyncHttpClient(
+        HttpClientConfig("http://example.test/prefix", "test"), transport=transport
+    )
+    try:
+        await client.send(HttpRequest("POST", "/opaque", headers=headers, body=b"raw"))
+        assert seen[0].headers == expected.headers
+        assert seen[0].url == expected.url and seen[0].content == expected.content
     finally:
         await client.aclose()
 
