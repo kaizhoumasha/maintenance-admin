@@ -99,6 +99,7 @@
 app/http_client/
   __init__.py    公开 Protocol、请求/结果类型及生产实现
   client.py      单次 HTTP、连接池、超时、正文限制
+  validation.py  公开同步请求校验,与 send 复用请求构建规则
   types.py       Protocol、配置、请求及结果类型
 tests/http_client/   合成 HTTP 合同与故障测试
 ```
