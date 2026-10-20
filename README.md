@@ -1,8 +1,12 @@
-# maintenance-admin
+# enterprise-backend
 
-当前目标版本 0.2.0(`release/0.2.0` 准备中,未发布)。本次发布范围是后端模板,固定镜像目前仅验收 `linux/arm64`,配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md);固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+面向生产企业的通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，提供通用、易用的第三方与内部 API 对接基础能力。
 
-维保协同后台管理系统（RBAC）。
+平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接当前已实现独立异步 HTTP 客户端，可靠交互层（幂等、收发件箱、持久化重试及恢复）仍属后续建设范围。
+
+最近发布基线为 `v0.2.0`，当前分支包含改名及 HTTP 客户端等后续未发布变更。固定镜像目前仅验收 `linux/arm64`，配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md)；固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+
+默认 Compose 项目名固定为 `enterprise-backend`，数据卷为 `enterprise-backend_pgdata` 和 `enterprise-backend_redisdata`，不再随仓库目录名变化。数据库名统一为 `enterprise_backend`，独立测试库使用 `enterprise_backend_test`；现有 API 路径及权限码不变。已有部署在完成备份和数据迁移前，须通过 `-p` 或 `COMPOSE_PROJECT_NAME` 指定原项目名，沿用原数据卷和站点配置；仅修改项目名不会迁移数据。旧数据库原地改名及工具连接同步见 [数据库改名](docs/deploy.md#数据库改名)。显式设置了 `APP_NAME` 或 `APP_IMAGE` 的环境继续以配置值为准，按需更新。
 
 开发约定见 [AGENTS.md](AGENTS.md) 和 [CLAUDE.md](CLAUDE.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -40,11 +44,11 @@ scripts/lint.sh      # ruff check --fix + format
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
 
 ```bash
-TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/maintenance_test \
+TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/enterprise_backend_test \
 TEST_REDIS_URL=redis://localhost:26379/15 uv run pytest
 ```
 
-运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
+运行前创建独立的 `enterprise_backend_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
 
 ### 3. 容器运行
 
@@ -108,7 +112,7 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 ### 8. 目录结构（Controller / Service / Model 三层）
 
 ```bash
-maintenance-admin/
+enterprise-backend/
   app/
     main.py              # 创建 app、中间件、include_router、lifespan
     controllers/         # C：路由，只做参数接收与返回，不写业务（auth / users / roles / permissions / menus / audit / health）
@@ -129,7 +133,7 @@ maintenance-admin/
 `app/http_client/` 独立于 `app.core`、业务模块和存储依赖；当前仅交付 H1/H2/H4，未接入业务或应用装配。公开合同见 [SPEC-019 v4](docs/superpowers/specs/2026-10-20-interop-framework-design.md#21-首期纯-httpclient)，实施与验证记录见 [H 阶段计划](docs/superpowers/plans/2026-10-20-http-client-plan.md)。
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
 
-### 9. 统一错误处理（沿用 maintenance-agent）
+### 9. 统一错误处理
 
 - 新增路由统一用 `app.core.routing.new_router()` 创建 router；OpenAPI 根据参数和依赖自动补 400/401/403/429，路由只需声明额外的业务错误（如 404/409/503），参数校验统一返回 400，不声明 422。
 - 业务错误一律 `raise AppError(ErrorCode.X, "中文消息", detail)`，路由里不手写错误响应。
@@ -153,8 +157,8 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 
 本仓库设为 GitHub Template Repository，新项目用 "Use this template" 生成，然后：
 
-1. `scripts/rename_project.sh <项目名> <数据库名>`（例：`demo-admin demo`），替换项目名、数据库名并刷新 `uv.lock`；之后可删除该脚本。
-2. 手改 `pyproject.toml` 的 `description`、`.serena/project.yml` 的 `project_name` 和本文件的标题/简介；`AGENTS.md` 第一段按新项目调整；本文件「统一错误处理」一节标题里的 `maintenance-agent` 是出处说明，按需删除。
+1. 在初始化数据库前运行 `scripts/rename_project.sh <项目名> <数据库名>`（例：`demo-admin demo`），替换项目名、数据库名及相关配置、文档和测试引用，并刷新 `uv.lock`；之后可删除该脚本。此脚本用于新项目，不迁移已有数据库或数据卷。
+2. 手改 `pyproject.toml` 的 `description`、`app/main.py` 的应用描述和本文件的简介；`AGENTS.md` 的项目定位按新项目调整。
 3. `cp .env.example .env`，换掉 `JWT_SECRET_KEY`（`openssl rand -hex 32`）。
 4. `docker compose up -d && uv sync && uv run alembic upgrade head`，再 `uv run python -m scripts.seed_admin <用户名> <邮箱>`。
 5. 按需删除示例：`app/controllers/maintenance.py`（手动触发审计归档，对应权限码 `admin:maintenance:archive_audit` 也要从 `INITIAL_PERMISSIONS` 和 `main.py` 里去掉）；`INITIAL_MENUS` 里按实际页面增删。

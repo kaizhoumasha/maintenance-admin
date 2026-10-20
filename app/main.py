@@ -35,7 +35,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     lifespan=lifespan,
     title=settings.APP_NAME,
-    description="管理系统后端",
+    description=(
+        "通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，"
+        "提供第三方与内部 API 对接基础能力"
+    ),
     version="0.2.0",
     # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
     dependencies=[Depends(RateLimit(100))],

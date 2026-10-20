@@ -75,7 +75,7 @@ def test_site_override_mounts_external_configuration_read_only(tmp_path, site_ex
     ]
     env = {
         **os.environ,
-        "APP_IMAGE": "maintenance-admin:0.2.0-test",
+        "APP_IMAGE": "enterprise-backend:0.2.0-test",
         "SITE_NGINX_CONFIG": str(site),
         "FRONTEND_DIST": str(frontend),
     }
@@ -150,13 +150,13 @@ def test_verify_rejects_paths_outside_bundle(tmp_path):
 
 
 def test_prepare_rejects_reused_output_before_build(tmp_path):
-    result = cli("prepare", "--image", "maintenance-admin:0.2.0-test", "--output", tmp_path)
+    result = cli("prepare", "--image", "enterprise-backend:0.2.0-test", "--output", tmp_path)
     assert result.returncode != 0
     assert "已存在" in result.stderr
 
 
 def test_prepare_rejects_mutable_development_tag(tmp_path):
-    result = cli("prepare", "--image", "maintenance-admin:latest", "--output", tmp_path / "new")
+    result = cli("prepare", "--image", "enterprise-backend:latest", "--output", tmp_path / "new")
     assert result.returncode != 0
     assert "固定标签" in result.stderr
 

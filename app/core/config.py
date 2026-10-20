@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # 项目名:OpenAPI 标题、Celery 应用名、日志器名都取它;新项目改这里(和 pyproject.toml)
-    APP_NAME: str = "maintenance-admin"
+    APP_NAME: str = "enterprise-backend"
     ENVIRONMENT: str = "local"
     DATABASE_URL: str
     REDIS_URL: str

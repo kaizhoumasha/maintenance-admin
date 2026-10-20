@@ -9,7 +9,7 @@
 
 ## Project Structure & Module Organization
 
-Python 3.13+ FastAPI backend for maintenance administration and RBAC:
+`enterprise-backend` is a Python 3.13+ FastAPI enterprise backend template for WMS, MES, WES, and other manufacturing applications, with shared administration and third-party/internal API integration capabilities. Keep domain business rules in the consuming projects and distinguish implemented capabilities from planned ones.
 
 - `app/controllers/` → `app/services/` → `app/models/`: routes, business rules/transactions, SQLAlchemy models.
 - `app/schemas/`: Pydantic contracts; `core/`, `middlewares/`, `tasks/` under `app/`: infrastructure, middleware, Celery jobs.
