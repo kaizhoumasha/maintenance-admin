@@ -130,7 +130,7 @@ enterprise-backend/
 ```
 
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
-`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；当前仅交付 H1/H2/H4，未接入业务或应用装配。公开合同见 [SPEC-019 v4](docs/superpowers/specs/2026-10-20-interop-framework-design.md#21-首期纯-httpclient)，实施与验证记录见 [H 阶段计划](docs/superpowers/plans/2026-10-20-http-client-plan.md)。
+`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；当前仅交付首期（单次 HTTP），未接入业务或应用装配。公开合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)（总览见 [SPEC-019](docs/superpowers/specs/2026-10-20-interop-framework-design.md)），实施与验证记录见 [HttpClient 实施计划](docs/superpowers/plans/2026-10-20-http-client-plan.md)。
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
 
 ### 9. 统一错误处理
