@@ -8,8 +8,10 @@ from .types import (
     HttpRequest,
     HttpResult,
 )
+from .validation import validate_request
 
 __all__ = [
+    "validate_request",
     "AsyncHttpClient",
     "ClientClosedError",
     "DeliveryState",

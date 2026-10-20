@@ -9,7 +9,7 @@ APP = Path(__file__).parents[2] / "app"
 FORBIDDEN = {
     "http_client": (
         "app.core",
-        "app.interop",
+        "app.reliable",
         "app.integrations",
         "app.services",
         "app.controllers",
@@ -20,6 +20,14 @@ FORBIDDEN = {
         "redis",
         "celery",
         "fastapi",
+    ),
+    "reliable": (
+        "app.controllers",
+        "app.integrations",
+        "app.services",
+        "app.schemas",
+        "fastapi",
+        "celery",
     ),
     "models": ("app.services", "app.controllers", "app.schemas"),
     "schemas": ("app.services", "app.controllers"),

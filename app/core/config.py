@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +18,22 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     AUDIT_RETENTION_DAYS: int = 90
+
+    RELIABLE_TARGETS: dict = {}
+    RELIABLE_MAX_BODY_BYTES: int = 262144
+    RELIABLE_DEFAULT_TIMEOUT_MS: float = 10000
+    RELIABLE_RETENTION_DAYS: int = 90
+    RELIABLE_MAX_RETRY_AFTER_S: float = 3600
+    RELIABLE_MAX_CONCURRENCY: int = 4
+    RELIABLE_CLAIM_BATCH_SIZE: int = 4
+    RELIABLE_DB_POOL_SIZE: int = 2
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _reject_reliable_boolean(cls, value, info):
+        if info.field_name.startswith("RELIABLE_") and isinstance(value, bool):
+            raise ValueError("reliable settings cannot be booleans")
+        return value
 
     # 逗号分隔的前端源(如 http://localhost:5173);为空则不启用 CORS(同域部署,nginx 反代)
     CORS_ORIGINS: str = ""

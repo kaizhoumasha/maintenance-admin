@@ -90,4 +90,4 @@ async def test_lifespan_releases_pools(monkeypatch):
     monkeypatch.setattr(Redis, "aclose", aclose)
     async with app.router.lifespan_context(app):
         assert calls == []
-    assert calls == ["engine", "redis"]
+    assert calls == ["engine", "engine", "redis"]

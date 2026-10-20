@@ -8,7 +8,7 @@
 
 - **先交付纯异步 HttpClient**:支持构造参数 DI、超时、连接池、请求/响应大小限制;不含出口并发及速率限流器。只完成一次 HTTP 调用,不理解 JSON 信封、operation 或业务结果。
 - **业务能力独立**:WMS、Transport 等业务域拥有自己的协议、payload、身份关联及业务/物理结果解释。已有可靠任务可以直接注入 HttpClient,不强制经过 Interop。
-- 首期交付 已实现并验证,出口限流、可靠交互层与业务接入未实施。“清理业务能力”指清理本设计中的业务耦合,不删除或修改 wes_backend、maintenance-agent 或本项目已有业务代码。
+- 首期交付已实现并验证；可靠层首版另行实现并完成离线验证，出口限流与业务接入仍未实施。“清理业务能力”指清理本设计中的业务耦合,不删除或修改 wes_backend、maintenance-agent 或本项目已有业务代码。
 
 ### 1.1 非目标
 
@@ -22,7 +22,7 @@
 
 ## 2. 设计
 
-**实现状态图例**:✅ 已实现(代码在 `app/http_client/`,测试在 `tests/http_client/`,当前 154 项测试含分层检查通过)· 📐 设计,未实施 · ⏸ 已后移。下表 ID 后的符号即该条状态:REQ-HTTP-01~06、09~11 已实现;07 后移;08、12 是对未来消费者的约束,尚未实施。
+**实现状态图例**:✅ 已实现(代码在 `app/http_client/`,测试在 `tests/http_client/`)· 📐 设计,未实施 · ⏸ 已后移。REQ-HTTP-01~06、09~11、13 已实现；08/12 的可靠发送器装配已在独立变更实现并验证；07 仍后移。验证记录见可靠交互实施计划，不把离线协议投递视为业务/物理完成。
 
 ### 分层与唯一生命周期所有者
 
@@ -42,7 +42,7 @@
 
 `HttpClient.send(HttpRequest) -> HttpResult`、`HttpClient.aclose()` 是公开异步接口。接口用 Python Protocol 表达,由基于 `httpx.AsyncClient` 的实现提供;不包装成业务 Service,不引入 DI 框架。
 
-**后续公开校验接缝(📐 已确定,尚未实现)**:`validate_request(config: HttpClientConfig, request: HttpRequest) -> None` 为同步、无网络副作用的模块级函数,**只依赖客户端配置**(base_url、正文上限等),不需要客户端实例,因此在没有客户端的进程(如 Celery worker、脚本)中也可调用,且不改变 `HttpClient` Protocol(`send` / `aclose` 不变)。非法参数仍抛 `ValueError` / `TypeError`。实现时与 `send` 复用同一套 method、path、query、headers、body 与 origin 校验规则,不得在调用方或协议适配器复制;`send` 保留自己的校验,不能假定请求已经预校验。该函数与测试夹具随可靠交互层接入时交付;当前代码仍只有 `send` / `aclose`,校验逻辑在 `send` 内部,本轮仅修订设计。
+**公开校验接缝(✅)**:`validate_request(config: HttpClientConfig, request: HttpRequest) -> None` 为同步、无网络副作用的模块级函数,**只依赖客户端配置**(base_url、正文上限等)，不需要客户端实例或事件循环。它与 `send` 复用 `validation.py` 的请求构建/校验规则；非法参数抛 `ValueError` / `TypeError`。`send` 仍自行校验，不能假定预校验已完成；`HttpClient` Protocol 仍只有 `send` / `aclose`，未增加重试或应用依赖。
 
 | 对象 | 最小合同 |
 |---|---|
@@ -64,12 +64,12 @@
 | REQ-HTTP-05 ✅ | 请求/响应正文默认上限均为 256KiB,可配置。请求 bytes 超限在发网前拒绝;响应流式累计检查上限,不先 read 全文再判断,不只相信 Content-Length。精确等于上限允许,超过立即停止读取并关闭响应 |
 | REQ-HTTP-06 ✅ | 首期仅接受 identity 响应编码,发送 Accept-Encoding: identity;遇到非 identity Content-Encoding 返回明确错误并关闭响应,不做自动解压以绕过大小限制。调用方不得覆盖此编码约束 |
 | REQ-HTTP-07 ⏸ | **后移,不属于首期**:出口并发/速率准入调度及 max_concurrency/rate_limit 配置暂不实现;不以连接池限制宣称具备 FIFO、滚动窗口或全局额度保证。未来限流方案另行明确作用域、准入与取消不变量 |
-| REQ-HTTP-08 📐 | 可靠交互层运行方向选 **(a)**:发送器装配为 FastAPI lifespan 内的后台任务,共用 api 进程的长生命周期单事件循环,客户端和将来限流器随该循环创建/关闭,不在每个发送任务内 asyncio.run 后重建。首期不新增 worker、不改现有 Celery 任务。R 开工前明确启动/停机及调度接入;将来单循环额度不代表跨进程总额度 |
+| REQ-HTTP-08 ✅ | 可靠发送器装配为 FastAPI lifespan 内的后台任务，共用 api 长生命周期事件循环，客户端随循环创建/关闭，不在每次发送时 asyncio.run 重建。现有 Celery 业务任务不迁移；可靠消息只增加终态清理任务，不在 Celery 调度发送。单循环预算不代表跨进程总额度，出口限流仍后移 |
 | REQ-HTTP-09 ✅ | 只在能证明未进入发送阶段时返回 NOT_SENT(如 pool/connect 失败或发送前总期限耗尽);写/读超时、发送后协议错误、响应超限/编码不支持为 DELIVERY_UNKNOWN。完整读取 HTTP 响应为 HTTP_RESPONSE_COMPLETE,不论 HTTP 状态和正文格式。保留可取得的 status/headers 与失败类别,不把部分正文冒充完整结果 |
 | REQ-HTTP-10 ✅ | 调用者取消须清理响应/连接、归还连接池资源并继续传播 CancelledError,不吞掉或转换为业务失败;上层已有可靠任务按发送阶段和租约处理未知,本层不排队续送。进入发送阶段前取消不发网 |
 | REQ-HTTP-11 ✅ | 不导入 app.core、数据库、Redis、Celery、controllers、app/reliable 或任何业务域;配置由装配处传入,日志用标准 logging,不通过 app.core 获取 logger。日志只记录方法、出口标识、耗时、状态和错误类别,不输出正文、凭据、查询串或异常携带的原始 URL |
-| REQ-HTTP-12 📐 | **未来消费者装配约束,不属于首期行为验收**:由实际应用生命周期建立并关闭实例,FastAPI Depends 仅取得已装配实例;R 发送器按 REQ-HTTP-08 的常驻循环装配。首期无消费者时不创建实例、不新增应用装配或 Celery 任务,只交付可注入组件,无新增路由/表/权限 |
-| REQ-HTTP-13 📐 | 公开请求校验函数 `validate_request(config, request)`:仅依赖 `HttpClientConfig`,与 `send` 复用同一规则,供可靠交互层在入队时校验;未实现,随可靠交互层接入交付。 |
+| REQ-HTTP-12 ✅ | 由应用生命周期建立并关闭客户端实例；可靠发送器按 REQ-HTTP-08 装配。只为已配置且适配器已注册的实际目标创建客户端，空目标不创建客户端但仍扫描消息库；不扩展 HttpClient 自身的生命周期职责 |
+| REQ-HTTP-13 ✅ | 公开请求校验函数 `validate_request(config, request)` 仅依赖 `HttpClientConfig`，与 `send` 复用同一规则，可靠层在新入队时调用，无客户端/网络/事件循环要求 |
 
 ### 默认值与配置归属
 
@@ -99,12 +99,13 @@
 app/http_client/
   __init__.py    公开 Protocol、请求/结果类型及生产实现
   client.py      单次 HTTP、连接池、超时、正文限制
+  validation.py  公开同步请求校验,与 send 复用请求构建规则
   types.py       Protocol、配置、请求及结果类型
 tests/http_client/   合成 HTTP 合同与故障测试
 ```
 
 
-不得增加仅转发参数的包装层。分层检查**当前**覆盖 `app/http_client` 不导入 app.core、业务域、数据库、Redis、Celery 等;对可靠交互层(`app.reliable`)的禁止项**尚未写入测试**,随可靠交互层落地的同一变更补入分层与导入隔离测试;除静态规则外用隔离进程验证导入不需要数据库/Redis/JWT 配置,父包初始化不得引入这些依赖。
+不得增加仅转发参数的包装层。静态分层和隔离进程测试覆盖 `app/http_client` 不导入 app.core、业务域、数据库、Redis、Celery 或 `app.reliable`；导入和同步校验不需要数据库/Redis/JWT 配置，父包初始化不得引入这些依赖。
 
 ## 4. 交付与验收
 
@@ -127,7 +128,7 @@ tests/http_client/   合成 HTTP 合同与故障测试
 6. app/http_client 分层及独立导入检查通过;无数据库表、迁移、业务路由、权限、Celery 任务或 WMS/Transport DTO。httpx 已移入正式依赖并更新锁文件。
 7. 聚焦测试、ruff check 与 format --check 通过;现有项目行为不变。不将纯 HttpClient 测试称为幂等、可靠交付或物理完成验收。
 
-**后续接缝验收(尚未实施,不计入上述首期已通过结论)**:公开校验接缝对非法 method、path、query、headers、非 bytes 或超限 body 的拒绝与 `send` 一致;精确正文上限及合法请求通过,校验过程传输调用数为零。同步验证公开 Protocol、生产实现与测试替身可替换,并回归现有 `send` 行为不变。
+**公开接缝补充验收(已通过)**：非法 method/path/query/headers、非 bytes 或超限 body 与 `send` 拒绝一致；精确正文上限允许。无客户端、网络或事件循环时可校验；现有 HTTP 网络、取消、超时、日志、导入与单次发送合同持续回归。
 
 ### 4.3 风险
 

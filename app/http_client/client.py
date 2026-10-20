@@ -2,13 +2,11 @@
 
 import asyncio
 import logging
-import re
 import ssl
 import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from pathlib import Path
-from urllib.parse import unquote
 
 import httpx
 
@@ -20,6 +18,7 @@ from .types import (
     HttpRequest,
     HttpResult,
 )
+from .validation import build_request
 
 logger = logging.getLogger("app.http_client")
 _http_call_active = ContextVar("http_client_call_active", default=False)
@@ -40,8 +39,6 @@ for _name in (
 ):
     logging.getLogger(_name).addFilter(_HttpCallLogFilter())
 
-_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-_OWNED_HEADERS = {"host", "content-length", "transfer-encoding", "accept-encoding"}
 _ERRORS = {
     httpx.PoolTimeout: FailureKind.POOL_TIMEOUT,
     httpx.ConnectTimeout: FailureKind.CONNECT_TIMEOUT,
@@ -107,81 +104,16 @@ class AsyncHttpClient:
             raise RuntimeError("HttpClient cannot be shared across event loops")
         self._loop = loop
 
-    def _build_request(self, request: HttpRequest) -> httpx.Request:
-        if not isinstance(request, HttpRequest):
-            raise TypeError("request must be HttpRequest")
-        if (
-            not isinstance(request.method, str)
-            or not _TOKEN.fullmatch(request.method)
-            or request.method != request.method.upper()
-        ):
-            raise ValueError("invalid method")
-        if not isinstance(request.body, bytes):
-            raise TypeError("body must be bytes")
-        if len(request.body) > self._config.max_request_body_bytes:
-            raise ValueError("request body limit exceeded")
-        if not isinstance(request.path, str):
-            raise TypeError("path must be a string")
-        path = request.path
-        decoded_path = unquote(path)
-        if (
-            any(ord(c) < 32 or ord(c) == 127 for c in path + decoded_path)
-            or "\\" in decoded_path
-            or decoded_path.startswith("//")
-            or "#" in path
-            or "?" in path
-            # 点段会被规范化而逃出 base_url 前缀;百分号编码形式服务端同样可能解码。
-            or any(segment in {".", ".."} for segment in decoded_path.split("/"))
-        ):
-            raise ValueError("invalid path")
-        try:
-            relative = httpx.URL(path)
-        except httpx.InvalidURL:
-            raise ValueError("invalid path") from None
-        if relative.scheme or relative.host or relative.userinfo:
-            raise ValueError("path must be relative to base_url")
-        for pairs, is_header in ((request.headers, True), (request.query, False)):
-            if not isinstance(pairs, tuple):
-                raise TypeError("headers and query must be tuples")
-            for pair in pairs:
-                if not isinstance(pair, tuple) or len(pair) != 2:
-                    raise TypeError("invalid name/value pair")
-                name, value = pair
-                if not isinstance(name, str) or not isinstance(value, str):
-                    raise TypeError("names and values must be strings")
-                if not name or any(c in name + value for c in "\r\n\x00"):
-                    raise ValueError("invalid name/value pair")
-                if is_header:
-                    if not _TOKEN.fullmatch(name) or name.lower() in _OWNED_HEADERS:
-                        raise ValueError("invalid or client-owned header")
-                    if any(ord(c) < 32 and c != "\t" or ord(c) >= 127 for c in value):
-                        raise ValueError("invalid header value")
-        try:
-            built = self._client.build_request(
-                request.method,
-                path,
-                params=request.query or None,
-                headers=(*request.headers, ("Accept-Encoding", "identity")),
-                content=request.body,
-            )
-        except (httpx.InvalidURL, UnicodeError):
-            raise ValueError("invalid request encoding") from None
-        base = self._client.base_url
-        if (built.url.scheme, built.url.host, built.url.port) != (
-            base.scheme,
-            base.host,
-            base.port,
-        ):
-            raise ValueError("request origin differs from base_url")
-        return built
-
     async def send(self, request: HttpRequest) -> HttpResult:
         if self._closed:
             raise ClientClosedError("HttpClient is closed")
         self._bind_loop()
         started = self._clock()
         loop_started = asyncio.get_running_loop().time()
-        built = self._build_request(request)
+        built = build_request(self._config, request)
+        headers = self._client.headers.copy()
+        headers.update(built.headers)
+        built.headers = headers
         remaining = self._config.total_timeout_s - (self._clock() - started)
         response = None
         status = None
