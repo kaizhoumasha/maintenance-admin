@@ -18,17 +18,25 @@ from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
 from app.middlewares import AuditMiddleware, trace_id_middleware
+from app.reliable.config import parse_reliable_config
+from app.reliable_runtime import reliable_lifespan
 
 settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    # 优雅停机:归还连接池,避免 Postgres 侧残留空闲连接、Redis 侧连接被强杀
-    await engine.dispose()
-    await get_redis().aclose()
-    get_redis.cache_clear()
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    try:
+        async with reliable_lifespan(
+            parse_reliable_config(settings), getattr(application.state, "reliable_adapters", {})
+        ) as outbox:
+            application.state.outbox = outbox
+            yield
+    finally:
+        application.state.outbox = None
+        await engine.dispose()
+        await get_redis().aclose()
+        get_redis.cache_clear()
 
 
 # 非本地环境隐藏 API 文档

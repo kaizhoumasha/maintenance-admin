@@ -14,6 +14,7 @@
 - `app/controllers/` → `app/services/` → `app/models/`: routes, business rules/transactions, SQLAlchemy models.
 - `app/schemas/`: Pydantic contracts; `core/`, `middlewares/`, `tasks/` under `app/`: infrastructure, middleware, Celery jobs.
 - `app/http_client/`: standalone HTTP client; no `app.core`, business, database, Redis, Celery, or FastAPI imports. single-request scope only (no retries, rate limiting, or application assembly).
+- `app/reliable/`: protocol-agnostic outbound outbox, leases, retries and TTL; uses only injected adapter ports. No business/protocol implementations, FastAPI, Celery or result-consumption API. Assembly lives in `app/reliable_runtime.py`; Celery only cleans terminal rows. Never stack another retry scheduler around these messages.
 - `tests/`: mirrors application areas; `scripts/`: development/bootstrap tools.
 - `migrations/versions/`: Alembic migrations (`YYYY-MM-DD_slug.py`).
 

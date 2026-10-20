@@ -2,7 +2,7 @@
 
 面向生产企业的通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，提供通用、易用的第三方与内部 API 对接基础能力。
 
-平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接当前已实现独立异步 HTTP 客户端，可靠交互层（幂等、收发件箱、持久化重试及恢复）仍属后续建设范围。
+平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接已实现独立异步 HTTP 客户端和协议无关的出站可靠交互首版（事务发件箱、持久化重试、租约与恢复）；不含入站、业务协议或业务/物理完成判定。
 
 最近发布基线为 `v0.2.0`，当前分支包含改名及 HTTP 客户端等后续未发布变更。固定镜像目前仅验收 `linux/arm64`，配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md)；固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
 
@@ -121,6 +121,8 @@ enterprise-backend/
     schemas/             # V：请求/响应模型（Pydantic）
     core/                # config / database / redis / security / errors / handlers / ratelimit / logger / trace 上下文
     http_client/         # 独立纯 HTTP 客户端：单次 bytes 收发、超时、连接池、大小限制
+    reliable/            # 出站事务发件箱、租约、原身份重试、TTL；不含协议实现
+    reliable_runtime.py  # lifespan 发送器与专用连接池装配
     middlewares/         # trace_id（X-Trace-Id + 访问日志）、审计日志
     tasks/               # Celery，可单独部署 worker
   migrations/            # Alembic（文件名 YYYY-MM-DD_slug）
@@ -130,7 +132,9 @@ enterprise-backend/
 ```
 
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
-`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；当前仅交付首期（单次 HTTP），未接入业务或应用装配。公开合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)（总览见 [SPEC-019](docs/superpowers/specs/2026-10-20-interop-framework-design.md)），实施与验证记录见 [HttpClient 实施计划](docs/superpowers/plans/2026-10-20-http-client-plan.md)。
+`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠交互实施计划](docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md)。
+
+默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后不再保证本地幂等。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标或业务协议。
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
 
 ### 9. 统一错误处理

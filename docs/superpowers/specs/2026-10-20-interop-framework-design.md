@@ -19,7 +19,7 @@ HttpClient   app/http_client 一次 HTTP 请求(已实现)
 | 层 | 内容 | 状态 |
 |---|---|---|
 | HttpClient | 单次异步 HTTP、超时、连接池、大小限制、交付事实分类 | **已实现并复审通过**(首期交付);出口限流后移 |
-| 可靠交互层 | 协议无关的出站可靠投递(首版);同步调用、去重窗口校验、调试 API 已设计但后移 | 设计复审完成(保留已接受风险),未实施 |
+| 可靠交互层 | 协议无关的出站可靠投递(首版);同步调用、去重窗口校验、调试 API 已设计但后移 | 已实现并完成离线 PostgreSQL 验证；未启用真实目标、未部署 |
 
 具体协议(信封、operation 格式、`code` 词表等)**不在基础能力内**:待有具体对接合同后,再由对应业务域设计协议适配器。
 
@@ -33,13 +33,13 @@ HttpClient   app/http_client 一次 HTTP 请求(已实现)
 | HttpClient | 阶段与总超时、连接池、关闭与取消(REQ-HTTP-03/04/10) | ✅ | 同上;`test_network_behavior.py` | — |
 | HttpClient | 请求/响应大小限制、identity 编码(REQ-HTTP-05/06) | ✅ | `test_response_body.py`、`test_request_validation.py` | — |
 | HttpClient | 交付事实分类(REQ-HTTP-09) | ✅ | `test_result_mapping.py` | — |
-| HttpClient | 公开请求校验函数 `validate_request(config, request)`(REQ-HTTP-13),仅依赖配置,与 `send` 复用规则 | 📐 已确定,未实现 | 现有校验仍在 `send` 内;公开函数及测试夹具待补 | 随可靠层接入 |
-| HttpClient | 导入隔离与脱敏日志(REQ-HTTP-11) | ✅ 部分 | `test_import_isolation.py`、`test_logging.py`、`tests/architecture/test_layering.py`;`app.reliable` 的禁止项待可靠层落地时补 | — |
+| HttpClient | 公开请求校验函数 `validate_request(config, request)`(REQ-HTTP-13),仅依赖配置,与 `send` 复用规则 | ✅ | `validation.py`、公开校验一致性与无客户端测试 | — |
+| HttpClient | 导入隔离与脱敏日志(REQ-HTTP-11) | ✅ | `test_import_isolation.py`、`test_logging.py`、`tests/architecture/test_layering.py`；包含禁止反向依赖 `app.reliable` | — |
 | HttpClient | 出口并发/速率限流(REQ-HTTP-07) | ⏸ | — | — |
-| HttpClient | 常驻事件循环与应用装配(REQ-HTTP-08/12) | 📐 | 未装配;无消费者 | 随发送器 |
-| 可靠交互层 | 事务发件箱、持久化退避重试、过期 | 📐 | 无 `app/reliable` | 首版 |
-| 可靠交互层 | 租约领取、崩溃恢复、条件回写 | 📐 | 同上 | 首版 |
-| 可靠交互层 | 消息行尝试记录与结构化状态日志、终态消息保留期清理、执行预算、发送器 lifespan 载体 | 📐 | 同上 | 首版 |
+| HttpClient | 常驻事件循环与应用装配(REQ-HTTP-08/12) | ✅ | `reliable_runtime.py`；空目标仍扫描、零客户端；双 API/专用池测试 | — |
+| 可靠交互层 | 事务发件箱、持久化退避重试、过期 | ✅ | `app/reliable`；`test_enqueue.py`、`test_delivery.py`、`test_leases.py` | 首版 |
+| 可靠交互层 | 租约领取、崩溃恢复、条件回写 | ✅ | `store.py`；真实 PG 并发、两阶段子进程骤停测试 | 首版 |
+| 可靠交互层 | 消息行尝试记录与结构化状态日志、终态消息保留期清理、执行预算、发送器 lifespan 载体 | ✅ | `test_retention.py`、`test_sender.py`、`test_runtime.py`、迁移及 Celery 清理测试 | 首版 |
 | 可靠交互层 | 同步调用 `call`、去重窗口校验 | 📐 设计保留 | — | 后移 |
 | 可靠交互层 | 调试查询 API、证据导出、状态事件表与折叠 | 📐 设计保留 | — | 后移 |
 | 可靠交互层 | `shadow`/`step` 审批模式、运行期暂停开关 | ⏸ | 已移出范围 | — |
@@ -60,7 +60,7 @@ HttpClient   app/http_client 一次 HTTP 请求(已实现)
 |---|---|---|
 | Q10 | 不具备去重能力的存量对端如何处理 | **开放**:现有设计要求对端必须去重;业务域接入如需接入不可改造对端,另定目标级策略 |
 
-- **代码侧待办(未做,属实施范围)**:`tests/architecture/test_layering.py` 与 `tests/http_client/test_import_isolation.py` 目前只禁止 `app.interop`;`app.interop` 已不再规划,补 `app.reliable` 时可一并清理。
+- **实施记录**：分层/导入测试已改为禁止 `app.reliable` 反向依赖；公开校验、可靠首版与验证记录见 `docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md`。安全、限流与业务域接入仍未实施。
 
 ## 5. 评审记录(精简)
 

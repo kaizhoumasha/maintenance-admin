@@ -1,11 +1,11 @@
 # 可靠交互层(出站优先,协议无关)
 
-状态:**设计复审完成(保留已接受风险),未实施** · 依赖:HttpClient 层(已实现)· 目录:`app/reliable/`
+状态:**出站首版已实现，离线 PostgreSQL 验证通过(保留已接受风险)** · 未启用真实目标、未部署 · 目录:`app/reliable/`
 
 > 本文自完整设计中摘出,自成一体。首版只做**出站可靠**:事务发件箱、原身份持久化退避重试、租约领取与崩溃恢复、消息行上的尝试记录。同步调用、去重窗口校验、调试 API 与逐次事件记录已设计完整但**后移**,条文保留在 §12。核心**不理解信封、operation、`code` 词表**,这些属于协议适配器(由各业务域对接时提供)。
-> HttpClient 层的假定:`send(HttpRequest) -> HttpResult`、`aclose()`;可靠层接入时补齐公开同步函数 `validate_request(config, request) -> None`(已确定,尚未实现):只依赖 `HttpClientConfig`,不需要客户端实例,不访问网络,与 `send` 复用同一套请求校验。`HttpResult` 含 `delivery_state`(`NOT_SENT` / `DELIVERY_UNKNOWN` / `HTTP_RESPONSE_COMPLETE`)、`failure_kind`、HTTP 状态码、响应头、有界响应字节;一次 `send` 至多一次网络请求,不自动重试。
+> HttpClient 合同：`send(HttpRequest) -> HttpResult`、`aclose()`；公开同步 `validate_request(config, request) -> None` 已实现，只依赖 `HttpClientConfig`，不需要客户端实例、事件循环或网络，与 `send` 复用请求校验。`HttpResult` 含 `delivery_state`(`NOT_SENT` / `DELIVERY_UNKNOWN` / `HTTP_RESPONSE_COMPLETE`)、`failure_kind`、HTTP 状态码、响应头、有界响应字节；一次 `send` 至多一次网络请求，不自动重试。
 
-> **实现状态:📐 全文为设计,尚未实施**;代码中不存在 `app/reliable`。已实现的只有它依赖的 HttpClient 层。首版范围见 §1.3,后移设计见 §12。
+> **实现状态**：§1.3 首版已实现，永久测试覆盖 SQLite 状态合同与真实 PostgreSQL 并发/骤停恢复；实施和验证记录见 `docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md`。§12、安全、出口限流、业务域接入仍未实施。离线脚本化对端不构成真实协议、对端去重或业务/物理完成验收。
 
 ## 1. 范围
 
@@ -101,7 +101,7 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 - 目标较多时配置提供 `defaults`,各目标只写差异项。
 - 与某目标共用地址、仅路径不同的下游不需要单独建 target,路径由适配器 `build_request` 决定。
 - 业务对象(如设备)与 target 的对应关系属于业务域。
-- 配置项 `RELIABLE_TARGETS`(JSON,含 `defaults`)、`RELIABLE_MAX_BODY_BYTES`、`RELIABLE_DEFAULT_TIMEOUT_MS`、`RELIABLE_RETENTION_DAYS`、`RELIABLE_MAX_RETRY_AFTER_S`。
+- 配置项 `RELIABLE_TARGETS`(JSON,含 `defaults`)、`RELIABLE_MAX_BODY_BYTES`、`RELIABLE_DEFAULT_TIMEOUT_MS`、`RELIABLE_RETENTION_DAYS`、`RELIABLE_MAX_RETRY_AFTER_S`;执行预算(REQ-RUN-01)的 `RELIABLE_MAX_CONCURRENCY`、`RELIABLE_CLAIM_BATCH_SIZE`、`RELIABLE_DB_POOL_SIZE`。轮询间隔、租约余量、停机宽限、连接池等待为内部常量,不暴露为环境变量。
 
 ## 4. 响应分类与结果映射
 
@@ -136,7 +136,7 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 | REQ-OUT-02 | 消息创建时**冻结**:`operation`、`operation_id`、`request_raw`;所有重试发送同一份字节。 |
 | REQ-OUT-06 | 出站消息带 `expires_at`(= 创建时间 + `ttl`;无 `ttl` 则不过期)。到期时,`PENDING` → `EXPIRED`,不再发送;`SENDING` 中的消息在租约结束后同样处理。已送达的消息不受影响。过期只表示本地停止发起新发送尝试,不表示对端失败,也不撤销已经发出的请求;对端可能在本地过期后接收或执行。发送前必须再次检查期限。 |
 | REQ-OUT-09 | **重复入队**:仅在消息行存续期间保证本地幂等。同一出站身份 `(target, operation, operation_id)` 再次 `enqueue`——`request_raw` 相同则返回已有消息(不改变其状态);不同则抛 `DuplicateMessage`,不覆盖已冻结字节。实现用 `INSERT … ON CONFLICT DO NOTHING` 后回读(或 SAVEPOINT 包裹),冲突处理**不得使调用者的外层事务进入失败状态**;并发首次入队收敛为一条。终态行按 REQ-RET-01 清理后不保留本地去重凭据,相同身份再次入队会成为新投递;调用者必须保证不跨清理边界重放旧动作,新业务意图使用新身份。 |
-| REQ-OUT-10 | **入队校验**:`enqueue` 在写库前对草稿调用一次适配器 `build_request`,再将其返回的 `HttpRequest` 交给 `validate_request(目标的 HttpClientConfig, request)` 校验;两步均不发送、不访问网络。校验函数只依赖由 `RELIABLE_TARGETS` 构造的 `HttpClientConfig`,**不需要客户端实例**,因此 `enqueue` 在任何进程(api、Celery worker、脚本)中都能校验。HTTP 请求合法性复用 HttpClient 的公开校验函数,不调用私有方法、不在适配器复制规则;其 `ValueError` / `TypeError` 在入队边界转换为 `InvalidMessage`,非法请求不进入发件箱。该函数尚未实现,须随可靠层接入同步补齐。 |
+| REQ-OUT-10 | **新入队校验**：先识别存续身份行，同字节返回已有引用、异字节抛 DuplicateMessage；仅真正新入队调用适配器 `build_request` 和公开 `validate_request(目标的 HttpClientConfig, request)`，不创建客户端、不发网。非法构建/校验转为 `InvalidMessage`，不落库，不复制 HTTP 校验规则。返回已有引用不代表重发，实际发送仍按当前配置重新构建和校验；清理后的身份须重新走新入队校验。公开校验接缝已实现 |
 
 ### 5.2 领取、租约与崩溃恢复(REQ-LSE)
 
@@ -158,7 +158,7 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 | `DELIVERY_UNKNOWN` / `Verdict.UNKNOWN` | 退避后原身份重试 |
 | `PEER_TERMINAL` | `FAILED`(终态),不重试;`CONFLICT` 由来源系统纠正,业务以**新意图、新身份**重新发起 |
 | `DELIVERED` | `DONE` |
-| 本地错误(适配器抛异常、构造非法请求、目标/适配器缺失) | `FAILED(LOCAL_ERROR)`,不重试,写错误日志并告警 |
+| 本地错误(适配器抛异常、构造非法请求) | `FAILED(LOCAL_ERROR)`,不重试,写错误日志并告警 |
 
 | ID | 要求 |
 |---|---|
@@ -188,9 +188,12 @@ enqueue -> PENDING --到期前领取--> SENDING --DELIVERED----------> DONE
 
 - 运行方向采用 **(a)**:发送器使用长生命周期单事件循环 worker,HttpClient 与将来的限流器随该循环创建/关闭,不在每个发送任务内 `asyncio.run` 重建。
 - **发送器载体(已定)**:装配为 FastAPI lifespan 内的后台任务,与 api 共用进程与事件循环;不使用 Celery 的每任务 `asyncio.run` 模式。api 可多实例,每个实例各跑一个发送器,正确性由租约与 `SKIP LOCKED` 保证。
-- **优雅停机**:先停止领取新消息,等待在途尝试至上限,再释放未完成消息的租约。
+- **优雅停机**：停止领取、等待在途、取消确认、条件释放租约、关闭客户端及 dispose 专用池，共用一个默认 15 秒 monotonic 整体预算，各阶段为后续清理保留机会。不确认停止的任务、未确认的回写留待租约自然恢复，不强行解锁；原 API 池、Redis 和整个进程退出不在该预算保证内。
 - **REQ-RUN-01 执行预算**:单进程的最大领取批量、最大并发发送数,以及发送器专用数据库连接池配额均有保守默认值并可配置,使对端故障不能挤占管理 API 的连接与事件循环。这不是出口限流或熔断,不替代它们。领取按**空闲发送槽位**进行:领取批量不得大于空闲槽位,避免消息在排队时已消耗租约;租约自领取起计。已知限制:一个持续超时的目标仍可能长期占用槽位,跨目标公平调度属出口限流范畴,后移。
+- **专用数据库引擎**:发送器(领取、回写、租约回收、过期标记)使用**独立的异步引擎与连接池**,不与 FastAPI 的 `app.core` 引擎共用:池大小为 `RELIABLE_DB_POOL_SIZE`(默认 2),不允许溢出(`max_overflow=0`),获取连接有超时,使对端故障占满发送器连接时不影响管理 API。`Outbox.enqueue` 则使用**调用者自己的会话**(事务发件箱要求消息与业务数据同一事务提交),不走专用池。终态消息清理由 Celery 任务使用自己的短生命周期引擎。代价:每个 api 实例多占 `RELIABLE_DB_POOL_SIZE` 个数据库连接(N 个实例即 N × 该值),数据库 `max_connections` 须计入;应用关闭时需额外释放该引擎(见优雅停机)。
+- **领取范围**:只领取本进程**已配置、已创建客户端且已注册适配器**的目标的消息;其余消息保持 `PENDING`,不因配置漂移或滚动部署被终态失败。
 - 恢复以数据库扫描为准;即时唤醒缺失不丢消息。
+- 空目标仍持续扫描数据库而不创建 HTTP 客户端；每轮有限处理 TTL 到期的 PENDING，再回收过期租约，最后按空闲槽位领取。TTL 扫描不依赖 next_attempt_at 或空闲发送槽位，不撤销 SENDING、不增加未发送尝试次数。
 - 装配处按 `RELIABLE_TARGETS` 为**实际启用**的目标创建 HttpClient 并注册适配器;不为没有消费者的目标创建空客户端。
 - 核心不依赖 FastAPI(lifespan 装配在应用层);数据库迁移 `YYYY-MM-DD_reliable_message.py`,`app/models/` 新增并导出消息模型。
 
@@ -227,10 +230,10 @@ enqueue -> PENDING --到期前领取--> SENDING --DELIVERED----------> DONE
 | `status` / `fail_reason` | §5.4;`FAILED` 的原因 `CONFLICT` / `REJECTED` / `FAILURE` / `CONTRACT_VIOLATION` / `LOCAL_ERROR` |
 | `attempts` / `next_attempt_at` | 重试控制;索引 `(status, next_attempt_at)` |
 | `last_attempt_at` / `last_http_status` / `last_failure_kind` / `last_verdict` | 最近一次尝试的结果,逐次覆盖 |
-| `last_response_raw` | 最近一次非终态响应原文(可空,受正文上限约束),逐次覆盖;诊断用 |
+| `last_response_raw` | 最近一次尝试的真实有界诊断响应(可空,逐次覆盖)；DONE/对端终态原文只存 `response_raw`，此列清空以免重复存储；本地分类错误若取得完整响应可保留在此 |
 | `lease_id` / `lease_until` | 租约(§5.2) |
 | `business_key` | 业务编号,仅展示/查询,索引 |
-| `expires_at` | 出站有效期截止,空表示不过期 |
+| `expires_at` | 出站有效期截止,空表示不过期；普通复合索引 `(status, expires_at)` 配合独立有限扫描 |
 | `trace_id` / `created_at` / `updated_at` | 追踪标识、创建及更新时间;每次进入 `DONE`/`FAILED`/`EXPIRED` 时与状态同事务写入 `updated_at`,终态后不再更新(含重复入队),作为终态保留期的起算点 |
 
 ### 8.2 原文保存
