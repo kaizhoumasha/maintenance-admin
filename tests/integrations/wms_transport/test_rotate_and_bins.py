@@ -14,17 +14,12 @@ from app.integrations.wms_transport import (
     Rack,
     RackBinSlot,
     RackPosition,
-    TransportCaller,
 )
 from app.models import ReliableMessage, TransportTask
 
-from .helpers import counts
+from .helpers import caller, counts
 
 CLIENT = "01a13b00-cabd-7390-890a-0c093e7c07a1"
-
-
-def caller(rig):
-    return TransportCaller(rig.target.name, "station")
 
 
 def slot(rack, face, number):
@@ -45,7 +40,7 @@ def rotate_request(rig, **changes):
     return (
         dict(
             client_request_id=CLIENT,
-            caller=caller(rig),
+            caller=caller(rig, "station"),
             rack_id="rack",
             position=RackPosition("KT16"),
             target_face="90",
@@ -119,7 +114,7 @@ async def test_move_bins_registers_sorted_members_without_any_state_lookup(trans
     ]
     async with rig.factory() as session:
         handle = await rig.service.move_bins(
-            session, client_request_id=CLIENT, caller=caller(rig), moves=moves
+            session, client_request_id=CLIENT, caller=caller(rig, "station"), moves=moves
         )
         await session.commit()
         task, data = await stored(session, handle)
@@ -135,10 +130,10 @@ async def test_move_bins_reordered_replay_returns_the_original(transport_storage
     ]
     async with rig.factory() as session:
         original = await rig.service.move_bins(
-            session, client_request_id=CLIENT, caller=caller(rig), moves=moves
+            session, client_request_id=CLIENT, caller=caller(rig, "station"), moves=moves
         )
         replay = await rig.service.move_bins(
-            session, client_request_id=CLIENT, caller=caller(rig), moves=moves[::-1]
+            session, client_request_id=CLIENT, caller=caller(rig, "station"), moves=moves[::-1]
         )
         assert replay == original and await counts(session, rig) == (1, 1)
 
@@ -151,7 +146,7 @@ async def test_exchange_registers_one_task_for_both_pairs(transport_storage):
     ]
     async with rig.factory() as session:
         handle = await rig.service.exchange_bins(
-            session, client_request_id=CLIENT, caller=caller(rig), exchange_pairs=pairs
+            session, client_request_id=CLIENT, caller=caller(rig, "station"), exchange_pairs=pairs
         )
         await session.commit()
         task, data = await stored(session, handle)
@@ -166,13 +161,13 @@ async def test_exchange_orientation_replays_and_method_change_conflicts(transpor
         original = await rig.service.exchange_bins(
             session,
             client_request_id=CLIENT,
-            caller=caller(rig),
+            caller=caller(rig, "station"),
             exchange_pairs=[BinExchangePair("b-1", left, "b-2", right)],
         )
         swapped = await rig.service.exchange_bins(
             session,
             client_request_id=CLIENT,
-            caller=caller(rig),
+            caller=caller(rig, "station"),
             exchange_pairs=[BinExchangePair("b-2", right, "b-1", left)],
         )
         assert swapped == original
@@ -180,7 +175,7 @@ async def test_exchange_orientation_replays_and_method_change_conflicts(transpor
             await rig.service.move_bins(
                 session,
                 client_request_id=CLIENT,
-                caller=caller(rig),
+                caller=caller(rig, "station"),
                 moves=[BinMove("b-1", left, HandoffPosition("out"))],
             )
         await session.commit()

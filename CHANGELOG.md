@@ -22,6 +22,7 @@
 - 新增可选 `fixed_retry_interval_s`，使本地重试等待固定；等待提示规则不变。数据库迁移新增 `not_received_count`、`delivery_uncertain` 与 `STALLED` 状态，升级时把存量 `PENDING`/`SENDING` 消息保守标记为未知；降级遇到挂起消息或未知事实时拒绝。
 - 新增 `app/integrations/wms_transport`：WMS Transport 提交协议适配器（合同 §4.2 的 ACK 分类）与能力层 `TransportService` 的四个搬运方法（`move_rack`、`rotate_rack`、`move_bins`、`exchange_bins`）——校验、冻结请求字节、`client_request_id` 同事务幂等入队（先抢唯一键，仅赢家入队）；位置与当前面的有效性交给 WMS 在接纳前校验（主动偏离合同 §3.2 的本地失败关闭：`rotate_rack` 的 `position` 只接受精确位置 `RackPosition`，原样写入源与目标，错误由 WMS 以 409/503 返回）。新增表 `transport_task`，降级时非空即拒绝。本变更不启用任何真实目标，入站回调与位置投影不在范围内。
 - 新增货架搬运业务接入层 `rack_scenarios.cycle(role=, rack_id=, caller=)`：以不可变的生命周期句柄表达「进场 → [换面…] → 离场」，角色只给一次，进离场模板的配对由构造保证（五层货架 `CTU01/CTU02/CTU03`，转运与退料货架 `F01/CK04/F01`），目标位置统一为 `RackPosition | Zone`；不强制步骤顺序，句柄可被多个并发调用方共享。默认实例首次使用时从 `RELIABLE_TARGETS` 惰性取得 `Outbox` 与目标，业务代码无需接线；启用真实目标时仍须把 `ADAPTERS` 注册给可靠发送器，漏注册会在启动日志中告警。`move_rack` 与 `rotate_rack` 按场景限定 RCS 模板（`CK04` 仅换面），换面模板必须显式传入。
+- 新增料箱业务接入层 `bin_scenarios`：`feed_bins`（投料：货架储位 → 滚筒线入料位置）、`return_bins`（回架：出料位置 → 货架储位）、`exchange_bins`（1～2 对交换）；方向由场景固定，合同规则由能力层执行，字节由契约测试固化。
 - 可靠层配置错误现在会指明配置名与出错目标（`RELIABLE_TARGETS target 'wms': …`），异常类型不变。
 
 ### 既有 0.2.0 发布准备记录

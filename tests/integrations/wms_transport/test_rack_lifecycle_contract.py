@@ -4,50 +4,36 @@
 时钟与 UUID 均确定,所以字节可以逐字比较。
 """
 
-import itertools
 import json
 
 import pytest
-from sqlalchemy import select
 
-from app.core.identifiers import uuid7
 from app.integrations.wms_transport import (
     RackPosition,
     RackRole,
     RackScenarios,
-    TransportCaller,
     TransportService,
     Zone,
 )
-from app.models import ReliableMessage
 
-from .helpers import counts
+from .helpers import caller, counts, deterministic_uuid7, frozen_requests, golden_head
 
 RACK, POINT, ZONE = "510046", "KT18", "WH01"
 STEPS = [f"01a13b00-cabd-7390-890a-0c093e7c07a{number}" for number in range(1, 5)]
-HEAD = (
-    b'{"operation_id":"019b76da-a800-7000-8000-%s","operation":"transport.task.submit@v1",'
-    b'"timestamp":1767225600000,"data":{"transport_task_id":'
-    b'"transport-019b76da-a800-7000-8000-%s",'
-)
 GOLDEN = [
-    HEAD
-    % (b"000000000001", b"000000000002")
+    golden_head(b"000000000001", b"000000000002")
     + b'"kind":"RACK_MOVE","rack_id":"510046","rcs_template_id":"CTU01",'
     b'"source":{"kind":"RACK","location_code":"510046"},'
     b'"target":{"kind":"RACK_POSITION","location_code":"KT18"},"target_face":"270"}}',
-    HEAD
-    % (b"000000000003", b"000000000004")
+    golden_head(b"000000000003", b"000000000004")
     + b'"kind":"RACK_ROTATE","rack_id":"510046","rcs_template_id":"CTU02",'
     b'"source":{"kind":"RACK_POSITION","location_code":"KT18"},'
     b'"target":{"kind":"RACK_POSITION","location_code":"KT18"},"target_face":"90"}}',
-    HEAD
-    % (b"000000000005", b"000000000006")
+    golden_head(b"000000000005", b"000000000006")
     + b'"kind":"RACK_ROTATE","rack_id":"510046","rcs_template_id":"CTU02",'
     b'"source":{"kind":"RACK_POSITION","location_code":"KT18"},'
     b'"target":{"kind":"RACK_POSITION","location_code":"KT18"},"target_face":"270"}}',
-    HEAD
-    % (b"000000000007", b"000000000008")
+    golden_head(b"000000000007", b"000000000008")
     + b'"kind":"RACK_MOVE","rack_id":"510046","rcs_template_id":"CTU03",'
     b'"source":{"kind":"RACK","location_code":"510046"},'
     b'"target":{"kind":"ZONE","location_code":"WH01"}}}',
@@ -55,16 +41,10 @@ GOLDEN = [
 
 
 def lifecycle(rig):
-    counter = itertools.count(1)
     service = TransportService(
-        rig.outbox,
-        target=rig.target.name,
-        clock=rig.clock,
-        uuid7=lambda: uuid7(rig.clock(), randbits=lambda width: next(counter)),
+        rig.outbox, target=rig.target.name, clock=rig.clock, uuid7=deterministic_uuid7(rig)
     )
-    return RackScenarios(service).cycle(
-        role=RackRole.FIVE_LAYER, rack_id=RACK, caller=TransportCaller(rig.target.name)
-    )
+    return RackScenarios(service).cycle(role=RackRole.FIVE_LAYER, rack_id=RACK, caller=caller(rig))
 
 
 async def run_lifecycle(cycle, session):
@@ -80,15 +60,6 @@ async def run_lifecycle(cycle, session):
         ),
         await cycle.depart(session, client_request_id=STEPS[3], target=Zone(ZONE)),
     ]
-
-
-async def frozen_requests(session, rig):
-    rows = await session.scalars(
-        select(ReliableMessage)
-        .where(ReliableMessage.target == rig.target.name)
-        .order_by(ReliableMessage.id)
-    )
-    return [row.request_raw for row in rows]
 
 
 async def test_five_layer_lifecycle_freezes_the_exact_contract_bytes(transport_storage):
