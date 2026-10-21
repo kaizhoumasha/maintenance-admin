@@ -9,6 +9,8 @@ down_revision = "a019b20261021"
 branch_labels = None
 depends_on = None
 
+# 基础迁移里写的是 name="status";命名约定(ck_%(table_name)s_%(constraint_name)s_check)
+# 使数据库中的实际名称为下面这个,已在 PostgreSQL 与 SQLite 上核对。
 STATUS_CHECK = sa.schema.conv("reliable_message_status_check")
 SCHEDULE_CHECK = sa.schema.conv("reliable_message_next_attempt_check")
 
