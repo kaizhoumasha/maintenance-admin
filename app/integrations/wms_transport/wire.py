@@ -1,6 +1,8 @@
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
+
+from app.core.clock import unix_ms
 
 from .protocol import OPERATION, RCS_TEMPLATES
 from .types import (
@@ -18,11 +20,10 @@ POSITION_KINDS = {Rack: "RACK", Zone: "ZONE", RackPosition: "RACK_POSITION"}
 
 
 def timestamp_ms(now: datetime) -> int:
-    if not isinstance(now, datetime) or now.utcoffset() is None:
-        raise InvalidTransportRequest("clock must return an aware datetime")
-    milliseconds = (now.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(
-        milliseconds=1
-    )
+    try:
+        milliseconds = unix_ms(now)
+    except ValueError as error:
+        raise InvalidTransportRequest(str(error)) from None
     if not 0 <= milliseconds <= 2**63 - 1:
         raise InvalidTransportRequest("timestamp is outside the protocol range")
     return milliseconds

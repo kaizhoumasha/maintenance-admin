@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
@@ -21,6 +20,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
+from app.core.identifiers import uuid4
 from app.core.redis import get_redis  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (  # noqa: E402
@@ -212,7 +212,7 @@ async def admin(client):
 @pytest.fixture
 async def pg_client(pg_sessions, redis):
     """自建最小授权数据,清理后检查公共 RBAC 数据未变;不运行生产种子。"""
-    suffix = uuid.uuid4().hex
+    suffix = uuid4().hex
     users, roles, created_permissions = [], [], []
     overrides = app.dependency_overrides.copy()
     audit_factory = app.state.audit_session_factory

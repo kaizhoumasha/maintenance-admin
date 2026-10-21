@@ -1,10 +1,10 @@
 import asyncio
-import uuid
 
 import pytest
 from sqlalchemy import delete, select, text
 from sqlalchemy.orm import selectinload
 
+from app.core.identifiers import uuid4
 from app.models import Permission, Role, User
 from app.services import rbac_service
 from scripts.seed_admin import seed_admin
@@ -12,7 +12,7 @@ from scripts.seed_admin import seed_admin
 
 @pytest.mark.parametrize("target", ["permissions", "roles"])
 async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, wait_for_lock, target):
-    suffix = uuid.uuid4().hex
+    suffix = uuid4().hex
     admin_name = f"admin_{suffix[:16]}"
     async with pg_sessions() as session:
         # 保留管理员检查要求库里至少有一个活跃管理员

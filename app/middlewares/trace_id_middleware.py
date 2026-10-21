@@ -2,12 +2,12 @@
 
 import logging
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
 
 from app.core import logger, set_trace_id
+from app.core.identifiers import uuid4
 from app.core.logger import endpoint_src
 
 
@@ -30,7 +30,7 @@ async def trace_id_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
     start = time.perf_counter()
-    trace_id = uuid.uuid4().hex
+    trace_id = uuid4().hex
     # 刻意不 reset:未处理异常的兜底 handler 在本函数退出之后才运行,仍要读到 trace_id。
     # uvicorn 每个请求一个独立 task,上下文互不串。
     set_trace_id(trace_id)

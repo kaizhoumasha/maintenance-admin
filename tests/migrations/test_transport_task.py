@@ -2,7 +2,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +9,7 @@ from sqlalchemy import insert, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.identifiers import uuid4
 from app.models import TransportTask
 
 BASE = "a019c20261022"
@@ -51,9 +51,9 @@ async def test_identity_constraints_and_safe_downgrade(transport_db):
     engine, migrate = transport_db
     factory = async_sessionmaker(engine)
     values = dict(
-        client_request_id=str(uuid.uuid4()),
-        transport_task_id="transport-" + str(uuid.uuid4()),
-        operation_id=str(uuid.uuid4()),
+        client_request_id=str(uuid4()),
+        transport_task_id="transport-" + str(uuid4()),
+        operation_id=str(uuid4()),
         kind="RACK_MOVE",
         input_digest="a" * 64,
         workline_id="line",
@@ -64,7 +64,7 @@ async def test_identity_constraints_and_safe_downgrade(transport_db):
         await session.execute(insert(TransportTask).values(**values))
     for column in ("client_request_id", "transport_task_id", "operation_id"):
         changed = values | {
-            name: str(uuid.uuid4())
+            name: str(uuid4())
             for name in ("client_request_id", "transport_task_id", "operation_id")
             if name != column
         }

@@ -1,9 +1,9 @@
 import asyncio
-import uuid
 
 import pytest
 
 from app.core.errors import AppError, ErrorCode
+from app.core.identifiers import uuid4
 from app.core.redis import get_redis
 from app.core.security import decode_token
 from app.main import app
@@ -48,7 +48,7 @@ async def test_refresh_cannot_restore_session_after_logout_all(client, admin, re
 
 
 async def test_issuing_tokens_prunes_expired_session_members(real_redis):
-    user = User(id=uuid.uuid4().int, allow_multi_login=True)
+    user = User(id=uuid4().int, allow_multi_login=True)
     key = f"user_refresh:{user.id}"
     try:
         _, token = await session_service.issue_tokens(real_redis, user)
@@ -65,7 +65,7 @@ async def test_issuing_tokens_prunes_expired_session_members(real_redis):
 
 @pytest.mark.parametrize("multi, count", [(False, 1), (True, 2)])
 async def test_concurrent_logins_preserve_login_policy(real_redis, multi, count):
-    user = User(id=uuid.uuid4().int, allow_multi_login=multi)
+    user = User(id=uuid4().int, allow_multi_login=multi)
     try:
         tokens = await asyncio.gather(
             *(session_service.issue_tokens(real_redis, user) for _ in range(2))
@@ -82,7 +82,7 @@ async def test_concurrent_logins_preserve_login_policy(real_redis, multi, count)
 
 
 async def test_concurrent_refresh_replay_succeeds_once(real_redis):
-    user = User(id=uuid.uuid4().int, allow_multi_login=True)
+    user = User(id=uuid4().int, allow_multi_login=True)
     try:
         _, token = await session_service.issue_tokens(real_redis, user)
         jti = decode_token(token, "refresh")["jti"]

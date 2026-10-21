@@ -48,3 +48,11 @@ def test_validate_uuid7_accepts_only_lowercase_canonical_text():
     ):
         with pytest.raises(ValueError):
             validate_uuid7(bad)
+
+
+def test_uuid4_is_the_single_random_uuid_entry():
+    from app.core.identifiers import uuid4
+
+    first, second = uuid4(), uuid4()
+    assert first.version == 4 and first != second
+    assert len(first.hex) == 32

@@ -3,11 +3,11 @@ import json
 import os
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 import pytest
 
+from app.core.identifiers import uuid4
 from scripts import release_bundle
 
 SCRIPT = Path(__file__).parents[2] / "scripts/release_bundle.py"
@@ -63,7 +63,7 @@ def test_site_override_mounts_external_configuration_read_only(tmp_path, site_ex
         "docker",
         "compose",
         "-p",
-        f"site-mount-test-{uuid.uuid4().hex[:12]}",
+        f"site-mount-test-{uuid4().hex[:12]}",
         "-f",
         str(root / "docker-compose.yml"),
         "-f",

@@ -1,13 +1,13 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.identifiers import uuid7
+from app.core.identifiers import uuid4, uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 

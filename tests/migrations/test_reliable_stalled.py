@@ -4,7 +4,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +11,8 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.core.identifiers import uuid4
 
 BASE, HEAD = "a019b20261021", "a019c20261022"
 ROOT = Path(__file__).parents[2]
@@ -76,7 +77,7 @@ async def db(request, tmp_path):
         assert stepped.returncode == 0, stepped.stdout + stepped.stderr
     prepared = await migrate(url, "upgrade", BASE)
     assert prepared.returncode == 0, prepared.stdout + prepared.stderr
-    target = "stalled-" + uuid.uuid4().hex
+    target = "stalled-" + uuid4().hex
     try:
         yield url, target
     finally:

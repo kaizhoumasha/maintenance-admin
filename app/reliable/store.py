@@ -1,6 +1,5 @@
 import logging
 import random
-import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -8,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import bindparam, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.identifiers import uuid4
 from app.http_client import DeliveryState, HttpResult
 from app.models.reliable import ReliableMessage
 
@@ -59,7 +59,7 @@ class MessageStore:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uniform: Callable[[float, float], float] = random.uniform,
-        lease_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+        lease_id_factory: Callable[[], str] = lambda: uuid4().hex,
         lease_margin_s: float = 5,
     ):
         positive(lease_margin_s, "lease_margin_s")
