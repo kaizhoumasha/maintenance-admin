@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Index,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,7 +23,10 @@ class ReliableMessage(Base):
         UniqueConstraint(
             "target", "operation", "operation_id", name="reliable_message_identity_key"
         ),
-        CheckConstraint("status IN ('PENDING','SENDING','DONE','FAILED','EXPIRED')", name="status"),
+        CheckConstraint(
+            "status IN ('PENDING','SENDING','STALLED','DONE','FAILED','EXPIRED')", name="status"
+        ),
+        CheckConstraint("status = 'STALLED' OR next_attempt_at IS NOT NULL", name="next_attempt"),
         Index("reliable_message_due_idx", "status", "next_attempt_at"),
         Index("reliable_message_expiry_idx", "status", "expires_at"),
         Index("reliable_message_lease_idx", "status", "lease_until"),
@@ -38,7 +43,10 @@ class ReliableMessage(Base):
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     fail_reason: Mapped[str | None] = mapped_column(String(32))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # STALLED 消息没有计划发送时间;其余状态由 next_attempt 约束保证非空。
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    not_received_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    delivery_uncertain: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_http_status: Mapped[int | None] = mapped_column(Integer)
     last_failure_kind: Mapped[str | None] = mapped_column(String(64))

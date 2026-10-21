@@ -26,6 +26,8 @@ class Claim:
     lease_id: str
     lease_until: datetime
     attempt_no: int
+    not_received_count: int = 0
+    delivery_uncertain: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,9 @@ class AttemptOutcome:
     result: HttpResult | None = None
     verdict: Verdict | None = None
     next_attempt_at: datetime | None = None
+    # None 表示保持原值;发送结果据此写入未送达计数与未知事实。
+    not_received_count: int | None = None
+    delivery_uncertain: bool | None = None
 
 
 def utc_datetime(value: datetime | None, *, known_sqlite_utc: bool = False) -> datetime | None:
@@ -79,7 +84,13 @@ class MessageStore:
             self._time(session, row.expires_at),
         )
         return Claim(
-            row.id, message, row.lease_id, self._time(session, row.lease_until), row.attempts + 1
+            row.id,
+            message,
+            row.lease_id,
+            self._time(session, row.lease_until),
+            row.attempts + 1,
+            row.not_received_count,
+            bool(row.delivery_uncertain),
         )
 
     async def claim(self, limit: int, targets: Mapping[str, TargetConfig]) -> tuple[Claim, ...]:
@@ -114,7 +125,7 @@ class MessageStore:
         return tuple(claims)
 
     async def finish(self, claim: Claim, outcome: AttemptOutcome) -> bool:
-        if outcome.status not in (*TERMINAL, MessageStatus.PENDING):
+        if outcome.status not in (*TERMINAL, MessageStatus.PENDING, MessageStatus.STALLED):
             raise ValueError("invalid attempt transition")
         if outcome.status == MessageStatus.FAILED and outcome.fail_reason is None:
             raise ValueError("failed outcome requires reason")
@@ -122,6 +133,8 @@ class MessageStore:
             raise ValueError("unexpected failure reason")
         if outcome.status == MessageStatus.PENDING and outcome.next_attempt_at is None:
             raise ValueError("retry requires next_attempt_at")
+        if outcome.status == MessageStatus.STALLED and outcome.next_attempt_at is not None:
+            raise ValueError("stalled message has no schedule")
         now = utc_datetime(self.clock())
         result, verdict = outcome.result, outcome.verdict
         if outcome.status == MessageStatus.DONE and (
@@ -182,6 +195,12 @@ class MessageStore:
             values["response_raw"] = result.body if result else None
         if outcome.next_attempt_at is not None:
             values["next_attempt_at"] = utc_datetime(outcome.next_attempt_at)
+        if outcome.status == MessageStatus.STALLED:
+            values["next_attempt_at"] = None
+        if outcome.not_received_count is not None:
+            values["not_received_count"] = outcome.not_received_count
+        if outcome.delivery_uncertain is not None:
+            values["delivery_uncertain"] = outcome.delivery_uncertain
         async with self.session_factory() as session, session.begin():
             changed = await session.scalar(
                 update(ReliableMessage)
@@ -286,6 +305,8 @@ class MessageStore:
             last_failure_kind=None,
             last_verdict=None,
             last_response_raw=None,
+            # 租约中断后请求可能已送达:一旦未知,预算不再适用(合同 §4.3)。
+            delivery_uncertain=True,
             next_attempt_at=now
             + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, self.uniform)),
         )
@@ -354,7 +375,11 @@ class MessageStore:
         level = (
             logging.ERROR
             if fields.get("reason") == FailReason.LOCAL_ERROR
-            else (logging.WARNING if status == MessageStatus.FAILED else logging.INFO)
+            else (
+                logging.WARNING
+                if status in (MessageStatus.FAILED, MessageStatus.STALLED)
+                else logging.INFO
+            )
         )
         context = {
             "target": message.target,

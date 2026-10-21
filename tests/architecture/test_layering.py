@@ -29,6 +29,13 @@ FORBIDDEN = {
         "fastapi",
         "celery",
     ),
+    "integrations": (
+        "app.controllers",
+        "app.schemas",
+        "app.services",
+        "fastapi",
+        "celery",
+    ),
     "models": ("app.services", "app.controllers", "app.schemas"),
     "schemas": ("app.services", "app.controllers"),
     "services": ("app.controllers",),
@@ -77,3 +84,11 @@ def test_http_client_cannot_import_application_infrastructure(tmp_path):
         "from app.core import logger\nimport sqlalchemy\n"
     )
     assert len(violations(tmp_path)) == 2
+
+
+def test_integrations_cannot_import_web_or_service_layers(tmp_path):
+    (tmp_path / "integrations").mkdir()
+    (tmp_path / "integrations" / "bad.py").write_text(
+        "from app.services import user_service\nimport fastapi\nfrom app.reliable import Outbox\n"
+    )
+    assert [v.split(": ")[1] for v in violations(tmp_path)] == ["app.services", "fastapi"]

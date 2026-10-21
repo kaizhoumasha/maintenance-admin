@@ -49,7 +49,7 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
             async with pg_sessions() as session:
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "a019b20261021"
+                    == "a019c20261022"
                 )
         else:
             async with pg_sessions() as session:

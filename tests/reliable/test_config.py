@@ -82,3 +82,47 @@ def test_retry_policy_avoids_intermediate_overflow_for_small_finite_base():
     target = TargetConfig("peer", "http://example.test", "script", retry_base_s=5e-324)
     value = retry_delay_s(1025, target, None, lambda low, high: high)
     assert 0 < value <= 300 and math.isfinite(value)
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, math.nan, "3"])
+def test_invalid_not_received_budget_rejected(value):
+    from app.reliable.config import TargetConfig
+
+    with pytest.raises((ValueError, TypeError)):
+        TargetConfig("peer", "http://example.test", "script", max_not_received_attempts=value)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, math.nan, math.inf, "30"])
+def test_invalid_fixed_retry_interval_rejected(value):
+    from app.reliable.config import TargetConfig
+
+    with pytest.raises((ValueError, TypeError)):
+        TargetConfig("peer", "http://example.test", "script", fixed_retry_interval_s=value)
+
+
+def test_budget_and_fixed_interval_come_from_defaults_and_target_overrides():
+    from app.reliable.config import TargetConfig, parse_reliable_config
+
+    config = parse_reliable_config(
+        Settings(
+            _env_file=None,
+            RELIABLE_TARGETS={
+                "defaults": {"max_not_received_attempts": 3, "fixed_retry_interval_s": 30},
+                "targets": {
+                    "a": {"base_url": "http://example.test", "protocol": "script"},
+                    "b": {
+                        "base_url": "http://example.test",
+                        "protocol": "script",
+                        "max_not_received_attempts": 5,
+                    },
+                },
+            },
+        )
+    )
+    assert (
+        config.targets["a"].max_not_received_attempts,
+        config.targets["a"].fixed_retry_interval_s,
+    ) == (3, 30)
+    assert config.targets["b"].max_not_received_attempts == 5
+    plain = TargetConfig("peer", "http://example.test", "script")
+    assert plain.max_not_received_attempts is None and plain.fixed_retry_interval_s is None

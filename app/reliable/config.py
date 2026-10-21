@@ -28,6 +28,8 @@ class TargetConfig:
     retry_cap_s: float = 300
     max_retry_after_s: float = 3600
     max_body_bytes: int = 262144
+    max_not_received_attempts: int | None = None
+    fixed_retry_interval_s: float | None = None
 
     def __post_init__(self):
         if not isinstance(self.protocol, str) or not self.protocol:
@@ -44,6 +46,12 @@ class TargetConfig:
         for name in ("alert_after_attempts", "max_body_bytes"):
             if not isinstance(getattr(self, name), int):
                 raise TypeError(f"{name} must be an integer")
+        if self.max_not_received_attempts is not None:
+            positive(self.max_not_received_attempts, "max_not_received_attempts")
+            if not isinstance(self.max_not_received_attempts, int):
+                raise TypeError("max_not_received_attempts must be an integer")
+        if self.fixed_retry_interval_s is not None:
+            positive(self.fixed_retry_interval_s, "fixed_retry_interval_s")
         self.http_config()
         if self.base_url.endswith("/"):
             raise ValueError("target base_url must not end with slash")
