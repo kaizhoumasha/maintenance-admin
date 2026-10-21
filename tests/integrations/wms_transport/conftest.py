@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -47,6 +47,16 @@ def make_transport_rig(factory, engine):
 @pytest.fixture
 async def transport_rig():
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+
+    # SQLAlchemy 文档的 pysqlite 事务配方:由 SQLAlchemy 显式发 BEGIN,保存点才可靠。
+    @event.listens_for(engine.sync_engine, "connect")
+    def disable_driver_transactions(dbapi_connection, record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def begin_explicitly(connection):
+        connection.exec_driver_sql("BEGIN")
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     try:

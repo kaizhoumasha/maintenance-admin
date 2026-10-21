@@ -54,6 +54,11 @@ async def migrate(url, command, revision):
 async def query(url, sql, **params):
     engine = create_async_engine(url)
     try:
+        if url.startswith("sqlite"):
+            # 避开 sqlite3 已弃用的默认 datetime 适配器。
+            params = {
+                k: v.isoformat(" ") if isinstance(v, datetime) else v for k, v in params.items()
+            }
         async with engine.begin() as connection:
             result = await connection.execute(text(sql) if isinstance(sql, str) else sql, params)
             return list(result.all()) if result.returns_rows else None

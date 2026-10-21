@@ -70,11 +70,6 @@ class TransportService:
         raw = freeze_request(operation_id, task_id, timestamp_ms(now), data)
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
-        if dialect == "sqlite":
-            connection = await session.connection()
-            raw_connection = await connection.get_raw_connection()
-            if not raw_connection.driver_connection.in_transaction:
-                await connection.exec_driver_sql("BEGIN")
         async with session.begin_nested():
             task_row_id = await session.scalar(
                 insert(TransportTask)
@@ -92,7 +87,10 @@ class TransportService:
                 .returning(TransportTask.id)
             )
             if task_row_id is None:
-                return self._existing(await session.scalar(query), digest)
+                winner = await session.scalar(query)
+                if winner is None:
+                    raise RuntimeError("client_request_id conflict without a visible task")
+                return self._existing(winner, digest)
             await self.outbox.enqueue(
                 session,
                 MessageDraft(self.target, OPERATION, operation_id, raw, business_key=task_id),
