@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import bindparam, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.identifiers import uuid4
+from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
 from app.models.reliable import ReliableMessage
 
@@ -59,7 +59,7 @@ class MessageStore:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uniform: Callable[[float, float], float] = random.uniform,
-        lease_id_factory: Callable[[], str] = lambda: uuid4().hex,
+        lease_id_factory: Callable[[], str] = lambda: uuid7().hex,
         lease_margin_s: float = 5,
     ):
         positive(lease_margin_s, "lease_margin_s")

@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.identifiers import uuid4, uuid7
+from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 
@@ -31,10 +31,9 @@ class TransportService:
         target: str = "wms",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uuid7: Callable[[], UUID] | None = None,
-        uuid4: Callable[[], UUID] = uuid4,
     ):
         self.outbox, self.target = outbox, target
-        self.clock, self.uuid7, self.uuid4 = clock, uuid7, uuid4
+        self.clock, self.uuid7 = clock, uuid7
 
     async def move_rack(
         self,
@@ -64,11 +63,9 @@ class TransportService:
             return self._existing(existing, digest)
         now = self.clock()
         timestamp = timestamp_ms(now)
-        operation_id = str(self.uuid7() if self.uuid7 is not None else uuid7(now))
-        task_uuid = self.uuid4()
-        if not isinstance(task_uuid, UUID) or task_uuid.version != 4:
-            raise InvalidTransportRequest("task identity factory must return UUIDv4")
-        task_id = "transport-" + str(task_uuid)
+        new_id = self.uuid7 or (lambda: uuid7(now))
+        operation_id = str(new_id())
+        task_id = "transport-" + str(new_id())
         raw = freeze_request(operation_id, task_id, timestamp, data)
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert

@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta, timezone
-from uuid import RFC_4122, UUID, uuid4
+from uuid import RFC_4122, UUID
 
 import pytest
 
@@ -23,7 +23,7 @@ def test_uuid7_uses_exact_utc_milliseconds_for_any_offset():
 
 
 @pytest.mark.parametrize(
-    "now", [datetime(2026, 10, 22), datetime(1969, 12, 31, tzinfo=UTC), "2026-10-22", None]
+    "now", [datetime(2026, 10, 22), datetime(1969, 12, 31, tzinfo=UTC), "2026-10-22", 0]
 )
 def test_uuid7_rejects_naive_or_out_of_range_clock(now):
     with pytest.raises(ValueError):
@@ -38,7 +38,7 @@ def test_validate_uuid7_accepts_only_lowercase_canonical_text():
         "{" + text + "}",
         "urn:uuid:" + text,
         text.replace("-", ""),
-        str(uuid4()),
+        "9af2751b-4d01-4203-88a7-649bbf69e810",  # UUIDv4
         text + "\x00",
         "",
         "not-a-uuid",
@@ -50,9 +50,10 @@ def test_validate_uuid7_accepts_only_lowercase_canonical_text():
             validate_uuid7(bad)
 
 
-def test_uuid4_is_the_single_random_uuid_entry():
-    from app.core.identifiers import uuid4
-
-    first, second = uuid4(), uuid4()
-    assert first.version == 4 and first != second
-    assert len(first.hex) == 32
+def test_uuid7_defaults_to_now_and_is_unique_and_hex_form_is_32_chars():
+    before = datetime.now(UTC)
+    first, second = uuid7(), uuid7()
+    assert first != second and first.version == 7 and len(first.hex) == 32
+    assert before - timedelta(seconds=1) < datetime.fromtimestamp((first.int >> 80) / 1000, UTC)
+    # 时间在高位:同毫秒内的区别只在尾部随机位,截取唯一后缀必须取尾部。
+    assert first.hex[-12:] != second.hex[-12:]

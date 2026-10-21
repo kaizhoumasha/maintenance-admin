@@ -25,11 +25,11 @@ async def test_cleanup_task_commits_on_real_database(pg_sessions, pg_url, monkey
 
     from sqlalchemy import delete, insert, select
 
-    from app.core.identifiers import uuid4
+    from app.core.identifiers import uuid7
     from app.models import ReliableMessage
     from app.tasks import reliable_tasks
 
-    marker = "task-" + uuid4().hex
+    marker = "task-" + uuid7().hex
     old = datetime.now(UTC) - timedelta(days=100)
     try:
         async with pg_sessions() as session:

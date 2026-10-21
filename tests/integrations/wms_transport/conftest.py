@@ -7,7 +7,7 @@ from sqlalchemy import delete, event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.core.identifiers import uuid4
+from app.core.identifiers import uuid7
 from app.integrations.wms_transport import (
     PROTOCOL,
     Rack,
@@ -25,7 +25,7 @@ from app.reliable.testing import FakeClock
 def make_transport_rig(factory, engine):
     clock = FakeClock()
     target = TargetConfig(
-        "transport-" + uuid4().hex,
+        "transport-" + uuid7().hex,
         "http://example.test",
         PROTOCOL,
         max_not_received_attempts=3,

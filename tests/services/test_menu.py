@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import delete, select, text
 
 from app.core import AppError, ErrorCode
-from app.core.identifiers import uuid4
+from app.core.identifiers import uuid7
 from app.models import Menu, Permission, Role, User
 from app.schemas.menu import MenuIn
 from app.services import menu_service
@@ -135,7 +135,7 @@ async def test_directory_without_visible_children_is_dropped(db):
 
 
 async def test_concurrent_moves_cannot_form_cycle(pg_sessions, wait_for_lock, monkeypatch):
-    suffix = uuid4().hex
+    suffix = uuid7().hex
     async with pg_sessions() as session:
         a = await menu_service.create_menu(session, make_menu_in(name=f"A{suffix}", path="/a"))
         b = await menu_service.create_menu(session, make_menu_in(name=f"B{suffix}", path="/b"))

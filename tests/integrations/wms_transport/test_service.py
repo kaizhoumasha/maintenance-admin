@@ -44,7 +44,7 @@ async def test_same_normalized_input_replays_without_new_identity(
         raise AssertionError("replay must not generate a new identity or timestamp")
 
     replay = TransportService(
-        rig.outbox, target=rig.target.name, clock=unexpected, uuid7=unexpected, uuid4=unexpected
+        rig.outbox, target=rig.target.name, clock=unexpected, uuid7=unexpected
     )
     async with rig.factory() as session:
         second = await replay.move_rack(session, **transport_request, rcs_template_id="F01")
@@ -58,7 +58,8 @@ async def test_same_normalized_input_replays_without_new_identity(
         )
         payload = json.loads(message.request_raw)
         assert UUID(message.operation_id).version == 7
-        assert UUID(first.transport_task_id.removeprefix("transport-")).version == 4
+        assert UUID(first.transport_task_id.removeprefix("transport-")).version == 7
+        assert first.transport_task_id.removeprefix("transport-") != message.operation_id
         assert task.operation_id == message.operation_id
         assert payload["data"]["transport_task_id"] == first.transport_task_id
         assert message.business_key == first.transport_task_id and message.expires_at is None

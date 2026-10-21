@@ -5,7 +5,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.core.identifiers import uuid4
+from app.core.identifiers import uuid7
 from app.http_client import HttpRequest
 from app.reliable import MessageDraft, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
@@ -77,7 +77,7 @@ async def rig():
 async def pg_rig(pg_sessions):
     from app.models import ReliableMessage
 
-    rig = make_rig(pg_sessions, pg_sessions.kw["bind"], "r-" + uuid4().hex)
+    rig = make_rig(pg_sessions, pg_sessions.kw["bind"], "r-" + uuid7().hex)
     try:
         yield rig
     finally:

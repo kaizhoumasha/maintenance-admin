@@ -7,13 +7,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import delete, insert, inspect, text
 
-from app.core.identifiers import uuid4
+from app.core.identifiers import uuid7
 from app.models import ReliableMessage
 
 
 @pytest.mark.parametrize("occupied", [False, True])
 async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occupied):
-    target = "migration-" + uuid4().hex
+    target = "migration-" + uuid7().hex
     now = datetime.now(UTC)
     if occupied:
         async with pg_sessions() as session:
@@ -86,7 +86,7 @@ async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, re
         [column.name for column in index.columns] == ["status", "expires_at"]
         for index in ReliableMessage.__table__.indexes
     )
-    target = "index-" + uuid4().hex
+    target = "index-" + uuid7().hex
     now = datetime.now(UTC)
     try:
         async with pg_sessions() as session:

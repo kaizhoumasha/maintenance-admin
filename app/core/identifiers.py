@@ -1,20 +1,19 @@
 import secrets
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
-from uuid import uuid4 as _uuid4
 
 from .clock import unix_ms
 
 
-def uuid4() -> UUID:
-    """项目内随机 UUID 的唯一入口;需要无连字符文本时取 `.hex`。"""
-    return _uuid4()
+def uuid7(
+    now: datetime | None = None, *, randbits: Callable[[int], int] = secrets.randbits
+) -> UUID:
+    """项目内 UUID 的唯一入口(RFC 9562 UUIDv7:48 位 UTC 毫秒 + 版本 + 变体 + 74 位随机)。
 
-
-def uuid7(now: datetime, *, randbits: Callable[[int], int] = secrets.randbits) -> UUID:
-    """RFC 9562 UUIDv7:48 位 UTC 毫秒 + 版本 + 变体 + 74 位随机;标准库 3.13 尚无实现。"""
-    milliseconds = unix_ms(now)
+    需要无连字符文本时取 `.hex`;前 12 位十六进制是时间,截取唯一后缀应取尾部。
+    """
+    milliseconds = unix_ms(datetime.now(UTC) if now is None else now)
     if not 0 <= milliseconds < 2**48:
         raise ValueError("timestamp is outside the UUIDv7 range")
     random_bits = randbits(74)
