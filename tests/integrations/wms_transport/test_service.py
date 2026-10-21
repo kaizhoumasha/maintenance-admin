@@ -188,3 +188,64 @@ async def test_distinct_locations_and_new_requests_do_not_lock_resources(
         await session.commit()
         assert first.transport_task_id != second.transport_task_id
         assert await counts(session, rig) == (2, 2)
+
+
+def settings_with(monkeypatch, targets):
+    from app.core.config import Settings
+    from app.integrations.wms_transport import service as service_module
+
+    settings = Settings(_env_file=None, RELIABLE_TARGETS={"targets": targets})
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+
+def wms(**extra):
+    return {"base_url": "http://wms.example.test", "protocol": "wms-transport"} | extra
+
+
+async def test_unconfigured_service_fails_clearly_before_touching_anything(monkeypatch):
+    settings_with(monkeypatch, {})
+    with pytest.raises(RuntimeError, match="Transport"):
+        await TransportService().move_rack(
+            None,
+            client_request_id="01a13b00-cabd-7390-890a-0c093e7c07a1",
+            caller=TransportCaller("line"),
+            rack_id="rack",
+            source=Rack("rack"),
+            target=RackPosition("KT16"),
+        )
+
+
+def test_default_service_resolves_outbox_and_target_from_settings_once(monkeypatch):
+    settings_with(monkeypatch, {"site-wms": wms(), "other": wms() | {"protocol": "another"}})
+    service = TransportService()
+    assert service.target == "site-wms"
+    assert service.outbox is service.outbox
+    assert set(service.outbox.targets) == {"site-wms", "other"}
+    assert "wms-transport" in service.outbox.adapters
+
+
+def test_default_service_rejects_ambiguous_wms_targets(monkeypatch):
+    settings_with(monkeypatch, {"a": wms(), "b": wms()})
+    with pytest.raises(RuntimeError, match="多个"):
+        _ = TransportService().target
+
+
+def test_explicit_arguments_take_precedence_over_settings(monkeypatch, transport_storage):
+    rig = transport_storage
+    settings_with(monkeypatch, {"site-wms": wms()})
+    service = TransportService(rig.outbox, target=rig.target.name)
+    assert service.outbox is rig.outbox and service.target == rig.target.name
+    assert TransportService(rig.outbox).target == rig.target.name  # 由注入的 Outbox 按协议推断
+
+
+def test_unconfigured_error_shows_the_setting_an_example_and_what_exists(monkeypatch):
+    settings_with(monkeypatch, {})
+    with pytest.raises(RuntimeError) as empty:
+        _ = TransportService().target
+    assert "RELIABLE_TARGETS" in str(empty.value) and "wms-transport" in str(empty.value)
+    assert "base_url" in str(empty.value)  # 带一个可照抄的示例
+
+    settings_with(monkeypatch, {"ecs": wms() | {"protocol": "ecs-device"}})
+    with pytest.raises(RuntimeError) as other:
+        _ = TransportService().target
+    assert "ecs[ecs-device]" in str(other.value)  # 指出现有目标及其协议,便于发现写错协议名

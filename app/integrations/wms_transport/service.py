@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -7,35 +7,32 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import get_settings
 from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
+from app.reliable.config import parse_reliable_config
 
-from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION
+from .adapter import ADAPTERS
+from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL
 from .types import (
     BinExchangePair,
     BinMove,
     IdempotencyConflict,
     InvalidTransportRequest,
-    Rack,
     RackLocation,
     RackPosition,
-    RackState,
-    RackStateReader,
-    RackStateUnavailable,
     TransportCaller,
     TransportHandle,
     require_uuid7,
 )
 from .wire import (
-    bin_faces,
     bin_move_data,
     exchange_bins_data,
     freeze_request,
     input_digest,
     move_rack_data,
     rotate_rack_data,
-    rotate_rack_input,
     timestamp_ms,
 )
 
@@ -43,15 +40,41 @@ from .wire import (
 class TransportService:
     def __init__(
         self,
-        outbox: Outbox,
+        outbox: Outbox | None = None,
         *,
-        target: str = "wms",
+        target: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uuid7: Callable[[], UUID] | None = None,
-        state_reader: RackStateReader | None = None,
     ):
-        self.outbox, self.target = outbox, target
-        self.clock, self.uuid7, self.state_reader = clock, uuid7, state_reader
+        """不传 `outbox` / `target` 时,首次使用从 RELIABLE_TARGETS 配置惰性取得并缓存,
+        业务代码无需任何接线;显式参数用于测试和特殊装配。"""
+        self._outbox, self._target = outbox, target
+        self.clock, self.uuid7 = clock, uuid7
+
+    @property
+    def outbox(self) -> Outbox:
+        if self._outbox is None:
+            targets = parse_reliable_config(get_settings()).targets
+            self._outbox = Outbox(targets, ADAPTERS, clock=self.clock)
+        return self._outbox
+
+    @property
+    def target(self) -> str:
+        if self._target is None:
+            names = [
+                name for name, item in self.outbox.targets.items() if item.protocol == PROTOCOL
+            ]
+            if not names:
+                existing = ", ".join(f"{n}[{t.protocol}]" for n, t in self.outbox.targets.items())
+                example = f'{{"targets":{{"wms":{{"base_url":"http://host:port","protocol":"{PROTOCOL}"}}}}}}'
+                raise RuntimeError(
+                    f"未配置 WMS Transport 目标:RELIABLE_TARGETS 中没有 protocol={PROTOCOL} "
+                    f"的目标(现有:{existing or '无'})。示例:RELIABLE_TARGETS='{example}'"
+                )
+            if len(names) > 1:
+                raise RuntimeError(f"配置了多个 WMS Transport 目标 {names},请显式指定 target")
+            self._target = names[0]
+        return self._target
 
     async def move_rack(
         self,
@@ -76,19 +99,13 @@ class TransportService:
         client_request_id: str,
         caller: TransportCaller,
         rack_id: str,
-        position: Rack | RackPosition,
+        position: RackPosition,
         target_face: str,
         rcs_template_id: str,
     ) -> TransportHandle:
-        """原地换面;需要可信的当前精确位置与当前面,缺失即失败关闭。"""
-        spec = rotate_rack_input(rack_id, position, target_face, rcs_template_id)
-
-        async def resolve() -> dict:
-            return rotate_rack_data(spec, await self._state(rack_id))
-
-        return await self._register(
-            session, "rotate_rack", client_request_id, caller, spec, resolve
-        )
+        """原地换面;精确位置 `position` 原样写入 source 与 target,位置与当前面由 WMS 校验。"""
+        data = rotate_rack_data(rack_id, position, target_face, rcs_template_id)
+        return await self._register(session, "rotate_rack", client_request_id, caller, data)
 
     async def move_bins(
         self,
@@ -99,9 +116,7 @@ class TransportService:
         moves: list[BinMove],
     ) -> TransportHandle:
         data = bin_move_data(moves)
-        return await self._register(
-            session, "move_bins", client_request_id, caller, data, self._faces_resolver(data)
-        )
+        return await self._register(session, "move_bins", client_request_id, caller, data)
 
     async def exchange_bins(
         self,
@@ -112,24 +127,7 @@ class TransportService:
         exchange_pairs: list[BinExchangePair],
     ) -> TransportHandle:
         data = exchange_bins_data(exchange_pairs)
-        return await self._register(
-            session, "exchange_bins", client_request_id, caller, data, self._faces_resolver(data)
-        )
-
-    async def _state(self, rack_id: str) -> RackState:
-        state = await self.state_reader.rack_state(rack_id) if self.state_reader else None
-        if not isinstance(state, RackState):
-            raise RackStateUnavailable("trusted rack state is unavailable")
-        return state
-
-    def _faces_resolver(self, data: dict) -> Callable[[], Awaitable[dict]]:
-        async def resolve() -> dict:
-            for rack_id, face in bin_faces(data).items():
-                if (await self._state(rack_id)).face != face:
-                    raise InvalidTransportRequest("rack face does not match the trusted face")
-            return data
-
-        return resolve
+        return await self._register(session, "exchange_bins", client_request_id, caller, data)
 
     async def _register(
         self,
@@ -137,14 +135,14 @@ class TransportService:
         method: str,
         client_request_id: str,
         caller: TransportCaller,
-        spec: dict,
-        resolve: Callable[[], Awaitable[dict]] | None = None,
+        data: dict,
     ) -> TransportHandle:
-        """四个方法共用的登记流程:重放不读可信状态,新请求先核对状态再冻结并入队。"""
+        """四个方法共用的登记流程:同号重放返回原任务,新请求冻结字节后同事务入队。"""
+        outbox, target = self.outbox, self.target  # 未配置时先于任何校验和写入失败
         require_uuid7(client_request_id)
         if not isinstance(caller, TransportCaller):
             raise InvalidTransportRequest("caller must be a TransportCaller")
-        digest = input_digest(method, caller, spec)
+        digest = input_digest(method, caller, data)
         query = (
             select(TransportTask)
             .where(TransportTask.client_request_id == client_request_id)
@@ -153,7 +151,6 @@ class TransportService:
         existing = await session.scalar(query)
         if existing is not None:
             return self._existing(existing, digest)
-        data = await resolve() if resolve else spec
         now = self.clock()
         timestamp = timestamp_ms(now)
         new_id = self.uuid7 or (lambda: uuid7(now))
@@ -183,9 +180,9 @@ class TransportService:
                 if winner is None:
                     raise RuntimeError("client_request_id conflict without a visible task")
                 return self._existing(winner, digest)
-            await self.outbox.enqueue(
+            await outbox.enqueue(
                 session,
-                MessageDraft(self.target, OPERATION, operation_id, raw, business_key=task_id),
+                MessageDraft(target, OPERATION, operation_id, raw, business_key=task_id),
             )
         return TransportHandle(task_id, client_request_id)
 
@@ -194,3 +191,7 @@ class TransportService:
         if task.input_digest != digest:
             raise IdempotencyConflict("client_request_id already has different input")
         return TransportHandle(task.transport_task_id, task.client_request_id)
+
+
+# 外部调用的统一入口:无需任何接线,首次使用时从配置惰性取得 Outbox 与目标。
+transport_service = TransportService()

@@ -1,4 +1,6 @@
+import inspect
 import json
+from dataclasses import FrozenInstanceError
 
 import pytest
 from sqlalchemy import select
@@ -11,8 +13,7 @@ from app.integrations.wms_transport import (
     RackPosition,
     RackRole,
     RackScenarios,
-    RackState,
-    RackStateUnavailable,
+    TransportCaller,
     TransportService,
     Zone,
 )
@@ -24,12 +25,6 @@ from .helpers import counts
 SCENARIOS = ["enter_rack", "rotate_rack", "depart_rack"]
 
 
-class CurrentRackState:
-    async def rack_state(self, rack_id):
-        assert rack_id == "rack"
-        return RackState("actual-position", "old-face")
-
-
 @pytest.fixture
 def scenarios(transport_storage):
     rig = transport_storage
@@ -38,7 +33,6 @@ def scenarios(transport_storage):
             rig.outbox,
             target=rig.target.name,
             clock=rig.clock,
-            state_reader=CurrentRackState(),
         )
     )
 
@@ -51,10 +45,20 @@ def scenario_request(transport_request):
     }
 
 
+CURRENT_POSITION = RackPosition("actual-position")
+STEP = {"enter_rack": "enter", "rotate_rack": "rotate", "depart_rack": "depart"}
+
+
 async def register(scenarios, action, session, request):
+    """经生命周期句柄登记一步;角色、货架、调用方只在句柄上给一次。"""
+    request = dict(request)
+    cycle = scenarios.cycle(
+        role=request.pop("role"), rack_id=request.pop("rack_id"), caller=request.pop("caller")
+    )
     if action == "rotate_rack":
-        request = {key: value for key, value in request.items() if key != "target"}
-    return await getattr(scenarios, action)(session, **request)
+        request.pop("target", None)
+        request["position"] = CURRENT_POSITION
+    return await getattr(cycle, STEP[action])(session, **request)
 
 
 @pytest.mark.parametrize(
@@ -89,14 +93,23 @@ async def test_role_selects_paired_templates_and_preserves_locations_and_face(
             )
             data = json.loads(message.request_raw)["data"]
             assert data["rcs_template_id"] == template
-            assert data["source"] == {"kind": "RACK", "location_code": "rack"}
+            if action == "rotate_rack":
+                assert (
+                    data["source"]
+                    == data["target"]
+                    == {
+                        "kind": "RACK_POSITION",
+                        "location_code": "actual-position",
+                    }
+                )
+            else:
+                assert data["source"] == {"kind": "RACK", "location_code": "rack"}
             assert data["target_face"] == " 侧A🧭 "
-            assert data["target"] == {
-                "kind": "ZONE"
-                if isinstance(target, Zone) and action != "rotate_rack"
-                else "RACK_POSITION",
-                "location_code": "actual-position" if action == "rotate_rack" else "destination",
-            }
+            if action != "rotate_rack":
+                assert data["target"] == {
+                    "kind": "ZONE" if isinstance(target, Zone) else "RACK_POSITION",
+                    "location_code": "destination",
+                }
         await session.commit()
         assert await counts(session, rig) == (3, 3)
 
@@ -174,7 +187,7 @@ async def test_failed_enqueue_preserves_only_the_callers_business_write(
 
 
 @pytest.mark.parametrize("action", SCENARIOS)
-async def test_replay_returns_original_without_new_identity_or_state_read(
+async def test_replay_returns_original_without_new_identity(
     transport_storage, scenarios, scenario_request, action
 ):
     rig = transport_storage
@@ -209,17 +222,6 @@ async def test_changed_capability_input_conflicts_without_a_second_obligation(
         assert await counts(session, rig) == (1, 1)
 
 
-async def test_rotate_propagates_missing_trusted_state_without_writes(
-    transport_storage, scenario_request
-):
-    rig = transport_storage
-    async with rig.factory() as session:
-        with pytest.raises(RackStateUnavailable):
-            await register(RackScenarios(rig.service), "rotate_rack", session, scenario_request)
-        await session.commit()
-        assert await counts(session, rig) == (0, 0)
-
-
 @pytest.mark.parametrize("action", SCENARIOS)
 @pytest.mark.parametrize("face", ["", 90, "face\x00", "x" * 11])
 async def test_invalid_face_propagates_the_capability_error_without_writes(
@@ -232,13 +234,26 @@ async def test_invalid_face_propagates_the_capability_error_without_writes(
         assert await counts(session, transport_storage) == (0, 0)
 
 
-async def test_rotate_rejects_the_current_face_without_writes(
-    transport_storage, scenarios, scenario_request
-):
-    async with transport_storage.factory() as session:
-        with pytest.raises(InvalidTransportRequest):
-            await register(
-                scenarios, "rotate_rack", session, scenario_request | {"target_face": "old-face"}
-            )
-        await session.commit()
-        assert await counts(session, transport_storage) == (0, 0)
+def test_module_level_scenarios_share_the_module_level_transport_service():
+    from app.integrations.wms_transport import rack_scenarios, transport_service
+
+    assert isinstance(rack_scenarios, RackScenarios)
+    assert rack_scenarios.transport is transport_service
+
+
+def test_cycle_handle_is_immutable_and_fixes_one_role_for_all_steps(scenarios):
+    cycle = scenarios.cycle(
+        role=RackRole.FIVE_LAYER, rack_id="rack", caller=TransportCaller("line")
+    )
+    with pytest.raises(FrozenInstanceError):
+        cycle.role = RackRole.TRANSFER
+    assert "role" not in inspect.signature(cycle.enter).parameters
+    assert "role" not in inspect.signature(cycle.rotate).parameters
+    assert "position" in inspect.signature(cycle.rotate).parameters
+    assert "role" not in inspect.signature(cycle.depart).parameters
+
+
+@pytest.mark.parametrize("role", ["unknown", None, [], "FIVE_LAYER"])
+def test_cycle_rejects_unknown_roles_when_it_is_created(scenarios, role):
+    with pytest.raises(InvalidTransportRequest):
+        scenarios.cycle(role=role, rack_id="rack", caller=TransportCaller("line"))

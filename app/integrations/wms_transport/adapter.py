@@ -5,7 +5,7 @@ from app.http_client import DeliveryState, HttpRequest, HttpResult
 from app.reliable import FailReason, OutboundMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 
-from .protocol import DEFAULT_SUBMIT_PATH, OPERATION, REJECTION_REASONS
+from .protocol import DEFAULT_SUBMIT_PATH, OPERATION, PROTOCOL, REJECTION_REASONS
 
 MAX_PATH_LENGTH = 2048
 INT64_MAX = 2**63 - 1
@@ -118,3 +118,7 @@ class TransportSubmitAdapter:
         if pair == (503, "UNAVAILABLE"):
             return Verdict(VerdictKind.NOT_RECEIVED)
         return UNKNOWN
+
+
+# 适配器的唯一定义:默认 TransportService 的入队校验与可靠发送器的注册共用这一份。
+ADAPTERS = {PROTOCOL: TransportSubmitAdapter()}

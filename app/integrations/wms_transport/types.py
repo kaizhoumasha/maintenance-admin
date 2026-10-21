@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Protocol
 
 from app.core.identifiers import validate_uuid7
 
@@ -10,10 +9,6 @@ class InvalidTransportRequest(ValueError):
 
 class IdempotencyConflict(ValueError):
     pass
-
-
-class RackStateUnavailable(InvalidTransportRequest):
-    """可信的货架当前位置/面缺失:失败关闭,不从其它数据推断(合同 §3.2)。"""
 
 
 def validate_text(value: object) -> str:
@@ -138,19 +133,3 @@ class BinExchangePair:
         for location in (self.left_location, self.right_location):
             if not isinstance(location, RackBinSlot):
                 raise InvalidTransportRequest("exchange locations must be RackBinSlot")
-
-
-@dataclass(frozen=True)
-class RackState:
-    """WES 可信的货架当前精确位置与工作面。"""
-
-    position: str
-    face: str
-
-    def __post_init__(self):
-        validate_text(self.position)
-        validate_face(self.face)
-
-
-class RackStateReader(Protocol):
-    async def rack_state(self, rack_id: str) -> RackState | None: ...

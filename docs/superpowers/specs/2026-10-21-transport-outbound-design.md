@@ -1,10 +1,12 @@
 # WMS Transport 出站:协议适配器与能力层开发说明书
 
-状态:**P0～P2 已实现并通过离线验证;生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、`2026-10-21-reliable-interaction-plan.md`
+状态:**P0～P3 已实现并通过离线验证(P3 的本地可信状态校验已按 2026-10-22 决定取消,见下);生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、`2026-10-21-reliable-interaction-plan.md`
 
 评审已确认范围(2026-10-21,D1 A):首轮交付 P0～P2;P3 只保留后续设计,其 DTO、规则、冻结及 `RackStateReader` 端口均延后,随可信位置投影或明确调用方推进。本文相关 P3 描述不属于首轮实施与验收。
 
-P3 实施记录(2026-10-22,用户指示继续):`rotate_rack`、`move_bins`、`exchange_bins` 已实现——DTO/规则/冻结在 `wire.py`,四个方法共用 `TransportService._register`;可信状态经 `RackStateReader.rack_state(rack_id) -> RackState(position, face) | None` 注入,未注入、查不到、面不一致或目标面等于当前面一律失败关闭;重放同号请求不读取可信状态;摘要按规范化入参(料箱按 `container_id` 排序,交换对左右互换等价)计算,可信状态派生的 `target` 不参与摘要。位置投影本身仍未实现,reader 由调用方装配。
+**2026-10-22 决定(用户)——取消 `RackStateReader` 与本地可信状态校验**:换面、料箱搬运与交换的位置/面有效性交给 WMS 在接纳前校验(合同 §4.1:面等于当前面返回 409,无法确认返回 503)。`rotate_rack(position, target_face, rcs_template_id)` 的 `position` **只接受 `RackPosition`**(调用方传入当前实际所在的精确位置;`Rack` 引用被拒绝),按合同 §3.2 原样同时写入 `source` 与 `target`;`move_bins` / `exchange_bins` 只做请求自身的结构校验。这是对合同 §3.2「创建前必须已有可信位置与当前面、未知即失败关闭」的**主动偏离**,风险是错误更晚暴露(WMS 返回 409 → 本地终态 `FAILED`,或 503 → 重试直至预算耗尽 `STALLED`);须与 WMS 确认二次校验按 §4.1 实现。下文及 §11 评审记录中涉及 `RackStateReader`、可信状态的描述为历史记录,以本条为准。
+
+P3 实施记录(2026-10-22,用户指示继续,**其中可信状态部分已被上一条取代**):`rotate_rack`、`move_bins`、`exchange_bins` 已实现——DTO/规则/冻结在 `wire.py`,四个方法共用 `TransportService._register`;可信状态经 `RackStateReader.rack_state(rack_id) -> RackState(position, face) | None` 注入,未注入、查不到、面不一致或目标面等于当前面一律失败关闭;重放同号请求不读取可信状态;摘要按规范化入参(料箱按 `container_id` 排序,交换对左右互换等价)计算,可信状态派生的 `target` 不参与摘要。位置投影本身仍未实现,reader 由调用方装配。
 
 实施记录(2026-10-22):P0/P1 见 `604dc16`。P2 提供 `TransportService.move_rack`、三种冻结位置类型及 `transport_task` 迁移 `a019d20261022`。caller 路由字段参与幂等摘要,同号不得改挂工作线/站点;该映射不随可靠消息保留期清理。SQLite legacy transaction control 下在保存点前确保实际外层事务已开始,避免释放保存点提前提交;PostgreSQL 使用既有事务。后文工程评审记录为当时结论,不代表当前实施状态。未注册真实目标,未执行真实 WMS 联调。
 
@@ -110,12 +112,12 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 | 方法 | 线上 `kind` | 规则要点(完整规则见合同对应条款) |
 |---|---|---|
 | `move_rack` | `RACK_MOVE` | 位置 ∈ RACK/ZONE/RACK_POSITION;`Rack.code == rack_id`;source ≠ target;模板 ∈ 闭集,省略即 `F01`;`target_face` 可选,`None` 时线上**省略该字段**(不发 `null`) |
-| `rotate_rack` | `RACK_ROTATE` | position ∈ RACK/RACK_POSITION;`target_face` 必填;需可信当前位置与当前面,目标面 ≠ 当前面;wire 的 `source`=传入位置,`target`=可信精确原点位 |
-| `move_bins` | `BIN_MOVE` | 成员 1..4;`bin_code` 不重复;位置 ∈ RACK_BIN_SLOT/HANDOFF_POSITION 且至少一端是 RACK_BIN_SLOT;单成员 source ≠ target;`RACK_BIN_SLOT` 全请求不重复;同一 `rack_id` 只有一个 `rack_face`,且等于可信当前面 |
+| `rotate_rack` | `RACK_ROTATE` | position 必须是 RACK_POSITION;`target_face` 必填;模板必须显式传且 ∈ `{CTU02, CK04}`;wire 的 `source` 与 `target` 均为传入位置(位置与当前面由 WMS 校验) |
+| `move_bins` | `BIN_MOVE` | 成员 1..4;`bin_code` 不重复;位置 ∈ RACK_BIN_SLOT/HANDOFF_POSITION 且至少一端是 RACK_BIN_SLOT;单成员 source ≠ target;`RACK_BIN_SLOT` 全请求不重复;同一 `rack_id` 只有一个 `rack_face`(面是否等于当前面由 WMS 校验) |
 | `exchange_bins` | `BIN_EXCHANGE` | 1..2 个交换对;展开成 2 或 4 个成员,形成 1..2 个互不重叠的二元闭环;位置仅 RACK_BIN_SLOT;涉及的 (rack_id, rack_face) 组 ≤2;同货架不混面;面等于可信当前面 |
 
 - `target_face`、`rack_face`:非空字符串,1..10 个 Unicode code point,无 NUL,按 code point 精确保存,不做 trim/大小写/规范化(合同 §5.3 的持久化口径;§3.2 写「不限长度」,取更严的 §5.3 并列入 §9 待确认)。
-- 「可信当前面/位置」来自位置投影,模板里**没有**。能力层只定义一个端口 `RackStateReader`(异步,`rack_id → (position, face) | None`);**未注入或返回 None 一律失败关闭**。因此依赖它的方法分阶段交付(§7)。
+- ~~可信当前面/位置与 `RackStateReader` 端口~~:2026-10-22 已取消(见文首决定),本地不再校验当前位置与面。
 
 ### 4.3 冻结:身份与字节(`wire.py`)
 
@@ -241,7 +243,7 @@ tests/architecture/test_layering.py   增加 integrations 的禁止项
 | P2 冻结与 `move_rack` | §4.1~§4.4 的 `move_rack`、`transport_task` 表与迁移 | 合同 §4 示例请求的字节与黄金样例一致;幂等/冲突/回滚/并发唯一性通过;经真实 `Outbox`+`Sender`+`ScriptedHttpClient` 到 `DONE`;另以 PostgreSQL+真实 `AsyncHttpClient`+本地 HTTP 对端验证完整发送和丢响应恢复 |
 | P3 已实施(2026-10-22) | `move_bins`/`exchange_bins`/`rotate_rack` 的 DTO、规则、冻结;`RackStateReader` 端口 | 随可信位置投影或明确调用方推进;届时规则条款全覆盖、未注入端口时失败关闭 |
 
-P3 的方法随包导出;位置投影落地前不注入 `state_reader`,调用即失败关闭。
+P3 的方法随包导出,不依赖位置投影。
 
 ## 8. 验证与测试原则
 

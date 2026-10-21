@@ -70,14 +70,11 @@ from app.integrations.wms_transport import (  # noqa: E402
     BinMove,
     HandoffPosition,
     RackBinSlot,
-    RackState,
 )
 from app.integrations.wms_transport.wire import (  # noqa: E402
-    bin_faces,
     bin_move_data,
     exchange_bins_data,
     rotate_rack_data,
-    rotate_rack_input,
 )
 
 
@@ -85,17 +82,15 @@ def slot(rack="rackA", face="A", number="1"):
     return RackBinSlot(rack, face, number)
 
 
-def rotate(position=None, face="90", template="CTU02", state=None):
-    position = position or Rack("510004")
-    state = state or RackState("KT16", "0")
-    return rotate_rack_data(rotate_rack_input("510004", position, face, template), state)
+def rotate(position=None, face="90", template="CTU02"):
+    return rotate_rack_data("510004", position or RackPosition("KT16"), face, template)
 
 
 def test_move_defaults_to_f01_but_rotate_has_no_default_template():
     # 换面模板随角色而异(五层 CTU02、转运/退料 CK04),不设默认,漏传即报错。
     assert move_rack_data("rack", Rack("rack"), RackPosition("KT16"))["rcs_template_id"] == "F01"
     with pytest.raises(TypeError):
-        rotate_rack_input("rack", Rack("rack"), "90")
+        rotate_rack_data("rack", Rack("rack"), "90")
 
 
 def test_rack_rotate_matches_contract_frozen_bytes():
@@ -104,29 +99,29 @@ def test_rack_rotate_matches_contract_frozen_bytes():
         b'"operation":"transport.task.submit@v1","timestamp":1791991270077,'
         b'"data":{"transport_task_id":"transport-9af2751b-4d01-4203-88a7-649bbf69e810",'
         b'"kind":"RACK_ROTATE","rack_id":"510004","rcs_template_id":"CTU02",'
-        b'"source":{"kind":"RACK","location_code":"510004"},'
+        b'"source":{"kind":"RACK_POSITION","location_code":"KT16"},'
         b'"target":{"kind":"RACK_POSITION","location_code":"KT16"},"target_face":"90"}}'
     )
 
 
-def test_rack_rotate_exact_position_must_equal_the_trusted_position():
+def test_rack_rotate_writes_the_exact_position_to_both_source_and_target():
+    # 合同 §3.2:位置原样同时写入 source 与 target;当前位置/面由 WMS 自行校验,WES 不推断。
     data = rotate(RackPosition("KT16"))
     assert data["source"] == data["target"] == {"kind": "RACK_POSITION", "location_code": "KT16"}
-    with pytest.raises(InvalidTransportRequest):
-        rotate(RackPosition("KT17"))
 
 
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: rotate_rack_input("510004", Zone("510004"), "90", "CTU02"),
-        lambda: rotate_rack_input("510004", Rack("another"), "90", "CTU02"),
-        lambda: rotate_rack_input("510004", Rack("510004"), None, "CTU02"),
-        lambda: rotate_rack_input("510004", Rack("510004"), "", "CTU02"),
-        lambda: rotate_rack_input("510004", Rack("510004"), "x" * 11, "CTU02"),
-        lambda: rotate_rack_input("510004", Rack("510004"), "90", "CTU09"),
-        lambda: rotate_rack_input("", Rack("510004"), "90", "CTU02"),
-        lambda: rotate(face="0"),
+        lambda: rotate_rack_data("510004", Zone("510004"), "90", "CTU02"),
+        lambda: rotate_rack_data("510004", Rack("510004"), "90", "CTU02"),
+        lambda: rotate_rack_data("510004", Rack("another"), "90", "CTU02"),
+        lambda: rotate_rack_data("510004", "KT16", "90", "CTU02"),
+        lambda: rotate_rack_data("510004", RackPosition("KT16"), None, "CTU02"),
+        lambda: rotate_rack_data("510004", RackPosition("KT16"), "", "CTU02"),
+        lambda: rotate_rack_data("510004", RackPosition("KT16"), "x" * 11, "CTU02"),
+        lambda: rotate_rack_data("510004", RackPosition("KT16"), "90", "CTU09"),
+        lambda: rotate_rack_data("", RackPosition("KT16"), "90", "CTU02"),
     ],
 )
 def test_rack_rotate_rejects_contract_violations(build):
@@ -150,7 +145,6 @@ def test_bin_move_matches_contract_shape_sorted_by_container_id():
         "source": {"kind": "RACK_BIN_SLOT", "rack_id": "rackA", "rack_face": "A", "slot_id": "1"},
         "target": {"kind": "HANDOFF_POSITION", "location_code": "out"},
     }
-    assert bin_faces(data) == {"rackA": "A"}
 
 
 def test_bin_move_allows_a_shared_handoff_position():
@@ -209,7 +203,7 @@ def test_bin_move_allows_different_faces_on_different_racks():
             BinMove("b-2", slot("rackB", "B", "1"), HandoffPosition("o")),
         ]
     )
-    assert bin_faces(data) == {"rackA": "A", "rackB": "B"}
+    assert len(data["moves"]) == 2
 
 
 def pair(left, right, left_bin="b-1", right_bin="b-2"):
@@ -241,7 +235,7 @@ def test_exchange_allows_one_group_or_two_crossing_groups():
             pair(slot("rackA", "A", "2"), slot("rackB", "A", "2"), "b-3", "b-4"),
         ]
     )
-    assert len(crossing["moves"]) == 4 and bin_faces(crossing) == {"rackA": "A", "rackB": "A"}
+    assert len(crossing["moves"]) == 4
 
 
 @pytest.mark.parametrize(

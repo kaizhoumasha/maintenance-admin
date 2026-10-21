@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 
@@ -10,6 +11,8 @@ from app.reliable import Outbox, ProtocolAdapter
 from app.reliable.config import ReliableConfig
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,6 +39,14 @@ async def reliable_lifespan(
         for name, target in config.targets.items():
             if target.protocol in adapters:
                 clients[name] = client_factory(target.http_config())
+            else:
+                # 入队不依赖发送器的适配器注册,漏注册会让消息静默停在 PENDING,所以启动时就报出来。
+                logger.warning(
+                    "reliable target %r protocol %r has no registered adapter: "
+                    "messages are enqueued but never sent",
+                    name,
+                    target.protocol,
+                )
         sender.runner = asyncio.create_task(sender.run())
         yield Outbox(config.targets, adapters) if config.targets else None
     finally:

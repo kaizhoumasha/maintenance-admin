@@ -1,4 +1,5 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from math import isfinite
 from types import MappingProxyType
@@ -100,10 +101,22 @@ class ReliableConfig:
         object.__setattr__(self, "targets", MappingProxyType(dict(self.targets)))
 
 
+@contextmanager
+def _config_error(label: str) -> Iterator[None]:
+    """保持原异常类型,消息里补上配置名和出错位置,避免只看到 TargetConfig 的内部参数错误。"""
+    try:
+        yield
+    except (TypeError, ValueError) as error:
+        raise type(error)(f"RELIABLE_TARGETS {label}: {error}") from error
+
+
 def parse_reliable_config(settings: "Settings") -> ReliableConfig:
     raw = settings.RELIABLE_TARGETS
-    if set(raw) - {"defaults", "targets"}:
-        raise ValueError("unknown reliable target configuration")
+    if unknown := set(raw) - {"defaults", "targets"}:
+        raise ValueError(
+            f"RELIABLE_TARGETS: unknown reliable target configuration {sorted(unknown)}"
+            "(只允许 defaults、targets)"
+        )
     defaults = {
         "timeout_ms": settings.RELIABLE_DEFAULT_TIMEOUT_MS,
         "max_body_bytes": settings.RELIABLE_MAX_BODY_BYTES,
@@ -114,19 +127,23 @@ def parse_reliable_config(settings: "Settings") -> ReliableConfig:
     if not isinstance(raw.get("defaults", {}), dict) or not isinstance(
         raw.get("targets", {}), dict
     ):
-        raise ValueError("defaults and targets must be objects")
+        raise ValueError("RELIABLE_TARGETS: defaults and targets must be objects")
     defaults.update(raw.get("defaults", {}))
-    TargetConfig(
-        **(
-            {"name": "validation", "base_url": "http://invalid.test", "protocol": "validation"}
-            | defaults
+    with _config_error("defaults"):
+        TargetConfig(
+            **(
+                {"name": "validation", "base_url": "http://invalid.test", "protocol": "validation"}
+                | defaults
+            )
         )
-    )
     targets = {}
     for name, overrides in raw.get("targets", {}).items():
         if not isinstance(overrides, dict) or "name" in overrides:
-            raise ValueError("target must be an object without name override")
-        targets[name] = TargetConfig(name=name, **(defaults | overrides))
+            raise ValueError(
+                f"RELIABLE_TARGETS target {name!r}: must be an object without name override"
+            )
+        with _config_error(f"target {name!r}"):
+            targets[name] = TargetConfig(name=name, **(defaults | overrides))
     # 轮询间隔、租约余量、停机宽限、连接池等待是内部常量(ReliableConfig 默认值),不暴露为环境变量。
     return ReliableConfig(
         targets,

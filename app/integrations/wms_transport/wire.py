@@ -19,7 +19,6 @@ from .types import (
     RackBinSlot,
     RackLocation,
     RackPosition,
-    RackState,
     TransportCaller,
     Zone,
     require_uuid7,
@@ -98,44 +97,24 @@ def _expect(value: object, allowed: tuple[type, ...], message: str) -> object:
     return value
 
 
-def rotate_rack_input(
-    rack_id: str,
-    position: Rack | RackPosition,
-    target_face: str,
-    rcs_template_id: str,
+def rotate_rack_data(
+    rack_id: str, position: RackPosition, target_face: str, rcs_template_id: str
 ) -> dict:
-    """货架原地换面的规范化入参(不含可信状态);合同 §3.2、§3.3。"""
+    """货架原地换面;只接受精确位置,原样同时写入 source 与 target(合同 §3.2、§4.1)。
+
+    当前位置与当前面是否有效由 WMS 在接纳前校验,WES 不推断、不查询。
+    """
     validate_text(rack_id)
     _template(rcs_template_id, ROTATE_TEMPLATES)
-    _expect(position, (Rack, RackPosition), "rotate position must be Rack or RackPosition")
-    source = position_data(position)
-    if source["kind"] == "RACK" and source["location_code"] != rack_id:
-        raise InvalidTransportRequest("rack reference must match rack_id")
+    _expect(position, (RackPosition,), "rotate position must be a RackPosition")
+    place = position_data(position)
     return {
         "kind": "RACK_ROTATE",
         "rack_id": rack_id,
         "rcs_template_id": rcs_template_id,
-        "source": source,
+        "source": place,
+        "target": place,
         "target_face": validate_face(target_face),
-    }
-
-
-def rotate_rack_data(spec: dict, state: RackState) -> dict:
-    """用可信状态补出精确原点位;目标面必须不同于当前面。"""
-    if (
-        spec["source"]["kind"] == "RACK_POSITION"
-        and spec["source"]["location_code"] != state.position
-    ):
-        raise InvalidTransportRequest("position does not match the trusted position")
-    if spec["target_face"] == state.face:
-        raise InvalidTransportRequest("target face equals the current face")
-    return {
-        "kind": spec["kind"],
-        "rack_id": spec["rack_id"],
-        "rcs_template_id": spec["rcs_template_id"],
-        "source": spec["source"],
-        "target": {"kind": "RACK_POSITION", "location_code": state.position},
-        "target_face": spec["target_face"],
     }
 
 
@@ -230,16 +209,6 @@ def exchange_bins_data(exchange_pairs: list[BinExchangePair]) -> dict:
     ):
         raise InvalidTransportRequest("with two rack faces every member must cross them")
     return _moves_data("BIN_EXCHANGE", moves)
-
-
-def bin_faces(data: dict) -> dict[str, str]:
-    """请求涉及的货架及其面,供与可信当前面核对。"""
-    return {
-        place["rack_id"]: place["rack_face"]
-        for move in data["moves"]
-        for place in (move["source"], move["target"])
-        if place["kind"] == "RACK_BIN_SLOT"
-    }
 
 
 def freeze_request(operation_id: str, task_id: str, timestamp: int, data: dict) -> bytes:

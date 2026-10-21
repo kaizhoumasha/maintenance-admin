@@ -28,23 +28,20 @@ def test_caller_requires_valid_routing_text():
             TransportCaller(workline, station)
 
 
-def test_bin_locations_and_rack_state_are_valid_immutable_text():
-    from app.integrations.wms_transport import HandoffPosition, RackBinSlot, RackState
+def test_bin_locations_are_valid_immutable_text():
+    from app.integrations.wms_transport import HandoffPosition, RackBinSlot
 
     slot = RackBinSlot("rack", "A", "s1")
     assert (slot.rack_id, slot.rack_face, slot.slot_id) == ("rack", "A", "s1")
     with pytest.raises(FrozenInstanceError):
         slot.slot_id = "changed"
-    assert HandoffPosition("in").code == "in" and RackState("KT16", "0").face == "0"
+    assert HandoffPosition("in").code == "in"
     for build in (
         lambda: RackBinSlot("", "A", "s"),
         lambda: RackBinSlot("rack", "x" * 11, "s"),
         lambda: RackBinSlot("rack", "A", "s\x00"),
         lambda: RackBinSlot("rack", None, "s"),
         lambda: HandoffPosition(""),
-        lambda: RackState("", "0"),
-        lambda: RackState("KT16", ""),
-        lambda: RackState("KT16", "🧭" * 11),
     ):
         with pytest.raises(InvalidTransportRequest):
             build()
