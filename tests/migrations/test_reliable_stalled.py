@@ -105,7 +105,7 @@ async def test_upgrade_backfills_unknown_for_active_messages_and_keeps_facts(db)
         "WHERE target = :target ORDER BY operation_id",
         target=target,
     )
-    upgraded = await migrate(url, "upgrade", "head")
+    upgraded = await migrate(url, "upgrade", HEAD)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     after = await query(
         url,
@@ -134,7 +134,7 @@ async def test_upgrade_backfills_unknown_for_active_messages_and_keeps_facts(db)
 
 async def test_upgraded_schema_allows_stalled_without_schedule_only(db):
     url, target = db
-    assert (await migrate(url, "upgrade", "head")).returncode == 0
+    assert (await migrate(url, "upgrade", HEAD)).returncode == 0
     base = dict(old_row(target, "x", "PENDING"), uncertain=False, count=0)
     stalled = dict(base, oid="stalled", status="STALLED", next=None)
     columns = {k: v for k, v in stalled.items() if k in NEW_INSERT._bindparams}
@@ -159,7 +159,7 @@ async def test_downgrade_refuses_to_drop_safety_facts_then_succeeds_without_them
     db, blocker, status, uncertain, count, schedule
 ):
     url, target = db
-    assert (await migrate(url, "upgrade", "head")).returncode == 0
+    assert (await migrate(url, "upgrade", HEAD)).returncode == 0
     safe = [
         ("clean", "PENDING", False, 0, NOW),
         ("done", "DONE", True, 2, NOW),

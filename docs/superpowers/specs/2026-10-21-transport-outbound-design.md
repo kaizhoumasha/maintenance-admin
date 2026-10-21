@@ -1,8 +1,14 @@
 # WMS Transport 出站:协议适配器与能力层开发说明书
 
-状态:**P0～P2 工程评审完成,待实施;生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、`2026-10-21-reliable-interaction-plan.md`
+状态:**P0～P2 已实现并通过离线验证;生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、`2026-10-21-reliable-interaction-plan.md`
 
 评审已确认范围(2026-10-21,D1 A):首轮交付 P0～P2;P3 只保留后续设计,其 DTO、规则、冻结及 `RackStateReader` 端口均延后,随可信位置投影或明确调用方推进。本文相关 P3 描述不属于首轮实施与验收。
+
+实施记录(2026-10-22):P0/P1 见 `604dc16`。P2 提供 `TransportService.move_rack`、三种冻结位置类型及 `transport_task` 迁移 `a019d20261022`。caller 路由字段参与幂等摘要,同号不得改挂工作线/站点;该映射不随可靠消息保留期清理。SQLite legacy transaction control 下在保存点前确保实际外层事务已开始,避免释放保存点提前提交;PostgreSQL 使用既有事务。后文工程评审记录为当时结论,不代表当前实施状态。未注册真实目标,未执行真实 WMS 联调,未实施 P3。
+
+最终代码审查修正:SQLite 在线迁移统一以 `BEGIN IMMEDIATE` 开始实际事务并启用事务性 DDL,锁覆盖安全检查、表结构变更及版本更新,避免并发插入绕过 `transport_task`/可靠消息保护。迁移期间 SQLite 并发写入可能等待或失败;PostgreSQL 锁和事务策略不变。永久回归测试实际运行 Alembic,在检查与 DDL 之间尝试另一连接提交,验证写入被阻止。
+
+离线验收(2026-10-22):独立 PostgreSQL 17/Redis 7 与本地真实 HTTP 对端下,全量 `pytest` 为 **940 passed、0 skipped**（52 条既有 SQLite datetime adapter 弃用告警）；Ruff 检查及格式检查通过,唯一 Alembic head 为 `a019d20261022`。独立代码审查发现的 SQLite 降级竞争已通过失败→修复→回归验证。再次独立复审未发现新增缺陷或必要重构；仅完成离线验收,未迁移当前配置库,未注册真实目标。
 
 > 本文覆盖两部分:**P0 可靠层扩展**(未送达预算、未知事实保护和可选固定间隔,§5),以及 Transport 业务域的**两层**:协议适配器、能力层。业务接入层(货架入站/退库、料箱投料/回架)随后续业务逐步扩展,本文只为它预留接缝。入站回调(合同 §5)、结果消费、位置投影不在本文范围。
 
@@ -125,6 +131,27 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 move_rack(session, *, client_request_id, caller, rack_id, source, target,
           target_face=None, rcs_template_id="F01") -> TransportHandle
 ```
+
+使用示例（`outbox` 由调用方装配已配置的目标和 `TransportSubmitAdapter`；不在能力层创建发送器）：
+
+```python
+from app.integrations.wms_transport import Rack, RackPosition, TransportCaller, TransportService
+
+transport = TransportService(outbox, target="wms")
+async with session_factory.begin() as session:
+    handle = await transport.move_rack(
+        session,
+        client_request_id="01a13b00-cabd-7390-890a-0c093e7c07a1",
+        caller=TransportCaller(workline_id="line-1", station_id="station-1"),
+        rack_id="510004",
+        source=Rack("510004"),
+        target=RackPosition("KT16"),
+        rcs_template_id="CTU01",
+        target_face="90",
+    )
+```
+
+示例 ID 仅供说明；生产调用方须在首次形成业务输入时生成并持久化自己的 UUIDv7,同一请求重放沿用原号。事务提交后 `handle` 仍只表示登记义务,不表示物理成功。
 
 表 `transport_task`(只存能力层独有事实,请求字节仍只在 `reliable_message.request_raw` 一处,不复制):
 

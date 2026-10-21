@@ -3,6 +3,7 @@
 OPERATION = "transport.task.submit@v1"
 PROTOCOL = "wms-transport"
 DEFAULT_SUBMIT_PATH = "/api/v1/wes/transport-requests"
+RCS_TEMPLATES = frozenset({"CTU01", "CTU02", "CTU03", "F01"})
 
 # 合同 §4.2:最后一项是已确认的完整线上字面量,逐字保持,不得改写或拆分匹配。
 REJECTION_REASONS = frozenset(

@@ -11,8 +11,15 @@ url = get_settings().DATABASE_URL
 
 
 def _run(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    sqlite = connection.dialect.name == "sqlite"
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        transactional_ddl=True if sqlite else None,
+    )
     with context.begin_transaction():
+        if sqlite:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
         context.run_migrations()
 
 

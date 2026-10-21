@@ -42,6 +42,8 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
         )
 
     try:
+        async with pg_sessions() as session:
+            original_version = await session.scalar(text("SELECT version_num FROM alembic_version"))
         result = await migrate("downgrade", "c9f2b7a41d08")
         assert (result.returncode != 0) == occupied, result.stdout + result.stderr
         if occupied:
@@ -49,7 +51,7 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
             async with pg_sessions() as session:
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "a019c20261022"
+                    == original_version
                 )
         else:
             async with pg_sessions() as session:
