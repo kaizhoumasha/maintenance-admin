@@ -1,6 +1,6 @@
 # 出站联调控制台(Swagger 统一入口)开发说明书
 
-状态:**T1~T5 已实施并验证(2026-10-22,见 §10);T6(README 小节)未做;未提交** · 依据:`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md`、AGENTS.md 分层约定 · 范围:仅 `ENVIRONMENT=local`
+状态:**T1~T5 已实施并验证(2026-10-22,见 §10);T6 已补(README「联调控制台」小节)** · 依据:`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md`、AGENTS.md 分层约定 · 范围:仅 `ENVIRONMENT=local`
 
 ## 1. 目标与边界
 
@@ -217,4 +217,4 @@ ACK 体回显请求里的 `operation_id`、`data.transport_task_id` 并带整数
 - **端到端(临时 SQLite 库 + 随机端口 + `RELIABLE_TARGETS` 指向自身,未碰开发库)**:真实发送器自调用 Mock WMS,终态与 §4.7 一致:`accept`→DONE、`duplicate`→DONE、`conflict`→FAILED/CONFLICT、`reject`→FAILED/REJECTED、`unavailable`→重试后 STALLED、`garbage`→PENDING(UNKNOWN,待重试)。`hang` 未测(睡眠 60 秒,逻辑与超时路径同属 UNKNOWN)。
 - **浏览器(Swagger UI)**:`POST /api/v1/dev/outbound` 的 Examples 下拉出现 6 项,选中后请求体自动填充,§9.1 未验证项已关闭。
 - **实施中的调整**:嵌套请求模型加 `Transport` 前缀(`Slot`、`Route` 等泛名会在不同业务间冲突 OpenAPI schema 名)。
-- **仍未做**:T6(README 启用说明);`hang` 模式;Postgres 下的实测。
+- **仍未做**:`hang` 模式;Postgres 下的实测。
