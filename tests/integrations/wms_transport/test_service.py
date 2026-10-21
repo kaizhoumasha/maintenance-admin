@@ -243,7 +243,7 @@ def test_unconfigured_error_shows_the_setting_an_example_and_what_exists(monkeyp
     with pytest.raises(RuntimeError) as empty:
         _ = TransportService().target
     assert "RELIABLE_TARGETS" in str(empty.value) and "wms-transport" in str(empty.value)
-    assert "base_url" in str(empty.value)  # 带一个可照抄的示例
+    assert '"targets":{"wms-transport":{"base_url"' in str(empty.value)  # 带一个可照抄的示例
 
     settings_with(monkeypatch, {"ecs": wms() | {"protocol": "ecs-device"}})
     with pytest.raises(RuntimeError) as other:

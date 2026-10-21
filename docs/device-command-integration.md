@@ -255,14 +255,14 @@ ECS 不采用静态设备 target 列表。现场不需要人工维护第二份�
 
 `operation_id` 由 submit 发起方生成并保存，格式为带标准连字符的小写 UUIDv7。`timestamp` 是 UTC Unix 毫秒整数。`transport_task_id` 标识业务搬运任务；`client_request_id` 是 WES 内部业务调用身份，不替代 submit `operation_id`，也不加入固定请求信封。技术恢复复用原身份和原始字节，不能重新生成时间或 JSON。
 
-当前可靠层的示例映射是 `(target="wms", operation="transport.task.submit@v1", operation_id=原 submit operation_id)`。它展示公开入队接口，不能沿用 DeviceCommand 的设备联合键。
+当前可靠层的示例映射是 `(target="wms-transport", operation="transport.task.submit@v1", operation_id=原 submit operation_id)`。它展示公开入队接口，不能沿用 DeviceCommand 的设备联合键。
 
 ### 5.2 静态配置与适配器文件
 
 下面展示静态目标的配置格式。实验适配器只覆盖学习切片，真实启用前须完成 §5.3 的 T1/T2/T3/T4。
 
 ```dotenv
-RELIABLE_TARGETS={"targets":{"wms":{"base_url":"http://10.24.199.217:8284","protocol":"wms-transport","timeout_ms":10000,"max_body_bytes":262144}}}
+RELIABLE_TARGETS={"targets":{"wms-transport":{"base_url":"http://10.24.199.217:8284","protocol":"wms-transport","timeout_ms":10000,"max_body_bytes":262144}}}
 ```
 
 先复制[离线实验](reliable-transport-lab.md)中的完整 `TransportSubmitAdapter` 和测试，跑通本页合法请求的响应分类。完整合同交付后，按 T1 把实现整理到 `app/integrations/wms_transport/adapter.py` 并补齐下面列出的增量。生产适配器同步、无副作用，不查库、不发网，正文原样透传。
@@ -281,7 +281,7 @@ app.state.reliable_adapters = {
 }
 ```
 
-`wms` 是 target，`wms-transport` 是注册名；目标名须匹配 `[a-z0-9][a-z0-9_.-]{0,63}`，base_url 不带尾部 `/`，路径保持原大小写。不要在运行中修改注册表，客户端在启动时创建。
+目标名（示例用 `wms-transport`，可任取）只是 `RELIABLE_TARGETS` 里的标签，会写进已入队消息，上线后改名会让旧名字的待发消息停在 `PENDING`；`protocol` 取 `wms-transport` 才是绑定适配器的注册名，默认实例按这个协议选目标；目标名须匹配 `[a-z0-9][a-z0-9_.-]{0,63}`，base_url 不带尾部 `/`，路径保持原大小写。不要在运行中修改注册表，客户端在启动时创建。
 
 ### 5.3 ACK 与完整合同的适配边界
 

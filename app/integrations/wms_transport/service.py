@@ -66,7 +66,7 @@ class TransportService:
             ]
             if not names:
                 existing = ", ".join(f"{n}[{t.protocol}]" for n, t in self.outbox.targets.items())
-                example = f'{{"targets":{{"wms":{{"base_url":"http://host:port","protocol":"{PROTOCOL}"}}}}}}'
+                example = f'{{"targets":{{"{PROTOCOL}":{{"base_url":"http://host:port","protocol":"{PROTOCOL}"}}}}}}'
                 raise RuntimeError(
                     f"未配置 WMS Transport 目标:RELIABLE_TARGETS 中没有 protocol={PROTOCOL} "
                     f"的目标(现有:{existing or '无'})。示例:RELIABLE_TARGETS='{example}'"

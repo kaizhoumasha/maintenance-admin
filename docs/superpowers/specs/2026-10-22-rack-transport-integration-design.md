@@ -490,7 +490,7 @@ _No new implementation tasks from Code Quality or Performance._ R3、R4 的文�
 NO UNRESOLVED DECISIONS
 - 完整生命周期用不可变的 `RackCycle` 句柄建模(用户 2026-10-22,方案 A):角色只给一次,配对真正由构造保证;不落库,不强制步骤顺序,持久化的生命周期留到阶段 B。原来的三个独立场景函数已去掉,避免两套入口。
 - 默认实例零接线(用户 2026-10-22):去掉 `bind`。`transport_service` 首次使用时从 `RELIABLE_TARGETS` 惰性取得 `Outbox`(适配器取 `adapter.ADAPTERS` 的唯一定义)并缓存,目标名按协议 `wms-transport` 推断(没有或多个则报错);因此 API 进程与 Celery 等不跑 `lifespan` 的后台进程用法一致。构造函数参数保留,用于测试和特殊装配。`RackStateReader` 待位置投影落地后由项目内实现提供,业务代码同样无感。
-- 仍需一次性基础设施接线(不是业务开发的事,也尚未做):启用真实目标时,在 `main.py` 的生命周期里把同一份 `ADAPTERS` 注册给可靠发送器(`app.state.reliable_adapters`)。
+- 一次性基础设施接线已完成(用户 2026-10-22):`app/main.py` 把同一份 `ADAPTERS` 注册给可靠发送器;启用真实目标只需在部署环境配置 `RELIABLE_TARGETS`(示例见 `.env.example`)。
 - 取消 `RackStateReader`(用户 2026-10-22):位置与面的有效性交给 WMS 校验,`cycle.rotate` 新增必填的 `position` 参数(沿用 `rotate_rack` 的参数名),本层不再有任何本地状态依赖;这是对合同 §3.2 的主动偏离,见能力层说明书文首。
 - `rotate_rack` / `cycle.rotate` 的 `position` 只接受 `RackPosition`(用户 2026-10-22):现场规则要求换面目标是「当前实际所在的 RACK_POSITION」,不再接受 `Rack` 引用。
 - 料箱业务接入层(用户 2026-10-22,按 `rack_scenarios` 的接入方式):`bin_scenarios`(`BinScenarios` 的模块级实例,共用零接线的 `transport_service`)提供 `feed_bins`(投料:货架储位 → 滚筒线入料位置)、`return_bins`(回架:出料位置 → 货架储位)、`exchange_bins`(1~2 对交换)。投料与回架由场景固定搬运方向,方向不符(含储位到储位、交接位到交接位)直接拒绝;成员数、重复、同货架同面等合同规则仍由能力层执行。料箱任务没有 RCS 模板,也没有跨步骤的生命周期,所以不设角色和句柄;调用方身份随每次调用传入。选箱、选储位和批次划分由调用方先决定(合同 §8)。

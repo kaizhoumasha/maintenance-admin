@@ -4,7 +4,7 @@
 
 评审已确认范围(2026-10-21,D1 A):首轮交付 P0～P2;P3 只保留后续设计,其 DTO、规则、冻结及 `RackStateReader` 端口均延后,随可信位置投影或明确调用方推进。本文相关 P3 描述不属于首轮实施与验收。
 
-**2026-10-22 决定(用户)——取消 `RackStateReader` 与本地可信状态校验**:换面、料箱搬运与交换的位置/面有效性交给 WMS 在接纳前校验(合同 §4.1:面等于当前面返回 409,无法确认返回 503)。`rotate_rack(position, target_face, rcs_template_id)` 的 `position` **只接受 `RackPosition`**(调用方传入当前实际所在的精确位置;`Rack` 引用被拒绝),按合同 §3.2 原样同时写入 `source` 与 `target`;`move_bins` / `exchange_bins` 只做请求自身的结构校验。这是对合同 §3.2「创建前必须已有可信位置与当前面、未知即失败关闭」的**主动偏离**,风险是错误更晚暴露(WMS 返回 409 → 本地终态 `FAILED`,或 503 → 重试直至预算耗尽 `STALLED`);须与 WMS 确认二次校验按 §4.1 实现。下文及 §11 评审记录中涉及 `RackStateReader`、可信状态的描述为历史记录,以本条为准。
+**2026-10-22 决定(用户)——取消 `RackStateReader` 与本地可信状态校验**:换面、料箱搬运与交换的位置/面有效性交给 WMS 在接纳前校验(合同 §4.1:面等于当前面返回 409,无法确认返回 503)。`rotate_rack(position, target_face, rcs_template_id)` 的 `position` **只接受 `RackPosition`**(调用方传入当前实际所在的精确位置;`Rack` 引用被拒绝),按合同 §3.2 原样同时写入 `source` 与 `target`;`move_bins` / `exchange_bins` 只做请求自身的结构校验。这是对合同 §3.2「创建前必须已有可信位置与当前面、未知即失败关闭」的**主动偏离**,风险是错误更晚暴露(WMS 返回 409 → 本地终态 `FAILED`,或 503 → 重试直至预算耗尽 `STALLED`);WMS 已确认(用户答复,2026-10-22):换面的 `source` 与 `target` 同为精确位置可被接纳,位置与当前面的有效性完全由 WMS 校验,请求形态由 `tests/integrations/wms_transport/test_rack_lifecycle_contract.py` 固化。下文及 §11 评审记录中涉及 `RackStateReader`、可信状态的描述为历史记录,以本条为准。
 
 P3 实施记录(2026-10-22,用户指示继续,**其中可信状态部分已被上一条取代**):`rotate_rack`、`move_bins`、`exchange_bins` 已实现——DTO/规则/冻结在 `wire.py`,四个方法共用 `TransportService._register`;可信状态经 `RackStateReader.rack_state(rack_id) -> RackState(position, face) | None` 注入,未注入、查不到、面不一致或目标面等于当前面一律失败关闭;重放同号请求不读取可信状态;摘要按规范化入参(料箱按 `container_id` 排序,交换对左右互换等价)计算,可信状态派生的 `target` 不参与摘要。位置投影本身仍未实现,reader 由调用方装配。
 
@@ -43,7 +43,7 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 - 不做入站:`/api/v1/wms/events` 路由、`transport.task.member_position_changed@v1`、`transport.task.resulted@v1`、Evidence、位置投影、`outcome_version` 发布。
 - 不做业务接入层,不选货架/储位,不做业务重试(合同 T1:确定拒绝/取消后的重试属于调用方,且必须换新 `client_request_id`)。
 - 除 §5 的 P0(预算、未知事实保护与可选固定重提间隔)外,不改 `app/http_client`、`app/reliable`;不新增通用重试策略表/配置 DSL。
-- 不生产启用:不在 `app/main.py` 注册适配器、不配置真实 `RELIABLE_TARGETS`。启用须等 §9 的偏差项被负责人确认(与接入指南 §5.2 一致)。
+- ~~不生产启用:不在 `app/main.py` 注册适配器~~:2026-10-22 已按用户决定在 `app/main.py` 注册 `ADAPTERS`(`tests/integrations/wms_transport/test_app_wiring.py` 固化);是否真正发送由 `RELIABLE_TARGETS` 是否配置 `wms-transport` 目标决定(示例见 `.env.example`,地址 `http://10.24.199.217:8284`)。仓库不预置真实目标配置。
 - 不提供取消、暂停、轮询、人工重发入口(合同 §10)。
 
 ## 2. 前置事实(已核对)
@@ -129,7 +129,7 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 
 ### 4.4 幂等与入队(`service.py` + 表 `transport_task`)
 
-首轮 `TransportService(outbox, *, target="wms", clock, uuid7, uuid4)` 仅公开 `move_rack`,签名与合同 §3.2 一致,另在最前加 `session: AsyncSession`;P3 再加入 `state_reader` 及其余三个方法:
+首轮 `TransportService(outbox, *, target, clock, uuid7)`(2026-10-22 起 `outbox`、`target` 可省略,按配置惰性取得,目标按协议 `wms-transport` 选取) 仅公开 `move_rack`,签名与合同 §3.2 一致,另在最前加 `session: AsyncSession`;P3 再加入 `state_reader` 及其余三个方法:
 
 ```text
 move_rack(session, *, client_request_id, caller, rack_id, source, target,
@@ -141,7 +141,7 @@ move_rack(session, *, client_request_id, caller, rack_id, source, target,
 ```python
 from app.integrations.wms_transport import Rack, RackPosition, TransportCaller, TransportService
 
-transport = TransportService(outbox, target="wms")
+transport = TransportService(outbox, target="wms-transport")
 async with session_factory.begin() as session:
     handle = await transport.move_rack(
         session,
