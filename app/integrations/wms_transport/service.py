@@ -11,7 +11,7 @@ from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 
-from .protocol import OPERATION
+from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION
 from .types import (
     BinExchangePair,
     BinMove,
@@ -63,7 +63,7 @@ class TransportService:
         source: RackLocation,
         target: RackLocation,
         target_face: str | None = None,
-        rcs_template_id: str = "F01",
+        rcs_template_id: str = DEFAULT_MOVE_TEMPLATE,
     ) -> TransportHandle:
         """登记义务,不提交调用方事务;返回值不证明接纳或物理完成。"""
         data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
@@ -78,7 +78,7 @@ class TransportService:
         rack_id: str,
         position: Rack | RackPosition,
         target_face: str,
-        rcs_template_id: str = "CTU02",
+        rcs_template_id: str,
     ) -> TransportHandle:
         """原地换面;需要可信的当前精确位置与当前面,缺失即失败关闭。"""
         spec = rotate_rack_input(rack_id, position, target_face, rcs_template_id)

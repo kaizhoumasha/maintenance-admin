@@ -64,7 +64,7 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 
 - `OPERATION = "transport.task.submit@v1"`,可靠层 `protocol` 注册名 `"wms-transport"`。
 - `REJECTION_REASONS`:`INVALID_ENVELOPE`、`UNSUPPORTED_OPERATION`、`INVALID_DATA`、`COORDINATED_BIN_EXCHANGE_UNSUPPORTED`,以及合同 §4.2 的完整中英文拼接字面量(逐字复制,不得改动)。
-- `RCS_TEMPLATES = {CTU01, CTU02, CTU03, F01}`;`KINDS = {RACK_MOVE, RACK_ROTATE, BIN_MOVE, BIN_EXCHANGE}`。
+- `MOVE_TEMPLATES = {CTU01, CTU03, F01}`(`move_rack`)、`ROTATE_TEMPLATES = {CTU02, CK04}`(`rotate_rack`),按场景区分(2026-10-22 用户指定);CK04 为转运货架换面,合同 0.4.0 §4.1 文本尚未同步,WMS 若不接受会返回 422;`KINDS = {RACK_MOVE, RACK_ROTATE, BIN_MOVE, BIN_EXCHANGE}`。
 
 ### 3.2 `TransportSubmitAdapter(submit_path)`
 

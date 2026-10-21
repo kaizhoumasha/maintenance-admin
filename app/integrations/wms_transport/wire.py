@@ -4,7 +4,12 @@ from datetime import datetime
 
 from app.core.clock import unix_ms
 
-from .protocol import OPERATION, RCS_TEMPLATES
+from .protocol import (
+    DEFAULT_MOVE_TEMPLATE,
+    MOVE_TEMPLATES,
+    OPERATION,
+    ROTATE_TEMPLATES,
+)
 from .types import (
     BinExchangePair,
     BinMove,
@@ -35,6 +40,12 @@ def timestamp_ms(now: datetime) -> int:
     return milliseconds
 
 
+def _template(value: object, allowed: frozenset[str]) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise InvalidTransportRequest("unsupported RCS template")
+    return value
+
+
 def position_data(position: RackLocation) -> dict:
     kind = POSITION_KINDS.get(type(position))
     if kind is None:
@@ -47,11 +58,10 @@ def move_rack_data(
     source: RackLocation,
     target: RackLocation,
     target_face: str | None = None,
-    rcs_template_id: str = "F01",
+    rcs_template_id: str = DEFAULT_MOVE_TEMPLATE,
 ) -> dict:
     validate_text(rack_id)
-    if not isinstance(rcs_template_id, str) or rcs_template_id not in RCS_TEMPLATES:
-        raise InvalidTransportRequest("unsupported RCS template")
+    _template(rcs_template_id, MOVE_TEMPLATES)
     source_data, target_data = position_data(source), position_data(target)
     if source_data == target_data:
         raise InvalidTransportRequest("source and target must differ")
@@ -89,12 +99,14 @@ def _expect(value: object, allowed: tuple[type, ...], message: str) -> object:
 
 
 def rotate_rack_input(
-    rack_id: str, position: Rack | RackPosition, target_face: str, rcs_template_id: str = "CTU02"
+    rack_id: str,
+    position: Rack | RackPosition,
+    target_face: str,
+    rcs_template_id: str,
 ) -> dict:
     """货架原地换面的规范化入参(不含可信状态);合同 §3.2、§3.3。"""
     validate_text(rack_id)
-    if not isinstance(rcs_template_id, str) or rcs_template_id not in RCS_TEMPLATES:
-        raise InvalidTransportRequest("unsupported RCS template")
+    _template(rcs_template_id, ROTATE_TEMPLATES)
     _expect(position, (Rack, RackPosition), "rotate position must be Rack or RackPosition")
     source = position_data(position)
     if source["kind"] == "RACK" and source["location_code"] != rack_id:

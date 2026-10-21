@@ -70,11 +70,12 @@ async def test_rotate_registers_with_the_trusted_exact_position(transport_storag
             rack_id="rack",
             position=Rack("rack"),
             target_face="90",
+            rcs_template_id="CK04",
         )
         await session.commit()
         task, data = await stored(session, rig, handle)
     assert task.kind == "RACK_ROTATE"
-    assert data["rcs_template_id"] == "CTU02" and data["target_face"] == "90"
+    assert data["rcs_template_id"] == "CK04" and data["target_face"] == "90"
     assert data["source"] == {"kind": "RACK", "location_code": "rack"}
     assert data["target"] == {"kind": "RACK_POSITION", "location_code": "KT16"}
 
@@ -101,6 +102,7 @@ async def test_rotate_fails_closed_without_trusted_state(transport_storage, read
                 rack_id="rack",
                 position=position,
                 target_face=face,
+                rcs_template_id="CTU02",
             )
         await session.commit()
         assert await counts(session, rig) == (0, 0)
@@ -219,3 +221,19 @@ async def test_exchange_orientation_replays_and_method_change_conflicts(transpor
             )
         await session.commit()
         assert await counts(session, rig) == (1, 1)
+
+
+async def test_rotate_requires_an_explicit_template(transport_storage):
+    rig = transport_storage
+    service = service_with(rig, StateBook(rack=RackState("KT16", "0")))
+    async with rig.factory() as session:
+        with pytest.raises(TypeError):
+            await service.rotate_rack(
+                session,
+                client_request_id=CLIENT,
+                caller=caller(rig),
+                rack_id="rack",
+                position=Rack("rack"),
+                target_face="90",
+            )
+        assert await counts(session, rig) == (0, 0)

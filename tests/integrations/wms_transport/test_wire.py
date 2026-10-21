@@ -91,6 +91,13 @@ def rotate(position=None, face="90", template="CTU02", state=None):
     return rotate_rack_data(rotate_rack_input("510004", position, face, template), state)
 
 
+def test_move_defaults_to_f01_but_rotate_has_no_default_template():
+    # 换面模板随角色而异(五层 CTU02、转运/退料 CK04),不设默认,漏传即报错。
+    assert move_rack_data("rack", Rack("rack"), RackPosition("KT16"))["rcs_template_id"] == "F01"
+    with pytest.raises(TypeError):
+        rotate_rack_input("rack", Rack("rack"), "90")
+
+
 def test_rack_rotate_matches_contract_frozen_bytes():
     assert freeze(rotate()) == (
         b'{"operation_id":"01a13b00-cabd-7390-890a-0c093e7c07a1",'
@@ -112,13 +119,13 @@ def test_rack_rotate_exact_position_must_equal_the_trusted_position():
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: rotate_rack_input("510004", Zone("510004"), "90"),
-        lambda: rotate_rack_input("510004", Rack("another"), "90"),
-        lambda: rotate_rack_input("510004", Rack("510004"), None),
-        lambda: rotate_rack_input("510004", Rack("510004"), ""),
-        lambda: rotate_rack_input("510004", Rack("510004"), "x" * 11),
+        lambda: rotate_rack_input("510004", Zone("510004"), "90", "CTU02"),
+        lambda: rotate_rack_input("510004", Rack("another"), "90", "CTU02"),
+        lambda: rotate_rack_input("510004", Rack("510004"), None, "CTU02"),
+        lambda: rotate_rack_input("510004", Rack("510004"), "", "CTU02"),
+        lambda: rotate_rack_input("510004", Rack("510004"), "x" * 11, "CTU02"),
         lambda: rotate_rack_input("510004", Rack("510004"), "90", "CTU09"),
-        lambda: rotate_rack_input("", Rack("510004"), "90"),
+        lambda: rotate_rack_input("", Rack("510004"), "90", "CTU02"),
         lambda: rotate(face="0"),
     ],
 )
@@ -286,3 +293,31 @@ def test_exchange_allows_one_group_or_two_crossing_groups():
 def test_exchange_rejects_contract_violations(build):
     with pytest.raises(InvalidTransportRequest):
         build()
+
+
+MOVE_TEMPLATES = ["CTU01", "CTU03", "F01"]
+ROTATE_TEMPLATES = ["CTU02", "CK04"]
+NO_TEMPLATE = ["CK05", "ck04", "CK04 ", "", None, 4, []]
+
+
+@pytest.mark.parametrize("template", MOVE_TEMPLATES)
+def test_rack_move_accepts_only_its_own_templates(template):
+    data = move_rack_data("rack", Rack("rack"), RackPosition("KT16"), None, template)
+    assert data["rcs_template_id"] == template
+
+
+@pytest.mark.parametrize("template", ROTATE_TEMPLATES + NO_TEMPLATE)
+def test_rack_move_rejects_rotate_and_unknown_templates(template):
+    with pytest.raises(InvalidTransportRequest):
+        move_rack_data("rack", Rack("rack"), RackPosition("KT16"), None, template)
+
+
+@pytest.mark.parametrize("template", ROTATE_TEMPLATES)
+def test_rack_rotate_accepts_only_its_own_templates(template):
+    assert rotate(template=template)["rcs_template_id"] == template
+
+
+@pytest.mark.parametrize("template", MOVE_TEMPLATES + NO_TEMPLATE)
+def test_rack_rotate_rejects_move_and_unknown_templates(template):
+    with pytest.raises(InvalidTransportRequest):
+        rotate(template=template)
