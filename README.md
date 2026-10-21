@@ -134,9 +134,13 @@ enterprise-backend/
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
 `app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠交互实施计划](docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md)。
 
+Transport 出站能力已提供 `app.integrations.wms_transport.TransportService.move_rack`，通过调用方 `AsyncSession` 同事务登记任务及可靠消息，支持 `Rack`、`Zone`、`RackPosition`。调用方保存并重用规范小写 UUIDv7 `client_request_id`；同号同输入返回原句柄，同号变更输入（含 caller 路由信息）抛 `IdempotencyConflict`。方法不提交外层事务；句柄只证明登记义务，不证明 WMS 接纳或物理完成。请求按最终 UTF-8 字节冻结，固定上限 256 KiB；迁移 `a019d20261022` 新增 `transport_task`，表非空时拒绝降级删除。装配及生产门槛见 [Transport 出站设计](docs/superpowers/specs/2026-10-21-transport-outbound-design.md)，没有自动注册真实目标。
+
+货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
+
 真实业务接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；当前的动态路由和完整 Transport 生命周期缺口仍阻塞真实启用。
 
-默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后不再保证本地幂等。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标或业务协议。
+默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后可靠层不再保证本地幂等；Transport 独立任务映射仍保留，不因可靠消息清理而重新入队。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标注册。
 发送尝试完成后唤醒本实例发送器补位；领取批量小于并发预算时继续填充空槽。后台检查在系统正常运行时执行，不需要停机；后台检查间隔默认 1 秒。发送器启动首轮、轮询计时器到点、扫描异常等待该间隔后重试时执行后台检查；发送完成唤醒或连续补位时，只有距上次后台检查已满该间隔才执行，否则仅领取发送。
 
 每次后台检查先扫描 TTL 到期的 `PENDING` 消息，再回收租约到期的 `SENDING` 消息，默认各最多处理 100 行；两项上限独立于发送领取批量，不新增环境变量，发送槽满或没有目标时仍按上述条件执行。TTL 扫描将到期消息标为 `EXPIRED`；租约回收将未过 TTL 的消息转回 `PENDING` 并退避，已过 TTL 的转为 `EXPIRED`。这些处理不代表对端未执行，仍须按稳定身份去重。
@@ -144,6 +148,8 @@ enterprise-backend/
 **TTL（Time To Live，消息有效时长）**决定一条消息还能在多长时间内发起发送或重试。以新消息入队创建时写入的 `created_at` 起算，固定截止时间为 `expires_at = created_at + ttl`，不是从事务提交或首次发送时起算；重试、退避、对端等待提示及返回已有消息的重复入队都不会延长或重置 TTL。不设置 `ttl` 时不因有效期截止自动过期，但仍可能进入成功或失败终态。
 
 例如，10:00 入队创建、TTL 为 30 分钟，则从 10:30 起不再发起新的发送或重试。到期的 `PENDING` 消息由后台检查标为 `EXPIRED`，实际发送前也会再次检查截止时间。已经发出的在途请求不会因 TTL 到期被强行取消，仍受原 HTTP 超时和租约回写条件约束，合法成功响应可能在到期后将消息转为 `DONE`；租约到期回收时若 TTL 已过，则转为 `EXPIRED`。TTL 到期不代表对端未执行，也不撤销对端动作。
+
+可选的目标级未送达预算（`max_not_received_attempts`）只统计「确认未送达」（请求未发出，或对端明确未接纳）；一旦出现过结果未知（响应丢失、租约中断或回收），该消息不再受预算约束，继续以原身份重提。未出现未知且次数达到预算的消息转为 `STALLED`：保留原身份与字节，不再发送，不会过期，也不会被保留期清理，并输出 `reliable stalled` 告警。只有调用方显式调用 `Outbox.resume` 才能把它放回 `PENDING`（计数清零，未知标记保留；提交后记 `reliable resumed` 日志）。可选 `fixed_retry_interval_s` 把本地重试等待固定为该值。
 
 | 时间限制 | 起算点与作用 |
 |---|---|

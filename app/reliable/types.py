@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 class MessageStatus(StrEnum):
     PENDING = "PENDING"
     SENDING = "SENDING"
+    STALLED = "STALLED"
     DONE = "DONE"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"

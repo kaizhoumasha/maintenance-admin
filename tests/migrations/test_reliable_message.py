@@ -2,18 +2,18 @@ import asyncio
 import os
 import subprocess
 import sys
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, insert, inspect, text
 
+from app.core.identifiers import uuid7
 from app.models import ReliableMessage
 
 
 @pytest.mark.parametrize("occupied", [False, True])
 async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occupied):
-    target = "migration-" + uuid.uuid4().hex
+    target = "migration-" + uuid7().hex
     now = datetime.now(UTC)
     if occupied:
         async with pg_sessions() as session:
@@ -42,6 +42,8 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
         )
 
     try:
+        async with pg_sessions() as session:
+            original_version = await session.scalar(text("SELECT version_num FROM alembic_version"))
         result = await migrate("downgrade", "c9f2b7a41d08")
         assert (result.returncode != 0) == occupied, result.stdout + result.stderr
         if occupied:
@@ -49,7 +51,7 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
             async with pg_sessions() as session:
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "a019b20261021"
+                    == original_version
                 )
         else:
             async with pg_sessions() as session:
@@ -84,7 +86,7 @@ async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, re
         [column.name for column in index.columns] == ["status", "expires_at"]
         for index in ReliableMessage.__table__.indexes
     )
-    target = "index-" + uuid.uuid4().hex
+    target = "index-" + uuid7().hex
     now = datetime.now(UTC)
     try:
         async with pg_sessions() as session:

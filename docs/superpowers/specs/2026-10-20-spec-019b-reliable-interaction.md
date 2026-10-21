@@ -181,14 +181,14 @@ target = 一个**出站目标**:名称到地址的映射,以及作用于该目�
 |---|---|
 | REQ-DLV-01 | 重试永远复用冻结消息与原身份,禁止生成新身份绕过冲突。 |
 | REQ-DLV-02 | 本地退避为指数 + 全抖动:`local_delay = random(0, min(cap, base × 2^n))`,默认 base 1s、cap 5min,可按目标覆盖;随机源与时钟可注入。`NOT_RECEIVED` 带合法 `retry_after_ms` 时,最终等待为 `max(local_delay, min(retry_after_ms / 1000, max_retry_after))`;无提示则使用 `local_delay`。`cap` 只限制本地抖动,不截断对端提示;但对端提示被采纳的上限为 `max_retry_after`(`RELIABLE_MAX_RETRY_AFTER_S`,默认 3600 秒,可按目标覆盖),提示超过上限时按上限等待并写告警日志,避免错误或恶意的超长提示让没有 `ttl` 的消息无声停滞。 |
-| REQ-DLV-03 | 明确未接收与 `NOT_SENT` 类的暂时性失败**不设终止次数**,以退避持续重试(本地抖动上限默认 5 分钟,最终等待可因对端提示而更长,但不超过 `max_retry_after`),直到送达、终态失败或 `expires_at`;达到 `alert_after_attempts` 后告警。不静默丢弃,也不因"对端宕机时间长"而终止;对端提示不延长 TTL,过期后不再发起新发送。 |
+| REQ-DLV-03 | 明确未接收与 `NOT_SENT` 类的暂时性失败**不设终止次数**,以退避持续重试(本地抖动上限默认 5 分钟,最终等待可因对端提示而更长,但不超过 `max_retry_after`),直到送达、终态失败或 `expires_at`;达到 `alert_after_attempts` 后告警。不静默丢弃,也不因"对端宕机时间长"而终止;对端提示不延长 TTL,过期后不再发起新发送。**可选目标级预算**(`max_not_received_attempts`,默认不设):只有「确认未送达」(`NOT_SENT` 或 `NOT_RECEIVED`)计数;未知结果(`DELIVERY_UNKNOWN`、`UNKNOWN` 判定、租约中断/回收)既不计数也不清零,并持久标记 `delivery_uncertain`,此后预算不再适用。无未知事实且计数达到预算时转 `STALLED`(见下)。可选 `fixed_retry_interval_s` 使本地延迟固定为该值,等待提示规则不变。 |
 | REQ-DLV-04 | **对端必须按身份去重**,这是接入前提而非可选项:对端须通过接入时的幂等重放测试才可上线。对端不具备去重能力时,本层的重试可靠性承诺不成立,须先改造对端(见 §10)。去重保留窗口由接入合同约定:有限窗口的目标须给消息设置不超过窗口的 `ttl`;窗口的配置化校验后移(§12.2)。 |
 | REQ-DLV-06 | **本地错误隔离**:发送阶段单条消息的异常必须被隔离为该条消息的 `FAILED(LOCAL_ERROR)`;发送循环自身的未预期异常记录日志后带退避继续下一轮,循环不得因单条消息或单次异常退出。 |
 
 ### 5.4 消息状态
 
-出站 `status`:`PENDING`(含退避等待,由 `next_attempt_at` 区分)/ `SENDING` / `DONE` / `FAILED` / `EXPIRED`。
-**停止自动发送的状态**:`DONE`、`FAILED`、`EXPIRED`;开放状态均由自动机制推进;**没有 `DEAD`**。
+出站 `status`:`PENDING`(含退避等待,由 `next_attempt_at` 区分)/ `SENDING` / `STALLED` / `DONE` / `FAILED` / `EXPIRED`。
+**停止自动发送的状态**:`DONE`、`FAILED`、`EXPIRED`,以及仅在配置了未送达预算的目标上出现的 `STALLED`(非终态:保留原身份与字节,无 `next_attempt_at`,不被领取、不被过期、不被保留期清理);其余开放状态均由自动机制推进;**没有 `DEAD`**。`STALLED` 只能经调用方显式 `Outbox.resume`(回 `PENDING`、清零计数、不清未知标记)或将来的权威结果收敛退出,基础层不自行恢复。
 状态转换集中在一处实现,非法转换抛错。
 
 ```text
@@ -197,6 +197,8 @@ enqueue -> PENDING --到期前领取--> SENDING --DELIVERED----------> DONE
               |                     +----未发出/未知/明确未接收--> PENDING(退避)
               |                     +----租约回收且未到期------> PENDING(退避)
               +--TTL 到期--> EXPIRED <----租约回收且 TTL 已到期--+
+
+SENDING --确认未送达预算耗尽且无未知--> STALLED --显式 resume--> PENDING
 ```
 
 所有发送回写均受当前租约与 `SENDING` 状态条件保护;过期只停止新尝试,不推断已经发出的请求失败。
@@ -265,7 +267,7 @@ enqueue -> PENDING --到期前领取--> SENDING --DELIVERED----------> DONE
 
 | ID | 要求 |
 |---|---|
-| REQ-DBG-02 | **不提供任何人工恢复入口**:人工裁决、原样/另存重发、重处理、改状态、解锁。异常的退出路径只有自动机制:重试续送、`expires_at`。需要重新发起业务动作时,由**业务代码**以新意图、新身份发送。 |
+| REQ-DBG-02 | **不提供任何人工恢复入口**:人工裁决、原样/另存重发、重处理、改状态、解锁。异常的退出路径只有自动机制:重试续送、`expires_at`;唯一例外是启用未送达预算的目标上的 `STALLED`,仅可由调用方经 `Outbox.resume` 放回,不提供改状态或改字节的入口。需要重新发起业务动作时,由**业务代码**以新意图、新身份发送。 |
 | REQ-DBG-05 | 达到 `alert_after_attempts` 的长期重试与 `FAILED` 产生告警日志(含 `target`、`operation`、`operation_id`、`attempts`,不含报文字段值);它们**只是诊断信息,不是继续运行的前置条件**。排查直接查库。 |
 | REQ-DBG-08 | 消息状态变化(含 `FAILED` 的原因)写结构化日志,字段含 `target`、`operation`、`operation_id`、`from_status`、`to_status`,**不含报文字段值**;逐次尝试结果在消息行 `last_*` 字段。 |
 | REQ-RET-01 | **终态消息保留期**:从进入 `DONE`/`FAILED`/`EXPIRED` 时写入且此后不变的 `updated_at` 起算,超过保留期(`RELIABLE_RETENTION_DAYS`,默认 90 天)后由定时任务删除;条件为终态且 `updated_at < now - retention`,精确截止时刻不删除。沿用项目审计归档任务的 Celery beat 模式;`PENDING`/`SENDING` 不受影响,长期重试后刚进入终态的消息仍保留完整窗口。清理整行也删除本地重复入队的比较依据,不另存去重凭据;REQ-OUT-09 的本地幂等仅在消息行存续期间成立,对端去重不能作为跨清理边界的本地幂等证明。 |

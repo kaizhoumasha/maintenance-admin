@@ -17,6 +17,7 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
+from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable.config import parse_reliable_config
 from app.reliable_runtime import reliable_lifespan
@@ -59,6 +60,11 @@ app = FastAPI(
 app.middleware("http")(trace_id_middleware)
 app.add_middleware(AuditMiddleware)  # 后添加 = 最外层,能看到最终状态码
 app.state.audit_session_factory = session_factory
+# 协议适配器按协议名注册给可靠发送器;是否真正发送由 RELIABLE_TARGETS 是否配置对应目标决定。
+app.state.reliable_adapters = {
+    **getattr(app.state, "reliable_adapters", {}),
+    **WMS_TRANSPORT_ADAPTERS,
+}
 register_exception_handlers(app)
 setup_logging()
 app.include_router(users_router, prefix="/api/v1")

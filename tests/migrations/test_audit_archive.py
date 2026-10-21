@@ -2,13 +2,13 @@ import asyncio
 import os
 import subprocess
 import sys
-import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select, text
 
+from app.core.identifiers import uuid7
 from app.models import AuditLog, AuditLogArchive, Permission, Role, role_permission
 from app.services.audit_service import archive_old
 
@@ -26,7 +26,7 @@ async def _migrate(url, command, revision):
 
 @pytest.mark.parametrize("has_archive", [False, True])
 async def test_downgrade_requires_empty_archive(pg_url, pg_sessions, has_archive):
-    marker = uuid.uuid4().hex
+    marker = uuid7().hex
     async with pg_sessions() as session:
         permission = await session.scalar(
             select(Permission).where(Permission.code == "admin:audit:read_archive")

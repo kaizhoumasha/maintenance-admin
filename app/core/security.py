@@ -1,13 +1,13 @@
 import hashlib
 import hmac
 import os
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
 
 from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode
+from app.core.identifiers import uuid7
 
 ALGORITHM = "HS256"
 
@@ -48,7 +48,7 @@ def create_access_token(sub: str, expires_minutes: int | None = None) -> str:
 
 def create_refresh_token(sub: str) -> tuple[str, str]:
     """返回 (token, jti);调用方负责把 jti 存进 Redis。"""
-    jti = uuid.uuid4().hex
+    jti = uuid7().hex
     ttl = timedelta(seconds=get_settings().REFRESH_TOKEN_EXPIRE_SECONDS)
     return _encode(sub, "refresh", ttl, jti=jti), jti
 

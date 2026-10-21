@@ -53,14 +53,32 @@ async def send_one(
             elif verdict is not None and verdict.kind == VerdictKind.PEER_TERMINAL:
                 outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)
             else:
-                hint = verdict.retry_after_ms if verdict else None
-                delay = retry_delay_s(claim.attempt_no, target, hint, uniform)
-                outcome = AttemptOutcome(
-                    MessageStatus.PENDING,
-                    result=result,
-                    verdict=verdict,
-                    next_attempt_at=utc_datetime(clock()) + timedelta(seconds=delay),
+                # 确认未送达只有两种:请求未发出,或对端明确未接纳;其余(含未知)都不计数。
+                definite = result.delivery_state == DeliveryState.NOT_SENT or (
+                    verdict is not None and verdict.kind == VerdictKind.NOT_RECEIVED
                 )
+                uncertain = claim.delivery_uncertain or not definite
+                count = claim.not_received_count + definite
+                budget = target.max_not_received_attempts
+                if budget is not None and definite and not uncertain and count >= budget:
+                    outcome = AttemptOutcome(
+                        MessageStatus.STALLED,
+                        result=result,
+                        verdict=verdict,
+                        not_received_count=count,
+                        delivery_uncertain=False,
+                    )
+                else:
+                    hint = verdict.retry_after_ms if verdict else None
+                    delay = retry_delay_s(claim.attempt_no, target, hint, uniform)
+                    outcome = AttemptOutcome(
+                        MessageStatus.PENDING,
+                        result=result,
+                        verdict=verdict,
+                        next_attempt_at=utc_datetime(clock()) + timedelta(seconds=delay),
+                        not_received_count=count,
+                        delivery_uncertain=uncertain,
+                    )
     except Exception:
         outcome = AttemptOutcome(
             MessageStatus.FAILED,
@@ -79,6 +97,9 @@ async def send_one(
     )
     if outcome.fail_reason == FailReason.CONTRACT_VIOLATION:
         logger.error("reliable peer contract violation %r", context, extra=context)
+    if outcome.status == MessageStatus.STALLED:
+        context["not_received_attempts"] = outcome.not_received_count
+        logger.warning("reliable stalled %r", context, extra=context)
     if outcome.status == MessageStatus.PENDING:
         if (
             verdict

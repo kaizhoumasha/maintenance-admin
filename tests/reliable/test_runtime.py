@@ -152,3 +152,36 @@ async def test_two_api_lifespans_have_isolated_budgets_and_management_access(
             select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
         )
         assert all(row.status == "DONE" for row in rows)
+
+
+async def test_target_without_a_registered_adapter_is_reported_at_startup(monkeypatch, caplog):
+    import logging
+
+    import app.reliable_runtime as runtime
+    from app.reliable.config import TargetConfig
+
+    class IdleSender:
+        def __init__(self, *args, **kwargs):
+            self.runner = None
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            self.runner.cancel()
+
+    monkeypatch.setattr(runtime, "Sender", IdleSender)
+    served = TargetConfig("served", "http://a.test", "known")
+    orphan = TargetConfig("orphan", "http://b.test", "wms-transport")
+    caplog.set_level(logging.WARNING)
+    clients = []
+    async with runtime.reliable_lifespan(
+        ReliableConfig({"served": served, "orphan": orphan}),
+        {"known": object()},
+        database_url="sqlite+aiosqlite://",
+        client_factory=lambda config: clients.append(config.destination_key) or object(),
+    ):
+        pass
+    assert clients == ["served"]
+    assert "orphan" in caplog.text and "wms-transport" in caplog.text
+    assert "served" not in caplog.text.replace("orphan", "")

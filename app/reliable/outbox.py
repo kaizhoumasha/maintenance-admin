@@ -1,7 +1,8 @@
+import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import event, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,23 @@ from .types import (
     OutboundMessage,
     ProtocolAdapter,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _log_resumed(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    contexts = sync_session.info["reliable_resumed"].pop(transaction, [])
+    if transaction.nested:
+        sync_session.info["reliable_resumed"].setdefault(transaction.parent, []).extend(contexts)
+        return
+    for context in contexts:
+        logger.info("reliable resumed %r", context, extra=context)
+
+
+def _drop_resumed(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    sync_session.info["reliable_resumed"].pop(transaction, None)
 
 
 class Outbox:
@@ -111,3 +129,46 @@ class Outbox:
         if existing.request_raw != draft.request_raw:
             raise DuplicateMessage("identity already has different bytes")
         return EnqueueResult(existing.id, MessageStatus(existing.status))
+
+    async def resume(
+        self, session: AsyncSession, target: str, operation: str, operation_id: str
+    ) -> bool:
+        """STALLED → PENDING,保持原身份与字节;不清除未知事实。非 STALLED 返回 False。"""
+        now = utc_datetime(self.clock())
+        row = (
+            await session.execute(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.status == MessageStatus.STALLED,
+                )
+                .values(
+                    status=MessageStatus.PENDING,
+                    not_received_count=0,
+                    next_attempt_at=now,
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.trace_id)
+            )
+        ).first()
+        if row is None:
+            return False
+        context = {
+            "target": target,
+            "operation": operation,
+            "operation_id": operation_id,
+            "message_trace_id": row.trace_id,
+            "from_status": MessageStatus.STALLED,
+            "to_status": MessageStatus.PENDING,
+        }
+        # 与其它状态转换一致:只在事务真正提交后记日志,回滚则丢弃。
+        sync_session = session.sync_session
+        if "reliable_resumed" not in sync_session.info:
+            sync_session.info["reliable_resumed"] = {}
+            event.listen(sync_session, "after_commit", _log_resumed)
+            event.listen(sync_session, "after_rollback", _drop_resumed)
+        transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        sync_session.info["reliable_resumed"].setdefault(transaction, []).append(context)
+        return True

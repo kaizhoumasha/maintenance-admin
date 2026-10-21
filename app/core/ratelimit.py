@@ -1,12 +1,11 @@
 """Redis 滑动窗口限流:一个 Lua 脚本一次往返完成清理、计数、写入,保证原子。"""
 
-import uuid
-
 from fastapi import Request
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.core.errors import AppError, ErrorCode
+from app.core.identifiers import uuid7
 from app.core.logger import logger
 from app.core.redis import RedisDep
 
@@ -58,7 +57,7 @@ class RateLimit:
                 f"ratelimit:{key}:{WINDOW}",
                 WINDOW,
                 self.limit,
-                uuid.uuid4().hex,
+                uuid7().hex,
             )
         except (RedisConnectionError, RedisTimeoutError):
             # fail-open:限流是保护不是门禁,Redis 挂了不能把整个 API 一起拖下水;
