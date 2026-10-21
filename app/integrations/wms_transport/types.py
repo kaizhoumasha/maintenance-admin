@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from uuid import UUID
+
+from app.core.identifiers import validate_uuid7
 
 
 class InvalidTransportRequest(ValueError):
@@ -20,15 +21,11 @@ def validate_text(value: object) -> str:
     return value
 
 
-def validate_uuid7(value: object) -> str:
-    text = validate_text(value)
+def require_uuid7(value: object) -> str:
     try:
-        identity = UUID(text)
-    except ValueError:
-        raise InvalidTransportRequest("expected a canonical UUIDv7") from None
-    if identity.version != 7 or str(identity) != text:
-        raise InvalidTransportRequest("expected a lowercase canonical UUIDv7")
-    return text
+        return validate_uuid7(value)
+    except ValueError as error:
+        raise InvalidTransportRequest(str(error)) from None
 
 
 @dataclass(frozen=True)

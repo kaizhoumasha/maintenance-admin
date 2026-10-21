@@ -1,6 +1,5 @@
 import json
-from datetime import UTC, datetime, timedelta, timezone
-from uuid import RFC_4122
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,7 +7,6 @@ from app.integrations.wms_transport import InvalidTransportRequest, Rack, RackPo
 from app.integrations.wms_transport.wire import (
     freeze_request,
     move_rack_data,
-    new_uuid7,
     timestamp_ms,
 )
 
@@ -47,15 +45,6 @@ def test_unicode_and_opaque_face_are_preserved_exactly():
     assert payload["data"]["target_face"] == face
     assert payload["data"]["rack_id"] == "架"
     assert "区域".encode() in freeze(move_rack_data("架", Rack("架"), Zone("区域")))
-
-
-@pytest.mark.parametrize("bits", [0, 2**74 - 1])
-def test_uuid7_encodes_milliseconds_version_and_variant(bits):
-    now = datetime(2026, 10, 22, 1, 2, 3, 456789, tzinfo=UTC)
-    identity = new_uuid7(now, randbits=lambda width: bits)
-    assert identity.version == 7 and identity.variant == RFC_4122
-    assert identity.int >> 80 == timestamp_ms(now)
-    assert str(identity) == str(identity).lower()
 
 
 def test_millisecond_clock_is_exact_and_timezone_aware():

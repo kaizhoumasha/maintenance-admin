@@ -7,6 +7,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 
@@ -17,9 +18,9 @@ from .types import (
     RackLocation,
     TransportCaller,
     TransportHandle,
-    validate_uuid7,
+    require_uuid7,
 )
-from .wire import freeze_request, input_digest, move_rack_data, new_uuid7, timestamp_ms
+from .wire import freeze_request, input_digest, move_rack_data, timestamp_ms
 
 
 class TransportService:
@@ -48,7 +49,7 @@ class TransportService:
         rcs_template_id: str = "F01",
     ) -> TransportHandle:
         """登记义务,不提交调用方事务;返回值不证明接纳或物理完成。"""
-        validate_uuid7(client_request_id)
+        require_uuid7(client_request_id)
         if not isinstance(caller, TransportCaller):
             raise InvalidTransportRequest("caller must be a TransportCaller")
         data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
@@ -62,12 +63,13 @@ class TransportService:
         if existing is not None:
             return self._existing(existing, digest)
         now = self.clock()
-        operation_id = str(self.uuid7() if self.uuid7 is not None else new_uuid7(now))
+        timestamp = timestamp_ms(now)
+        operation_id = str(self.uuid7() if self.uuid7 is not None else uuid7(now))
         task_uuid = self.uuid4()
         if not isinstance(task_uuid, UUID) or task_uuid.version != 4:
             raise InvalidTransportRequest("task identity factory must return UUIDv4")
         task_id = "transport-" + str(task_uuid)
-        raw = freeze_request(operation_id, task_id, timestamp_ms(now), data)
+        raw = freeze_request(operation_id, task_id, timestamp, data)
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
         async with session.begin_nested():

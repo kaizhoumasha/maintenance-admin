@@ -117,7 +117,7 @@ app/reliable → app/http_client    基础层,仅可靠层按 P0 扩展
 
 ### 4.3 冻结:身份与字节(`wire.py`)
 
-- `operation_id`:UUIDv7,小写 canonical。标准库无实现,自写约 10 行(RFC 9562:48 位毫秒时间 + 版本 7 + 变体),时钟与随机源可注入。
+- `operation_id`:UUIDv7,小写 canonical。标准库无实现,通用实现放在 `app/core/identifiers.py`(`uuid7`、`validate_uuid7`;RFC 9562:48 位毫秒时间 + 版本 7 + 变体),时钟与随机源可注入。
 - `transport_task_id`:`"transport-" + uuid4`(与合同示例同形态;格式约束未在已读条款中明文,列入 §9)。
 - `timestamp`:UTC Unix 毫秒整数,取注入时钟。
 - 信封键序固定 `operation_id, operation, timestamp, data`;`data` 键序固定 `transport_task_id, kind, rack_id, rcs_template_id, source, target, target_face`(货架族)/ `transport_task_id, kind, moves`(料箱族);`moves` 按 `container_id` 升序,每项 `container_id, source, target`;`BinMove.bin_code` 在线上改名 `container_id`。
