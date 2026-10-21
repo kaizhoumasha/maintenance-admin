@@ -16,6 +16,12 @@
 - 完整响应不受关闭异常覆盖，取消和异常后可释放连接资源；诊断日志不输出正文、凭据或查询值。
 - 查询统一通过独立参数传入，拒绝内联查询和路径点段以保护目标前缀；明文 HTTP 不依赖系统 CA 文件，HTTPS 保持证书与主机名校验。
 
+### 待发布：可靠层发送预算与 WMS Transport 出站（SPEC-019）
+
+- 可靠层新增按目标可选的未送达预算（`max_not_received_attempts`，默认不设）：只统计「确认未送达」，达到预算且从未出现过结果未知的消息转为 `STALLED`——保留原身份与字节、不再发送、不过期、不被保留期清理，并输出告警日志；仅调用方显式 `Outbox.resume` 可放回 `PENDING`（提交后记日志）。曾出现结果未知（响应丢失、租约中断或回收）的消息不再受预算约束，继续以原身份重提。
+- 新增可选 `fixed_retry_interval_s`，使本地重试等待固定；等待提示规则不变。数据库迁移新增 `not_received_count`、`delivery_uncertain` 与 `STALLED` 状态，升级时把存量 `PENDING`/`SENDING` 消息保守标记为未知；降级遇到挂起消息或未知事实时拒绝。
+- 新增 `app/integrations/wms_transport`：WMS Transport 提交协议适配器（合同 §4.2 的 ACK 分类）与能力层 `TransportService.move_rack`——校验、冻结请求字节、`client_request_id` 同事务幂等入队（先抢唯一键，仅赢家入队）。新增表 `transport_task`，降级时非空即拒绝。本变更不启用任何真实目标，入站回调与其余三个搬运方法不在范围内。
+
 ### 既有 0.2.0 发布准备记录
 
 以下保留原项目 `maintenance-admin` 的 **0.2.0** 发布准备记录；该版本已建立 `v0.2.0` 发布标签。记录中的候选基线验收不自动覆盖后续改名或 HTTP 客户端变更；dirty 验收包不能作为正式制品。
