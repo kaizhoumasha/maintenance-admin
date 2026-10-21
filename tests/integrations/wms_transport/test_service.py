@@ -3,7 +3,7 @@ from dataclasses import FrozenInstanceError, replace
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.integrations.wms_transport import (
     IdempotencyConflict,
@@ -17,19 +17,7 @@ from app.integrations.wms_transport import (
 from app.models import Menu, ReliableMessage, TransportTask
 from app.reliable import InvalidMessage
 
-
-async def counts(session, rig):
-    tasks = await session.scalar(
-        select(func.count())
-        .select_from(TransportTask)
-        .where(TransportTask.workline_id == rig.target.name)
-    )
-    messages = await session.scalar(
-        select(func.count())
-        .select_from(ReliableMessage)
-        .where(ReliableMessage.target == rig.target.name)
-    )
-    return tasks, messages
+from .helpers import counts
 
 
 async def test_same_normalized_input_replays_without_new_identity(

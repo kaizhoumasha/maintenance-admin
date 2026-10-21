@@ -20,7 +20,7 @@
 
 - 可靠层新增按目标可选的未送达预算（`max_not_received_attempts`，默认不设）：只统计「确认未送达」，达到预算且从未出现过结果未知的消息转为 `STALLED`——保留原身份与字节、不再发送、不过期、不被保留期清理，并输出告警日志；仅调用方显式 `Outbox.resume` 可放回 `PENDING`（提交后记日志）。曾出现结果未知（响应丢失、租约中断或回收）的消息不再受预算约束，继续以原身份重提。
 - 新增可选 `fixed_retry_interval_s`，使本地重试等待固定；等待提示规则不变。数据库迁移新增 `not_received_count`、`delivery_uncertain` 与 `STALLED` 状态，升级时把存量 `PENDING`/`SENDING` 消息保守标记为未知；降级遇到挂起消息或未知事实时拒绝。
-- 新增 `app/integrations/wms_transport`：WMS Transport 提交协议适配器（合同 §4.2 的 ACK 分类）与能力层 `TransportService.move_rack`——校验、冻结请求字节、`client_request_id` 同事务幂等入队（先抢唯一键，仅赢家入队）。新增表 `transport_task`，降级时非空即拒绝。本变更不启用任何真实目标，入站回调与其余三个搬运方法不在范围内。
+- 新增 `app/integrations/wms_transport`：WMS Transport 提交协议适配器（合同 §4.2 的 ACK 分类）与能力层 `TransportService` 的四个搬运方法（`move_rack`、`rotate_rack`、`move_bins`、`exchange_bins`）——校验、冻结请求字节、`client_request_id` 同事务幂等入队（先抢唯一键，仅赢家入队）；换面与料箱方法依赖调用方注入的可信货架位置/面（`RackStateReader`），缺失即失败关闭。新增表 `transport_task`，降级时非空即拒绝。本变更不启用任何真实目标，入站回调与位置投影不在范围内。
 
 ### 既有 0.2.0 发布准备记录
 

@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -13,14 +13,31 @@ from app.reliable import MessageDraft, Outbox
 
 from .protocol import OPERATION
 from .types import (
+    BinExchangePair,
+    BinMove,
     IdempotencyConflict,
     InvalidTransportRequest,
+    Rack,
     RackLocation,
+    RackPosition,
+    RackState,
+    RackStateReader,
+    RackStateUnavailable,
     TransportCaller,
     TransportHandle,
     require_uuid7,
 )
-from .wire import freeze_request, input_digest, move_rack_data, timestamp_ms
+from .wire import (
+    bin_faces,
+    bin_move_data,
+    exchange_bins_data,
+    freeze_request,
+    input_digest,
+    move_rack_data,
+    rotate_rack_data,
+    rotate_rack_input,
+    timestamp_ms,
+)
 
 
 class TransportService:
@@ -31,9 +48,10 @@ class TransportService:
         target: str = "wms",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uuid7: Callable[[], UUID] | None = None,
+        state_reader: RackStateReader | None = None,
     ):
         self.outbox, self.target = outbox, target
-        self.clock, self.uuid7 = clock, uuid7
+        self.clock, self.uuid7, self.state_reader = clock, uuid7, state_reader
 
     async def move_rack(
         self,
@@ -48,11 +66,85 @@ class TransportService:
         rcs_template_id: str = "F01",
     ) -> TransportHandle:
         """登记义务,不提交调用方事务;返回值不证明接纳或物理完成。"""
+        data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
+        return await self._register(session, "move_rack", client_request_id, caller, data)
+
+    async def rotate_rack(
+        self,
+        session: AsyncSession,
+        *,
+        client_request_id: str,
+        caller: TransportCaller,
+        rack_id: str,
+        position: Rack | RackPosition,
+        target_face: str,
+        rcs_template_id: str = "CTU02",
+    ) -> TransportHandle:
+        """原地换面;需要可信的当前精确位置与当前面,缺失即失败关闭。"""
+        spec = rotate_rack_input(rack_id, position, target_face, rcs_template_id)
+
+        async def resolve() -> dict:
+            return rotate_rack_data(spec, await self._state(rack_id))
+
+        return await self._register(
+            session, "rotate_rack", client_request_id, caller, spec, resolve
+        )
+
+    async def move_bins(
+        self,
+        session: AsyncSession,
+        *,
+        client_request_id: str,
+        caller: TransportCaller,
+        moves: list[BinMove],
+    ) -> TransportHandle:
+        data = bin_move_data(moves)
+        return await self._register(
+            session, "move_bins", client_request_id, caller, data, self._faces_resolver(data)
+        )
+
+    async def exchange_bins(
+        self,
+        session: AsyncSession,
+        *,
+        client_request_id: str,
+        caller: TransportCaller,
+        exchange_pairs: list[BinExchangePair],
+    ) -> TransportHandle:
+        data = exchange_bins_data(exchange_pairs)
+        return await self._register(
+            session, "exchange_bins", client_request_id, caller, data, self._faces_resolver(data)
+        )
+
+    async def _state(self, rack_id: str) -> RackState:
+        state = await self.state_reader.rack_state(rack_id) if self.state_reader else None
+        if not isinstance(state, RackState):
+            raise RackStateUnavailable("trusted rack state is unavailable")
+        return state
+
+    def _faces_resolver(self, data: dict) -> Callable[[], Awaitable[dict]]:
+        async def resolve() -> dict:
+            for rack_id, face in bin_faces(data).items():
+                if (await self._state(rack_id)).face != face:
+                    raise InvalidTransportRequest("rack face does not match the trusted face")
+            return data
+
+        return resolve
+
+    async def _register(
+        self,
+        session: AsyncSession,
+        method: str,
+        client_request_id: str,
+        caller: TransportCaller,
+        spec: dict,
+        resolve: Callable[[], Awaitable[dict]] | None = None,
+    ) -> TransportHandle:
+        """四个方法共用的登记流程:重放不读可信状态,新请求先核对状态再冻结并入队。"""
         require_uuid7(client_request_id)
         if not isinstance(caller, TransportCaller):
             raise InvalidTransportRequest("caller must be a TransportCaller")
-        data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
-        digest = input_digest(caller, data)
+        digest = input_digest(method, caller, spec)
         query = (
             select(TransportTask)
             .where(TransportTask.client_request_id == client_request_id)
@@ -61,6 +153,7 @@ class TransportService:
         existing = await session.scalar(query)
         if existing is not None:
             return self._existing(existing, digest)
+        data = await resolve() if resolve else spec
         now = self.clock()
         timestamp = timestamp_ms(now)
         new_id = self.uuid7 or (lambda: uuid7(now))
@@ -76,7 +169,7 @@ class TransportService:
                     client_request_id=client_request_id,
                     transport_task_id=task_id,
                     operation_id=operation_id,
-                    kind="RACK_MOVE",
+                    kind=data["kind"],
                     input_digest=digest,
                     workline_id=caller.workline_id,
                     station_id=caller.station_id,

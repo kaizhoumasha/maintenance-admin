@@ -4,7 +4,9 @@
 
 评审已确认范围(2026-10-21,D1 A):首轮交付 P0～P2;P3 只保留后续设计,其 DTO、规则、冻结及 `RackStateReader` 端口均延后,随可信位置投影或明确调用方推进。本文相关 P3 描述不属于首轮实施与验收。
 
-实施记录(2026-10-22):P0/P1 见 `604dc16`。P2 提供 `TransportService.move_rack`、三种冻结位置类型及 `transport_task` 迁移 `a019d20261022`。caller 路由字段参与幂等摘要,同号不得改挂工作线/站点;该映射不随可靠消息保留期清理。SQLite legacy transaction control 下在保存点前确保实际外层事务已开始,避免释放保存点提前提交;PostgreSQL 使用既有事务。后文工程评审记录为当时结论,不代表当前实施状态。未注册真实目标,未执行真实 WMS 联调,未实施 P3。
+P3 实施记录(2026-10-22,用户指示继续):`rotate_rack`、`move_bins`、`exchange_bins` 已实现——DTO/规则/冻结在 `wire.py`,四个方法共用 `TransportService._register`;可信状态经 `RackStateReader.rack_state(rack_id) -> RackState(position, face) | None` 注入,未注入、查不到、面不一致或目标面等于当前面一律失败关闭;重放同号请求不读取可信状态;摘要按规范化入参(料箱按 `container_id` 排序,交换对左右互换等价)计算,可信状态派生的 `target` 不参与摘要。位置投影本身仍未实现,reader 由调用方装配。
+
+实施记录(2026-10-22):P0/P1 见 `604dc16`。P2 提供 `TransportService.move_rack`、三种冻结位置类型及 `transport_task` 迁移 `a019d20261022`。caller 路由字段参与幂等摘要,同号不得改挂工作线/站点;该映射不随可靠消息保留期清理。SQLite legacy transaction control 下在保存点前确保实际外层事务已开始,避免释放保存点提前提交;PostgreSQL 使用既有事务。后文工程评审记录为当时结论,不代表当前实施状态。未注册真实目标,未执行真实 WMS 联调。
 
 最终代码审查修正:SQLite 在线迁移统一以 `BEGIN IMMEDIATE` 开始实际事务并启用事务性 DDL,锁覆盖安全检查、表结构变更及版本更新,避免并发插入绕过 `transport_task`/可靠消息保护。迁移期间 SQLite 并发写入可能等待或失败;PostgreSQL 锁和事务策略不变。永久回归测试实际运行 Alembic,在检查与 DDL 之间尝试另一连接提交,验证写入被阻止。
 
@@ -237,9 +239,9 @@ tests/architecture/test_layering.py   增加 integrations 的禁止项
 | P0 基础层预算 | §5 | 预算计数/耗尽/不计数/`resume`/默认 `None` 兼容的永久测试通过;`tests/reliable` 全量保持绿;迁移在 SQLite 与 PostgreSQL 升降级通过 |
 | P1 适配器 | §3 | 合同 §4.2 ACK 矩阵(接入指南 §5.3 的 9 行为基线)+ 边界用例全过;无 DB/网络 |
 | P2 冻结与 `move_rack` | §4.1~§4.4 的 `move_rack`、`transport_task` 表与迁移 | 合同 §4 示例请求的字节与黄金样例一致;幂等/冲突/回滚/并发唯一性通过;经真实 `Outbox`+`Sender`+`ScriptedHttpClient` 到 `DONE`;另以 PostgreSQL+真实 `AsyncHttpClient`+本地 HTTP 对端验证完整发送和丢响应恢复 |
-| P3 后续,不在首轮交付 | `move_bins`/`exchange_bins`/`rotate_rack` 的 DTO、规则、冻结;`RackStateReader` 端口 | 随可信位置投影或明确调用方推进;届时规则条款全覆盖、未注入端口时失败关闭 |
+| P3 已实施(2026-10-22) | `move_bins`/`exchange_bins`/`rotate_rack` 的 DTO、规则、冻结;`RackStateReader` 端口 | 随可信位置投影或明确调用方推进;届时规则条款全覆盖、未注入端口时失败关闭 |
 
-P3 的方法在位置投影落地前不对业务暴露(不导出到包的公共接口)。
+P3 的方法随包导出;位置投影落地前不注入 `state_reader`,调用即失败关闭。
 
 ## 8. 验证与测试原则
 
