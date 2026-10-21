@@ -136,6 +136,8 @@ enterprise-backend/
 
 Transport 出站能力已提供 `app.integrations.wms_transport.TransportService.move_rack`，通过调用方 `AsyncSession` 同事务登记任务及可靠消息，支持 `Rack`、`Zone`、`RackPosition`。调用方保存并重用规范小写 UUIDv7 `client_request_id`；同号同输入返回原句柄，同号变更输入（含 caller 路由信息）抛 `IdempotencyConflict`。方法不提交外层事务；句柄只证明登记义务，不证明 WMS 接纳或物理完成。请求按最终 UTF-8 字节冻结，固定上限 256 KiB；迁移 `a019d20261022` 新增 `transport_task`，表非空时拒绝降级删除。装配及生产门槛见 [Transport 出站设计](docs/superpowers/specs/2026-10-21-transport-outbound-design.md)，没有自动注册真实目标。
 
+货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
+
 真实业务接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；当前的动态路由和完整 Transport 生命周期缺口仍阻塞真实启用。
 
 默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后可靠层不再保证本地幂等；Transport 独立任务映射仍保留，不因可靠消息清理而重新入队。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标注册。

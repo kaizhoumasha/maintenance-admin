@@ -1,5 +1,6 @@
 from .adapter import TransportSubmitAdapter
 from .protocol import OPERATION, PROTOCOL
+from .rack_scenarios import RackDestination, RackRole, RackScenarios
 from .service import TransportService
 from .types import (
     BinExchangePair,
@@ -30,7 +31,10 @@ __all__ = [
     "InvalidTransportRequest",
     "Rack",
     "RackBinSlot",
+    "RackDestination",
     "RackPosition",
+    "RackRole",
+    "RackScenarios",
     "RackState",
     "RackStateReader",
     "RackStateUnavailable",
