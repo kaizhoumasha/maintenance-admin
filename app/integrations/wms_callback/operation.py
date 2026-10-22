@@ -29,6 +29,8 @@ class CallbackPayload(BaseModel):
 
 class CallbackOperation:
     title: ClassVar[str | None] = None
+    # 对端要求在 ACK(含 409/422)里回显的 data 键,如 Transport 的 transport_task_id
+    echo_keys: ClassVar[tuple[str, ...]] = ()
     Payload: ClassVar[type[CallbackPayload]]
 
     def __init__(self) -> None:
@@ -44,6 +46,12 @@ class CallbackOperation:
     def example(self) -> dict | None:
         examples = self.Payload.model_json_schema().get("examples")
         return examples[0] if examples else None
+
+    def echo(self, data: dict) -> dict:
+        """被拒绝的消息也尽量回显 `echo_keys`(只要值是非空字符串)。"""
+        return {
+            key: data[key] for key in self.echo_keys if isinstance(data.get(key), str) and data[key]
+        }
 
     def parse(self, data: dict) -> dict:
         try:

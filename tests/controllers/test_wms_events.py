@@ -3,8 +3,7 @@ import base64
 import json
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, delete, event, insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import Column, Integer, MetaData, String, Table, event, insert, select
 
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import (
@@ -22,37 +21,9 @@ from app.integrations.wms_callback import (
 from app.integrations.wms_callback.dev_callback import OPERATION as EXAMPLE_OPERATION
 from app.integrations.wms_callback.dev_callback import EchoOperation
 from app.main import app
-from app.models import Base, CallbackReceipt, CallbackSnapshot
+from app.models import CallbackReceipt, CallbackSnapshot
 
 PATH = "/api/v1/wms/events"
-
-
-@pytest.fixture(params=["sqlite", "postgres"])
-async def callback_store(request, tmp_path, monkeypatch, redis):
-    if request.param == "postgres":
-        engine = create_async_engine(request.getfixturevalue("pg_url"))
-    else:
-        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}")
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    monkeypatch.setattr(app.state, "callback_session_factory", factory, raising=False)
-    monkeypatch.setattr(snapshots, "_written", 0)
-    monkeypatch.setattr(snapshots, "_dropped", 0)
-    monkeypatch.setattr(snapshots, "_window_start", 0.0)
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError("callback must not access Redis rate limiting")
-
-    monkeypatch.setattr(redis, "eval", forbidden)
-    try:
-        yield factory
-    finally:
-        if request.param == "postgres":
-            async with factory.begin() as session:
-                await session.execute(delete(CallbackSnapshot))
-                await session.execute(delete(CallbackReceipt))
-        await engine.dispose()
 
 
 @pytest.fixture

@@ -5,7 +5,7 @@
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,6 +68,11 @@ class CallbackContext:
     operation_id: str
     timestamp: int
     parsed: dict
+    notes: list = field(default_factory=list)
+
+    def note(self, reason_code: str, **detail) -> None:
+        """附上诊断:返回 202 但没有(完全)应用的事实(未知任务、事实矛盾等),随收据同事务持久化。"""
+        self.notes.append({"reason_code": reason_code, **detail})
 
 
 _registry: dict[str, Any] = {}

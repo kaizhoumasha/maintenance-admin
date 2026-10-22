@@ -1,15 +1,15 @@
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
+from app.core.strict_json import canonical_digest as _digest
 from app.core.strict_json import json_object
 from app.models import CallbackReceipt
 
@@ -25,6 +25,7 @@ from .registry import (
 
 MAX_BODY_BYTES = 256 * 1024
 MAX_OPERATION_CHARS = 256
+LOCK_TIMEOUT = "5s"  # PostgreSQL 回调事务等待行锁的上限,超时整体回滚并返回 503
 
 
 @dataclass(frozen=True)
@@ -69,11 +70,6 @@ def unavailable(raw: bytes) -> CallbackResponse:
     return _unavailable(_identity(json_object(raw)))
 
 
-def _digest(value: object) -> str:
-    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
-
-
 def _replay(existing: CallbackReceipt) -> CallbackResponse:
     body = dict(existing.body)
     if body["code"] == "RECEIVED":
@@ -97,10 +93,9 @@ async def _handle(
 ) -> CallbackResponse:
     """保存点内执行处理器:Rejected 显式回滚其写入;先构造并校验响应,再写回收据(同一事务)。"""
     async with session.begin_nested() as savepoint:
+        context = CallbackContext(session, receipt_id, operation_id, timestamp, parsed)
         try:
-            outcome = await handler.handle(
-                CallbackContext(session, receipt_id, operation_id, timestamp, parsed)
-            )
+            outcome = await handler.handle(context)
         except OUTCOMES as signal:  # 处理器 raise 的结果与 return 等价
             outcome = signal
         if not isinstance(outcome, OUTCOMES):
@@ -116,6 +111,7 @@ async def _handle(
             status_code=response.status_code,
             body=response.body,
             resp_timestamp=response.body["timestamp"],
+            diagnostic=context.notes or None,
         )
     )
     return response
@@ -162,12 +158,17 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
         )
     )
     # 已接纳路径先写临时响应占住身份,处理器返回后在同一事务内覆盖;事务提交前对外不可见。
+    echo_for = getattr(handler, "echo", None)  # 手写结构化处理器可以没有 echo
+    echo = echo_for(payload["data"]) if echo_for and valid_envelope else {}
     reply = (
-        _reply(422, operation_id, "REJECTED", {"reason_code": reason}, "rejected")
+        _reply(422, operation_id, "REJECTED", {"reason_code": reason, **echo}, "rejected")
         if reason
         else _reply(202, operation_id, "RECEIVED", {}, "received")
     )
-    insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    postgresql = session.get_bind().dialect.name == "postgresql"
+    if postgresql:  # 等待行锁有上限:拿不到锁就整体回滚并返回 503,WMS 用原身份重发
+        await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+    insert = pg_insert if postgresql else sqlite_insert
     receipt_id = await session.scalar(
         insert(CallbackReceipt)
         .values(
@@ -203,4 +204,7 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
             return _unavailable(operation_id)
         if effective is not None and existing.effective_digest == effective:
             return _replay(existing)
-    return _reply(409, operation_id, "CONFLICT", {}, "conflict")
+    # 409 回显首次响应里对端要求的键(如首次消息已解析出的任务编号);首次没有就是 {}
+    first = existing.body.get("data") or {}
+    echo_first = echo_for(first) if echo_for else {}
+    return _reply(409, operation_id, "CONFLICT", echo_first, "conflict")

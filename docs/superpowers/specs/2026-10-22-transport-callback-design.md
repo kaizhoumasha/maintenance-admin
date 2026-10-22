@@ -213,6 +213,8 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 每步独立可验收、可合并;1、2 与业务无关,可先于任何具体 operation 完成并联调通用部分。**「可合并」不等于「可对 WMS 开放」**:第 1、2 步合并后入口上线,但此时真实 Transport 回调只会得到 `422 UNSUPPORTED_OPERATION`,WMS 按合同不再重试原内容,第 3 步上线也救不回,滚动发布期间打到旧实例同理。因此上线顺序约定(写入 `docs/deploy.md`):第 3 步在**全部接收实例与全部任务创建者(API、worker、脚本)**均已升级后,才在网关对 WMS 来源放行;在此之前联调只用测试 operation,不投真实 Transport 回调;滚动发布期间网关暂停来源。第 1 步另含两处对既有代码的小改动:`RateLimit` 增加 `limit is None` 豁免,`adapter.py` 的严格 JSON 解析提到 `app/core/strict_json.py`;第 3 步含 `TransportService._register` 写入 `frozen`。
 
+第 3 步已实现(`app/integrations/wms_transport/callback.py`、`callback_payloads.py`、`callback_apply.py`、`reconcile.py`):`Payload` 模型承担消息自身的合法性(字段互斥、枚举、长度),`TaskCallbacks` 承担与冻结任务的对照和应用;位置事件允许 `SOURCE_PICKED → POSITION_UNKNOWN`;`outcome_status` 对货架 `FAILED+position_unknown` 与料箱任一成员位置未知记为 `UNKNOWN`。第 4 步(`STALLED` 定时对账)的 `resume_stalled(cooldown=...)` 已就绪,beat 任务尚未接入。
+
 ### 8.1 测试计划
 
 测试按 AGENTS.md:只固化长期合同,通过公开入口断言,不测私有函数,不为凑覆盖率写测试。

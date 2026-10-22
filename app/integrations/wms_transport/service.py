@@ -171,6 +171,7 @@ class TransportService:
                     workline_id=caller.workline_id,
                     station_id=caller.station_id,
                     created_at=now,
+                    frozen=data,
                 )
                 .on_conflict_do_nothing(index_elements=["client_request_id"])
                 .returning(TransportTask.id)

@@ -33,6 +33,9 @@ async def callback_db(request, tmp_path):
 
     upgraded = await migrate("upgrade", REVISION)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    # 共享 PostgreSQL 库可能已在更新的 head 上:这里把库收敛到本迁移版本
+    targeted = await migrate("downgrade", REVISION)
+    assert targeted.returncode == 0, targeted.stdout + targeted.stderr
     engine = create_async_engine(url)
     try:
         yield engine, migrate
@@ -49,8 +52,8 @@ async def test_receipt_identity_survives_refused_downgrade_and_empty_schema_roun
     engine, migrate = callback_db
     factory = async_sessionmaker(engine)
     async with factory.begin() as session:
-        session.add(
-            CallbackReceipt(
+        await session.execute(
+            CallbackReceipt.__table__.insert().values(
                 operation="unknown@v1",
                 operation_id="01a13b00-cabd-7390-890a-0c093e7c07a1",
                 raw_digest="a" * 64,

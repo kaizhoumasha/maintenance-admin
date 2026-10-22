@@ -22,14 +22,19 @@ from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.core.identifiers import uuid7
 from app.core.redis import get_redis  # noqa: E402
+from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (  # noqa: E402
     AuditLog,
     AuditLogArchive,
     Base,
+    CallbackReceipt,
+    CallbackSnapshot,
     Menu,
     Permission,
+    ReliableMessage,
     Role,
+    TransportTask,
     User,
     role_permission,
 )
@@ -57,6 +62,37 @@ async def pg_sessions(pg_url):
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
+        await engine.dispose()
+
+
+# WMS 回调接收的共享存储夹具:SQLite(create_all)与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
+@pytest.fixture(params=["sqlite", "postgres"])
+async def callback_store(request, tmp_path, monkeypatch, redis):
+    if request.param == "postgres":
+        engine = create_async_engine(request.getfixturevalue("pg_url"))
+    else:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(app.state, "callback_session_factory", factory, raising=False)
+    monkeypatch.setattr(snapshots, "_written", 0)
+    monkeypatch.setattr(snapshots, "_dropped", 0)
+    monkeypatch.setattr(snapshots, "_window_start", 0.0)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("callback must not access Redis rate limiting")
+
+    monkeypatch.setattr(redis, "eval", forbidden)
+    try:
+        yield factory
+    finally:
+        if request.param == "postgres":
+            async with factory.begin() as session:
+                await session.execute(delete(CallbackSnapshot))
+                await session.execute(delete(CallbackReceipt))
+                await session.execute(delete(ReliableMessage))  # Transport 回调测试造的任务与消息
+                await session.execute(delete(TransportTask))
         await engine.dispose()
 
 

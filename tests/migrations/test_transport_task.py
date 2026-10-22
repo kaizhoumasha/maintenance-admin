@@ -75,14 +75,19 @@ async def test_identity_constraints_and_safe_downgrade(transport_db):
             with pytest.raises(IntegrityError):
                 await session.execute(insert(TransportTask).values(**changed))
     async with engine.connect() as connection:
-        before = list((await connection.execute(select(TransportTask))).all())
+        before = list(
+            (
+                await connection.execute(select(TransportTask.id, TransportTask.transport_task_id))
+            ).all()
+        )
     refused = await migrate("downgrade", BASE)
     assert refused.returncode != 0 and "非空" in refused.stdout + refused.stderr
     async with engine.begin() as connection:
         assert (
             await connection.execute(text("SELECT version_num FROM alembic_version"))
         ).scalar() == REVISION
-        assert list((await connection.execute(select(TransportTask))).all()) == before
+        rows = await connection.execute(select(TransportTask.id, TransportTask.transport_task_id))
+        assert list(rows.all()) == before
         await connection.execute(TransportTask.__table__.delete())
     removed = await migrate("downgrade", BASE)
     assert removed.returncode == 0, removed.stdout + removed.stderr

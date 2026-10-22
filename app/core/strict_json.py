@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 
@@ -22,3 +23,9 @@ def json_object(raw: bytes) -> dict | None:
     except (UnicodeError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def canonical_digest(value: object) -> str:
+    """规范化 JSON(键排序、无空白、拒绝 NaN)的 SHA-256,收据与任务层共用同一算法。"""
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
