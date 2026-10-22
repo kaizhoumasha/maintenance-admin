@@ -7,7 +7,7 @@ import pytest
 from app.http_client import DeliveryState, FailureKind, HttpResult, validate_request
 from app.integrations.wms_transport import OPERATION, TransportSubmitAdapter
 from app.integrations.wms_transport.protocol import DEFAULT_SUBMIT_PATH, REJECTION_REASONS
-from app.reliable import OutboundMessage
+from app.reliable import OutgoingMessage
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
 
@@ -49,7 +49,7 @@ def message(request=REQUEST, **changes):
         created_at=FakeClock()(),
         expires_at=None,
     )
-    return OutboundMessage(**(values | changes))
+    return OutgoingMessage(**(values | changes))
 
 
 def complete(status, body):

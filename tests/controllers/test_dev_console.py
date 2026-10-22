@@ -16,7 +16,7 @@ from app.integrations.wms_transport import (
     rack_scenarios,
 )
 from app.integrations.wms_transport.wire import freeze_request
-from app.reliable import OutboundMessage, Outbox, VerdictKind
+from app.reliable import Outbox, OutgoingMessage, VerdictKind
 from app.reliable.config import TargetConfig
 
 TASKS = "/api/v1/dev/transport/tasks"
@@ -115,7 +115,7 @@ async def test_the_mock_wms_answers_what_the_transport_adapter_expects(
     )
     await mock_mode(mode)
     r = await client.post(SUBMIT, content=frozen)
-    message = OutboundMessage(
+    message = OutgoingMessage(
         row["target"],
         row["operation"],
         row["operation_id"],

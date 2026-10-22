@@ -19,7 +19,7 @@ from .types import (
     InvalidMessage,
     MessageDraft,
     MessageStatus,
-    OutboundMessage,
+    OutgoingMessage,
     ProtocolAdapter,
 )
 
@@ -78,7 +78,7 @@ class Outbox:
         now = utc_datetime(self.clock())
         try:
             expires_at = now + draft.ttl if draft.ttl is not None else None
-            message = OutboundMessage(
+            message = OutgoingMessage(
                 draft.target,
                 draft.operation,
                 draft.operation_id,
@@ -94,7 +94,7 @@ class Outbox:
                 raise ValueError("adapter changed frozen body")
             validate_request(target.http_config(), request)
         except Exception:
-            raise InvalidMessage("invalid new outbound message") from None
+            raise InvalidMessage("invalid new outgoing message") from None
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
         values = dict(

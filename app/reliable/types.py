@@ -53,7 +53,7 @@ class MessageDraft:
 
 
 @dataclass(frozen=True)
-class OutboundMessage:
+class OutgoingMessage:
     target: str
     operation: str
     operation_id: str
@@ -101,6 +101,6 @@ class Verdict:
 
 
 class ProtocolAdapter(Protocol):
-    def build_request(self, message: OutboundMessage, target: "TargetConfig") -> HttpRequest: ...
+    def build_request(self, message: OutgoingMessage, target: "TargetConfig") -> HttpRequest: ...
 
-    def classify_response(self, message: OutboundMessage, result: HttpResult) -> Verdict: ...
+    def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict: ...

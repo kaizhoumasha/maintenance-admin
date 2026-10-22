@@ -38,7 +38,7 @@ def data_of(raw):
     return json.loads(raw)["data"]
 
 
-async def test_feed_moves_bins_from_rack_slots_to_the_inbound_handoff(transport_storage):
+async def test_feed_moves_bins_from_rack_slots_to_the_feed_handoff(transport_storage):
     rig = transport_storage
     moves = [BinMove("b-2", slot("510047", "270", "S2"), IN), BinMove("b-1", slot(), IN)]
     async with rig.factory() as session:
@@ -64,7 +64,7 @@ async def test_feed_moves_bins_from_rack_slots_to_the_inbound_handoff(transport_
     }
 
 
-async def test_return_moves_bins_from_the_outbound_handoff_into_rack_slots(transport_storage):
+async def test_return_moves_bins_from_the_return_handoff_into_rack_slots(transport_storage):
     rig = transport_storage
     async with rig.factory() as session:
         await scenarios_for(rig).return_bins(
