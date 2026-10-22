@@ -139,6 +139,10 @@ def test_openapi_error_responses_follow_route_rules():
     assert len(operations) > 10
     for path, op in operations:
         codes = set(op["responses"])
+        if path == "/api/v1/wms/events":
+            assert "422" in codes and "429" not in codes and "200" not in codes
+            assert "400" in codes and "413" in codes and "503" in codes
+            continue
         assert "429" in codes, path  # 全局限流
         assert "422" not in codes, path  # 校验失败实际返回 400
         if op.get("parameters") or "requestBody" in op:

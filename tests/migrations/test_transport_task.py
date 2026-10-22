@@ -35,6 +35,9 @@ async def transport_db(request, tmp_path):
 
     upgraded = await migrate("upgrade", REVISION)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    # 共享 PostgreSQL 库可能已在更新的 head 上:upgrade 对它是空操作,这里把库收敛到本迁移版本
+    targeted = await migrate("downgrade", REVISION)
+    assert targeted.returncode == 0, targeted.stdout + targeted.stderr
     engine = create_async_engine(url)
     try:
         yield engine, migrate
