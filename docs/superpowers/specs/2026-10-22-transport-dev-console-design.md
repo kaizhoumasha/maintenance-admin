@@ -214,7 +214,7 @@ ACK 体回显请求里的 `operation_id`、`data.transport_task_id` 并带整数
 
 - **实现**:`app/core/dev_scenarios.py`、`app/schemas/dev_outbound.py`、`app/services/dev_outbound_service.py`、`app/controllers/dev.py`、`app/controllers/dev_mock_wms.py`、`app/integrations/wms_transport/dev.py`,`app/main.py` 加一行挂载。测试:`tests/core/test_dev_scenarios.py`、`tests/controllers/test_dev_outbound.py`(按 §7,另加"Mock WMS 的响应经 `TransportSubmitAdapter` 判定与预期一致"这一条长期合同)。
 - **自动化**:`ruff check`、`ruff format --check` 通过;全量 `pytest` 1030 passed、243 skipped(跳过项是未配置 `TEST_DATABASE_URL` 的既有集成测试)。
-- **端到端(临时 SQLite 库 + 随机端口 + `RELIABLE_TARGETS` 指向自身,未碰开发库)**:真实发送器自调用 Mock WMS,终态与 §4.7 一致:`accept`→DONE、`duplicate`→DONE、`conflict`→FAILED/CONFLICT、`reject`→FAILED/REJECTED、`unavailable`→重试后 STALLED、`garbage`→PENDING(UNKNOWN,待重试)。`hang` 未测(睡眠 60 秒,逻辑与超时路径同属 UNKNOWN)。
+- **端到端(临时 SQLite 库 + 随机端口 + `RELIABLE_TARGETS` 指向自身,未碰开发库)**:真实发送器自调用 Mock WMS,终态与 §4.7 一致:`accept`→DONE、`duplicate`→DONE、`conflict`→FAILED/CONFLICT、`reject`→FAILED/REJECTED、`unavailable`→重试后 STALLED、`garbage`→PENDING(UNKNOWN,待重试)。`hang`(目标超时 2 秒)→ 首次投递以 `TOTAL_TIMEOUT` 结束并标记 `delivery_uncertain`,随后按固定间隔重试(轮询时第 2 次投递在途,状态 SENDING)。
 - **浏览器(Swagger UI)**:`POST /api/v1/dev/outbound` 的 Examples 下拉出现 6 项,选中后请求体自动填充,§9.1 未验证项已关闭。
 - **实施中的调整**:嵌套请求模型加 `Transport` 前缀(`Slot`、`Route` 等泛名会在不同业务间冲突 OpenAPI schema 名)。
-- **仍未做**:`hang` 模式;Postgres 下的实测。
+- **仍未做**:Postgres 下的实测(25432 是开发库,需要一次性库和显式 `TEST_DATABASE_URL`)。
