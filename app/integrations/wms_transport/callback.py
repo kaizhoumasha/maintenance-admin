@@ -17,7 +17,7 @@ from app.models.transport import TransportTask
 
 from .callback_apply import TaskCallbacks
 from .callback_payloads import PositionChanged, Resulted
-from .reconcile import resume_stalled
+from .settle import settle_submitted
 
 
 class _TransportCallback(CallbackOperation):
@@ -38,13 +38,12 @@ class _TransportCallback(CallbackOperation):
         if task is None:
             ctx.note("UNKNOWN_TASK", transport_task_id=ack["transport_task_id"], data=data)
             return ack
+        await settle_submitted(ctx.session, task.transport_task_id)  # 对端已知该任务,不必再重试提交
         if task.frozen is None:
             ctx.note("FROZEN_MISSING", transport_task_id=ack["transport_task_id"], data=data)
             return ack
         state = TaskCallbacks(task, ctx)
         self.apply(state, data, ack)  # 判重为 Duplicate/Conflict 时直接抛出
-        if state.determined:
-            await resume_stalled(ctx.session, task.transport_task_id)
         return Accepted(ack)
 
     def apply(self, state: TaskCallbacks, data: dict, ack: dict) -> None:

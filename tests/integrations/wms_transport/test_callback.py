@@ -114,7 +114,7 @@ def ack(task_id):
 
 
 # ---- 位置事件 ----
-async def test_position_events_are_merged_by_milestone_rules(client, callback_store):
+async def test_position_facts_accumulate_regardless_of_arrival_order(client, callback_store):
     task_id = await add_task(callback_store, bin_data())
 
     async def event(container, milestone, name=None):
@@ -125,13 +125,17 @@ async def test_position_events_are_merged_by_milestone_rules(client, callback_st
         assert response.status_code == 202 and response.json()["data"] == ack(task_id)
         return (await task_row(callback_store, task_id)).member_positions
 
-    assert (await event("C1", "SOURCE_PICKED"))["C1"]["milestone"] == "SOURCE_PICKED"
-    assert (await event("C1", "POSITION_UNKNOWN"))["C1"]["milestone"] == "POSITION_UNKNOWN"
-    assert (await event("C1", "SOURCE_PICKED"))["C1"]["milestone"] == "POSITION_UNKNOWN"
-    positions = await event("C1", "TARGET_PLACED", "S1")
-    assert positions["C1"] == {"milestone": "TARGET_PLACED", "final_position": slot("S1")}
-    assert (await event("C1", "SOURCE_PICKED"))["C1"]["milestone"] == "TARGET_PLACED"
-    assert (await event("C2", "SOURCE_PICKED"))["C1"]["milestone"] == "TARGET_PLACED"
+    assert (await event("C1", "TARGET_PLACED", "S1"))["C1"] == {"TARGET_PLACED": slot("S1")}
+    assert (await event("C1", "SOURCE_PICKED"))["C1"] == {
+        "TARGET_PLACED": slot("S1"),
+        "SOURCE_PICKED": True,
+    }
+    assert (await event("C1", "SOURCE_PICKED"))["C1"]["TARGET_PLACED"] == slot("S1")  # 重复幂等
+    # 位置未知不存状态,只留诊断;之后到达的事实照常累积
+    assert "C2" not in await event("C2", "POSITION_UNKNOWN")
+    assert (await event("C2", "SOURCE_PICKED"))["C2"] == {"SOURCE_PICKED": True}
+    diagnostics = [r.diagnostic for r in await receipts(callback_store) if r.diagnostic]
+    assert diagnostics[0][0]["reason_code"] == "POSITION_UNKNOWN_REPORTED"
 
 
 async def test_position_that_contradicts_the_frozen_task_is_accepted_but_not_applied(
@@ -347,8 +351,8 @@ async def test_identity_conflict_echoes_the_first_messages_task_id(client, callb
     assert again.status_code == 409 and again.json()["data"] == {}
 
 
-# ---- STALLED 出口 ----
-async def stalled_message(factory, task_id, *, operation=SUBMIT):
+# ---- 收到回调即结束提交消息的发送 ----
+async def submit_message(factory, task_id, *, status, operation=SUBMIT):
     now = datetime.now(UTC)
     async with factory.begin() as session:
         session.add(
@@ -357,8 +361,8 @@ async def stalled_message(factory, task_id, *, operation=SUBMIT):
                 operation=operation,
                 operation_id=str(uuid7()),
                 request_raw=json.dumps({}).encode(),
-                status="STALLED",
-                next_attempt_at=None,
+                status=status,
+                next_attempt_at=None if status == "STALLED" else now,
                 business_key=task_id,
                 created_at=now,
                 updated_at=now,
@@ -374,17 +378,38 @@ async def message_statuses(factory, task_id):
         return sorted((m.operation, m.status) for m in rows)
 
 
-async def test_a_determined_result_puts_the_stalled_submit_message_back_to_pending(
-    client, callback_store
+@pytest.mark.parametrize("status", ["PENDING", "SENDING", "STALLED"])
+@pytest.mark.parametrize("kind", ["position", "result", "contradicting_result"])
+async def test_any_callback_for_a_task_ends_its_submit_retries(
+    client, callback_store, status, kind
 ):
     task_id = await add_task(callback_store, rack_data())
-    await stalled_message(callback_store, task_id)
-    await stalled_message(callback_store, task_id, operation="other.operation@v1")
-    assert (await send(client, RESULTED, rack_result(task_id))).status_code == 202
+    other = await add_task(callback_store, rack_data())
+    await submit_message(callback_store, task_id, status=status)
+    await submit_message(callback_store, task_id, status=status, operation="other.operation@v1")
+    await submit_message(callback_store, other, status=status)
+    if kind == "position":
+        message = (
+            POSITION,
+            dict(transport_task_id=task_id, container_id="C1", milestone="SOURCE_PICKED"),
+        )
+    elif kind == "result":
+        message = (RESULTED, rack_result(task_id))
+    else:  # 与冻结任务矛盾,只告警不应用,但仍是对端已知该任务的证据
+        message = (RESULTED, rack_result(task_id, rack_id="RACK-OTHER"))
+    assert (await send(client, *message)).status_code == 202
     assert await message_statuses(callback_store, task_id) == [
-        ("other.operation@v1", "STALLED"),
-        (SUBMIT, "PENDING"),
+        ("other.operation@v1", status),
+        (SUBMIT, "DONE"),
     ]
+    assert await message_statuses(callback_store, other) == [(SUBMIT, status)]
+
+
+async def test_unknown_task_callback_settles_nothing(client, callback_store):
+    task_id = "transport-" + str(uuid7())
+    await submit_message(callback_store, task_id, status="PENDING")
+    assert (await send(client, RESULTED, rack_result(task_id))).status_code == 202
+    assert await message_statuses(callback_store, task_id) == [(SUBMIT, "PENDING")]
 
 
 # ---- 锁等待上限 ----

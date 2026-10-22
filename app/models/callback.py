@@ -19,6 +19,7 @@ class CallbackReceipt(Base):
     __tablename__ = "callback_receipt"
     __table_args__ = (
         UniqueConstraint("operation", "operation_id"),
+        Index("callback_receipt_retention_idx", "created_at", "id"),
         CheckConstraint(
             "(compare_mode = 'RAW' AND effective_digest IS NULL) OR "
             "(compare_mode = 'EFFECTIVE' AND effective_digest IS NOT NULL)",

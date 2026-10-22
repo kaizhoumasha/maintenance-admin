@@ -33,7 +33,7 @@ def _log_resumed(sync_session):
         sync_session.info["reliable_resumed"].setdefault(transaction.parent, []).extend(contexts)
         return
     for context in contexts:
-        logger.info("reliable resumed %r", context, extra=context)
+        logger.info("reliable %s %r", context["event"], context, extra=context)
 
 
 def _drop_resumed(sync_session):
@@ -162,7 +162,58 @@ class Outbox:
             "message_trace_id": row.trace_id,
             "from_status": MessageStatus.STALLED,
             "to_status": MessageStatus.PENDING,
+            "event": "resumed",
         }
+        self._log_after_commit(session, context)
+        return True
+
+    async def settle(
+        self, session: AsyncSession, target: str, operation: str, operation_id: str
+    ) -> bool:
+        """未结束(PENDING/SENDING/STALLED)→ DONE:对端已通过其他渠道(如业务回调)确认接收。
+
+        不再发送,也不写响应(`response_raw` 为空以区别于收到对端应答的 DONE);正在发送的租约随之
+        失效,迟到的发送结果会被忽略。已处于终态返回 False。
+        """
+        now = utc_datetime(self.clock())
+        row = (
+            await session.execute(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.status.in_(
+                        (MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.STALLED)
+                    ),
+                )
+                .values(
+                    status=MessageStatus.DONE,
+                    lease_id=None,
+                    lease_until=None,
+                    next_attempt_at=now,  # STALLED 行没有排期,而约束要求非 STALLED 必须有
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.trace_id)
+            )
+        ).first()
+        if row is None:
+            return False
+        self._log_after_commit(
+            session,
+            {
+                "target": target,
+                "operation": operation,
+                "operation_id": operation_id,
+                "message_trace_id": row.trace_id,
+                "to_status": MessageStatus.DONE,
+                "event": "settled",
+            },
+        )
+        return True
+
+    @staticmethod
+    def _log_after_commit(session: AsyncSession, context: dict) -> None:
         # 与其它状态转换一致:只在事务真正提交后记日志,回滚则丢弃。
         sync_session = session.sync_session
         if "reliable_resumed" not in sync_session.info:
@@ -171,4 +222,3 @@ class Outbox:
             event.listen(sync_session, "after_rollback", _drop_resumed)
         transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
         sync_session.info["reliable_resumed"].setdefault(transaction, []).append(context)
-        return True

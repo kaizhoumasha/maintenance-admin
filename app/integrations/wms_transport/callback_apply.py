@@ -17,7 +17,6 @@ class TaskCallbacks:
     def __init__(self, task: TransportTask, ctx: CallbackContext):
         self.task, self.ctx = task, ctx
         self.frozen: dict = task.frozen or {}
-        self.determined = False  # 本次是否得到了确定终态(用于触发 STALLED 对账)
         # 料箱任务的冻结成员 {container_id: 冻结目标位置}
         self.members = {m["container_id"]: m["target"] for m in self.frozen.get("moves", [])}
 
@@ -26,28 +25,22 @@ class TaskCallbacks:
 
     # ---- 位置事件 ----
     def apply_position(self, data: dict) -> None:
+        """位置事实按料箱累积成集合,与到达先后无关;唯一的判定依赖是「已放到冻结目标」。"""
         container, milestone = data["container_id"], data["milestone"]
         target = self.members.get(container)
         if target is None:
             return self._skip("UNKNOWN_MEMBER", container_id=container)
-        final_position = data["final_position"]
-        if milestone == "TARGET_PLACED" and final_position != target:
+        if milestone == "POSITION_UNKNOWN":  # 不存状态:任务是否 UNKNOWN 只由结果消息决定
+            return self._skip("POSITION_UNKNOWN_REPORTED", container_id=container)
+        placed = milestone == "TARGET_PLACED"
+        if placed and data["final_position"] != target:
             return self._skip("TARGET_MISMATCH", container_id=container, data=data)
-        positions = dict(self.task.member_positions or {})
-        have = (positions.get(container) or {}).get("milestone")
-        if have == "TARGET_PLACED":  # 已到位后不再改变
-            if (
-                milestone == "TARGET_PLACED"
-                and positions[container]["final_position"] != final_position
-            ):
-                self._skip("POSITION_CONFLICT", container_id=container, data=data)
+        positions = self.task.member_positions or {}
+        facts = positions.get(container) or {}
+        value = data["final_position"] if placed else True
+        if facts.get(milestone) == value:  # 同一事实重复到达:幂等
             return
-        if milestone == have:  # 同一事实重复到达:幂等
-            return
-        if have == "POSITION_UNKNOWN" and milestone == "SOURCE_PICKED":
-            return  # 位置未知只能被「已放下」收敛
-        positions[container] = {"milestone": milestone, "final_position": final_position}
-        self.task.member_positions = positions
+        self.task.member_positions = {**positions, container: {**facts, milestone: value}}
         self.complete_pending()
 
     # ---- 最终结果 ----
@@ -82,9 +75,9 @@ class TaskCallbacks:
         self.task.outcome_status = self._status_of(outcome)
         self.task.applied_outcome = outcome
         self.task.applied_outcome_revision = revision
-        self.determined = self.task.outcome_status in TERMINAL
+        determined = self.task.outcome_status in TERMINAL
         pending = self.task.pending_outcome
-        if pending is not None and (self.determined or pending["revision"] <= revision):
+        if pending is not None and (determined or pending["revision"] <= revision):
             self.task.pending_outcome = None  # 已确定终态,或暂存的版本已不高于刚应用的版本
 
     def complete_pending(self) -> None:
@@ -137,10 +130,9 @@ class TaskCallbacks:
                 or members[item["container_id"]]["kind"] != "RACK_BIN_SLOT"
             ):
                 continue
-            placed = positions.get(item["container_id"])
-            if placed is None or placed["milestone"] != "TARGET_PLACED":
-                return False
-            if placed["final_position"] != members[item["container_id"]]:
+            if (positions.get(item["container_id"]) or {}).get("TARGET_PLACED") != members[
+                item["container_id"]
+            ]:
                 return False
         return True
 

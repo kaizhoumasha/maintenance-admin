@@ -30,6 +30,10 @@ celery_app.conf.update(
             "task": "callback.cleanup_snapshots",
             "schedule": crontab(hour=3, minute=30),
         },
+        "cleanup-callback-receipts": {
+            "task": "callback.cleanup_receipts",
+            "schedule": crontab(hour=3, minute=45),
+        },
         "archive-audit": {"task": "audit.archive_old", "schedule": crontab(hour=3, minute=0)},
         "cleanup-reliable": {
             "task": "reliable.cleanup_terminal",
