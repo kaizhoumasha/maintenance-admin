@@ -323,7 +323,7 @@ T1 相对实验的具体增量如下，验收不能只重跑已有的 23 项：
 
 ### 5.4 跑通离线投递实验
 
-按[离线实验](reliable-transport-lab.md)准备一个完整测试文件并运行。实验使用 `ScriptedHttpClient`、`FakeClock`、内存 SQLite 和真实的 Outbox/Sender，验证完整投递路径。通过后交付测试文件；取得并确认完整合同后再做 T1。真实 PostgreSQL/Redis 的准备见 §9，离线实验不需要启动它们。
+按[离线实验](reliable-transport-lab.md)准备一个完整测试文件并运行。实验使用 `ScriptedHttpClient`、`FakeClock`、内存 SQLite 和真实的 Outbox/Sender，验证完整投递路径。通过后交付测试文件；取得并确认完整合同后再做 T1。真实 PostgreSQL/Redis 的准备见 §9，离线实验不需要启动它们。本地想在 Swagger 里手动触发场景并查看请求、响应原文，可用仅 `ENVIRONMENT=local` 的联调控制台，见 [README](../README.md#联调控制台仅-environmentlocal) 与[设计](superpowers/specs/2026-10-22-transport-dev-console-design.md)；它不替代离线测试，也不是真实对端联调。
 
 ## 6. 静态 target 的事务内入队示例
 

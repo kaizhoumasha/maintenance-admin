@@ -25,6 +25,13 @@
 - 新增料箱业务接入层 `bin_scenarios`：`feed_bins`（投料：货架储位 → 滚筒线入料位置）、`return_bins`（回架：出料位置 → 货架储位）、`exchange_bins`（1～2 对交换）；方向由场景固定，合同规则由能力层执行，字节由契约测试固化。
 - 可靠层配置错误现在会指明配置名与出错目标（`RELIABLE_TARGETS target 'wms': …`），异常类型不变。
 
+### 待发布：联调控制台（Swagger 统一出站入口）
+
+- 仅 `ENVIRONMENT=local` 可用：在 Swagger 里用 `POST /api/v1/dev/outbound` 的 Examples 下拉选择业务场景（货架进场、换面、离场，料箱投料、回架、交换），经真实业务接入层登记出站，再用 `GET /api/v1/dev/outbound/status/{business_key}` 查看投递状态与请求、响应原文；服务层显式提交事务，保证发送器能看到消息。
+- 业务接入层新增 `app/integrations/<业务>/dev.py`，用 `@dev_scenario` 登记场景即可自动出现在下拉里，无需改 `main.py`；非法名字、重名、非法示例在导入期报错。
+- 内置 Mock WMS（`POST /api/v1/wes/transport-requests`，`PUT /api/v1/dev/mock-wms/mode` 切换 accept、duplicate、conflict、reject、unavailable、garbage、hang 七种响应），把 `RELIABLE_TARGETS` 指向本应用自身即可端到端验证重试与终态；响应与 Transport 适配器的判定由契约测试保持一致。
+- 部署必须显式设置 `ENVIRONMENT`：默认值 `local` 会同时挂出该控制台；控制台只校验登录、不校验权限码，Mock 接收端无认证，仅限本地联调。
+
 ### 既有 0.2.0 发布准备记录
 
 以下保留原项目 `maintenance-admin` 的 **0.2.0** 发布准备记录；该版本已建立 `v0.2.0` 发布标签。记录中的候选基线验收不自动覆盖后续改名或 HTTP 客户端变更；dirty 验收包不能作为正式制品。

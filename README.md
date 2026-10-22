@@ -123,6 +123,7 @@ enterprise-backend/
     http_client/         # 独立纯 HTTP 客户端：单次 bytes 收发、超时、连接池、大小限制
     reliable/            # 出站事务发件箱、租约、原身份重试、TTL；不含协议实现
     reliable_runtime.py  # lifespan 发送器与专用连接池装配
+    integrations/        # 业务接入层（wms_transport）；各包内 dev.py 登记联调场景，仅 local 挂载（见下方「联调控制台」）
     middlewares/         # trace_id（X-Trace-Id + 访问日志）、审计日志
     tasks/               # Celery，可单独部署 worker
   migrations/            # Alembic（文件名 YYYY-MM-DD_slug）
@@ -161,6 +162,16 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 多实例部署前，所有发送器、入队生产者及清理进程所在主机必须启用 NTP/chrony 等时钟同步并监控偏差和跳变。持久时间目前来自应用 UTC 墙钟，不是数据库统一授时；实例间偏差与调度、回写延迟合计应远小于默认 5 秒租约余量。不能满足此前提时可能提前接管并重复投递；租约围栏只保护回写，不替代对端按稳定身份去重。
 
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
+
+#### 联调控制台(仅 `ENVIRONMENT=local`)
+
+Swagger 里 `POST /api/v1/dev/outbound` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/outbound/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
+
+```bash
+RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"}}}'
+```
+
+新增业务接入层时,在 `app/integrations/<业务>/dev.py` 里用 `@dev_scenario` 登记场景即可自动出现在下拉里,详见 `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`。非 local 环境这些路由不存在。**部署时必须显式设置 `ENVIRONMENT`(如 `production`)**:它的默认值是 `local`,漏设会同时挂出该控制台(含无认证的 Mock WMS 接收端)、开放 API 文档并关闭 Cookie 的 Secure。示例里的 Zone、储位、滚筒线编码是占位值,联调前按现场替换。
 
 ### 9. 统一错误处理
 
