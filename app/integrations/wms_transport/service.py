@@ -14,7 +14,7 @@ from app.reliable import MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config
 
 from .adapter import ADAPTERS
-from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL
+from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL, SUBMIT_TTL
 from .types import (
     BinExchangePair,
     BinMove,
@@ -183,7 +183,9 @@ class TransportService:
                 return self._existing(winner, digest)
             await outbox.enqueue(
                 session,
-                MessageDraft(target, OPERATION, operation_id, raw, business_key=task_id),
+                MessageDraft(
+                    target, OPERATION, operation_id, raw, business_key=task_id, ttl=SUBMIT_TTL
+                ),
             )
         return TransportHandle(task_id, client_request_id)
 

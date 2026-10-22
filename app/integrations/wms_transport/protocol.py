@@ -1,8 +1,12 @@
 """WMS Transport 提交协议常量;条款来源 wes_backend 的 transport-fulfillment-contract(0.4.0)。"""
 
+from datetime import timedelta
+
 OPERATION = "transport.task.submit@v1"
 PROTOCOL = "wms-transport"
 DEFAULT_SUBMIT_PATH = "/api/v1/wes/transport-requests"
+# 暂定(2026-10-23):提交 1 小时仍未送达就不再重发,过期的物理指令再下发已无意义,到期转 EXPIRED
+SUBMIT_TTL = timedelta(hours=1)
 # 按场景区分模板(用户 2026-10-22 指定):搬运只用 CTU01/CTU03/F01,换面只用 CTU02/CK04。
 # 合同 0.4.0 §4.1 只列 CTU01/CTU02/CTU03/F01;CK04(转运货架换面)由现场确认补入,
 # 合同文本尚未同步,WMS 若不接受会以 422 REJECTED 返回。

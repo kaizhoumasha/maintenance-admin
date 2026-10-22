@@ -14,6 +14,7 @@ from app.integrations.wms_transport import (
     TransportService,
     Zone,
 )
+from app.integrations.wms_transport.protocol import SUBMIT_TTL
 from app.models import Menu, ReliableMessage, TransportTask
 from app.reliable import InvalidMessage
 
@@ -50,7 +51,8 @@ async def test_same_normalized_input_replays_without_new_identity(
         assert first.transport_task_id.removeprefix("transport-") != message.operation_id
         assert task.operation_id == message.operation_id
         assert payload["data"]["transport_task_id"] == first.transport_task_id
-        assert message.business_key == first.transport_task_id and message.expires_at is None
+        assert message.business_key == first.transport_task_id
+        assert message.expires_at - message.created_at == SUBMIT_TTL  # 超时不再重发
         assert "workline_id" not in payload["data"] and "caller" not in payload
         frozen = {k: v for k, v in payload["data"].items() if k != "transport_task_id"}
         assert task.frozen == frozen  # 回调应用要用的冻结事实随登记写入
