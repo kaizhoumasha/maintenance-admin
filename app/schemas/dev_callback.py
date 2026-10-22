@@ -27,6 +27,7 @@ class DevCallbackOut(BaseModel):
 class DevTaskStateOut(BaseModel):
     transport_task_id: str
     kind: str
+    cycle_id: str | None
     outcome_status: str | None
     applied_outcome_revision: int | None
     applied_outcome: dict[str, Any] | None

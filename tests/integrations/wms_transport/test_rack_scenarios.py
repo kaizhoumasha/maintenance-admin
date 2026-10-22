@@ -257,3 +257,71 @@ def test_cycle_handle_is_immutable_and_fixes_one_role_for_all_steps(scenarios):
 def test_cycle_rejects_unknown_roles_when_it_is_created(scenarios, role):
     with pytest.raises(InvalidTransportRequest):
         scenarios.cycle(role=role, rack_id="rack", caller=TransportCaller("line"))
+
+
+async def test_steps_of_one_cycle_share_a_local_group_key_that_never_reaches_the_wire(
+    transport_storage, scenarios, transport_request
+):
+    rig = transport_storage
+    caller = transport_request["caller"]  # 工作线取自夹具,测试结束时才会按它清理残留行
+    cycle = scenarios.cycle(role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller)
+    other = scenarios.cycle(role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller)
+    assert cycle.cycle_id != other.cycle_id
+    async with rig.factory() as session:
+        await cycle.enter(session, client_request_id=str(uuid7()), target=RackPosition("P1"))
+        await cycle.rotate(
+            session, client_request_id=str(uuid7()), position=RackPosition("P1"), target_face="180"
+        )
+        await other.enter(session, client_request_id=str(uuid7()), target=RackPosition("P1"))
+        await session.commit()
+    async with rig.factory() as session:
+        tasks = list(await session.scalars(select(TransportTask).order_by(TransportTask.id)))
+        raw = (await session.scalars(select(ReliableMessage.request_raw))).all()
+    assert [t.cycle_id for t in tasks] == [cycle.cycle_id, cycle.cycle_id, other.cycle_id]
+    assert all(cycle.cycle_id.encode() not in body for body in raw)
+    assert all("cycle_id" not in json.loads(body)["data"] for body in raw)
+
+
+async def test_a_later_step_can_rebuild_the_handle_with_the_saved_group_key(
+    transport_storage, scenarios, transport_request
+):
+    rig = transport_storage
+    caller = transport_request["caller"]  # 工作线取自夹具,测试结束时才会按它清理残留行
+    first = scenarios.cycle(role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller)
+    later = scenarios.cycle(
+        role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller, cycle_id=first.cycle_id
+    )
+    async with rig.factory() as session:
+        await first.enter(session, client_request_id=str(uuid7()), target=RackPosition("P1"))
+        await later.depart(session, client_request_id=str(uuid7()), target=Zone("Z1"))
+        await session.commit()
+        keys = set(await session.scalars(select(TransportTask.cycle_id)))
+    assert keys == {first.cycle_id}
+
+
+async def test_replay_under_a_rebuilt_handle_keeps_the_first_group_key(
+    transport_storage, scenarios, transport_request
+):
+    rig = transport_storage
+    caller = transport_request["caller"]  # 工作线取自夹具,测试结束时才会按它清理残留行
+    request_id = str(uuid7())
+    async with rig.factory() as session:
+        first = scenarios.cycle(role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller)
+        original = await first.enter(
+            session, client_request_id=request_id, target=RackPosition("P1")
+        )
+        rebuilt = scenarios.cycle(role=RackRole.FIVE_LAYER, rack_id="rack", caller=caller)
+        assert (
+            await rebuilt.enter(session, client_request_id=request_id, target=RackPosition("P1"))
+            == original
+        )
+        await session.commit()
+        keys = list(await session.scalars(select(TransportTask.cycle_id)))
+    assert keys == [first.cycle_id]
+
+
+def test_a_cycle_key_must_be_a_uuid7(scenarios):
+    with pytest.raises(InvalidTransportRequest):
+        scenarios.cycle(
+            role=RackRole.FIVE_LAYER, rack_id="rack", caller=TransportCaller("line"), cycle_id="x"
+        )

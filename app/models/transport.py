@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, String, Text
+from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -9,6 +9,7 @@ from .base import Base
 class TransportTask(Base):
     __tablename__ = "transport_task"
     __table_args__ = (
+        Index("transport_task_cycle_idx", "cycle_id"),
         CheckConstraint(
             "kind IN ('RACK_MOVE','RACK_ROTATE','BIN_MOVE','BIN_EXCHANGE')", name="kind"
         ),
@@ -23,6 +24,8 @@ class TransportTask(Base):
     workline_id: Mapped[str] = mapped_column(Text)
     station_id: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 同一货架一轮生命周期(进场/换面/离场)的本地分组键,不进入 wire 与冻结请求
+    cycle_id: Mapped[str | None] = mapped_column(Text)
     # 以下列用于 WMS 回调的应用(见回调接收设计 §4.2);JSON 列一律整体重新赋值,不要原地修改
     frozen: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     member_positions: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))

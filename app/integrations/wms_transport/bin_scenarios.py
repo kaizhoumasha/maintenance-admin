@@ -32,7 +32,8 @@ class BinScenarios:
     """料箱搬运业务接入层:投料、回架、交换。
 
     无状态:每次调用各自使用调用方传入的会话和调用方身份,并由调用方提交或回滚;
-    没有跨步骤的生命周期,所以不需要句柄。选箱、选储位和批次划分由调用方先决定。
+    没有跨步骤的生命周期,所以不需要句柄。选箱、选储位和批次划分由调用方先决定;想把同一面的多批
+    搬运归为一组时传可选的 `cycle_id`(UUIDv7,本地分组键,不进 wire)。
     """
 
     def __init__(self, transport: TransportService):
@@ -45,6 +46,7 @@ class BinScenarios:
         client_request_id: str,
         caller: TransportCaller,
         moves: list[BinMove],
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """投料:料箱从货架储位搬到滚筒线入料位置(合同 §8)。"""
         return await self.transport.move_bins(
@@ -52,6 +54,7 @@ class BinScenarios:
             client_request_id=client_request_id,
             caller=caller,
             moves=_directed(moves, RackBinSlot, HandoffPosition),
+            cycle_id=cycle_id,
         )
 
     async def return_bins(
@@ -61,6 +64,7 @@ class BinScenarios:
         client_request_id: str,
         caller: TransportCaller,
         moves: list[BinMove],
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """回架:料箱从滚筒线出料位置搬回货架储位(合同 §8)。"""
         return await self.transport.move_bins(
@@ -68,6 +72,7 @@ class BinScenarios:
             client_request_id=client_request_id,
             caller=caller,
             moves=_directed(moves, HandoffPosition, RackBinSlot),
+            cycle_id=cycle_id,
         )
 
     async def exchange_bins(
@@ -77,6 +82,7 @@ class BinScenarios:
         client_request_id: str,
         caller: TransportCaller,
         exchange_pairs: list[BinExchangePair],
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """交换:一个协调任务内交换 1~2 对料箱。"""
         return await self.transport.exchange_bins(
@@ -84,6 +90,7 @@ class BinScenarios:
             client_request_id=client_request_id,
             caller=caller,
             exchange_pairs=exchange_pairs,
+            cycle_id=cycle_id,
         )
 
 

@@ -31,6 +31,7 @@
 12. **收据保留期对齐 `RELIABLE_RETENTION_DAYS`(2026-10-23)**:`callback_receipt` 按该配置每日清理,不新增配置项;`created_at` 加索引(迁移 `a022a20261023`)。合同要求的清理周期变更在 §9 向 WMS 确认。
 13. **提交消息 1 小时超时(2026-10-23,暂定)**:同一消息身份的最长重发时间不超过 1 小时,超过后再发已无意义。出站侧 Transport 提交消息统一带 `ttl = SUBMIT_TTL`(1 小时,`wms_transport/protocol.py`),到期未送达的消息由发送层转为 `EXPIRED` 而不再发送;对 WMS 的回调侧同样按 1 小时作为其重发窗口提请确认(§9)。过期后任务没有结果,由卡住任务告警(`TODOS.md`)暴露,由上游决定是否用新 `client_request_id` 重新下发。
 14. **合同符合性复核后的取舍(2026-10-23)**:(1) **创建前不做可信位置/当前面校验**是有意偏离(合同 §3.2、§4.1 要求换面前有可信精确位置与当前面、料箱同架面须等于可信当前面):没有位置投影,由 WMS 在接纳时兜底(`409/503`),我方只做请求内结构校验,不做补救。(2) **来源认证降为低优先级,联调完成后再实施**。(3) **换面模板 `CK04` 与 `CTU02` 同为旋转动作**:`ROTATE_TEMPLATES = {CTU02, CK04}`,转运/退料架用 `CK04`、五层架用 `CTU02`;合同文本只列 `CTU01/CTU02/CTU03/F01`,待合同同步。
+15. **货架生命周期分组键 `cycle_id`(2026-10-24)**:进场 → [换面…] → 离场作为一个货架的完整生命周期;`transport_task.cycle_id`(可空、有索引)是纯本地分组键,**不进入 wire、冻结请求与幂等摘要**,所以无需与 WMS 重新商定合同。每一步仍是独立任务(自己的 `transport_task_id`、版本、终态、重试隔离);不共用 `transport_task_id`,因为回调靠它区分物理任务,共用会让终态不可改写规则和重试隔离失效。`RackCycle` 创建时生成 `cycle_id`,后续步骤在别的进程重建句柄时传入首次的值;同一 `client_request_id` 重放以首次登记为准。料箱场景提供可选 `cycle_id` 参数,同一面的多批搬运想归组时才传。只做分组,不新建批次表,也不定义批次何时结束(留在 TODOS 的闭合语义)。
 
 ## 1. 目标与边界
 
@@ -196,6 +197,14 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 `STALLED` 由可靠层产生,仅当目标配置了 `max_not_received_attempts` 且「确认未送达」累计达到预算时出现(默认不设,默认不会出现);结果未知不进入 `STALLED`。任务存在时收到任何回调,都说明对端已收到该任务的提交,继续重试没有意义。处理器在锁住任务行后,对 `reliable_message WHERE business_key = transport_task_id AND operation = 提交 OPERATION AND status IN ('PENDING','SENDING','STALLED')` 的行逐条 `SELECT ... FOR UPDATE` 锁住,再用其 `(target, operation, operation_id)` 调用基础层新增的 `Outbox.settle`(同事务提交):这些消息转为 `DONE`,不写响应(`response_raw` 为空,以区别于收到对端应答的 `DONE`),不再被领取发送;正在发送的租约随之失效,迟到的发送结果被忽略(`finish` 按租约与 `SENDING` 状态更新)。未知任务不 settle;不依赖 `RELIABLE_TARGETS`,不假设「一任务一消息」,不动同 `business_key` 的其他 operation 消息。这是对「不改基础层」约束的有意突破,理由是只有基础层能安全地按身份终止发送。风险:来源认证目前为 `NONE`,持有 `transport_task_id` 的伪造回调可以终止重试;`transport_task_id` 含 UUIDv7 随机部分,认证落地后消除。
 
 **不做定时对账的理由**:(1) 默认配置不会产生 `STALLED`;(2) 对端不可用时盲目 `resume` 只是把预算清零后继续重发,与不设预算的持续退避等价,没有新增能力;(3) 本系统不维护货架/料箱终态,无法判断很久之前的指令现在是否仍该下发,时效由调用方的 `expires_at` 与上游决定;(4) 对端长期不可用应由告警和显式 `Outbox.resume` 处理。
+
+### 6.5 货架取消结果与生命周期
+
+- **本系统怎么记**:货架族 `CANCELLED`(必须带权威 `RACK_POSITION final_position`,不带失败码/到达面)按终态保存:`outcome_status=CANCELLED`,`applied_outcome.final_position` 记录实际终位;同时 `settle` 结束该任务提交消息的发送。它只终止当前执行实例,**不是失败,也不撤销业务需求**。
+- **本系统不做什么**:不自动重试,不改同一 `cycle_id` 下其他步骤的状态,也不替调用方判断后续步骤是否还该下发(搬运层不预查、不阻塞,有效性交给上游)。
+- **调用方怎么处理**(合同 T1):需求仍有效时,以全新 `client_request_id` 创建新任务(新 `transport_task_id`),指数退避、上限约 60 秒、次数无上限。重试仍属于同一生命周期,用保存的 `cycle_id` 重建 `RackCycle` 即可,一个 `cycle_id` 下同一步可以有多次尝试。重试前看 `final_position`:仍在目标点则视为已到位、复用,不在目标点则重新进场。
+- **迟到与重复**:同版本重复按幂等处理;已是终态后再来的更高版本(含迟到的 `CANCELLED`)记诊断 `TERMINAL_CONFLICT`,不改写;`CANCELLED` 先到、之后才到的成功结果同样不改写已确定终态。成员取消通知可能比 Transport 取消晚 3~180 秒,不据此推断需求撤销。
+- **缺口**:没有向调用方发布结果的出口(`outcome_version` 发布是非目标),调用方目前只能读 `transport_task`(`outcome_status`、`applied_outcome`)判断,见 `TODOS.md`。
 
 ## 7. 保留期与诊断快照
 

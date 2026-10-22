@@ -87,10 +87,11 @@ class TransportService:
         target: RackLocation,
         target_face: str | None = None,
         rcs_template_id: str = DEFAULT_MOVE_TEMPLATE,
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """登记义务,不提交调用方事务;返回值不证明接纳或物理完成。"""
         data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
-        return await self._register(session, "move_rack", client_request_id, caller, data)
+        return await self._register(session, "move_rack", client_request_id, caller, data, cycle_id)
 
     async def rotate_rack(
         self,
@@ -102,10 +103,13 @@ class TransportService:
         position: RackPosition,
         target_face: str,
         rcs_template_id: str,
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """原地换面;精确位置 `position` 原样写入 source 与 target,位置与当前面由 WMS 校验。"""
         data = rotate_rack_data(rack_id, position, target_face, rcs_template_id)
-        return await self._register(session, "rotate_rack", client_request_id, caller, data)
+        return await self._register(
+            session, "rotate_rack", client_request_id, caller, data, cycle_id
+        )
 
     async def move_bins(
         self,
@@ -114,9 +118,10 @@ class TransportService:
         client_request_id: str,
         caller: TransportCaller,
         moves: list[BinMove],
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         data = bin_move_data(moves)
-        return await self._register(session, "move_bins", client_request_id, caller, data)
+        return await self._register(session, "move_bins", client_request_id, caller, data, cycle_id)
 
     async def exchange_bins(
         self,
@@ -125,9 +130,12 @@ class TransportService:
         client_request_id: str,
         caller: TransportCaller,
         exchange_pairs: list[BinExchangePair],
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         data = exchange_bins_data(exchange_pairs)
-        return await self._register(session, "exchange_bins", client_request_id, caller, data)
+        return await self._register(
+            session, "exchange_bins", client_request_id, caller, data, cycle_id
+        )
 
     async def _register(
         self,
@@ -136,13 +144,16 @@ class TransportService:
         client_request_id: str,
         caller: TransportCaller,
         data: dict,
+        cycle_id: str | None = None,
     ) -> TransportHandle:
         """四个方法共用的登记流程:同号重放返回原任务,新请求冻结字节后同事务入队。"""
         outbox, target = self.outbox, self.target  # 未配置时先于任何校验和写入失败
         require_uuid7(client_request_id)
         if not isinstance(caller, TransportCaller):
             raise InvalidTransportRequest("caller must be a TransportCaller")
-        digest = input_digest(method, caller, data)
+        if cycle_id is not None:
+            require_uuid7(cycle_id)
+        digest = input_digest(method, caller, data)  # 分组键不是入参,重放以首次为准
         query = (
             select(TransportTask)
             .where(TransportTask.client_request_id == client_request_id)
@@ -171,6 +182,7 @@ class TransportService:
                     workline_id=caller.workline_id,
                     station_id=caller.station_id,
                     created_at=now,
+                    cycle_id=cycle_id,
                     frozen=data,
                 )
                 .on_conflict_do_nothing(index_elements=["client_request_id"])
