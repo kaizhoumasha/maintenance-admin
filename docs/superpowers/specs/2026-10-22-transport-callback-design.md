@@ -24,6 +24,8 @@
 5. **写法尽量简单**:继承 `CallbackOperation` + 内嵌 `Payload` + 实现 `execute`;自动发现与 Swagger 示例自动生成。
 6. **命名**:通用机制不使用仓储业务词 `inbound`(入库),统一用 `callback`。
 7. **步骤**:通用接收、operation 注册、Transport 接收并应用、`STALLED` 定时对账;第 1、2 步已实现,第 3 步待做。
+8. **第四版评审补充(第一轮)**:ACK 一律回显 `transport_task_id`;只告警的事实写入 `callback_receipt.diagnostic`;JSON 列整体赋值并用新会话读回断言;对账 beat 每 10 分钟。
+9. **第四版评审补充(外部审阅,2026-10-23)**:身份冲突的 `409` 通过 `echo_keys` 回显首次消息的任务编号;`pending_outcome` 复用同一个应用函数并带跨版本失效规则;任务行保存完整规范化结果 `applied_outcome`;成功结果的目标匹配按任务类型/状态区分(判定表见 §6.2);未知任务的「新身份同版本」重发返回 `202` 是有意偏离;`STALLED` 对账承认低频持续重试、限定 Transport 提交消息、锁候选消息行后复查冷却;回调事务设置 `lock_timeout`;迁移从 `request_raw` 回填 `frozen`。
 
 ## 1. 目标与边界
 
@@ -108,7 +110,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 | 表 | 关键列 | 约束/用途 |
 |---|---|---|
-| `callback_receipt` | `operation`、`operation_id`、`raw_digest`、`effective_digest?`、`compare_mode`(RAW/EFFECTIVE)、首次响应 `status_code`+`body`+`resp_timestamp`、`created_at` | `UNIQUE(operation, operation_id)`;精确原信封优先重放;未知 operation 或非法消息的拒绝使用 RAW,结构合法且已知 operation 使用 EFFECTIVE;**不含任何业务列**。第 1 步即建齐两种摘要元数据,第 2 步启用纯 parse 有效字段比较(D3 / 2A) |
+| `callback_receipt` | `operation`、`operation_id`、`raw_digest`、`effective_digest?`、`compare_mode`(RAW/EFFECTIVE)、首次响应 `status_code`+`body`+`resp_timestamp`、`created_at` | `UNIQUE(operation, operation_id)`;精确原信封优先重放;未知 operation 或非法消息的拒绝使用 RAW,结构合法且已知 operation 使用 EFFECTIVE;**不含任何业务列**。第 1 步即建齐两种摘要元数据,第 2 步启用纯 parse 有效字段比较(D3 / 2A);第 3 步的迁移追加可空 JSON 列 `diagnostic`(处理器附加的诊断,见 §6.1) |
 | `callback_snapshot` | `request_id`、`received_at`、`body_b64`(≤64 KiB)、`truncated`、`http_status`、`response_body`、`outcome` | 仅诊断,无唯一约束,不参与幂等 |
 
 `operation` 长度上限为 256 个字符(code point),`callback_receipt.operation` 为 `VARCHAR(256)`,物理唯一约束直接为 `UNIQUE(operation, operation_id)`(最长约 1 KiB + 36 字节,远低于 PostgreSQL B-tree 索引项限制),不再需要 `operation_digest` 与摘要碰撞核对。超过上限的 `operation` 按 §5 第 2 条处理,不建收据。
@@ -119,12 +121,14 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 | 列 | 内容 |
 |---|---|
-| `frozen`(JSON) | 登记任务时存下冻结的 `data`(成员、目标、`target_face`、`rack_id`);由 `TransportService._register` 写入,用于校验回调事实,不依赖出站消息保留期。**与 Transport operation 注册同一步上线**(此前回调只会得到 `422`,不存在「已 ACK 却无冻结信息」的窗口);此前登记的任务(无真实目标,仅联调数据)为空,回调到达时按「冻结信息缺失」记录告警并返回 `202` |
+| `frozen`(JSON) | 登记任务时存下冻结的 `data`(成员、目标、`target_face`、`rack_id`);由 `TransportService._register` 写入,用于校验回调事实,不依赖出站消息保留期。**与 Transport operation 注册同一步上线**(此前回调只会得到 `422`,不存在「已 ACK 却无冻结信息」的窗口);迁移时对 `frozen` 为空的现存任务,按 `business_key = transport_task_id` 取 `reliable_message.request_raw`,解析出 `data`(去掉 `transport_task_id`)回填;消息已被保留期清理的保持为空,回调到达时按「冻结信息缺失」记录诊断并返回 `202` |
 | `member_positions`(JSON) | `{container_id: {"milestone": ..., "final_position"?: ...}}`,任务内每个料箱成员的位置里程碑 |
 | `outcome_status` | `NULL` 或 `SUCCEEDED/FAILED/CANCELLED/UNKNOWN`;已应用的权威结果 |
-| `final_position`(JSON)、`applied_outcome_revision` | 已应用结果的终位与版本;料箱任务的逐箱结果放进 `final_position` 的 JSON |
+| `applied_outcome`(JSON)、`applied_outcome_revision` | 已应用版本的**完整规范化结果**:`status`、`final_position` 或 `position_unknown`、补齐后的 `arrival_face`、`failure_code`、料箱的 `results[]` 逐箱状态;`outcome_status` 保留为可查询的标量。摘要是单向的,下游(重试、换面)要读的事实都在这一列 |
 | `outcome_digests`(JSON) | `{revision: sha256(规范化 data)}`,用于同版本判重:相同 `Duplicate`、不同 `Conflict` |
-| `pending_outcome`(JSON,可空) | 最高版本的、因前置位置缺失而暂存的料箱成功结果 `{revision, data}` |
+| `pending_outcome`(JSON,可空) | 最高版本的、因前置位置缺失而暂存的料箱成功结果 `{revision, data}`;失效与完成规则见 §6.2 |
+
+**JSON 列约定**:SQLAlchemy 不检测 JSON 列里 dict 的原地修改,一律构造新 dict 后整体赋值(不引入 `MutableDict`);所有应用测试以「请求结束后用新会话读回任务行」断言,不读同一会话的内存对象。
 
 不新增按货架/料箱查询的关联表:`frozen` 保存了货架、料箱和位置的完整事实,是事实来源;将来整架依赖检查(见 `TODOS.md` 的闭合语义条目)需要查询时,再由 `frozen` 回填索引或关联表,当前没有消费方,不提前建。
 
@@ -146,8 +150,14 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 - 处理器在通用层打开的保存点内执行:先 `SELECT transport_task ... FOR UPDATE`(按 `transport_task_id`;SQLite 下按事务串行),再按下面规则更新任务行;同任务的回调因此串行,互不覆盖。
 - **应用逻辑对已通过 DTO 校验的消息不得抛异常**:未知任务、冻结信息缺失、事实与冻结任务矛盾、与已确定终态矛盾,一律输出结构化告警日志(任务号、operation、operation_id、原因)并返回 `Accepted`(对端仍得 `202`,不要求重发);原文靠诊断快照保留 7 天。只有数据库、序列化等真异常才走通用 `503`。
+- **ACK 必须回显 `transport_task_id`**(合同 §5.1 第 506 行:带任务 ID 的 ACK 回显冻结消息中的任务 ID,否则 WMS 不结束发送义务)。Transport 两个 operation 的**所有** `Accepted/Duplicate/Conflict` 响应,包括只告警的情形(未知任务、冻结缺失、事实矛盾、终态矛盾),`data` 都带 `{"transport_task_id": <本条消息解析出的任务 ID>}`;处理器内统一用一个小函数构造,避免遗漏。
+- **只告警的事实要有持久记录**:未知任务、冻结缺失、事实矛盾、终态矛盾、结果不完整这几种「返回 `202` 但不应用」的情形,处理器通过 `ctx` 附上诊断(原因码 + 规范化 `data`),通用层与收据同事务写入 `callback_receipt.diagnostic`(可空 JSON 列,随第 3 步的迁移新增;诊断内容超过 64 KiB 截断并标记)。快照有每进程每分钟上限,不能作为唯一记录。数据库、序列化等**意外异常**仍走通用 `503`(对端原样重发,不丢事实,修复后自愈),不吞成 `202`。
 - **不看出站消息状态**:只要任务存在就应用(权威结果是物理事实,出站消息可能还在 `PENDING/SENDING/STALLED`)。
 - 校验冻结事实(`rack_id`/`container_id` 属冻结对象、目标匹配)读 `transport_task.frozen`。
+
+- **身份冲突的 `409` 也要回显**:同一 `operation + operation_id` 内容被改时,通用层直接返回 `409`,不进入处理器。`CallbackOperation` 增加类属性 `echo_keys`(Transport 两个 operation 为 `("transport_task_id",)`),通用层从**已保存的首次响应** `data` 中只取 `echo_keys` 里的键;首次没有(如首次任务编号非法)则为 `{}`。测试覆盖:同身份把任务 A 改成 B、首次被拒绝但任务编号合法、首次任务编号非法三种。
+- **锁等待有边界**:PostgreSQL 下回调事务开头 `SET LOCAL lock_timeout = '5s'`(常量,不做配置);拿不到任务行或消息行的锁就整体回滚并返回合同形状的 `503`(WMS 用原身份重发)。锁顺序固定为「收据唯一键 → 任务行 → `reliable_message` 行」,应用时的对账只处理当前任务。SQLite 不适用。
+- **未知任务的有意偏离**:任务不存在时没有任务行可锁,也没有版本登记处,因此对未知任务不保证「新身份同版本」重发的 `200/409`,一律 `202` 并写诊断。任务编号由我们生成并下发,WMS 只会回调下发过的任务,这个情形只会出现在环境错配或测试数据里;为它恢复一张版本登记表与「合同可优化、不为极端情形增加机制」的原则相反。
 
 **搬运层不阻塞、先后依赖交给调用方(设计原则)**:下发前不查询 `transport_task` 窗口,也不裁决跨任务占用(合同第 29、447、804 行已如此约定,`TransportService` 现状一致),能否下发由 WMS/RCS 在接纳时裁决。依据:无阻塞设计避免了「我方状态误挡后续任务」这一类事故。但「WMS 接纳」不等于「顺序正确」——现场出现过回架未完成就旋转同架、放箱未完成就离场,WMS 均接纳并执行(`wes_backend/tests/mock/BAD_CASES.md`),因为它不知道业务编排意图。所以:(1) 搬运层保持不预查、不阻塞;(2) 同一货架上是否等前序任务闭合,由调用方按场景决定,依据是任务的闭合状态(见 `TODOS.md` 闭合语义条目);(3) 下发的「失败」分两种:明确被拒(`409/422`)记录原因并算**闭合**,调用方可用新 `client_request_id` 重试;结果不明(超时/无响应)不能当作未下发,保留原身份重试或等权威结果(`STALLED` 的由来)。被拒的任务必须算闭合,否则会变成又一个永久未结束的状态。
 
@@ -156,7 +166,19 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 - **版本登记**:`outcome_digests[revision]` 已存在:规范化 `data` 摘要相同返回 `Duplicate`(`200`),不同返回 `Conflict`(`409`);否则记录该版本摘要。
 - **版本与终态**:`outcome_revision` 低于 `applied_outcome_revision` 的新版本只登记摘要、返回 `202`,不回退;`SUCCEEDED/FAILED/CANCELLED` 已确定后任何后续结果(即使版本更高)告警并返回 `202`、不改写;`UNKNOWN` 可被更高版本收敛。
 - 货架族 `SUCCEEDED` 缺少到达面时,用冻结的 `target_face` 补齐应用结果(合同 §5.3)。
-- **料箱族成功回架**(冻结目标为 `RACK_BIN_SLOT`):所需 `TARGET_PLACED` 均已应用才完成任务;否则存入 `pending_outcome` 并返回 `202`,位置事件应用后在同一事务内检查并完成。结果必须完整且仅覆盖冻结成员,否则告警并返回 `202`、不应用。
+- **料箱族成功回架**(冻结目标为 `RACK_BIN_SLOT`):**每个成功回架的成员**所需的 `TARGET_PLACED` 均已应用才完成任务;否则存入 `pending_outcome` 并返回 `202`。结果必须完整且仅覆盖冻结成员,否则写诊断并返回 `202`、不应用。
+- **`pending_outcome` 的失效与完成规则**:(1) 只保留最高版本,更高版本的结果到达直接替换;(2) 任何版本被应用后(确定终态或 `UNKNOWN`),若 `pending_outcome` 的版本不高于 `applied_outcome_revision` 就清除并写诊断;(3) 位置到齐后完成 `pending_outcome` 时,**与首次应用走同一个应用函数**,版本(须高于已应用版本)、终态规则、前置位置检查全部重做,不另写第二份逻辑,因此旧版本不会把更新的 `UNKNOWN` 或终态覆盖回去。
+- **目标匹配判定表**:
+
+| 任务/结果 | 校验 |
+|---|---|
+| 货架族 `SUCCEEDED`,冻结目标为 `RACK_POSITION` | `final_position` 必须与冻结目标精确相等 |
+| 货架族 `SUCCEEDED`,冻结目标为 `RACK` 或 `ZONE` | 我们没有货架位置和区域归属的主数据,接受任意 `RACK_POSITION`(信任 WMS/RCS 的解析),在文档与注释中明写 |
+| 货架族 `SUCCEEDED`,冻结了 `target_face` | 回调给出非空 `arrival_face` 时必须相等,不相等写诊断不应用;缺省则用冻结 `target_face` 补齐 |
+| 货架族 `FAILED` / `CANCELLED` | 终位允许不在目标,不做目标校验;仍须满足合同的字段互斥规则 |
+| 料箱族 `SUCCEEDED` 成员 | `final_position` 必须等于该成员冻结的目标 |
+| 料箱族 `FAILED` 成员 | 不校验目标;`position_unknown` 与 `final_position` 严格二选一 |
+| 位置事件 `TARGET_PLACED` | `final_position` 等于该料箱冻结的目标 |
 - 得到确定终态后调用一次 `STALLED` 对账(§6.4)。
 
 ### 6.3 `member_position_changed`
@@ -166,7 +188,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 ### 6.4 `STALLED` 对账(第 4 步)
 
-抽出一个幂等步骤——找出「任务已有确定结果(`outcome_status` 为 `SUCCEEDED/FAILED/CANCELLED`,不含 `UNKNOWN`)且 `reliable_message WHERE business_key = transport_task_id AND status = 'STALLED'`」的行(只读引用基础层模型),对命中的每一行用它自己的 `(target, operation, operation_id)` 调用现有 `Outbox.resume`。结果应用成功后调用一次(不受冷却限制);唯一的后台任务是一个 Celery beat 定时调用,覆盖「结果先到、消息后来才进入 `STALLED`」,**只处理 `updated_at` 早于当前时间 30 分钟的 `STALLED` 消息**(常量,不做配置),避免 WMS 不可达时 `resume` 清零预算后无限重发。不依赖 `RELIABLE_TARGETS`/`transport_service.target`,也不假设「一任务一消息」。**验收只承诺「消息被置回 `PENDING`」**;是否变 `DONE` 取决于有目标配置的发送进程在运行。不改基础层、不新增重试调度。
+抽出一个幂等步骤——找出「任务已有确定结果(`outcome_status` 为 `SUCCEEDED/FAILED/CANCELLED`,不含 `UNKNOWN`)且 `reliable_message WHERE business_key = transport_task_id AND status = 'STALLED'`」的行(只读引用基础层模型),对命中的每一行用它自己的 `(target, operation, operation_id)` 调用现有 `Outbox.resume`。结果应用成功后调用一次(不受冷却限制);唯一的后台任务是一个 Celery beat 定时调用(间隔为每 10 分钟的常量,与 30 分钟冷却配套,不做配置),覆盖「结果先到、消息后来才进入 `STALLED`」,**只处理 `updated_at` 早于当前时间 30 分钟的 `STALLED` 消息**(常量,不做配置)。这只是把频率降到每条消息最多每 30 分钟恢复一轮预算:`Outbox.resume` 每次清零 `not_received_count`,WMS 长期不可达时会低频持续重试直到对端恢复(恢复后回 `DUPLICATE` 结束),这是**有意接受的代价**,不承诺消除。查询限定 `operation` 等于出站 submit 的 `OPERATION` 且目标协议属 Transport,不恢复同 `business_key` 的其他 operation 消息。**逐条对账先 `SELECT ... FOR UPDATE` 锁住候选消息行,在锁下重新检查 `status = 'STALLED'` 且已过冷却,再调用 `Outbox.resume` 并同事务提交**,避免两个对账执行者与发送器状态转换交错时绕过冷却(ABA)。不依赖 `RELIABLE_TARGETS`/`transport_service.target`,也不假设「一任务一消息」。**验收只承诺「消息被置回 `PENDING`」**;是否变 `DONE` 取决于有目标配置的发送进程在运行。不改基础层、不新增重试调度。
 
 ## 7. 保留期与诊断快照
 
@@ -186,10 +208,10 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 |---|---|---|
 | 1 通用接收 | 路由、信封校验、严格 JSON(提到 core)、收据幂等与稳定重放、未注册 operation 的 `422`、意外异常 `503` 兜底、`RateLimit` 豁免、快照与其保留期配置/清理/写入速率上限、`docs/deploy.md` 的部署约束说明、迁移(收据、快照) | `413/400`;`operation` 缺失 `422` 不建收据;未知 operation `422 UNSUPPORTED_OPERATION` 并稳定重放;同身份同摘要重放、异摘要(含仅 `timestamp` 不同)`409`;并发同身份只写一份;快照写失败不影响响应;超过 100 次/分钟不返回 `429` |
 | 2 operation 注册 | 注册装饰器、处理器契约(`parse`/`handle`/`Outcome`)、与收据同事务、`Rejected` 回滚处理器写入、处理器异常 `503` | 用**测试里注册的测试 operation** 验证 `202/200/409/422`;`Rejected` 不留业务行;处理器异常合同形状 `503`;注册重复名报错 |
-| 3 Transport 接收并应用 | 两个 operation(`callback.py`,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;结果应用后 `STALLED` 对账一次 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
-| 4 `STALLED` 定时对账 | Celery beat 任务,30 分钟冷却 | `STALLED` 消息被置回 `PENDING`(含结果先到而消息后进入 `STALLED`);冷却内不重复 `resume`;未配置 `RELIABLE_TARGETS` 的进程也可执行 |
+| 3 Transport 接收并应用 | 两个 operation(`callback.py`,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;`callback_receipt.diagnostic` 列与 `ctx` 附加诊断;ACK 与 `409` 回显 `transport_task_id`(`echo_keys`);`applied_outcome` 保存完整规范化结果;`frozen` 从 `request_raw` 回填;回调事务 `lock_timeout`;结果应用后 `STALLED` 对账一次 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
+| 4 `STALLED` 定时对账 | Celery beat 任务(每 10 分钟),30 分钟冷却,锁候选消息行后复查再 `resume`,限定 Transport 提交消息 | `STALLED` 消息被置回 `PENDING`(含结果先到而消息后进入 `STALLED`);冷却内不重复 `resume`;未配置 `RELIABLE_TARGETS` 的进程也可执行 |
 
-每步独立可验收、可合并;1、2 与业务无关,可先于任何具体 operation 完成并联调通用部分。**「可合并」不等于「可对 WMS 开放」**:第 1、2 步合并后入口上线,但此时真实 Transport 回调只会得到 `422 UNSUPPORTED_OPERATION`,WMS 按合同不再重试原内容,第 3 步上线也救不回,滚动发布期间打到旧实例同理。因此上线顺序约定(写入 `docs/deploy.md`):第 3 步在全部接收实例就绪后,才在网关对 WMS 来源放行;在此之前联调只用测试 operation,不投真实 Transport 回调;滚动发布期间网关暂停来源。第 1 步另含两处对既有代码的小改动:`RateLimit` 增加 `limit is None` 豁免,`adapter.py` 的严格 JSON 解析提到 `app/core/strict_json.py`;第 3 步含 `TransportService._register` 写入 `frozen`。
+每步独立可验收、可合并;1、2 与业务无关,可先于任何具体 operation 完成并联调通用部分。**「可合并」不等于「可对 WMS 开放」**:第 1、2 步合并后入口上线,但此时真实 Transport 回调只会得到 `422 UNSUPPORTED_OPERATION`,WMS 按合同不再重试原内容,第 3 步上线也救不回,滚动发布期间打到旧实例同理。因此上线顺序约定(写入 `docs/deploy.md`):第 3 步在**全部接收实例与全部任务创建者(API、worker、脚本)**均已升级后,才在网关对 WMS 来源放行;在此之前联调只用测试 operation,不投真实 Transport 回调;滚动发布期间网关暂停来源。第 1 步另含两处对既有代码的小改动:`RateLimit` 增加 `limit is None` 豁免,`adapter.py` 的严格 JSON 解析提到 `app/core/strict_json.py`;第 3 步含 `TransportService._register` 写入 `frozen`。
 
 ### 8.1 测试计划
 
@@ -209,9 +231,19 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 - 不抛异常:未知任务、冻结信息缺失、事实矛盾、终态矛盾均返回 `202`,任务行不变,并有告警日志;应用逻辑在这些情形下不产生 `503`。
 - 判重:同版本相同 `data` 新身份 `200 DUPLICATE`、不同 `data` `409`,不改任务行;PostgreSQL 并发:同任务同版本两个不同消息身份只有一个 `202`;同任务两个料箱的位置事件并发不互相抹掉。
 - 结果先于出站接纳也能应用;得到确定终态后 `STALLED` 消息被置回 `PENDING`。
+- ACK 回显:`202/200/409` 的 `data` 均含 `transport_task_id`,包括未知任务与只告警的情形。
+- 只告警的事实有持久记录:未知任务、事实矛盾、终态矛盾、结果不完整时 `callback_receipt.diagnostic` 含原因码与规范化 `data`,即使诊断快照被限速丢弃也在;意外数据库异常仍 `503` 且不落收据。
+- 迟到与隔离:出站消息 `STALLED`/超时之后到达的回调仍自动应用,重复到达不重复;一个任务的异常回调(未知任务、矛盾)不影响同时进来的其他任务;结果先于位置事件到达只暂存该任务,不影响其他任务。
+- JSON 列:所有应用结果以请求后新会话读回任务行断言(防原地修改未落库)。
+- `409` 回显:同身份把任务 A 改成 B、首次被拒绝但任务编号合法、首次任务编号非法,三种情形的 `data` 分别为首次的任务编号、首次的任务编号、`{}`。
+- `pending_outcome` 交错:v1 暂存后 v2 应用为 `UNKNOWN`,位置到齐不得重新应用 v1;v3 暂存后迟到的 v2 得到确定终态,v3 被清除或按规则重新评估;部分成功的料箱结果逐成员检查前置位置。
+- 目标判定表逐格:`RACK_POSITION` 精确相等;`RACK`/`ZONE` 目标的成功结果被接受;面向不一致写诊断不应用;`FAILED/CANCELLED` 终位偏离目标仍被应用。
+- 完整结果落库:`applied_outcome` 含 `arrival_face`、`failure_code`、逐箱状态;未知任务、矛盾、不完整结果的诊断含原因码与规范化 `data`。
+- 迁移回填:现存任务的 `frozen` 从 `request_raw` 回填,消息已清理的保持为空;revision 取 Int64 边界值。
+- 锁超时:PostgreSQL 下任务行被另一事务长期占用时回调在预算内返回合同形状的 `503`,且不留收据与业务变更;「任务已更新、收据提交前失败」时任务、诊断、版本登记与 `resume` 全部回滚。
 - 回归:`test_service.py` 原用例通过,且登记任务时 `frozen` 等于冻结的 `data`;迁移升降级,新列与 SQLite `create_all` 一致。
 
-**4 `STALLED` 定时对账**:结果先到、消息后进入 `STALLED` 时被置回 `PENDING`;冷却内不重复 `resume`;未配置 `RELIABLE_TARGETS` 的进程也可执行。
+**4 `STALLED` 定时对账**:结果先到、消息后进入 `STALLED` 时被置回 `PENDING`;冷却内不重复 `resume`;未配置 `RELIABLE_TARGETS` 的进程也可执行;只恢复 Transport 提交消息,不动同 `business_key` 的其他 operation;PostgreSQL 下两个对账执行者与发送器状态转换交错时不绕过冷却(ABA)。
 
 ## 9. 待与对端确认(联调前)
 
@@ -361,17 +393,19 @@ HTTP(要求) ─ 原始 body/严格 JSON ─ 信封与身份
 - 外部 F5 属于 canonical JSON 的实施注意事项,并非已观察到使用默认 `json.dumps` 的代码缺陷。实施时应以键重排/空白变化不改变消息等价性的公开行为证明规范化语义,不升级成通用数值规范化引擎。
 - 不重开已确认的认证 NONE、先接纳后应用、无 outcome 发布/跨任务位置投影、未知任务分类策略和网关控制开放顺序。协议接纳、任务应用和真实物理事实仍分开验收。
 
+## 17. 第四版评审记录(2026-10-23)
+
+`/plan-eng-review` 重新评审第四版(范围:剩余第 3、4 步,不触发复杂度警示)。原生评审 3 项:ACK 回显 `transport_task_id`(合同第 506 行)、只告警事实的持久诊断、JSON 列原地修改与对账间隔。外部审阅(Codex)9 条,核实后:第 2、3、5、8、9 条成立并采纳;第 1 条记录为有意偏离(未知任务不保证「新身份同版本」的 200/409);第 4 条改文案(承认低频持续重试)并限定 Transport 提交消息;第 6 条加 `lock_timeout`;第 7 条采纳完整结果落库(诊断大小由 DTO 限定,64 KiB 截断那半条不成立)。12 项均已逐项确认并写入 §0、§4、§6、§8、§8.1。
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| Eng Review | plan-eng-review,第三轮 | Architecture / Code Quality / Tests / Performance | 本轮1;累计3 | clean(设计决定) | 6项均单独批准并写入;0未决,0剩余关键计划缺口 |
-| Outside Review | Claude Code CLI,host=codex | 独立意见 | 本轮1 | unavailable | glm-5.3 返回5条信息性意见,完成标记不合规;不计完整外部覆盖 |
-| Native Fallback | Codex in-host只读副代理 | 实际源码及合同交叉核验 | 本轮1 | completed | 2项确认缺口均已批准写入;不是外部复核通过 |
-| CEO / Design / DX | 本轮未调用 | 无产品方向或UI变更 | 0 | 不适用本轮 | 不新增前置评审 |
+| Eng Review | plan-eng-review,第四版 | Architecture / Code Quality / Tests / Performance | 本轮1;累计4 | clean(设计决定) | 12 项(原生 3 + 外部 9)均单独批准并写入;0 未决 |
+| Outside Review | Codex CLI,host=claude | 独立意见 | 本轮1 | completed | 9 条,全部核实后处理(7 采纳、1 有意偏离、1 部分采纳) |
+| CEO / Design / DX | 本轮未调用 | 无产品方向或 UI 变更 | 0 | 不适用 | 不新增前置评审 |
 
-- **OUTSIDE COVERAGE:** unavailable,完成标记缺失;原生回退已完成,不能替代外部覆盖。
-- **VERDICT:** 第三版 ENG CLEARED FOR IMPLEMENTATION / DONE_WITH_CONCERNS(保留六步路线,六项修正均已决定);第四版(§0:取消证据表与后台应用、搬运层不阻塞)尚未重新评审。仅说明设计可实施,不证明回调代码、测试、WMS合同同步或物理执行已完成,不授权实现、提交、推送或部署。
+- **OUTSIDE COVERAGE:** codex,plan-review,completed,本轮 9 条。
+- **VERDICT:** 第四版 ENG CLEARED FOR IMPLEMENTATION(第 3、4 步)。仅说明设计可实施,不证明回调代码、测试、WMS 合同同步或物理执行已完成,不授权实现、提交、推送或部署。位置事件先后规则仍是本方约定,联调前须与 WMS 确认。
 
-**UNRESOLVED DECISIONS:**
-- 第四版(§0)待重新评审后再清除本节
+NO UNRESOLVED DECISIONS
