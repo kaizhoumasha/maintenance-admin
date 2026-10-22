@@ -150,6 +150,14 @@ python3 scripts/release_bundle.py check . --project enterprise-backend-prod
 
 迁移前须确认 PostgreSQL 已运行(首次部署先启动 postgres/redis)。`up` 仍会保留并执行 migrate 服务,其成功状态供运行核对。`check` 核对四个应用服务的实际 image ID、迁移成功及 beat 单实例,不代替健康/业务检查。之后检查 `/ready`、登录、权限/菜单、审计分页及真实队列任务,按版本需要补种子。保留成功验收记录,不要记录 token/密码。
 
+### WMS 回调接收启用门槛
+
+`POST /api/v1/wms/events` 当前仅实现通用接收，合法但未注册的 operation（`ENVIRONMENT=local` 仅注册示例 `example.echo@v1`，生产无任何注册）返回持久化的 `422 REJECTED / UNSUPPORTED_OPERATION`，不是临时失败。此响应会按原消息身份稳定重放，不能将部署接口等同于已支持 Transport 回调。
+
+在鉴权方案落地前，网关必须限制 WMS 来源，禁止向公网无保护开放该接口。完成设计第 3 步并确认所有实例已加载实际 Transport 接收能力之前，不得启用真实回调；滚动升级时先暂停网关回调入口，全部实例就绪后再恢复，避免旧实例将合法业务消息永久记录为不支持。详细协议和后续启用条件见[回调接收设计](superpowers/specs/2026-10-22-transport-callback-design.md)。
+
+请求体上限为 256 KiB；独立诊断快照最多保存 64 KiB 的 base64 内容，按进程限量、尽力写入，不影响协议响应。`CALLBACK_SNAPSHOT_RETENTION_DAYS` 默认为 7，必须为正整数，由现有 Celery beat 每日清理过期快照；幂等收据不随快照清理。上线前先迁移数据库，非空收据表禁止降级删除，以免丢失消息身份及首次响应。
+
 ### 数据库改名
 
 默认数据库为 `enterprise_backend`，独立测试库为 `enterprise_backend_test`。PostgreSQL 镜像仅在空数据卷首次初始化时使用 `POSTGRES_DB`，修改此变量不会改名已有数据库。已有 `maintenance` 库采用原地 `ALTER DATABASE` 改名，保留数据库 OID、表、数据、权限和扩展，不另建空库或复制出两套可写数据。
