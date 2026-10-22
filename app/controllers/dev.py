@@ -42,7 +42,7 @@ def _outbound_router(items: list[DevScenario]):
         prefix="/dev/outbound", tags=["dev-outbound"], dependencies=[Depends(get_current_user)]
     )
 
-    @router.post("", response_model=DevSubmitOut)
+    @router.post("", response_model=DevSubmitOut, responses=error_responses(409))
     async def submit_outbound(
         session: SessionDep,
         req: Annotated[body, Body(discriminator="scenario", openapi_examples=examples)],
@@ -74,6 +74,7 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     items = scenarios()
     if items:
         app.include_router(_outbound_router(items), prefix=prefix)
+    # Mock WMS 是 Transport 协议专用的,显式挂载,不走场景自动扫描;以后别的协议要 mock 再加一行
     app.include_router(mock_wms_router, prefix=prefix)
     if not parse_reliable_config(get_settings()).targets:
         logger.warning(

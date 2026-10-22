@@ -45,13 +45,15 @@ async def set_mode(body: MockWmsModeBody) -> MockWmsModeBody:
 
 
 # DEFAULT_SUBMIT_PATH 含 /api/v1 前缀,而路由挂载时统一加前缀,所以这里去掉。
-@router.post(DEFAULT_SUBMIT_PATH.removeprefix(_API_PREFIX), include_in_schema=True)
+@router.post(DEFAULT_SUBMIT_PATH.removeprefix(_API_PREFIX))
 async def submit_transport_request(request: Request) -> Response:
     """模拟 WMS 的 transport.task.submit@v1 接收端,回显请求里的 operation_id 与任务号。"""
     mode = _mode
     if mode == MockWmsMode.hang:
-        await asyncio.sleep(_HANG_SECONDS)
-    if mode == MockWmsMode.garbage:
+        await asyncio.sleep(
+            _HANG_SECONDS
+        )  # 通常发送方超时先断开;睡完仍无意义响应,与 garbage 同判 UNKNOWN
+    if mode in (MockWmsMode.garbage, MockWmsMode.hang):
         return PlainTextResponse("not json")
     status_code, code = _STATUS.get(mode, _STATUS[MockWmsMode.accept])
     try:

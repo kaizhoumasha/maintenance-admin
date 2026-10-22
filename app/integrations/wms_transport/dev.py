@@ -5,7 +5,7 @@ Zone、储位、滚筒线编码的示例是占位值,联调前按现场替换。
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dev_scenarios import DevOutcome, DevRequest, dev_scenario
@@ -32,7 +32,11 @@ ERRORS = {
 }
 
 
-class TransportRouteIn(BaseModel):
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # 嵌套字段拼错时报 400,而不是被静默丢弃
+
+
+class TransportRouteIn(_Strict):
     workline_id: str
     station_id: str | None = None
 
@@ -40,7 +44,7 @@ class TransportRouteIn(BaseModel):
         return TransportCaller(self.workline_id, self.station_id)
 
 
-class TransportDestinationIn(BaseModel):
+class TransportDestinationIn(_Strict):
     kind: Literal["position", "zone"]
     code: str
 
@@ -48,7 +52,7 @@ class TransportDestinationIn(BaseModel):
         return RackPosition(self.code) if self.kind == "position" else Zone(self.code)
 
 
-class TransportSlotIn(BaseModel):
+class TransportSlotIn(_Strict):
     rack_id: str
     rack_face: str
     slot_id: str
@@ -57,7 +61,7 @@ class TransportSlotIn(BaseModel):
         return RackBinSlot(self.rack_id, self.rack_face, self.slot_id)
 
 
-class TransportHandoffIn(BaseModel):
+class TransportHandoffIn(_Strict):
     handoff_code: str
 
     def domain(self) -> HandoffPosition:
@@ -78,7 +82,7 @@ class RackRotateIn(DevRequest, TransportRouteIn):
     target_face: str
 
 
-class TransportFeedMoveIn(BaseModel):
+class TransportFeedMoveIn(_Strict):
     bin_code: str
     source: TransportSlotIn
     target: TransportHandoffIn
@@ -88,7 +92,7 @@ class BinFeedIn(DevRequest, TransportRouteIn):
     moves: list[TransportFeedMoveIn]
 
 
-class TransportReturnMoveIn(BaseModel):
+class TransportReturnMoveIn(_Strict):
     bin_code: str
     source: TransportHandoffIn
     target: TransportSlotIn
@@ -98,7 +102,7 @@ class BinReturnIn(DevRequest, TransportRouteIn):
     moves: list[TransportReturnMoveIn]
 
 
-class TransportExchangePairIn(BaseModel):
+class TransportExchangePairIn(_Strict):
     left_bin_code: str
     left_location: TransportSlotIn
     right_bin_code: str
