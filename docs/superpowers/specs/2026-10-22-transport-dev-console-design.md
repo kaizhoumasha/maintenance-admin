@@ -217,4 +217,5 @@ ACK 体回显请求里的 `operation_id`、`data.transport_task_id` 并带整数
 - **端到端(临时 SQLite 库 + 随机端口 + `RELIABLE_TARGETS` 指向自身,未碰开发库)**:真实发送器自调用 Mock WMS,终态与 §4.7 一致:`accept`→DONE、`duplicate`→DONE、`conflict`→FAILED/CONFLICT、`reject`→FAILED/REJECTED、`unavailable`→重试后 STALLED、`garbage`→PENDING(UNKNOWN,待重试)。`hang`(目标超时 2 秒)→ 首次投递以 `TOTAL_TIMEOUT` 结束并标记 `delivery_uncertain`,随后按固定间隔重试(轮询时第 2 次投递在途,状态 SENDING)。
 - **浏览器(Swagger UI)**:`POST /api/v1/dev/outbound` 的 Examples 下拉出现 6 项,选中后请求体自动填充,§9.1 未验证项已关闭。
 - **实施中的调整**:嵌套请求模型加 `Transport` 前缀(`Slot`、`Route` 等泛名会在不同业务间冲突 OpenAPI schema 名)。
-- **仍未做**:Postgres 下的实测(25432 是开发库,需要一次性库和显式 `TEST_DATABASE_URL`)。
+- **Postgres 实测**:在本机 25432 实例里临时新建库、`alembic upgrade head`、种子管理员后,同一组 6 种模式的终态与 SQLite 完全一致;库已删除,未碰开发库。请求日志里的 3 条 ERROR 是 `unavailable` 模式有意返回的 503。
+- **仍未做**:无。
