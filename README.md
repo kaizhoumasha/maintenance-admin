@@ -165,7 +165,7 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 #### 联调控制台(仅 `ENVIRONMENT=local`)
 
-Swagger 里 `POST /api/v1/dev/outbound` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/outbound/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
+Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
 
 ```bash
 RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"}}}'

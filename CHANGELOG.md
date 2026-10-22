@@ -27,7 +27,7 @@
 
 ### 待发布：联调控制台（Swagger 统一出站入口）
 
-- 仅 `ENVIRONMENT=local` 可用：在 Swagger 里用 `POST /api/v1/dev/outbound` 的 Examples 下拉选择业务场景（货架进场、换面、离场，料箱投料、回架、交换），经真实业务接入层登记出站，再用 `GET /api/v1/dev/outbound/status/{business_key}` 查看投递状态与请求、响应原文；服务层显式提交事务，保证发送器能看到消息。
+- 仅 `ENVIRONMENT=local` 可用：在 Swagger 里用 `POST /api/v1/dev/transport/tasks` 的 Examples 下拉选择业务场景（货架进场、换面、离场，料箱投料、回架、交换），经真实业务接入层登记出站，再用 `GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文；服务层显式提交事务，保证发送器能看到消息。
 - 业务接入层新增 `app/integrations/<业务>/dev.py`，用 `@dev_scenario` 登记场景即可自动出现在下拉里，无需改 `main.py`；非法名字、重名、非法示例在导入期报错。
 - 内置 Mock WMS（`POST /api/v1/wes/transport-requests`，`PUT /api/v1/dev/mock-wms/mode` 切换 accept、duplicate、conflict、reject、unavailable、garbage、hang 七种响应），把 `RELIABLE_TARGETS` 指向本应用自身即可端到端验证重试与终态；响应与 Transport 适配器的判定由契约测试保持一致。
 - 新增 WMS 回调通用接收 `POST /api/v1/wms/events`（Transport 回调接收设计第 1 步）：有界读取（256 KiB）、严格 JSON（拒绝重复 key 与 NaN）、`operation + operation_id` 幂等收据（原信封指纹相同则稳定重放首次响应，不同则 409）、合同形状的 `422 REJECTED`/`503 UNAVAILABLE`、独立诊断快照（≤64 KiB，每进程每分钟限量，默认保留 7 天，由 `CALLBACK_SNAPSHOT_RETENTION_DAYS` 配置并每日清理）。`operation` 上限 256 字符，超长或缺失返回 `422` 且不建收据。该路径豁免全局限流（`RateLimit(None)`）；严格 JSON 解析提到 `app/core/strict_json.py` 与出站适配器共用。尚未注册任何具体 operation，合法 operation 一律得到持久化的 `422 UNSUPPORTED_OPERATION`；启用门槛见 `docs/deploy.md`「WMS 回调接收启用门槛」。新增表 `callback_receipt`、`callback_snapshot`，收据表非空时拒绝降级。

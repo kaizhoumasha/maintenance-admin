@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dev_scenarios import DevOutcome, DevRequest, DevScenario
 from app.core.errors import AppError, ErrorCode
 from app.models import ReliableMessage
-from app.schemas.dev_outbound import DevMessageOut
+from app.schemas.dev_console import DevMessageOut
 
 
 async def submit(session: AsyncSession, scenario: DevScenario, req: DevRequest) -> DevOutcome:

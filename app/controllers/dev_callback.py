@@ -13,7 +13,7 @@ from app.services import dev_callback_service
 
 router = new_router(
     prefix="/dev/transport",
-    tags=["dev-transport-callback"],
+    tags=["dev-transport"],
     dependencies=[Depends(get_current_user)],
 )
 
