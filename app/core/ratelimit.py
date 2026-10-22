@@ -31,10 +31,11 @@ WINDOW = 60  # 秒;key 里带窗口是为了日后改窗口不会和旧数据混
 class RateLimit:
     """
     限流依赖。全局默认挂在 app 上;路由要覆盖就在装饰器里再放一个同 name 的实例,
-    默认那个会自动跳过。不同 name(如登录的 "login")与默认限流叠加生效。
+    默认那个会自动跳过;`limit=None` 的实例表示该路由豁免默认限流(协议不允许 429 的回调入口)。
+    不同 name(如登录的 "login")与默认限流叠加生效。
     """
 
-    def __init__(self, limit: int, name: str = "ip", per_route: bool = True):
+    def __init__(self, limit: int | None, name: str = "ip", per_route: bool = True):
         self.limit, self.name, self.per_route = limit, name, per_route
 
     async def __call__(self, request: Request, redis: RedisDep) -> None:
@@ -46,6 +47,8 @@ class RateLimit:
             if isinstance(d.dependency, RateLimit) and d.dependency.name == self.name
         ]
         if overrides and overrides[-1] is not self:
+            return
+        if self.limit is None:
             return
         # shortcut: 取对端地址,反向代理后所有人共用一个 IP;部署时改为解析可信的 X-Forwarded-For
         ip = request.client.host if request.client else "unknown"
