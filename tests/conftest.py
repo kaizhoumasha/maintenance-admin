@@ -65,9 +65,9 @@ async def pg_sessions(pg_url):
         await engine.dispose()
 
 
-# WMS 回调接收的共享存储夹具:SQLite(create_all)与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
+# WMS 回调相关的共享存储夹具:SQLite(create_all)与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
 @pytest.fixture(params=["sqlite", "postgres"])
-async def callback_store(request, tmp_path, monkeypatch, redis):
+async def callback_db(request, tmp_path, monkeypatch):
     if request.param == "postgres":
         engine = create_async_engine(request.getfixturevalue("pg_url"))
     else:
@@ -76,14 +76,6 @@ async def callback_store(request, tmp_path, monkeypatch, redis):
             await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(app.state, "callback_session_factory", factory, raising=False)
-    monkeypatch.setattr(snapshots, "_written", 0)
-    monkeypatch.setattr(snapshots, "_dropped", 0)
-    monkeypatch.setattr(snapshots, "_window_start", 0.0)
-
-    async def forbidden(*args, **kwargs):
-        raise AssertionError("callback must not access Redis rate limiting")
-
-    monkeypatch.setattr(redis, "eval", forbidden)
     try:
         yield factory
     finally:
@@ -94,6 +86,20 @@ async def callback_store(request, tmp_path, monkeypatch, redis):
                 await session.execute(delete(ReliableMessage))  # Transport 回调测试造的任务与消息
                 await session.execute(delete(TransportTask))
         await engine.dispose()
+
+
+# 回调接收合同测试用:另外保证回调路径不碰 Redis 限流,并重置快照计数
+@pytest.fixture
+async def callback_store(callback_db, monkeypatch, redis):
+    monkeypatch.setattr(snapshots, "_written", 0)
+    monkeypatch.setattr(snapshots, "_dropped", 0)
+    monkeypatch.setattr(snapshots, "_window_start", 0.0)
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("callback must not access Redis rate limiting")
+
+    monkeypatch.setattr(redis, "eval", forbidden)
+    return callback_db
 
 
 @pytest.fixture

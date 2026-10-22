@@ -10,6 +10,7 @@ from typing import Annotated, Union
 from fastapi import Body, Depends, FastAPI
 
 from app import integrations
+from app.controllers.dev_callback import router as callback_router
 from app.controllers.dev_mock_wms import router as mock_wms_router
 from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
 from app.core.dev_scenarios import DevScenario, scenarios
@@ -76,6 +77,7 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
         app.include_router(_outbound_router(items), prefix=prefix)
     # Mock WMS 是 Transport 协议专用的,显式挂载,不走场景自动扫描;以后别的协议要 mock 再加一行
     app.include_router(mock_wms_router, prefix=prefix)
+    app.include_router(callback_router, prefix=prefix)
     if not parse_reliable_config(get_settings()).targets:
         logger.warning(
             "dev console mounted but RELIABLE_TARGETS has no target: submitting fails with 500. "

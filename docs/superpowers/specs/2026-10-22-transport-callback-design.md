@@ -42,7 +42,7 @@
 - `outcome_version` 对外发布(合同 §5.4 第 8 步):没有下游消费者前不做。
 - 跨任务的货架/料箱当前位置表与 `RackStateReader` 项目内实现:没有调用方,不做。
 - 非 Transport 的 WMS operation:通用层为其预留注册点,本文不实现。
-- 联调控制台的「回调投递」场景:已记 `TODOS.md`。
+- 联调控制台的「回调投递」场景:已实现(`POST /api/v1/dev/transport/{transport_task_id}/callbacks`,仅 local),不属于本文范围外的未决项。
 - 不改基础层 `app/http_client`、`app/reliable`(冻结,见 [[transport-domain-layering]])。
 
 ## 2. 已核实的现状
