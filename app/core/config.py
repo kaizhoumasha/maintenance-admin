@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     AUDIT_RETENTION_DAYS: int = 90
     CALLBACK_SNAPSHOT_RETENTION_DAYS: int = Field(default=7, gt=0)
 
+    # Transport 任务创建后超过该时长仍无确定终态就输出卡住告警(暂定 2 小时,按现场 SOP 调整)
+    TRANSPORT_STUCK_ALERT_MINUTES: int = Field(default=120, gt=0)
+
     RELIABLE_TARGETS: dict = {}
     RELIABLE_MAX_BODY_BYTES: int = 262144
     RELIABLE_DEFAULT_TIMEOUT_MS: float = 10000

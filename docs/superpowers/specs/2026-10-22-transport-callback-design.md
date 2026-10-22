@@ -32,6 +32,7 @@
 13. **提交消息 1 小时超时(2026-10-23,暂定)**:同一消息身份的最长重发时间不超过 1 小时,超过后再发已无意义。出站侧 Transport 提交消息统一带 `ttl = SUBMIT_TTL`(1 小时,`wms_transport/protocol.py`),到期未送达的消息由发送层转为 `EXPIRED` 而不再发送;对 WMS 的回调侧同样按 1 小时作为其重发窗口提请确认(§9)。过期后任务没有结果,由卡住任务告警(`TODOS.md`)暴露,由上游决定是否用新 `client_request_id` 重新下发。
 14. **合同符合性复核后的取舍(2026-10-23)**:(1) **创建前不做可信位置/当前面校验**是有意偏离(合同 §3.2、§4.1 要求换面前有可信精确位置与当前面、料箱同架面须等于可信当前面):没有位置投影,由 WMS 在接纳时兜底(`409/503`),我方只做请求内结构校验,不做补救。(2) **来源认证降为低优先级,联调完成后再实施**。(3) **换面模板 `CK04` 与 `CTU02` 同为旋转动作**:`ROTATE_TEMPLATES = {CTU02, CK04}`,转运/退料架用 `CK04`、五层架用 `CTU02`;合同文本只列 `CTU01/CTU02/CTU03/F01`,待合同同步。
 15. **货架生命周期分组键 `cycle_id`(2026-10-24)**:进场 → [换面…] → 离场作为一个货架的完整生命周期;`transport_task.cycle_id`(可空、有索引)是纯本地分组键,**不进入 wire、冻结请求与幂等摘要**,所以无需与 WMS 重新商定合同。每一步仍是独立任务(自己的 `transport_task_id`、版本、终态、重试隔离);不共用 `transport_task_id`,因为回调靠它区分物理任务,共用会让终态不可改写规则和重试隔离失效。`RackCycle` 创建时生成 `cycle_id`,后续步骤在别的进程重建句柄时传入首次的值;同一 `client_request_id` 重放以首次登记为准。料箱场景提供可选 `cycle_id` 参数,同一面的多批搬运想归组时才传。只做分组,不新建批次表,也不定义批次何时结束(留在 TODOS 的闭合语义)。
+16. **卡住任务告警(2026-10-24)**:`transport.scan_stuck`(beat 每 10 分钟,`app/tasks/transport_tasks.py`)扫描创建超过 `TRANSPORT_STUCK_ALERT_MINUTES`(默认 120,暂定)仍无确定终态的任务(无结果、`UNKNOWN`、料箱成功结果暂存),输出结构化告警日志 `transport task stuck`,`reason` 为 `SUBMIT_NOT_DELIVERED / RESULT_MISSING / RESULT_WAITING_FOR_POSITIONS / OUTCOME_UNKNOWN`。只读,不改状态,不伪造结果;仍卡住的任务每次扫描重复告警;每次最多 200 条。通知渠道与责任人由现场 SOP 决定。
 
 ## 1. 目标与边界
 

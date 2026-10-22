@@ -14,6 +14,7 @@ celery_app = Celery(
         "app.tasks.audit_tasks",
         "app.tasks.reliable_tasks",
         "app.tasks.callback_tasks",
+        "app.tasks.transport_tasks",
     ],
 )
 
@@ -29,6 +30,10 @@ celery_app.conf.update(
         "cleanup-callback-snapshots": {
             "task": "callback.cleanup_snapshots",
             "schedule": crontab(hour=3, minute=30),
+        },
+        "scan-stuck-transport-tasks": {
+            "task": "transport.scan_stuck",
+            "schedule": crontab(minute="*/10"),
         },
         "cleanup-callback-receipts": {
             "task": "callback.cleanup_receipts",
