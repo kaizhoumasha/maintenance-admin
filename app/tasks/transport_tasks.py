@@ -55,16 +55,11 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
             )
             if not tasks:
                 return total
-            status = dict(
-                (
-                    await session.execute(
-                        select(ReliableMessage.business_key, ReliableMessage.status).where(
-                            ReliableMessage.business_key.in_([t.transport_task_id for t in tasks]),
-                            ReliableMessage.operation == "transport.task.submit@v1",
-                        )
-                    )
-                ).all()
+            submissions = select(ReliableMessage.business_key, ReliableMessage.status).where(
+                ReliableMessage.business_key.in_([task.transport_task_id for task in tasks]),
+                ReliableMessage.operation == "transport.task.submit@v1",
             )
+            submit_statuses = dict((await session.execute(submissions)).all())
         for task in tasks:
             created = (
                 task.created_at if task.created_at.tzinfo else task.created_at.replace(tzinfo=UTC)
@@ -73,7 +68,7 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
                 "transport_task_id": task.transport_task_id,
                 "cycle_id": task.cycle_id,
                 "kind": task.kind,
-                "reason": _reason(task, status.get(task.transport_task_id)),
+                "reason": _reason(task, submit_statuses.get(task.transport_task_id)),
                 "waiting_minutes": int((current - created).total_seconds() // 60),
             }
             logger.warning("transport task stuck %r", context, extra=context)

@@ -123,16 +123,14 @@ class TaskCallbacks:
         if self.task.kind not in BIN_KINDS:
             return True
         positions = self.task.member_positions or {}
-        members = self.members
         for item in data["results"]:
-            if (
-                item["status"] != "SUCCEEDED"
-                or members[item["container_id"]]["kind"] != "RACK_BIN_SLOT"
-            ):
+            if item["status"] != "SUCCEEDED":
                 continue
-            if (positions.get(item["container_id"]) or {}).get("TARGET_PLACED") != members[
-                item["container_id"]
-            ]:
+            container_id = item["container_id"]
+            target = self.members[container_id]
+            if target["kind"] != "RACK_BIN_SLOT":
+                continue
+            if (positions.get(container_id) or {}).get("TARGET_PLACED") != target:
                 return False
         return True
 

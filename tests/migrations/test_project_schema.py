@@ -13,10 +13,10 @@ from app.database import create_database_engine
 from app.models import Permission
 
 
-async def migrate(url, revision):
+async def run_alembic(url: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     return await asyncio.to_thread(
         subprocess.run,
-        [sys.executable, "-m", "alembic", "upgrade", revision],
+        [sys.executable, "-m", "alembic", *arguments],
         env={**os.environ, "DATABASE_URL": url},
         capture_output=True,
         text=True,
@@ -41,7 +41,7 @@ async def schema_database(pg_url):
 
 
 async def legacy_database(url, engine):
-    result = await migrate(url, "a023a20261024")
+    result = await run_alembic(url, "upgrade", "a023a20261024")
     assert result.returncode == 0, result.stdout + result.stderr
     async with engine.begin() as connection:
         tables = list(
@@ -68,13 +68,7 @@ async def legacy_database(url, engine):
 async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_database):
     url, engine = schema_database
     await legacy_database(url, engine)
-    current = await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", "current"],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+    current = await run_alembic(url, "current")
     assert current.returncode == 0, current.stdout + current.stderr
     async with engine.connect() as connection:
         assert await connection.scalar(text("SELECT to_regclass('public.alembic_version')"))
@@ -89,7 +83,7 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
             text("SELECT pg_get_serial_sequence('public.permission','id')::regclass::oid")
         )
         foreign_oid = await connection.scalar(text("SELECT 'public.other_system'::regclass::oid"))
-    result = await migrate(url, "head")
+    result = await run_alembic(url, "upgrade", "head")
     assert result.returncode == 0, result.stdout + result.stderr
     async with engine.connect() as connection:
         assert (
@@ -138,7 +132,7 @@ async def test_unsafe_schema_aborts_without_moving_any_project_table(schema_data
             )
         else:
             await connection.execute(text("DROP TABLE public.callback_snapshot"))
-    result = await migrate(url, "head")
+    result = await run_alembic(url, "upgrade", "head")
     assert result.returncode != 0
     async with engine.connect() as connection:
         assert await connection.scalar(text("SELECT to_regclass('public.permission')"))
@@ -186,15 +180,9 @@ async def test_fresh_database_keeps_another_systems_public_migration_ledger(sche
         await connection.execute(
             text("INSERT INTO public.permission VALUES ('foreign permission')")
         )
-    current = await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", "current"],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+    current = await run_alembic(url, "current")
     assert current.returncode == 0, current.stdout + current.stderr
-    result = await migrate(url, "head")
+    result = await run_alembic(url, "upgrade", "head")
     assert result.returncode == 0, result.stdout + result.stderr
     async with engine.connect() as connection:
         assert (
@@ -227,13 +215,7 @@ async def test_fresh_database_keeps_another_systems_public_migration_ledger(sche
             )
     finally:
         await runtime.dispose()
-    checked = await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", "check"],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+    checked = await run_alembic(url, "check")
     assert checked.returncode == 0, checked.stdout + checked.stderr
 
 
@@ -244,7 +226,7 @@ async def test_older_public_revision_cannot_move_foreign_tables(schema_database)
         await connection.execute(
             text("UPDATE public.alembic_version SET version_num='e44a910b2e48'")
         )
-    result = await migrate(url, "7c1d3f5a9b20")
+    result = await run_alembic(url, "upgrade", "7c1d3f5a9b20")
     assert result.returncode != 0
     assert "must first be upgraded" in result.stdout + result.stderr
     async with engine.connect() as connection:

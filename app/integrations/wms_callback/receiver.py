@@ -32,11 +32,10 @@ logger = logging.getLogger(__name__)
 
 def _log_diagnostics(sync_session):
     transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
-    diagnostics = sync_session.info["callback_diagnostics"].pop(transaction, [])
+    queued = sync_session.info["callback_diagnostics"]
+    diagnostics = queued.pop(transaction, [])
     if transaction.nested:
-        sync_session.info["callback_diagnostics"].setdefault(transaction.parent, []).extend(
-            diagnostics
-        )
+        queued.setdefault(transaction.parent, []).extend(diagnostics)
         return
     for detail in diagnostics:
         logger.warning("callback diagnostic %r", detail, extra=detail)
