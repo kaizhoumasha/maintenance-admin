@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### 内部整理
+
+- Celery 任务的数据库入口合并为 `app/tasks/_db.py` 的 `run_with_factory`（NullPool 引擎、单次 `asyncio.run`、同循环内释放）；联调控制台的模块扫描改用 `import_module_tree`。行为不变。
+- `test_service` 的配置辅助函数隔离进程环境里的 `RELIABLE_TARGETS`，避免本机环境变量污染用例。
+
 ### WMS 请求端点与 operation 组织
 
 - 修复请求端点 ACK 校验：非法 code/reason_code 类型和不符合公共响应联合闭集的内容均按 `UNKNOWN` 保留不确定性并重试，不能转成本地永久失败或误判终局；校验 facts/准备接纳的空 data 及拒绝响应可选 `field_path`，不解释 `DECIDED` 业务结果、不改变 Transport 分类。

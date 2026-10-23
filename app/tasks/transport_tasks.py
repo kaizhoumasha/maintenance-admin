@@ -1,15 +1,12 @@
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.pool import NullPool
 
 from app.core import get_settings
-from app.database import create_database_engine as create_async_engine
 from app.models import ReliableMessage, TransportTask
 from app.reliable.config import positive
+from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -82,16 +79,6 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
 @celery_app.task(name="transport.scan_stuck")
 def scan_stuck_tasks() -> int:
     settings = get_settings()
-
-    async def execute():
-        engine = create_async_engine(
-            settings.DATABASE_URL, poolclass=NullPool, hide_parameters=True
-        )
-        try:
-            return await scan_stuck(
-                async_sessionmaker(engine), settings.TRANSPORT_STUCK_ALERT_MINUTES
-            )
-        finally:
-            await engine.dispose()
-
-    return asyncio.run(execute())
+    return run_with_factory(
+        settings.DATABASE_URL, lambda f: scan_stuck(f, settings.TRANSPORT_STUCK_ALERT_MINUTES)
+    )
