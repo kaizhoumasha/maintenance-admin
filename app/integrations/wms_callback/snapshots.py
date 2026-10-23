@@ -16,24 +16,22 @@ SNAPSHOTS_PER_MINUTE = 120
 SNAPSHOT_BODY_BYTES = 64 * 1024
 SNAPSHOT_PREVIEW_BYTES = SNAPSHOT_BODY_BYTES // 4 * 3  # base64 后恰好不超过 64 KiB
 SNAPSHOT_TIMEOUT_S = 2
-_window_start = 0.0
-_written = 0
-_dropped = 0
+_windows: dict[str, list] = {}  # 来源 -> [窗口起点, 已写入, 已丢弃]
 
 
-def allow_snapshot() -> bool:
-    global _window_start, _written, _dropped
+def allow_snapshot(source: str = "wms") -> bool:
     now = monotonic()
-    if now - _window_start >= 60:
-        if _dropped:
-            logger.warning("callback snapshots dropped count=%s", _dropped)
-        _window_start, _written, _dropped = now, 0, 0
-    if _written >= SNAPSHOTS_PER_MINUTE:
-        _dropped += 1
-        if _dropped == 1:
-            logger.warning("callback snapshot rate limit reached")
+    window = _windows.setdefault(source, [0.0, 0, 0])
+    if now - window[0] >= 60:
+        if window[2]:
+            logger.warning("callback snapshots dropped source=%s count=%s", source, window[2])
+        window[:] = [now, 0, 0]
+    if window[1] >= SNAPSHOTS_PER_MINUTE:
+        window[2] += 1
+        if window[2] == 1:
+            logger.warning("callback snapshot rate limit reached source=%s", source)
         return False
-    _written += 1
+    window[1] += 1
     return True
 
 
@@ -45,11 +43,13 @@ async def record_snapshot(
     response: CallbackResponse,
     request_id: str,
     received_at: datetime,
+    source: str | None = None,
 ) -> None:
     try:
         async with asyncio.timeout(SNAPSHOT_TIMEOUT_S), factory() as session, session.begin():
             session.add(
                 CallbackSnapshot(
+                    source=source,
                     request_id=request_id,
                     received_at=received_at,
                     body_b64=base64.b64encode(preview).decode("ascii"),
