@@ -1,20 +1,24 @@
 import json
+import logging
 from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
 
+from app.core.strict_json import canonical_digest
 from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.envelope import EcsEventEnvelope
 from app.integrations.ecs_callback.receiver import (
     ACK,
     MAX_BODY_BYTES,
+    MAX_DIAGNOSTIC_BYTES,
+    PREVIEW_BYTES,
     event_identity,
     receive_ecs_event,
 )
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback.operation import CallbackPayload
-from app.models import CallbackReceipt
+from app.models import CallbackReceipt, CallbackSnapshot
 
 BASE = {"device_code": "D1", "event_type": "SCAN_COMPLETED", "timestamp": 1}
 
@@ -114,3 +118,151 @@ async def test_existing_receipt_short_circuits_before_data_validation(callback_s
         )
     resp = await receive(callback_store, json.dumps(BASE).encode())
     assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
+
+
+EVENT = json.dumps({**BASE, "data": {"barcode": "B1"}}).encode()
+
+
+async def receipts(factory) -> list[CallbackReceipt]:
+    async with factory() as session:
+        return list((await session.scalars(select(CallbackReceipt))).all())
+
+
+async def test_new_event_gets_ack_and_one_receipt(callback_store):
+    resp = await receive(callback_store, EVENT)
+    assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "unregistered")
+    [receipt] = await receipts(callback_store)
+    assert receipt.operation == "ecs.event"
+    assert len(receipt.operation_id) == 64 and receipt.operation_id == resp.digest
+    assert (receipt.compare_mode, receipt.effective_digest) == ("RAW", None)
+    assert receipt.body == ACK and receipt.resp_timestamp > 0
+    assert receipt.raw_digest == canonical_digest(json.loads(EVENT))
+
+
+async def test_replay_returns_same_ack_and_handler_runs_once(callback_store):
+    calls = []
+
+    async def handler(ctx, data):
+        calls.append(data)
+
+    ecs_event("SCAN_COMPLETED")(handler)
+    first = await receive(callback_store, EVENT)
+    second = await receive(callback_store, EVENT)
+    assert (first.body, first.outcome) == (ACK, "received")
+    assert (second.body, second.outcome) == (ACK, "duplicate")
+    assert len(calls) == 1 and await receipt_count(callback_store) == 1
+
+
+async def test_replay_after_handler_validation_tightened_still_acks(callback_store):
+    raw = json.dumps(BASE).encode()
+    assert (await receive(callback_store, raw)).outcome == "unregistered"
+
+    class Model(CallbackPayload):
+        barcode: str
+
+    ecs_event("SCAN_COMPLETED", data=Model)(lambda ctx, data: None)
+    resp = await receive(callback_store, raw)
+    assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
+
+
+async def test_handler_exception_rolls_back_receipt_and_business_write(callback_store):
+    async def handler(ctx, data):
+        ctx.session.add(
+            CallbackSnapshot(
+                request_id="r",
+                received_at=datetime.now(UTC),
+                body_b64="",
+                truncated=False,
+                http_status=200,
+                outcome="x",
+            )
+        )
+        await ctx.session.flush()
+        raise RuntimeError("boom")
+
+    ecs_event("SCAN_COMPLETED")(handler)
+    async with callback_store() as session:
+        with pytest.raises(RuntimeError, match="boom"):
+            async with session.begin():
+                await receive_ecs_event(session, EVENT)
+    assert await receipt_count(callback_store) == 0
+    async with callback_store() as session:
+        assert await session.scalar(select(func.count()).select_from(CallbackSnapshot)) == 0
+
+
+async def test_unregistered_event_is_acked_with_full_event_in_diagnostic(callback_store):
+    resp = await receive(callback_store, EVENT)
+    assert (resp.status_code, resp.outcome) == (200, "unregistered")
+    [receipt] = await receipts(callback_store)
+    [note] = receipt.diagnostic
+    assert note["reason_code"] == "UNREGISTERED_EVENT_TYPE"
+    assert note["data"] == {
+        "device_code": "D1",
+        "event_type": "SCAN_COMPLETED",
+        "timestamp": 1,
+        "is_debug": False,
+        "data": {"barcode": "B1"},
+    }
+
+
+async def test_oversized_unregistered_event_keeps_digest_size_preview_only(callback_store):
+    body = {**BASE, "data": {"blob": "x" * 40 * 1024}}
+    await receive(callback_store, json.dumps(body).encode())
+    [receipt] = await receipts(callback_store)
+    [note] = receipt.diagnostic
+    assert set(note["data"]) == {"digest", "size", "preview"}
+    assert len(note["data"]["preview"]) == PREVIEW_BYTES and note["data"]["size"] > 40 * 1024
+    assert len(json.dumps(receipt.diagnostic).encode()) <= MAX_DIAGNOSTIC_BYTES
+    assert "x" * 2048 not in json.dumps(receipt.diagnostic)
+
+
+async def test_long_device_code_with_tiny_data_stays_within_cap(callback_store):
+    long = "D" * 200_000
+    await receive(callback_store, json.dumps({**BASE, "device_code": long, "data": {}}).encode())
+    [receipt] = await receipts(callback_store)
+    [note] = receipt.diagnostic
+    assert note["device_code"] == "D" * 128
+    assert len(json.dumps(receipt.diagnostic).encode()) <= MAX_DIAGNOSTIC_BYTES
+    assert long not in json.dumps(receipt.diagnostic)
+
+
+async def test_log_alert_renders_untrusted_fields_bounded(callback_store, caplog):
+    caplog.set_level(logging.WARNING)
+    code = "A\nFORGED " + "D" * 5000
+    await receive(
+        callback_store, json.dumps({**BASE, "device_code": code, "event_type": code}).encode()
+    )
+    [alert] = [r for r in caplog.records if hasattr(r, "diagnostic")]
+    assert (alert.operation, len(alert.operation_id)) == ("ecs.event", 64)
+    assert "data" not in alert.diagnostic
+    for key in ("device_code", "event_type"):
+        assert len(alert.diagnostic[key]) <= 70 and "\n" not in alert.diagnostic[key]
+        assert alert.diagnostic[key].startswith("'A\\nFORGED")
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_ctx_note_is_persisted_and_alert_follows_commit(callback_store, caplog, fail):
+    async def handler(ctx, data):
+        ctx.note("X", k=1)
+        if fail:
+            raise RuntimeError("boom")
+
+    ecs_event("SCAN_COMPLETED")(handler)
+    caplog.set_level(logging.WARNING)
+
+    def alerts():
+        return [r for r in caplog.records if hasattr(r, "diagnostic")]
+
+    async with callback_store() as session:
+        try:
+            async with session.begin():
+                await receive_ecs_event(session, EVENT)
+                assert alerts() == []  # 提交前不输出
+        except RuntimeError:
+            assert fail
+    if fail:
+        assert alerts() == [] and await receipt_count(callback_store) == 0
+    else:
+        [alert] = alerts()
+        assert alert.diagnostic == {"reason_code": "X", "k": 1}
+        assert (await receipts(callback_store))[0].diagnostic == [{"reason_code": "X", "k": 1}]
