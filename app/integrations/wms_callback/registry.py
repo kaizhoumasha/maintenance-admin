@@ -4,14 +4,12 @@
 测试用 `monkeypatch` 替换成空 dict 隔离。装饰器只注册映射,不带 `ack_mode` 等元数据(信封合同 §6)。
 """
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+@v[1-9][0-9]*$")
-MAX_NAME_CHARS = 256
+from app.core.operation_names import is_operation_name
 
 
 class InvalidPayload(Exception):
@@ -87,7 +85,7 @@ def callback_operation(name: str):
     和 `async handle(ctx) -> Outcome`(在保存点内写业务行,不得自行 commit/rollback)。"""
 
     def register(cls):
-        if len(name) > MAX_NAME_CHARS or not NAME_PATTERN.fullmatch(name):
+        if not is_operation_name(name):
             raise ValueError(f"invalid operation name {name!r}")
         for method in ("parse", "handle"):
             if not callable(getattr(cls, method, None)):

@@ -14,6 +14,7 @@ from app.models.reliable import ReliableMessage
 from .config import TargetConfig
 from .store import utc_datetime
 from .types import (
+    ComparableRequests,
     DuplicateMessage,
     EnqueueResult,
     InvalidMessage,
@@ -124,11 +125,18 @@ class Outbox:
             if existing is not None:
                 return self._existing(existing, draft)
 
-    @staticmethod
-    def _existing(existing, draft) -> EnqueueResult:
-        if existing.request_raw != draft.request_raw:
+    def _existing(self, existing, draft) -> EnqueueResult:
+        if existing.request_raw != draft.request_raw and not self._same_request(existing, draft):
             raise DuplicateMessage("identity already has different bytes")
         return EnqueueResult(existing.id, MessageStatus(existing.status))
+
+    def _same_request(self, existing, draft) -> bool:
+        """字节不同但适配器认定内容等价(例如只有时间戳变了)时,同身份重入返回原消息。"""
+        target = self.targets.get(draft.target)
+        adapter = self.adapters.get(target.protocol) if target is not None else None
+        return isinstance(adapter, ComparableRequests) and adapter.same_request(
+            existing.request_raw, draft.request_raw
+        )
 
     async def resume(
         self, session: AsyncSession, target: str, operation: str, operation_id: str

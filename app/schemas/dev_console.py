@@ -34,6 +34,23 @@ class DevMessageOut(BaseModel):
     updated_at: datetime
 
 
+class DevOperationOut(BaseModel):
+    name: str
+    endpoint: str
+    title: str
+    ttl_seconds: float | None
+    payload_schema: dict[str, Any]
+    example: dict[str, Any] | None
+
+
+class DevRequestOut(BaseModel):
+    operation: str
+    operation_id: str
+    message_id: int
+    status: str
+    target: str
+
+
 class MockWmsMode(StrEnum):
     accept = "accept"  # 202 RECEIVED
     duplicate = "duplicate"  # 200 DUPLICATE
@@ -42,6 +59,8 @@ class MockWmsMode(StrEnum):
     unavailable = "unavailable"  # 503 UNAVAILABLE,可重试
     garbage = "garbage"  # 200 非 JSON,判为 UNKNOWN
     hang = "hang"  # 不响应直到发送方超时,判为 UNKNOWN
+    busy = "busy"  # 429 BUSY 带 retry_after_ms;WMS 请求端点按合同重试,Transport 提交判为 UNKNOWN
+    prepare_accepted = "prepare_accepted"  # 仅 decisions:202 PREPARE_ACCEPTED,其余端点同 accept
 
 
 class MockWmsModeBody(BaseModel):

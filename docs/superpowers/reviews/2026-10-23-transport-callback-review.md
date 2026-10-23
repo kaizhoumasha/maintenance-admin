@@ -30,7 +30,7 @@
 ## 主要路径复核(无缺陷)
 
 - **通用幂等**(`receiver.py:receive`):原子占位 `ON CONFLICT DO NOTHING` + 败者重读;RAW/EFFECTIVE 双摘要、原指纹优先重放、规范化器不可用时 `503` 不降级为未知 operation、`409` 经 `echo_keys` 回显首次响应 data——均与设计 §5 一致。
-- **结果应用**(`callback_apply.py`):行锁下版本登记、`UNKNOWN` 可收敛、`pending_outcome` 失效/完成与首次应用共用同一函数、判定表逐格核对(含 `RACK`/`ZONE` 目标放行、`CANCELLED` 不做目标校验)与设计 §6.2 相符;JSON 列全部整体赋值。
+- **结果应用**(`callback/apply.py`):行锁下版本登记、`UNKNOWN` 可收敛、`pending_outcome` 失效/完成与首次应用共用同一函数、判定表逐格核对(含 `RACK`/`ZONE` 目标放行、`CANCELLED` 不做目标校验)与设计 §6.2 相符;JSON 列全部整体赋值。
 - **settle**(`settle.py`、`Outbox.settle`):先 `FOR UPDATE` 锁消息行再按身份 settle;`lease_id=None` 使迟到发送结果按租约被 `finish` 忽略;与 `expire_pending` 的并发由状态过滤双向互斥。锁顺序「收据 → 任务行 → 消息行」保持。
 - **迁移**:`a020`→`a023` 单链,与模型 `create_all` 终态一致(含 `diagnostic`、两个保留期索引、`cycle_id` 索引);回填逻辑与 `_register` 写入的 `frozen` 口径一致(均无 `transport_task_id`)。
 

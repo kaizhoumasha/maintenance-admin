@@ -141,7 +141,9 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
 
-真实业务接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；当前的动态路由和完整 Transport 生命周期缺口仍阻塞真实启用。
+真实业务接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/superpowers/specs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；当前的动态路由和完整 Transport 生命周期缺口仍阻塞真实启用。
+
+WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；当前业务还读不到 WMS 的响应，需要同步决定的 operation 在确认时再定调用方式。
 
 默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后可靠层不再保证本地幂等；Transport 独立任务映射仍保留，不因可靠消息清理而重新入队。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标注册。
 发送尝试完成后唤醒本实例发送器补位；领取批量小于并发预算时继续填充空槽。后台检查在系统正常运行时执行，不需要停机；后台检查间隔默认 1 秒。发送器启动首轮、轮询计时器到点、扫描异常等待该间隔后重试时执行后台检查；发送完成唤醒或连续补位时，只有距上次后台检查已满该间隔才执行，否则仅领取发送。
@@ -174,6 +176,14 @@ RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000
 ```
 
 回调侧:`POST /api/v1/dev/transport/{transport_task_id}/callbacks` 选 `succeeded` 或 `position_unknown`,按该任务的冻结事实构造样例回调并走真实接收管线,返回每条的响应与诊断;`GET /api/v1/dev/transport/{transport_task_id}` 看任务状态。
+
+WMS 请求端点(decisions、facts)的联调在 `/api/v1/dev/wms/requests`:`GET /operations` 是已注册 operation 的目录(端点、标题、TTL、Payload Schema、示例);`POST` 在 Examples 下拉选 operation 触发,走真实的 `WmsRequests.send` 入队;`GET /status/{operation_id}` 看投递状态与请求、响应原文。同一 `operation_id` 同 Payload 重复触发返回同一条消息,Payload 不同返回 409。Mock WMS 同时认识 `/api/v1/wes/facts`、`/api/v1/wes/decisions`,模式开关同一个(`PUT /dev/mock-wms/mode`,新增 `busy` 与仅 decisions 生效的 `prepare_accepted`);decisions 的 `DECIDED` 响应 `data` 恒为 `{}`,不模拟真实业务数据。两个端点各需一个目标,同样指向本应用自身:
+
+```bash
+RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"},"wms-facts":{"base_url":"http://127.0.0.1:8000","protocol":"wms-facts"},"wms-decisions":{"base_url":"http://127.0.0.1:8000","protocol":"wms-decisions"}}}'
+```
+
+演示 operation 在 `app/integrations/wms_request/dev.py`,只在 local 登记;真实 operation 的写法见该文件头注释。
 
 新增业务接入层时,在 `app/integrations/<业务>/dev.py` 里用 `@dev_scenario` 登记场景即可自动出现在下拉里,详见 `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`。非 local 环境这些路由不存在。**部署时必须显式设置 `ENVIRONMENT`(如 `production`)**:它的默认值是 `local`,漏设会同时挂出该控制台(含无认证的 Mock WMS 接收端)、开放 API 文档并关闭 Cookie 的 Secure。示例里的 Zone、储位、滚筒线编码是占位值,联调前按现场替换。
 

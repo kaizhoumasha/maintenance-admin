@@ -4,12 +4,12 @@
 
 ## 先做什么
 
-ECS 被动态路由、地址快照和客户端管理阻塞，任务见 E1/E2/E3。Transport 可以写静态 target，但重试预算、迟到结果和业务结果消费还不符合完整合同，任务见 T2/T3/T4。初级工程师先做下面的离线任务，不自行改这些架构约定。
+ECS 被动态路由、地址快照和客户端管理阻塞，任务见 E1/E2/E3。Transport 的出站适配器（T1）、回调接收与「收到回调即结束发送」（T3）已在 `app/integrations/wms_transport/` 实现，重试预算（T2）只有机制、是否启用待联调确认，业务结果消费（T4）尚未做；真实发送还须配置 `RELIABLE_TARGETS`，默认不发。初级工程师先做下面的任务，不自行改这些架构约定。
 
 | 顺序 | 交付文件与任务 | 验收条件 |
 |---|---|---|
-| 1 | 按[第一个可靠投递实验](reliable-transport-lab.md)创建 `tests/reliable/test_transport_submit_example.py` | 复制完整样例后跑出 `23 passed`；看到事务提交、发送、ACK 分类、`DONE` 和业务回滚，网络连接被测试禁止 |
-| 2 | 前置：技术负责人交付并确认完整 Transport 合同；之后在 `app/integrations/wms_transport/adapter.py` 实现纯协议适配器，在 `tests/integration/test_wms_transport_adapter.py` 写参数化测试 | 完成 T1：§5.3 列出的增量及矩阵通过；没有数据库和网络副作用；合同未交付时只做第 1 项实验，不自行补猜 |
+| 1 | 按[第一个可靠投递实验](../../reliable-transport-lab.md)创建 `tests/reliable/test_transport_submit_example.py` | 复制完整样例后跑出 `23 passed`；看到事务提交、发送、ACK 分类、`DONE` 和业务回滚，网络连接被测试禁止 |
+| 2 | 前置：技术负责人交付并确认完整 Transport 合同；之后对照合同核对已有的 `app/integrations/wms_transport/adapter.py` 与 `tests/integrations/wms_transport/test_adapter.py`，补合同差异用例 | 完成 T1 的合同核对：§5.3 的矩阵与「合同待确认项」逐条有结论；适配器没有数据库和网络副作用；合同未交付时只做第 1 项实验，不自行补猜 |
 | 3 | 在业务项目的 `docs/integrations/ecs-route-cases.md` 整理现场设备路由与 A→B 用例 | 覆盖 §4 的新旧命令、binding 生效、地址不可达和重复入口；由 E1 负责人评审，不先创造生产接口 |
 
 上表是建议的任务分工，不是已经指定了某位负责人。技术负责人确认 T/E 任务的设计和实施范围后，初级工程师再补生产代码。现有 `wes_backend` DeviceCommand/TransportTask 保持各自的派发流程。
@@ -35,11 +35,12 @@ ECS 被动态路由、地址快照和客户端管理阻塞，任务见 E1/E2/E3�
                                                → [模板] 保存消息状态/退避
 
 对端完成通知 → [业务项目] 回调接口 → 幂等保存结果/证据 → 关联原业务任务
-                ECS 按设备/命令关联，Transport 按任务/事件版本关联
+                ECS 按设备/命令关联（业务项目自建），Transport 按任务/事件版本关联
+                （已实现：POST /api/v1/wms/events，见 §7.2）
                 不能依靠读取可靠层表完成业务流程
 ```
 
-图中的静态目标链是模板的通用机制，不代表完整 Transport 合同已经兼容。实验只演示这条链；业务结果更新和真实接入条件分别按 T 任务验收。
+图中的静态目标链是模板的通用机制。实验只演示这条链；Transport 的正式实现见 `app/integrations/wms_transport/`，业务结果消费（T4）和真实联调条件按 T 任务验收。
 
 ### 术语和源码对照
 
@@ -84,7 +85,7 @@ ECS Swagger 目前只定义字段结构，没有说明 `code` 成功值、命令
 | 场景 | 地址何时确定 | 当前模板能否直接装配 |
 |---|---|---|
 | ECS 设备命令 | 发布时不知道有多少 ECS；现场配置设备列表后收集地址，创建命令时选择并冻结 | HttpClient 可复用；当前可靠层没有设备动态路由、逐消息地址冻结和动态客户端管理接口，不能直接按静态 target 接入 |
-| WMS Transport | 现场部署时确定固定 WMS origin 和提交路径，进程启动前配置 | 可以采用静态 target 的寻址写法；不表示现有通用可靠层已满足完整 Transport 生命周期合同 |
+| WMS Transport | 现场部署时确定固定 WMS origin 和提交路径，进程启动前配置 | 静态 target 寻址已可用，适配器已默认注册；是否真发送取决于 `RELIABLE_TARGETS`。生命周期合同中业务结果消费（T4）仍缺，联调与对端确认也未完成 |
 
 | 责任方 | 接入时必须落实的事项 |
 |---|---|
@@ -96,7 +97,7 @@ ECS Swagger 目前只定义字段结构，没有说明 `code` 成功值、命令
 
 对端要求是接入合同与验收条件，不代表要把对端去重、设备业务或入站处理加入 `app/reliable/`。对端不满足去重条件时，不得启用当前可靠层的自动重试；本地幂等不能替代对端去重。
 
-实现合同见 [HttpClient SPEC](superpowers/specs/2026-10-20-spec-019a-http-client.md)、[可靠层 SPEC](superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)；配置和装配背景见[实施与验证记录](superpowers/plans/2026-10-21-reliable-interaction-plan.md)。
+实现合同见 [HttpClient SPEC](2026-10-20-spec-019a-http-client.md)、[可靠层 SPEC](2026-10-20-spec-019b-reliable-interaction.md)；配置和装配背景见[实施与验证记录](../plans/2026-10-21-reliable-interaction-plan.md)。
 
 ## 2. 完整请求示例
 
@@ -259,27 +260,19 @@ ECS 不采用静态设备 target 列表。现场不需要人工维护第二份�
 
 ### 5.2 静态配置与适配器文件
 
-下面展示静态目标的配置格式。实验适配器只覆盖学习切片，真实启用前须完成 §5.3 的 T1/T2/T3/T4。
+下面展示静态目标的配置格式。离线实验里的适配器只覆盖学习切片；正式适配器已在 `app/integrations/wms_transport/adapter.py`，真实启用前须完成 §5.3 中仍未关闭的任务（T4，以及 T2 是否启用预算的确认）和对端联调。
 
 ```dotenv
 RELIABLE_TARGETS={"targets":{"wms-transport":{"base_url":"http://10.24.199.217:8284","protocol":"wms-transport","timeout_ms":10000,"max_body_bytes":262144}}}
 ```
 
-先复制[离线实验](reliable-transport-lab.md)中的完整 `TransportSubmitAdapter` 和测试，跑通本页合法请求的响应分类。完整合同交付后，按 T1 把实现整理到 `app/integrations/wms_transport/adapter.py` 并补齐下面列出的增量。生产适配器同步、无副作用，不查库、不发网，正文原样透传。
+先复制[离线实验](../../reliable-transport-lab.md)中的完整 `TransportSubmitAdapter` 和测试，理解响应分类；再读正式适配器及其测试 `tests/integrations/wms_transport/test_adapter.py`，两者的差异见 §5.3。正式适配器同步、无副作用，不查库、不发网，正文原样透传。
 
-业务负责请求 UUIDv7、严格 JSON、固定信封、kind 专属 DTO、成员及位置校验。`TargetConfig` 是装配/适配器参数类型，不是业务读取可靠存储的入口。新入队及发送前已经复用公开 `validate_request`；不要复制 HTTP 规则。
+请求 UUIDv7、固定信封、kind 专属 DTO、成员及位置校验由 `TransportService`（`types.py`、`wire.py`）在冻结正文前完成，适配器只核对冻结身份自洽。`TargetConfig` 是装配/适配器参数类型，不是业务读取可靠存储的入口。新入队及发送前已经复用公开 `validate_request`；不要复制 HTTP 规则。
 
-T1/T2/T3/T4 全部验收通过后，才能在业务项目入口、lifespan 启动前注册，并启动该入口导出的应用。下面引用的是届时由业务项目创建的正式模块，不是已经存在的文件：
+适配器已在 `app/main.py` 随应用创建时按协议名 `wms-transport` 注册（`app.state.reliable_adapters`），`TransportService` 的入队校验与发送器共用 `ADAPTERS` 这一份；不需要业务项目再写注册代码。注册不等于发送：只有 `RELIABLE_TARGETS` 里配置了对应目标，本进程才会创建客户端并领取消息，默认 `RELIABLE_TARGETS={}` 不发任何请求。需要 ECS 等其他协议时，才在 lifespan 启动前往 `app.state.reliable_adapters` 追加。
 
-```python
-from app.main import app
-from app.integrations.wms_transport.adapter import TransportSubmitAdapter
-
-app.state.reliable_adapters = {
-    **getattr(app.state, "reliable_adapters", {}),
-    "wms-transport": TransportSubmitAdapter(),
-}
-```
+可选的提交预算示例：`"max_not_received_attempts":3` 让「确认未送达」累计 3 次后转 `STALLED`，默认不设，见 §5.3 的 T2。
 
 目标名（示例用 `wms-transport`，可任取）只是 `RELIABLE_TARGETS` 里的标签，会写进已入队消息，上线后改名会让旧名字的待发消息停在 `PENDING`；`protocol` 取 `wms-transport` 才是绑定适配器的注册名，默认实例按这个协议选目标；目标名须匹配 `[a-z0-9][a-z0-9_.-]{0,63}`，base_url 不带尾部 `/`，路径保持原大小写。不要在运行中修改注册表，客户端在启动时创建。
 
@@ -299,37 +292,38 @@ app.state.reliable_adapters = {
 | 503 | `<html/>` | `UNKNOWN` |
 | 200 | `{"operation_id":"01a13b00-cabd-7390-890a-0c093e7c07a1","code":"RECEIVED","timestamp":1791992148964,"data":{"transport_task_id":"transport-9af2751b-4d01-4203-88a7-649bbf69e810"}}` | `UNKNOWN`，HTTP/code 组合不合法 |
 
-实验中的 `ack_result` 会生成完整 body，参数化测试还覆盖错误消息 ID、错误/缺少任务 ID、未知 code、未知拒绝码、未定义 429/502、非法 UTF-8、重复 JSON key、非对象 body 和布尔时间戳。
+实验中的 `ack_result` 会生成完整 body，参数化测试还覆盖错误消息 ID、错误/缺少任务 ID、未知 code、未知拒绝码、未定义 429/502、非法 UTF-8、重复 JSON key、非对象 body 和布尔时间戳。正式适配器的同类用例在 `tests/integrations/wms_transport/test_adapter.py`，另外覆盖时间戳 int64 边界、必填字段缺失、嵌套重复 key、400/413 非空体仍为未知，以及提交路径校验。
 
 `422` 的 reason_code 只能使用合同列明的值，任务 ID 也只能在合同允许的分支省略。不要用子串或翻译匹配。submit 不定义 `429 / BUSY` 或等待提示。回调 `503` 可能已有收据/Evidence 提交，不能套用 submit 的明确未接纳语义。
 
-静态 target 解决寻址，以下任务决定能否接真实 Transport。表中目标来自合同，采用什么实现方案仍须负责人批准；初级工程师不自行改变基础层策略。
+静态 target 解决寻址，以下任务决定能否接真实 Transport。2026-10-23 按 develop 代码核对的现状如下；仍未关闭的项由负责人批准方案，初级工程师不自行改变基础层策略。
 
-| 待办 | 当前状态 | 目标与验收条件 | 决策/实施责任 | 是否阻塞真实接入 |
+| 待办 | 当前状态（已核对代码） | 剩余目标与验收条件 | 决策/实施责任 | 是否阻塞真实接入 |
 |---|---|---|---|---|
-| T1 协议适配器 | 已有合法 `RACK_MOVE` 请求的离线分类实现；完整合同尚未交付给实施人员 | 保留已有矩阵，补齐下列 T1 增量及参数化测试 | 技术负责人交付完整合同，协议负责人确认版本；初级工程师实现，负责人复核 | 是；合同交付并确认后开工，当前可先跑实验 |
-| T2 重试预算 | 通用可靠层统一持久退避 | 明确如何满足 `NOT_SENT` / 合法 `503` 最多发送 3 次、未知结果固定间隔恢复；预算耗尽不伪造业务拒绝 | 技术负责人决定复用现有 Transport 调度还是另立适配方案；初级工程师按获批方案写预算测试 | 是；设计未定，先不改调度 |
-| T3 ACK 与权威结果收敛 | 当前仅允许当前租约回写，没有业务结果结束发送义务的接口 | 匹配原身份/摘要的确定 ACK 可按合同收敛；原任务权威结果到达后停止盲目 submit；迟到数据不覆盖新事实 | 技术负责人和 Transport 负责人决定状态/并发方案并实施评审；初级工程师补获批的竞态用例 | 是；设计未定 |
-| T4 业务结果消费 | 没有公开异步结果消费接口 | 明确如何把协议接纳、拒绝和冲突可靠交给业务，重复消费不重复推进；不能读取可靠层表替代接口 | 业务负责人和技术负责人确定结果合同；初级工程师在获批接口上写事务和幂等测试 | 是；设计未定 |
+| T1 协议适配器 | 已实现：`wms_transport/adapter.py`（同步纯函数，严格 JSON、双重身份、任务 ID 回显、拒绝码精确匹配）；请求侧 DTO/位置校验在 `types.py`、`wire.py`；`tests/integrations/wms_transport/` 有对应测试 | 技术负责人交付完整合同并确认版本后，逐条核对下方「合同待确认项」；有差异再补用例 | 协议负责人确认版本；初级工程师核对，负责人复核 | 否（实现已有）；合同核对属联调前置 |
+| T2 重试预算 | 机制已有：`TargetConfig.max_not_received_attempts`（默认不设，设为 3 即「确认未送达」累计 3 次转 `STALLED`）和 `fixed_retry_interval_s`；Transport 提交统一带 `SUBMIT_TTL`（1 小时，暂定），到期转 `EXPIRED` | 与 WMS 确认是否启用 3 次预算、1 小时窗口是否可接受；合同要求的固定重试间隔对应 `TargetConfig.fixed_retry_interval_s`（默认不设，按退避），是否配置待确认；预算耗尽不伪造业务拒绝 | 技术负责人和 Transport 负责人 | 否（默认安全）；启用与否待联调确认 |
+| T3 ACK 与权威结果收敛 | 已实现：`POST /api/v1/wms/events` 在请求事务内锁任务行并应用；任何回调到达即用 `Outbox.settle` 结束该任务提交消息的发送；位置事实按集合记录与到达先后无关，结果按 `outcome_revision` 登记，迟到数据不改写已确定终态 | 联调验收：PostgreSQL 并发、回调重发与迟到场景；收据清理周期、对端最长重发时间向 WMS 确认（见 `TODOS.md`） | 技术负责人和 Transport 负责人 | 否（实现已有）；联调确认项未关闭 |
+| T4 业务结果消费 | 未做：没有公开的结果发布或查询接口，调用方只能直接读 `transport_task`（`outcome_status`、`applied_outcome`、`cycle_id`） | 第一个消费方（工作线插件）出现后再定形态；重复消费不重复推进；不能读取可靠层表替代接口 | 业务负责人和技术负责人 | 是；见 `TODOS.md` 后续开发 |
 
-T1 相对实验的具体增量如下，验收不能只重跑已有的 23 项：
+合同待确认项（实现已落地，但以下偏离或空缺要在核对完整合同时给出结论）：
 
-- 请求输入校验：在业务输入边界补小写 canonical UUIDv7、固定信封及各 kind 专属 DTO、成员和位置约束，覆盖缺失字段、错误类型和枚举。实验只核对固定请求的 operation 和身份，不提供这些业务输入校验；适配器仍透传已冻结字节。
-- ACK 解析边界：保留已有的严格 UTF-8、重复 key、整数时间戳和身份匹配检查，补齐必填字段的缺失/类型用例、合法冗余字段和各分支规则。实验一律拒绝浮点数，生产解析须按完整合同区分已定义字段与冗余字段的数值规则，不把这个学习限制当成合同要求，也不在本方复制对端的身份查询和摘要存储。
-- 非法原请求的拒绝关联：补充请求中任务 ID 缺失或非法时，合法 `422 / REJECTED` 可不带任务 ID 的用例；合法原请求仍必须回显同一任务 ID。不能把实验的无条件任务 ID 匹配照搬到该分支。
-- 拒绝码测试：逐一覆盖全部批准字面量（含中英文拼接原文），以及未知值、类型错误和近似字符串；精确匹配，不翻译、不按子串接受。请求与 ACK 的这些新增边界都应有合法和非法输入断言，不改 T2 的重试策略。
+- 换面模板 `CK04` 由现场确认补入，合同 0.4.0 只列 `CTU01/CTU02/CTU03/F01`，合同文本尚未同步；WMS 若不接受会以 `422 REJECTED` 返回。
+- 创建前不做可信位置/当前面校验，是有意偏离，由 WMS 在接纳时兜底（回调接收设计决定 14）。
+- 适配器对所有 ACK（含 `422`）一律要求回显同一 `transport_task_id`，请求在冻结前已校验，因此没有实现「非法原请求的 `422` 可不带任务 ID」的分支；若 WMS 对非法请求返回不带任务 ID 的 `422`，当前会判为 `UNKNOWN` 并按退避重试到 TTL。合同是否要求该分支待确认：Transport 合同写合法请求的拒绝须回显任务 ID，而外发给 WMS 的接口说明书（`wes_backend/docs/integration/wes-wms-interface-development-specification.md` REQ-SUB-02）写拒绝响应不得携带 `transport_task_id`，两份文档互相矛盾，联调前必须与 WMS 确认；若 WMS 按后者实现，合法的 `422` 当前会被判为 `UNKNOWN`。
+- 正式适配器忽略冗余字段中的浮点数，只要求已定义字段为整数，与离线实验一律拒绝浮点不同。
+- 拒绝码以精确字面量集合匹配，含中英文拼接原文；集合有测试固定，变更须同步合同。
 
-已有 `wes_backend` TransportTask/Worker 不叠加本模板发送器。这里不授权迁移，也不改变分类器异常进入 `FAILED(LOCAL_ERROR)` 的既有策略。架构选择记录在上述任务中，不由适配器副作用绕过。
+已有 `wes_backend` TransportTask/Worker 不叠加本模板发送器。这里不授权迁移。分类器抛异常时消息进入 `FAILED(LOCAL_ERROR)`，而对端此时可能已执行，这条既有策略未变，接入真实对端前须单独评审。架构选择记录在上述任务中，不由适配器副作用绕过。
 
 ### 5.4 跑通离线投递实验
 
-按[离线实验](reliable-transport-lab.md)准备一个完整测试文件并运行。实验使用 `ScriptedHttpClient`、`FakeClock`、内存 SQLite 和真实的 Outbox/Sender，验证完整投递路径。通过后交付测试文件；取得并确认完整合同后再做 T1。真实 PostgreSQL/Redis 的准备见 §9，离线实验不需要启动它们。本地想在 Swagger 里手动触发场景并查看请求、响应原文，可用仅 `ENVIRONMENT=local` 的联调控制台，见 [README](../README.md#联调控制台仅-environmentlocal) 与[设计](superpowers/specs/2026-10-22-transport-dev-console-design.md)；它不替代离线测试，也不是真实对端联调。
+按[离线实验](../../reliable-transport-lab.md)准备一个完整测试文件并运行。实验使用 `ScriptedHttpClient`、`FakeClock`、内存 SQLite 和真实的 Outbox/Sender，验证完整投递路径。通过后交付测试文件；取得并确认完整合同后再做 T1 的合同核对。真实 PostgreSQL/Redis 的准备见 §9，离线实验不需要启动它们。本地想在 Swagger 里手动触发场景并查看请求、响应原文，可用仅 `ENVIRONMENT=local` 的联调控制台，见 [README](../../../README.md#联调控制台仅-environmentlocal) 与[设计](2026-10-22-transport-dev-console-design.md)；它不替代离线测试，也不是真实对端联调。
 
 ## 6. 静态 target 的事务内入队示例
 
-本节只展示 §5 的静态 target，不适用于 ECS 动态路由。业务项目自行定义 SQLAlchemy 模型，保存该请求的身份和冻结字节，并建立业务唯一约束。可靠层表不能代替业务记录。
+Transport 本身不需要照着本节再写一遍：`TransportService.move_rack` 等方法已在调用方的 `AsyncSession` 内同事务登记 `transport_task` 与可靠消息（用法见 [README](../../../README.md) 的 Transport 出站一节）。本节讲通用的静态 target 入队写法，供新增其他协议时参考，不适用于 ECS 动态路由。业务项目自行定义 SQLAlchemy 模型，保存该请求的身份和冻结字节，并建立业务唯一约束。可靠层表不能代替业务记录。
 
-先阅读[实验](reliable-transport-lab.md)的 `BusinessTransport`、`save_and_enqueue` 和回滚测试。那里给出了具体 ORM 模型、唯一约束、会话工厂和完整调用，不需要猜 `transport_record: object` 应该传什么。
+先阅读[实验](../../reliable-transport-lab.md)的 `BusinessTransport`、`save_and_enqueue` 和回滚测试。那里给出了具体 ORM 模型、唯一约束、会话工厂和完整调用，不需要猜 `transport_record: object` 应该传什么。
 
 实验的 `save_and_enqueue` 在同一个 `session.begin()` 中保存业务身份及字节，再调用 `outbox.enqueue`。成功退出才提交；之后由 `Sender.tick()` 领取并发送。回滚测试同时断言两张表都没有记录。生产服务采用相同事务所有权，但业务模型、业务状态和迁移必须经业务负责人确认。
 
@@ -339,7 +333,7 @@ T1 相对实验的具体增量如下，验收不能只重跑已有的 23 项：
 
 `reference` 是入队引用及当时的状态，不是异步执行结果。可靠层的 `DONE` 表示协议投递成功，不是搬运完成；当前没有公开的异步结果消费接口，业务不能查询可靠层表来推进流程。业务若需获知异步 `FAILED/EXPIRED`，必须另行明确结果契约，不能把本指南当成已有能力。
 
-TTL 从入队创建时起算，重试不延长，到期不取消已发请求；`EXPIRED`、超时或未收到回调都不能证明对端没执行。有限去重窗口下，双方约定的 TTL 加在途到达余量不得超过去重窗口；无法保证余量时不能凭 TTL 假定安全。当前窗口校验尚未程序化，接入方负责配置约束与验收；无 TTL 的持续重试只适用于持久去重保证，不能由样例擅自承诺。
+TTL 从入队创建时起算，重试不延长，到期不取消已发请求；`EXPIRED`、超时或未收到回调都不能证明对端没执行。有限去重窗口下，双方约定的 TTL 加在途到达余量不得超过去重窗口；无法保证余量时不能凭 TTL 假定安全。当前窗口校验尚未程序化（Transport 提交的 1 小时 `SUBMIT_TTL` 是暂定值，需与 WMS 确认其最长重发时间同样不超过 1 小时），接入方负责配置约束与验收；无 TTL 的持续重试只适用于持久去重保证，不能由样例擅自承诺。
 
 静态 target 在消息存续期间仍使用当前配置，没有地址快照；迁移到另一套 WMS/去重库或改变协议前须排空存量消息，不能把这一限制反过来作为 ECS 的静态配置方案。
 
@@ -380,12 +374,13 @@ TTL 从入队创建时起算，重试不延长，到期不取消已发请求；`
 
 ### 7.2 Transport 的消息身份、任务关联与结果版本
 
-按 Transport 合同 §5，WMS 回调到 WES 的 `/api/v1/wms/events`，不是原 submit 路径，也不是 ECS 完成通知格式：
+按 Transport 合同 §5，WMS 回调到 WES 的 `/api/v1/wms/events`，不是原 submit 路径，也不是 ECS 完成通知格式。接收端已实现：通用接收在 `app/integrations/wms_callback/`，Transport 的两个 operation 在 `app/integrations/wms_transport/callback/`，设计与决定记录见[回调接收设计](2026-10-22-transport-callback-design.md)：
 
 - `transport.task.member_position_changed@v1` 与 `transport.task.resulted@v1` 分别承载位置事实和最终结果；每条回调有 WMS 自己生成的 `operation_id`，不沿用 submit ID，技术重试保持该消息原身份和完整信封。
-- `transport_task_id` 关联原任务；最终结果另以 `transport_task_id + outcome_revision` 登记版本。同版本相同 `data` 判重复，不同 `data` 判冲突；不需要另造设备 `event_id`。
-- 可靠保存收据/Evidence 后 ACK，业务应用异步执行；已接收不等于已应用。合法未知任务证据也按合同先可靠接收、再异步核验，不能套用 ECS 讨论样例的未知命令拒绝规则。
-- 低版本不回退事实；更高版本只在合同允许的未确定结果上收敛，不改写已确定成功/失败。BIN 回架等前置位置 Evidence 条件仍按业务合同验收，不能仅凭聚合结果推断完成。
+- `transport_task_id` 关联原任务；最终结果另以 `transport_task_id + outcome_revision` 登记版本（`transport_task.applied_outcome_revision`、`outcome_digests`）。同版本相同 `data` 判重复，不同 `data` 判冲突；不需要另造设备 `event_id`。
+- 与合同的内部顺序不同、对端可见行为不变：不设证据表和后台应用，回调在请求事务内锁任务行并直接应用后再 ACK。未知任务、事实矛盾也只记收据诊断和告警日志，仍返回 `202`，不能套用 ECS 讨论样例的未知命令拒绝规则；应用逻辑对通过 DTO 校验的消息不抛异常。
+- 低版本不回退事实；更高版本只在未确定结果上收敛，不改写已确定成功/失败。料箱成功结果先于位置事件到达时暂存在 `pending_outcome`，位置补齐后在同一事务内完成。BIN 回架等前置位置条件按业务合同验收，不能仅凭聚合结果推断完成。
+- 任务收到任何回调即结束其提交消息的发送（`settle_submitted`）；对端长期不可用或回调缺失，靠 `transport.scan_stuck` 的卡住任务告警暴露，不做定时盲目重发。
 
 技术重提与业务重试必须分开。确定 `REJECTED/CANCELLED` 后，原任务保持终态；只有原业务需求仍有效，负责该业务的模块才按合同以全新 `client_request_id` 创建新任务及 submit ID。这不是第二套技术发送调度，不能因原请求超时或配置改址就自动创建新动作。
 
@@ -399,7 +394,7 @@ TTL 从入队创建时起算，重试不延长，到期不取消已发请求；`
 - 离线实验的成功用例直接调用公开 `validate_request`，验证适配器构建的示例请求且不触发发送；入队与实际发送仍使用现有 HTTP 校验。覆盖完整应答的分类、身份不符、非法报文、未知码及网关错误，不靠 HTTP 200 推断成功。
 - 静态 target 接入使用真实 PostgreSQL 验证业务写入与入队共同提交/回滚、并发首次创建及同身份冲突。ECS 由其业务派发模块验证命令身份、地址及快照原子保存。全量回归按项目要求显式配置可销毁的 PostgreSQL/Redis，不把跳过当通过。
 - 回调并发重放只应用一次业务效果，冲突不覆盖原结果，未知身份和旧命令通知不推进新动作。业务处理失败不能留下已记为重复、却尚未应用业务变更的半状态。
-- Transport 分别验证 submit ACK 和回调 ACK，覆盖空体拒绝、双重身份、结果版本及消息已接纳但尚未应用；离线投递实验通过不等于完整生命周期兼容。
+- Transport 分别验证 submit ACK 和回调 ACK，覆盖空体拒绝、双重身份、结果版本、迟到与重复回调；对应永久测试在 `tests/integrations/wms_transport/`（`test_adapter.py`、`test_callback.py`、`test_concurrency.py` 等）。离线投递实验通过不等于完整生命周期兼容。
 
 ### 真实对端联调：双方负责
 
@@ -491,7 +486,9 @@ RELIABLE_TARGETS={}
 )
 ```
 
-2026-10-21 实跑记录：按上述命令使用独立 PostgreSQL/Redis，全量 `617 passed`、无跳过。退出后核对本轮容器和匿名卷已清理，已有容器身份、启动时间及卷清单未变；`.env` 和 `uv.lock` 内容未变。这不替代真实对端联调或完整 Transport 合同验收。
+2026-10-21 实跑记录（历史，当时代码尚无 Transport 业务层）：按上述命令使用独立 PostgreSQL/Redis，全量 `617 passed`、无跳过。退出后核对本轮容器和匿名卷已清理，已有容器身份、启动时间及卷清单未变；`.env` 和 `uv.lock` 内容未变。
+
+2026-10-23 在 develop 上未配置 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 直接运行：`1176 passed, 366 skipped`，ruff 检查与格式检查通过。被跳过的是 PostgreSQL/Redis 用例，当前代码尚无带数据库的全量实跑记录，上线前须按本节命令补跑。这些都不替代真实对端联调或完整 Transport 合同验收。
 
 检查 pytest 汇总和 skip 原因：要求 PostgreSQL/Redis 用例实际执行，不能将它们的跳过当作通过。不要对共享开发库运行种子或清空数据。代码任务再运行 `uv run ruff check .` 和 `uv run ruff format --check .`；文档任务检查示例、链接及 `git diff --check` 即可。示例命令在这里提供给开发者，不表示已经完成真实对端或完整 Transport 验收。
 
@@ -499,7 +496,7 @@ RELIABLE_TARGETS={}
 
 | 不要做的事 | 应该怎么做 |
 |---|---|
-| 让初级工程师自行补动态路由、重试预算或结果接口 | 先由 E/T 任务的负责人批准设计，再按验收条件实施 |
+| 让初级工程师自行补动态路由、启用重试预算或设计结果接口 | 先由 E/T 任务的负责人批准设计，再按验收条件实施 |
 | 修改全局 base_url、在正文塞任意 URL、在运行中改 target 注册表 | ECS 在业务创建时冻结路由；静态 WMS 在启动前装配，存量消息迁移单独处理 |
 | 在纯适配器中查库、发网或更新业务状态 | 适配器只构建请求、判断完整响应，业务事务和客户端生命周期由各自模块负责 |
 | 给 DeviceCommand/TransportTask 再叠一套 Sender 或 Celery 技术重试 | 每条发送义务只保留一个调度负责人 |

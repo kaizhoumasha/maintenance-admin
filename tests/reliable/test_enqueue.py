@@ -56,3 +56,17 @@ async def test_existing_identity_precedes_current_adapter_and_body_limit(rig):
             await rig.outbox.enqueue(session, rig.draft(request_raw=b"different"))
         with pytest.raises(InvalidMessage):
             await rig.outbox.enqueue(session, rig.draft("new"))
+
+
+async def test_adapter_may_declare_changed_bytes_equivalent_on_reentry(rig, monkeypatch):
+    """同身份重入字节不同:适配器声明等价则返回原消息,否则仍是冲突。"""
+    async with rig.factory() as session:
+        first = await rig.outbox.enqueue(session, rig.draft(request_raw=b"A:payload"))
+        with pytest.raises(DuplicateMessage):
+            await rig.outbox.enqueue(session, rig.draft(request_raw=b"B:payload"))
+        monkeypatch.setattr(
+            rig.adapter, "same_request", lambda old, new: old[2:] == new[2:], raising=False
+        )
+        assert await rig.outbox.enqueue(session, rig.draft(request_raw=b"B:payload")) == first
+        with pytest.raises(DuplicateMessage):
+            await rig.outbox.enqueue(session, rig.draft(request_raw=b"B:other"))

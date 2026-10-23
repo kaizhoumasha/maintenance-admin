@@ -20,7 +20,6 @@ from app.reliable import Outbox, OutgoingMessage, VerdictKind
 from app.reliable.config import TargetConfig
 
 TASKS = "/api/v1/dev/transport/tasks"
-MOCK = "/api/v1/dev/mock-wms/mode"
 SUBMIT = "/api/v1/wes/transport-requests"
 FEED = next(s for s in scenarios() if s.name == "bin.feed")
 
@@ -78,16 +77,6 @@ async def test_invalid_input_is_rejected_with_400(client, admin, wms):
 
 async def test_status_of_an_unknown_key_is_404(client, admin):
     assert (await client.get(f"{TASKS}/status/none", headers=admin)).status_code == 404
-
-
-@pytest.fixture
-async def mock_mode(client, admin):
-    async def use(mode):
-        r = await client.put(MOCK, json={"mode": mode}, headers=admin)
-        assert r.status_code == 200
-
-    yield use
-    await use("accept")
 
 
 @pytest.mark.parametrize(

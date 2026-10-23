@@ -19,6 +19,7 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
+from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable.config import parse_reliable_config
@@ -66,6 +67,7 @@ app.state.audit_session_factory = session_factory
 app.state.reliable_adapters = {
     **getattr(app.state, "reliable_adapters", {}),
     **WMS_TRANSPORT_ADAPTERS,
+    **WMS_REQUEST_ADAPTERS,
 }
 register_exception_handlers(app)
 setup_logging()

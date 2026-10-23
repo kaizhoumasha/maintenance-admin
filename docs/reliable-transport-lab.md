@@ -1,6 +1,6 @@
 # 第一个可靠投递实验
 
-本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。先跑通本实验，再按[接入指南](device-command-integration.md)的任务表做协议开发。
+本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。先跑通本实验，再按[接入指南](superpowers/specs/device-command-integration.md)的任务表做协议开发。
 
 ## 1. 准备文件与命令
 
@@ -8,7 +8,7 @@
 
 在业务项目创建第一个文件 `tests/reliable/test_transport_submit_example.py`，复制下面整段 Python。若文件已存在，先核对内容，不要覆盖其他人的测试。这里的业务模型只存在于测试内存库，不需要生产迁移。
 
-这个文件包含可供拆分的请求构建、ACK 分类、业务模型、事务写入和测试。它是一个离线学习切片，不是生产适配器：只使用带合法任务 ID 的 `RACK_MOVE` 请求；JSON 数值只接收整数。完整合同对非法请求拒绝、冗余字段及数值规范化的规则，由指南中的 T1 任务补齐。
+这个文件包含可供拆分的请求构建、ACK 分类、业务模型、事务写入和测试。它是一个离线学习切片，不是生产适配器：只使用带合法任务 ID 的 `RACK_MOVE` 请求；JSON 数值一律只接收整数（含冗余字段）。正式适配器已在 `app/integrations/wms_transport/adapter.py`，对冗余字段中的浮点数更宽松，且有请求侧 DTO/位置校验和更完整的测试；与完整合同的差异清单见指南 §5.3 的「合同待确认项」。
 
 ```python
 import json
@@ -17,10 +17,11 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import LargeBinary, String, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import StaticPool
 
+from app.database import create_database_engine
 from app.http_client import DeliveryState, HttpRequest, HttpResult, validate_request
 from app.models import ReliableMessage
 from app.reliable import FailReason, MessageDraft, Outbox, Verdict, VerdictKind
@@ -240,7 +241,9 @@ def test_ack_classification(response, kind, reason):
 
 @pytest.fixture
 async def storage():
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool, hide_parameters=True)
+    engine = create_database_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, hide_parameters=True
+    )
     try:
         async with engine.begin() as connection:
             await connection.run_sync(LabBase.metadata.create_all)
@@ -338,18 +341,21 @@ uv run python -m pytest --noconftest -q tests/reliable/test_transport_submit_exa
 
 预期为 `23 passed`。成功用例实际经过 `Outbox.enqueue → Sender.tick → MessageStore.claim → ScriptedHttpClient.send → classify_response → 数据库 DONE`。回滚用例证明业务记录和出站消息共同回滚。网络保护 fixture 会在尝试打开连接时使测试失败。
 
+可靠层表带项目 schema（`enterprise_backend`），所以实验必须用 `create_database_engine` 建引擎：它在 SQLite 下去掉 schema 前缀、在 PostgreSQL 下设置 `search_path`；直接用 `create_async_engine` 建表会报 `unknown database enterprise_backend`。
+
 `FakeClock` 固定持久化时间，`DeterministicRandom` 固定退避随机输入。`Sender.aclose()` 等待本次在途任务并关闭假客户端；内存库由 fixture 释放。测试读取 `ReliableMessage` 和装配 `Sender/MessageStore` 是基础设施测试做法，生产业务不能照搬这些内部依赖。
 
-## 3. 下一步文件怎么拆
+## 3. 实验与正式实现的对应关系
 
-| 文件 | 从实验中移入的内容 | 完成条件 |
+Transport 的正式实现已经落在仓库里，实验里的各部分对应如下：
+
+| 实验中的部分 | 正式位置 | 说明 |
 |---|---|---|
-| `app/integrations/wms_transport/adapter.py` | `TransportSubmitAdapter` 及经过合同核验的解析/分类函数 | 指南 §5.3 全部矩阵与严格解析验收通过，不导入数据库、业务服务或网络客户端 |
-| `tests/integration/test_wms_transport_adapter.py` | ACK 参数化测试 | 每个合法、拒绝、冲突和未知分支都有断言；成功保留真实原文 |
-| `app/models/transport_request.py` | 消费项目正式业务模型，不直接复制 `BusinessTransport` 测试表 | 业务负责人确认字段、身份、状态和保留期，按项目流程建立迁移 |
-| `app/services/transport_request_service.py` | 事务内保存与入队逻辑 | 同一事务提交/回滚，并发重复入口由业务唯一约束收敛 |
-| 消费项目的应用入口 | 静态目标和启动前注册 | 仅在指南 T2/T3/T4 阻塞项关闭后启用真实发送 |
+| `TransportSubmitAdapter` | `app/integrations/wms_transport/adapter.py`，测试 `tests/integrations/wms_transport/test_adapter.py` | 同步纯函数，不导入数据库或网络客户端；已按协议名 `wms-transport` 在 `app/main.py` 注册 |
+| `REQUEST_RAW` 与请求构造 | `wire.py`、`types.py` | 由 `TransportService` 在冻结正文前校验并生成 |
+| `BusinessTransport` 与 `save_and_enqueue` | `app/models/transport.py` 的 `TransportTask`、`service.py` 的 `TransportService` | 同一事务保存任务并 `enqueue`；不要照搬 `BusinessTransport` 测试表 |
+| 应用入口与目标配置 | `RELIABLE_TARGETS` | 默认为空，不发任何请求；是否启用真实目标按指南 §5.3 的 T4 及联调确认项决定 |
 
-这些是建议的新文件路径，不表示本仓库已提供对应业务实现。先交付实验；技术负责人交付并确认完整合同后，再按指南 T1 的增量开发正式分类器和测试。不让初级开发者自行修改重试预算、租约围栏、结果消费或设备动态路由。ECS 不使用本实验的静态 `wms` target。
+实验仍是学习用的自给自足切片，不会随正式实现自动更新。新增其他协议时，才需要按实验拆分出自己的适配器、模型和入队服务。不让初级开发者自行修改重试预算、租约围栏、结果消费或设备动态路由。ECS 不使用本实验的静态 `wms` target。
 
-本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发指南 §9](device-command-integration.md#9-环境准备与全量验证)。
+本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发指南 §9](superpowers/specs/device-command-integration.md#9-环境准备与全量验证)。

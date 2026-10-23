@@ -152,3 +152,16 @@ def parse_reliable_config(settings: "Settings") -> ReliableConfig:
         db_pool_size=settings.RELIABLE_DB_POOL_SIZE,
         retention_days=settings.RELIABLE_RETENTION_DAYS,
     )
+
+
+def targets_for_protocol(targets: Mapping[str, TargetConfig], protocol: str) -> list[str]:
+    return [name for name, item in targets.items() if item.protocol == protocol]
+
+
+def target_config_hint(targets: Mapping[str, TargetConfig], protocol: str) -> str:
+    """缺少某协议的目标时附在错误后面:列出现有目标和一个可复制的配置示例。"""
+    existing = ", ".join(f"{n}[{t.protocol}]" for n, t in targets.items())
+    example = (
+        f'{{"targets":{{"{protocol}":{{"base_url":"http://host:port","protocol":"{protocol}"}}}}}}'
+    )
+    return f"(现有:{existing or '无'})。示例:RELIABLE_TARGETS='{example}'"
