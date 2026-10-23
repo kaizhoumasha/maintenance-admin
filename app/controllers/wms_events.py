@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, Response
 
 from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
+from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.integrations.wms_callback import MAX_BODY_BYTES, CallbackResponse, receive, unavailable
 from app.integrations.wms_callback.discovery import load_operation_modules
@@ -60,14 +61,10 @@ router = APIRouter(tags=["WMS callbacks"], dependencies=[Depends(RateLimit(None)
 )
 async def events(request: Request, background_tasks: BackgroundTasks) -> Response:
     received_at = datetime.now(UTC)
-    raw = bytearray()
+    body = b""
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
     try:
-        async for chunk in request.stream():
-            raw.extend(chunk[: MAX_BODY_BYTES + 1 - len(raw)])
-            if len(raw) > MAX_BODY_BYTES:
-                break
-        body = bytes(raw)
+        body = await read_body_capped(request, MAX_BODY_BYTES)
         if len(body) > MAX_BODY_BYTES:
             result = CallbackResponse(413, None, "too_large")
         else:
@@ -75,7 +72,6 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
                 result = await receive(session, body)
     except Exception as error:
         logger.error("callback receive failed error_type=%s", type(error).__name__)
-        body = bytes(raw)
         result = unavailable(body)
     if allow_snapshot():  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(
