@@ -15,6 +15,18 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .registry import Accepted, CallbackContext, InvalidPayload, Outcome
 
+ECHO_MAX_CHARS = 256
+
+
+def _echoable(value: object) -> bool:
+    if not isinstance(value, str) or not 0 < len(value) <= ECHO_MAX_CHARS:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:  # 孤立代理字符无法渲染进 HTTP 响应
+        return False
+    return True
+
 
 class CallbackPayload(BaseModel):
     """业务字段的声明式模型:严格按 JSON 类型校验(不把 "1" 当成 1),冗余字段被忽略。
@@ -48,10 +60,9 @@ class CallbackOperation:
         return examples[0] if examples else None
 
     def echo(self, data: dict) -> dict:
-        """被拒绝的消息也尽量回显 `echo_keys`(只要值是非空字符串)。"""
-        return {
-            key: data[key] for key in self.echo_keys if isinstance(data.get(key), str) and data[key]
-        }
+        """被拒绝的消息也尽量回显 `echo_keys`:非空、不超长、可按 UTF-8 编码的字符串。
+        无认证入口不能把任意长度或无法渲染的内容原样写进收据再回给对端。"""
+        return {key: data[key] for key in self.echo_keys if _echoable(data.get(key))}
 
     def parse(self, data: dict) -> dict:
         try:

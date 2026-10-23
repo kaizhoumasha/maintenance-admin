@@ -14,10 +14,13 @@ from app.integrations.wms_callback import CallbackPayload
 def _no_nul(value: str) -> str:
     if "\x00" in value:
         raise ValueError("NUL is not allowed")
+    value.encode(
+        "utf-8"
+    )  # 孤立代理字符会让响应无法渲染,按非法值拒绝(UnicodeEncodeError 是 ValueError)
     return value
 
 
-Text = Annotated[str, Field(min_length=1), AfterValidator(_no_nul)]
+Text = Annotated[str, Field(min_length=1, max_length=256), AfterValidator(_no_nul)]
 Face = Annotated[str, Field(min_length=1, max_length=10), AfterValidator(_no_nul)]
 FailureCode = Literal[
     "RCS_TASK_REJECTED", "RCS_EXECUTION_FAILED", "POSITION_UNKNOWN", "MANUAL_ABORTED"

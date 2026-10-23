@@ -429,6 +429,27 @@ async def test_invalid_payload_is_rejected_and_still_echoes_a_legal_task_id(clie
     assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE", **ack(task_id)}
 
 
+@pytest.mark.parametrize("task_id", ["x" * 300, "bad-\ud800-id"])
+async def test_unusable_task_ids_are_rejected_without_echo_or_server_error(
+    client, callback_store, task_id
+):
+    """无认证入口:超长或无法渲染的编号按非法证据拒绝,不回显、不写进收据,也不 500。"""
+    body = dict(
+        operation_id=str(uuid7()),
+        operation=RESULTED,
+        timestamp=1,
+        data=rack_result(task_id),
+    )
+    # 用 ASCII 转义的原始字节发送:孤立代理字符只能这样出现在线上
+    raw = json.dumps(body).encode()
+    headers = {"content-type": "application/json"}
+    response = await client.post(PATH, content=raw, headers=headers)
+    assert response.status_code == 422
+    assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE"}
+    replay = await client.post(PATH, content=raw, headers=headers)  # 同身份重放仍可渲染
+    assert (replay.status_code, replay.json()["data"]) == (422, {"reason_code": "INVALID_EVIDENCE"})
+
+
 async def test_identity_conflict_echoes_the_first_messages_task_id(client, callback_store):
     first_id, second_id = await add_task(callback_store, rack_data()), "transport-other"
     operation_id = str(uuid7())

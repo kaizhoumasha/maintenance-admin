@@ -49,7 +49,8 @@ async def test_only_old_tasks_without_a_determined_outcome_raise_an_alert(db, ca
     parked = task(180, pending_outcome={"revision": 1, "data": {}})
     done = task(180, outcome_status="SUCCEEDED")
     cancelled = task(180, outcome_status="CANCELLED")
-    db.add_all([fresh, waiting, expired, unknown, parked, done, cancelled])
+    abandoned = task(60 * 24 * 10)  # 搁置超过 7 天的无结果任务不再告警
+    db.add_all([fresh, waiting, expired, unknown, parked, done, cancelled, abandoned])
     db.add(submit_message(expired.transport_task_id, "EXPIRED"))
     await db.commit()
     caplog.set_level(logging.WARNING)

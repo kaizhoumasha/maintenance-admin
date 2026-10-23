@@ -38,9 +38,20 @@ def _prepare_schema(connection) -> str:
     if command is None:
         raise CommandError("PostgreSQL migration requires an explicit Alembic CLI command")
     changing = command[0].__name__ in {"upgrade", "downgrade", "stamp"}
+    # 外部系统可能也有同名 public.alembic_version 且列不同:没有 version_num 就当作不是本项目的版本表
+    ledger = (
+        not target
+        and legacy
+        and connection.scalar(
+            text(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+                "AND table_name = 'alembic_version' AND column_name = 'version_num'"
+            )
+        )
+    )
     versions = (
         list(connection.scalars(text("SELECT version_num FROM public.alembic_version")))
-        if not target and legacy
+        if ledger
         else []
     )
     known = {

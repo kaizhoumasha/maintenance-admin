@@ -107,7 +107,7 @@ async def test_upgrade_backfills_frozen_from_the_submitted_request(state_db):
             await connection.execute(OLD_TASK.insert().values(**old_task(name)))
         await connection.execute(
             MESSAGE.insert().values(
-                target="wms", operation="op", operation_id="m1", status="DONE", attempts=1,
+                target="wms", operation="op", operation_id="o-t1", status="DONE", attempts=1,
                 request_raw=json.dumps(request).encode(), business_key="t1",
                 next_attempt_at=now, created_at=now, updated_at=now,
             )

@@ -41,14 +41,23 @@ def _backfill_frozen(connection) -> None:
         "transport_task",
         sa.column("id"),
         sa.column("transport_task_id"),
+        sa.column("operation_id"),
         sa.column("frozen", sa.JSON()),
     )
-    messages = sa.table("reliable_message", sa.column("business_key"), sa.column("request_raw"))
-    for row_id, task_id in connection.execute(
-        sa.select(tasks.c.id, tasks.c.transport_task_id)
+    messages = sa.table(
+        "reliable_message",
+        sa.column("business_key"),
+        sa.column("operation_id"),
+        sa.column("request_raw"),
+    )
+    for row_id, task_id, operation_id in connection.execute(
+        sa.select(tasks.c.id, tasks.c.transport_task_id, tasks.c.operation_id)
     ).all():
+        # 只取该任务自己的提交消息(同 business_key 下可能还有别的 operation)
         raw = connection.execute(
-            sa.select(messages.c.request_raw).where(messages.c.business_key == task_id).limit(1)
+            sa.select(messages.c.request_raw).where(
+                messages.c.business_key == task_id, messages.c.operation_id == operation_id
+            )
         ).scalar()
         if raw is None:
             continue

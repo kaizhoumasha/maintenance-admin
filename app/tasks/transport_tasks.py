@@ -15,6 +15,8 @@ from app.tasks.celery_app import celery_app
 logger = logging.getLogger(__name__)
 DEAD_SUBMIT = ("EXPIRED", "FAILED")  # 提交消息已终止且没有被确认接收
 SCAN_LIMIT = 200
+# 超过这个年龄的无结果任务视为已搁置,不再重复告警(升级前的存量任务、被拒的任务都会永远没有结果)
+STUCK_MAX_AGE = timedelta(days=7)
 
 
 def _reason(task: TransportTask, submit_status: str | None) -> str:
@@ -31,7 +33,7 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
     """只输出结构化告警日志,不改任务状态,也不伪造结果;返回告警条数。
 
     卡住 = 创建超过 `minutes` 分钟,仍没有确定终态(无结果、结果 UNKNOWN,或料箱成功结果暂存中)。
-    阈值按现场 SOP 调整;任务一直卡住会每次扫描重复告警,直到结果到达。
+    阈值按现场 SOP 调整;任务一直卡住会每次扫描重复告警,直到结果到达或超过 `STUCK_MAX_AGE`。
     """
     positive(minutes, "TRANSPORT_STUCK_ALERT_MINUTES")
     positive(limit, "limit")
@@ -46,6 +48,7 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
                     .where(
                         TransportTask.id > last_id,
                         TransportTask.created_at < cutoff,
+                        TransportTask.created_at >= current - STUCK_MAX_AGE,
                         TransportTask.outcome_status.is_(None)
                         | (TransportTask.outcome_status == "UNKNOWN"),
                     )
