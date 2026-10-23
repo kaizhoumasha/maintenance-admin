@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### WMS 请求端点与 operation 组织
+
+- 新增 `app/integrations/wms_request`：WES → WMS 的 `decisions`、`facts` 两个端点（协议 `wms-decisions`、`wms-facts`），提供 operation 注册、信封冻结、公共响应分类和事务内入队 `WmsRequests.send`；目前没有任何具体 operation，每个 operation 对照合同确认后再单独添加。两个端点都走可靠层，业务暂时读不到 WMS 响应。
+- 接入指南和离线实验同步到当前代码，实验改用 `create_database_engine` 建表。
+
 ### PostgreSQL Schema 隔离
 
 - ORM、API、可靠发送器与 Celery 数据库连接统一使用 `enterprise_backend` schema，SQLite 测试映射为空；自动索引保留原名称。
