@@ -9,6 +9,7 @@ from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
+from app.core.strict_json import json_object
 from app.integrations.ecs_callback.discovery import load_event_modules
 from app.integrations.ecs_callback.receiver import (
     MAX_BODY_BYTES,
@@ -69,7 +70,14 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
                 result = await receive_ecs_event(session, raw)
     except Exception as error:  # 含提交失败:整个事务已回滚
         logger.error("ecs callback receive failed error_type=%s", type(error).__name__)
-        result = EcsResponse(503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error")
+        event_type, device_code = _best_effort_identity(raw)
+        result = EcsResponse(
+            503,
+            {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"},
+            "error",
+            event_type,
+            device_code,
+        )
     _log_request(result, started)
     if allow_snapshot("ecs"):  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(
@@ -83,6 +91,16 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
             source="ecs",
         )
     return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
+
+
+def _best_effort_identity(raw: bytes) -> tuple[str | None, str | None]:
+    """仅供 503 日志:尽力从请求体取标识,任何失败都当作没有,绝不影响响应。"""
+    try:
+        parsed = json_object(raw) or {}
+        values = (parsed.get("event_type"), parsed.get("device_code"))
+        return tuple(v if isinstance(v, str) else None for v in values)  # type: ignore[return-value]
+    except Exception:
+        return None, None
 
 
 def _log_request(result: EcsResponse, started: float) -> None:

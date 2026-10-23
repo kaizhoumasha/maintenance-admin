@@ -3,6 +3,7 @@ import logging
 import pytest
 from sqlalchemy import event, select
 
+from app.controllers import ecs_callback as ecs_controller
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.receiver import MAX_BODY_BYTES
@@ -70,7 +71,29 @@ async def test_commit_failure_returns_503_and_logs_error_outcome(client, callbac
     assert await rows(callback_store, CallbackReceipt) == []
     finals = [r for r in caplog.records if hasattr(r, "outcome")]
     assert [r.outcome for r in finals] == ["error"]
+    assert finals[0].event_type == "'SCAN_COMPLETED'" and finals[0].device_code == "'D1'"
     assert finals[0].status == 503 and "outcome=error" in finals[0].getMessage()
+
+
+@pytest.mark.parametrize("raw", [None, b"\xff"])
+async def test_receive_failure_log_identity_is_best_effort(
+    client, callback_store, caplog, monkeypatch, raw
+):
+    async def broken(session, data):
+        raise RuntimeError("secret-commit-detail")
+
+    monkeypatch.setattr(ecs_controller, "receive_ecs_event", broken)
+    caplog.set_level(logging.INFO)
+    response = await client.post(PATH, content=raw) if raw else await client.post(PATH, json=body())
+    assert response.status_code == 503
+    [final] = [r for r in caplog.records if hasattr(r, "outcome")]
+    assert final.outcome == "error"
+    if raw:
+        assert final.event_type is None and final.device_code is None
+    else:
+        assert final.event_type == "'SCAN_COMPLETED'" and final.device_code == "'D1'"
+    assert all("secret-commit-detail" not in r.getMessage() for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 async def test_final_log_has_rendered_fields(client, callback_store, caplog):
