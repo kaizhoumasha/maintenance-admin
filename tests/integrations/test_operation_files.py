@@ -1,5 +1,7 @@
 import re
 
+from app.integrations.ecs_callback import registry as ecs_events
+from app.integrations.ecs_callback.discovery import load_event_modules
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.discovery import load_operation_modules as load_callbacks
 from app.integrations.wms_request import operation as requests
@@ -13,6 +15,17 @@ def violation(name: str, module: str) -> str | None:
     match = IN_PACKAGE.match(module)
     if match and match.group(2) != re.sub(r"[.@]", "_", name):
         return f"{name} is in {module}"
+    return None
+
+
+ECS_IN_PACKAGE = re.compile(r"^app\.integrations\.\w+\.ecs_event\.(\w+)$")
+
+
+def ecs_violation(event_type: str, module: str) -> str | None:
+    """ECS 事件 `SCAN_COMPLETED` 必须写在 `scan_completed.py`;只检查目录形式。"""
+    match = ECS_IN_PACKAGE.match(module)
+    if match and match.group(1) != event_type.lower():
+        return f"{event_type} is in {module}"
     return None
 
 
@@ -36,3 +49,19 @@ def test_the_rule_covers_both_directions_and_ignores_single_modules():
         assert violation("biz.thing.done@v2", f"{base}.biz_thing_done_v1") is not None
         assert violation("biz.thing.done@v1", base) is None  # 单个模块形式不检查
     assert violation("example.fact.demo@v1", "app.integrations.wms_request.dev") is None
+
+
+def test_registered_ecs_event_files_are_named_after_the_event_type():
+    load_event_modules("production")
+    assert [
+        v
+        for event_type, registered in ecs_events.events().items()
+        if (v := ecs_violation(event_type, registered.func.__module__))
+    ] == []
+
+
+def test_the_ecs_rule_covers_both_directions_and_ignores_single_modules():
+    base = "app.integrations.biz.ecs_event"
+    assert ecs_violation("SCAN_DONE", f"{base}.scan_done") is None
+    assert ecs_violation("SCAN_DONE", f"{base}.done") is not None
+    assert ecs_violation("SCAN_DONE", base) is None  # 单个模块形式不检查
