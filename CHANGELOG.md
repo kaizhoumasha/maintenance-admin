@@ -5,7 +5,8 @@
 ### WMS 请求端点与 operation 组织
 
 - 新增 `app/integrations/wms_request`：WES → WMS 的 `decisions`、`facts` 两个端点（协议 `wms-decisions`、`wms-facts`），提供 operation 注册、信封冻结、公共响应分类和事务内入队 `WmsRequests.send`；目前没有任何具体 operation，每个 operation 对照合同确认后再单独添加。两个端点都走可靠层，业务暂时读不到 WMS 响应。
-- 接入指南和离线实验同步到当前代码，实验改用 `create_database_engine` 建表。
+- 入站与出站 operation 的发现支持「单个模块或目录」：`<业务>/callback`、`<业务>/request` 为目录时，一个 operation 一个文件并整目录导入，文件名为注册名把 `.`、`@` 换成 `_`，有测试检查一致。Transport 回调据此拆为 `wms_transport/callback/`，行为不变。
+- 补全 `app/integrations` 各 `__init__.py` 的职责与开发方式说明；接入指南和离线实验同步到当前代码，实验改用 `create_database_engine` 建表。
 
 ### PostgreSQL Schema 隔离
 

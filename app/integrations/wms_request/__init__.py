@@ -28,13 +28,15 @@ Transport 业务,在 `wms_transport`。
   - 合法的 409、422 是对端终局。
   - 其余一律算未知,继续重试。
   - 不属于本端点的消息会被拒绝。
-- `discovery.py`:第一次 `send` 时导入各业务包的 `request.py`,让装饰器完成注册。
+- `discovery.py`:第一次 `send` 时导入各业务包的 `request`,让装饰器完成注册。
 
 发送、租约、退避、TTL 和终态清理都在 `app/reliable`,这个包不重复实现。
 
 ## 怎么新增一个 operation
 
-在 `app/integrations/<业务>/request.py` 里:
+在 `app/integrations/<业务>/request/` 目录里加一个文件,一个 operation 一个文件,整个目录自动导入。
+文件名是注册名把 `.` 和 `@` 换成 `_`,有测试检查两者一致。例如下面这个 operation 写在
+`app/integrations/<业务>/request/<域>_<名称>_v1.py`:
 
     @request_operation("域.名称@v1", Endpoint.FACTS)
     class MyFact(RequestOperation):
@@ -42,6 +44,7 @@ Transport 业务,在 `wms_transport`。
         class Payload(RequestPayload):
             task_id: str
 
+只有一两个很小的 operation 时,也可以用单个 `request.py`,发现逻辑两种形式都认。
 调用方保存自己的业务记录和 `operation_id`(小写 canonical UUIDv7),在同一个事务里调用 `send`。
 
 ## 使用时要知道的限制

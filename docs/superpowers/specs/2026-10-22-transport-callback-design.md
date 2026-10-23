@@ -76,7 +76,7 @@
 ```text
 app/controllers/wms_events.py               POST /api/v1/wms/events:有界读 body → 交给通用接收 → 回写响应;预留认证位;响应后写快照
 app/integrations/wms_callback/               通用接收(无 fastapi,不认识任何业务):信封解析、收据幂等、ACK、operation 分发与注册装饰器
-app/integrations/wms_transport/callback.py   Transport 的两个 operation:DTO 校验、冻结事实校验、直接应用到 transport_task(用装饰器注册)
+app/integrations/wms_transport/callback/   Transport 的两个 operation:DTO 校验、冻结事实校验、直接应用到 transport_task(用装饰器注册)
 app/core/strict_json.py                     严格 JSON 解析(出站适配器与通用接收共用)
 app/models/callback.py                       CallbackReceipt、CallbackSnapshot(通用);Transport 不新增表,只给 transport_task 加列
 app/tasks/callback_tasks.py                  快照清理
@@ -84,7 +84,7 @@ app/tasks/callback_tasks.py                  快照清理
 
 - 分三层:**通用接收**(第 1 步)→ **operation 注册**(第 2 步)→ **具体 operation**(第 3 步起)。通用层只认「operation 名 → 处理器」,不含 Transport 的列、表或规则。
 - 信封合同 §6 规定 `ack_mode`/`ack_commit_facts` 不进入运行时 registry:装饰器**只注册 operation → 处理器**,不带 `ack_mode` 等元数据,这些继续只写在合同与文档里。
-- 自动发现:`include_wms_events` 在启动时导入 `app/integrations/<业务>/callback.py`(`dev_callback.py` 仅 local),装饰器在导入时注册,新增 operation 不改控制器和 `main.py`(见 §3.1 实现说明)。
+- 自动发现:`include_wms_events` 在启动时导入 `app/integrations/<业务>/callback`(模块或包,包会连同子模块一起导入;`dev_callback` 仅 local),装饰器在导入时注册,新增 operation 不改控制器和 `main.py`(见 §3.1 实现说明)。
 - 路由是唯一入口,不另开第二路径或旁路持久化。
 - **限流豁免**:全局 `RateLimit(100)` 会对回调返回 `429`,与合同冲突。`RateLimit.__call__` 增加 `limit is None` 直接放行的分支,回调路由用 `RateLimit(None)` 覆盖默认;路由使用普通 `APIRouter`(不用 `new_router`,否则 OpenAPI 会自动声明 `429`)。
 - **共用严格 JSON 解析**:`adapter.py` 里的 `_unique_keys / _reject_constant / _json_object` 提到 `app/core/strict_json.py`,适配器与通用接收共用(拒绝任意层重复 key 和 NaN/Infinity),`test_adapter.py` 现有用例作回归保护。
@@ -227,12 +227,12 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 |---|---|---|
 | 1 通用接收 | 路由、信封校验、严格 JSON(提到 core)、收据幂等与稳定重放、未注册 operation 的 `422`、意外异常 `503` 兜底、`RateLimit` 豁免、快照与其保留期配置/清理/写入速率上限、`docs/deploy.md` 的部署约束说明、迁移(收据、快照) | `413/400`;`operation` 缺失 `422` 不建收据;未知 operation `422 UNSUPPORTED_OPERATION` 并稳定重放;同身份同摘要重放、异摘要(含仅 `timestamp` 不同)`409`;并发同身份只写一份;快照写失败不影响响应;超过 100 次/分钟不返回 `429` |
 | 2 operation 注册 | 注册装饰器、处理器契约(`parse`/`handle`/`Outcome`)、与收据同事务、`Rejected` 回滚处理器写入、处理器异常 `503` | 用**测试里注册的测试 operation** 验证 `202/200/409/422`;`Rejected` 不留业务行;处理器异常合同形状 `503`;注册重复名报错 |
-| 3 Transport 接收并应用 | 两个 operation(`callback.py`,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;`callback_receipt.diagnostic` 列与 `ctx` 附加诊断;ACK 与 `409` 回显 `transport_task_id`(`echo_keys`);`applied_outcome` 保存完整规范化结果;`frozen` 从 `request_raw` 回填;回调事务 `lock_timeout`;收到回调即 settle 提交消息 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
+| 3 Transport 接收并应用 | 两个 operation(`callback/`,每个 operation 一个文件,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;`callback_receipt.diagnostic` 列与 `ctx` 附加诊断;ACK 与 `409` 回显 `transport_task_id`(`echo_keys`);`applied_outcome` 保存完整规范化结果;`frozen` 从 `request_raw` 回填;回调事务 `lock_timeout`;收到回调即 settle 提交消息 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
 | ~~4 `STALLED` 定时对账~~ | 已取消(决定 10) | — |
 
 每步独立可验收、可合并;1、2 与业务无关,可先于任何具体 operation 完成并联调通用部分。**「可合并」不等于「可对 WMS 开放」**:第 1、2 步合并后入口上线,但此时真实 Transport 回调只会得到 `422 UNSUPPORTED_OPERATION`,WMS 按合同不再重试原内容,第 3 步上线也救不回,滚动发布期间打到旧实例同理。因此上线顺序约定(写入 `docs/deploy.md`):第 3 步在**全部接收实例与全部任务创建者(API、worker、脚本)**均已升级后,才在网关对 WMS 来源放行;在此之前联调只用测试 operation,不投真实 Transport 回调;滚动发布期间网关暂停来源。第 1 步另含两处对既有代码的小改动:`RateLimit` 增加 `limit is None` 豁免,`adapter.py` 的严格 JSON 解析提到 `app/core/strict_json.py`;第 3 步含 `TransportService._register` 写入 `frozen`。
 
-第 3 步已实现(`app/integrations/wms_transport/callback.py`、`callback_payloads.py`、`callback_apply.py`、`settle.py`):`Payload` 模型承担消息自身的合法性(字段互斥、枚举、长度),`TaskCallbacks` 承担与冻结任务的对照和应用;位置事实按集合累积,`outcome_status` 对货架 `FAILED+position_unknown` 与料箱任一成员位置未知记为 `UNKNOWN`。`STALLED` 定时对账已取消,任务收到回调即 `settle` 提交消息(决定 10)。
+第 3 步已实现(`app/integrations/wms_transport/callback/`、`callback/payloads.py`、`callback/apply.py`、`settle.py`):`Payload` 模型承担消息自身的合法性(字段互斥、枚举、长度),`TaskCallbacks` 承担与冻结任务的对照和应用;位置事实按集合累积,`outcome_status` 对货架 `FAILED+position_unknown` 与料箱任一成员位置未知记为 `UNKNOWN`。`STALLED` 定时对账已取消,任务收到回调即 `settle` 提交消息(决定 10)。
 
 ### 8.1 测试计划
 
@@ -361,15 +361,15 @@ WMS ──POST /api/v1/wms/events──▶ 路由(有界读 ≤256KiB;RateLimit(
   - Verify: PostgreSQL 升降级与 SQLite `create_all` 索引一致;步骤 4 用实际领取 SQL 核对历史数据下查询计划,不固定私有 SQL 形状。
 - [ ] **T3 (P2, human: ~1–2h / CC: ~10–15min)** — 版本登记 — 在步骤 3 落定正常并发败者响应。
   - Surfaced by: Code Quality / concurrency R6 / D7 6A,唯一约束不等于败者的收据事务已定义。
-  - Files: `app/integrations/wms_transport/callback.py`、`tests/integrations/wms_transport/`。
+  - Files: `app/integrations/wms_transport/callback/`、`tests/integrations/wms_transport/`。
   - Verify: PostgreSQL 实际 HTTP 并发得到 `202+200` 或 `202+409`,一份证据、两个可重放收据;赢家回滚后竞争者可接管;真正数据库失败仍 `503`。
 - [ ] **T4 (P1, human: ~30–60min / CC: ~5–10min)** — 证据应用 — 在步骤 4 补全未知任务领取资格。
   - Surfaced by: Architecture R1 / D2 1A,普通 JOIN 无法到达未知任务分类路径。
-  - Files: `app/integrations/wms_transport/callback.py`、`app/tasks/callback_tasks.py`、`tests/integrations/wms_transport/`。
+  - Files: `app/integrations/wms_transport/callback/`、`app/tasks/callback_tasks.py`、`tests/integrations/wms_transport/`。
   - Verify: 公开扫描入口同时证明未知任务 `CONFLICT` 并告警、支持任务推进、已知但未支持的证据仍 `PENDING`;SQLite/PostgreSQL 均覆盖。
 - [ ] **T5 (P2, human: ~1–2h / CC: ~10–15min)** — 扫描预算 — 在步骤 4 限制每次最多 10 批且本轮不重复领取。
   - Surfaced by: Performance R4 / D5 4A,持续满批或等待租约反复到期可能形成长任务。
-  - Files: `app/integrations/wms_transport/callback.py`、`app/tasks/callback_tasks.py`、`tests/integrations/wms_transport/`。
+  - Files: `app/integrations/wms_transport/callback/`、`app/tasks/callback_tasks.py`、`tests/integrations/wms_transport/`。
   - Verify: 持续满批按预算返回,下一次可继续,本轮不重领、等待证据仍 `PENDING`,类别配额仍有效;不增加调度器或 Redis 锁。
 - [ ] **T6 (P2, human: ~2–3h / CC: ~15–25min)** — 贯通验收 — 在步骤 4/6 覆盖真实接收至应用的事务链。
   - Surfaced by: Test Review R3 / D4 3A,分段测试不能替代实际注册与接线证据。
@@ -444,7 +444,7 @@ Scope Check: CLEAN。主线为通用接收 → operation 注册 → Transport �
 |---|---|---|
 | 1 通用接收 | DONE(实现) | `controllers/wms_events.py`、`wms_callback/receiver.py`、`strict_json.py`;信封、幂等、快照、保存点回滚与 HTTP 测试已存在 |
 | 2 operation 注册 | DONE(实现) | `registry.py`、`operation.py`、`discovery.py`;生产也自动发现 Transport 的两个 operation,仅示例 `example.echo@v1` 限 local |
-| 3 Transport 应用 | DONE(实现),验收 PARTIAL | `callback.py`、`callback_payloads.py`、`callback_apply.py`;版本、终态、暂存结果、冻结事实、回显与新会话读回已有测试;不能据此认定 PostgreSQL 并发验收完成 |
+| 3 Transport 应用 | DONE(实现),验收 PARTIAL | `callback.py`、`callback/payloads.py`、`callback/apply.py`;版本、终态、暂存结果、冻结事实、回显与新会话读回已有测试;不能据此认定 PostgreSQL 并发验收完成 |
 | 4 STALLED 定时对账 | CANCELLED | 已由回调触发 `Outbox.settle` 取代,不恢复旧扫描设计 |
 | 模型与迁移 | DONE(源码),运行验收 PARTIAL | `a020` 至 `a023`;`alembic heads` 仅 `a023a20261024`;迁移运行测试依赖显式独立 PostgreSQL,本轮未运行 |
 | 配套能力 | DONE(实现) | local 控制台回调投递、1 小时提交 TTL、90 天收据清理、cycle_id、卡住任务告警均有实现和相应用例 |

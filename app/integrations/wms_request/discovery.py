@@ -1,13 +1,13 @@
-"""自动发现请求 operation 模块:`app/integrations/<业务>/request.py` 在导入时由装饰器完成注册。
+"""自动发现请求 operation 模块:`app/integrations/<业务>/request` 在导入时由装饰器完成注册。
 
-模块自身的导入错误必须暴露,不能让 operation 静默缺失。
+`request` 可以是单个模块,也可以是包(一个 operation 一个文件),包会连同全部子模块一起导入。
 """
 
-import importlib
 import pkgutil
 from functools import cache
 
 from app import integrations
+from app.core.module_tree import import_module_tree
 
 
 def candidate_modules() -> list[str]:
@@ -20,8 +20,4 @@ def candidate_modules() -> list[str]:
 @cache
 def load_operation_modules() -> None:
     for name in candidate_modules():
-        try:
-            importlib.import_module(name)
-        except ModuleNotFoundError as error:
-            if error.name != name:
-                raise
+        import_module_tree(name)

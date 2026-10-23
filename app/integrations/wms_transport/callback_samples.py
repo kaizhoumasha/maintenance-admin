@@ -1,7 +1,7 @@
 """联调用的样例回调:按任务的冻结事实构造一组合法的位置事件与结果消息。
 
 只给 local 联调控制台用,不参与接收与应用。每条消息都会走真实的接收管线,所以这里只负责
-「长得对」,是否被应用仍由 `callback_apply.py` 按判定表决定。
+「长得对」,是否被应用仍由 `callback/apply.py` 按判定表决定。
 """
 
 POSITION_OPERATION = "transport.task.member_position_changed@v1"

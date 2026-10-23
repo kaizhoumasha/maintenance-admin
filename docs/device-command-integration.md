@@ -374,7 +374,7 @@ TTL 从入队创建时起算，重试不延长，到期不取消已发请求；`
 
 ### 7.2 Transport 的消息身份、任务关联与结果版本
 
-按 Transport 合同 §5，WMS 回调到 WES 的 `/api/v1/wms/events`，不是原 submit 路径，也不是 ECS 完成通知格式。接收端已实现：通用接收在 `app/integrations/wms_callback/`，Transport 的两个 operation 在 `app/integrations/wms_transport/callback.py`，设计与决定记录见[回调接收设计](superpowers/specs/2026-10-22-transport-callback-design.md)：
+按 Transport 合同 §5，WMS 回调到 WES 的 `/api/v1/wms/events`，不是原 submit 路径，也不是 ECS 完成通知格式。接收端已实现：通用接收在 `app/integrations/wms_callback/`，Transport 的两个 operation 在 `app/integrations/wms_transport/callback/`，设计与决定记录见[回调接收设计](superpowers/specs/2026-10-22-transport-callback-design.md)：
 
 - `transport.task.member_position_changed@v1` 与 `transport.task.resulted@v1` 分别承载位置事实和最终结果；每条回调有 WMS 自己生成的 `operation_id`，不沿用 submit ID，技术重试保持该消息原身份和完整信封。
 - `transport_task_id` 关联原任务；最终结果另以 `transport_task_id + outcome_revision` 登记版本（`transport_task.applied_outcome_revision`、`outcome_digests`）。同版本相同 `data` 判重复，不同 `data` 判冲突；不需要另造设备 `event_id`。
