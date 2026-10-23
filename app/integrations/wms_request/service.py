@@ -43,8 +43,11 @@ class WmsRequests:
     def target(self, protocol: str) -> str:
         names = [name for name, item in self.outbox.targets.items() if item.protocol == protocol]
         if len(names) != 1:
+            existing = ", ".join(f"{n}[{t.protocol}]" for n, t in self.outbox.targets.items())
+            example = f'{{"targets":{{"{protocol}":{{"base_url":"http://host:port","protocol":"{protocol}"}}}}}}'
             raise RuntimeError(
                 f"RELIABLE_TARGETS 需要恰好一个 protocol={protocol} 的目标,当前有 {names or '无'}"
+                f"(现有全部目标:{existing or '无'})。示例:RELIABLE_TARGETS='{example}'"
             )
         return names[0]
 
