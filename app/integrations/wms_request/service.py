@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +10,7 @@ from app.core.identifiers import validate_uuid7
 from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config
 
-from .adapter import ADAPTERS
-from .discovery import load_operation_modules
+from .adapter import ADAPTERS, PROTOCOL_OF
 from .operation import InvalidRequestPayload, UnknownOperation, lookup
 
 
@@ -52,9 +51,7 @@ class WmsRequests:
         data: dict,
         *,
         operation_id: str,
-        ttl: timedelta | None = None,
     ) -> EnqueueResult:
-        load_operation_modules()
         registered = lookup(operation)
         if registered is None:
             raise UnknownOperation(f"operation {operation!r} is not registered")
@@ -74,12 +71,11 @@ class WmsRequests:
             ).encode("utf-8")
         except ValueError as error:  # 含 pydantic ValidationError 与 UnicodeError
             raise InvalidRequestPayload(str(error)) from None
-        protocol = next(p for p, a in ADAPTERS.items() if a.endpoint == registered.endpoint)
         draft = MessageDraft(
-            self.target(protocol),
+            self.target(PROTOCOL_OF[registered.endpoint]),
             operation,
             operation_id,
             raw,
-            ttl=ttl if ttl is not None else registered.operation.ttl,
+            ttl=registered.operation.ttl,
         )
         return await self.outbox.enqueue(session, draft)

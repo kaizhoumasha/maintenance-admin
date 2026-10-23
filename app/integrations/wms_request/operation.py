@@ -79,9 +79,17 @@ def request_operation(name: str, endpoint: Endpoint):
     return register
 
 
+def _loaded() -> dict[str, Registered]:
+    # 读注册表前保证业务包的 request 模块已导入:发送器重启后可能先于任何 `send` 就要读它
+    from .discovery import load_operation_modules
+
+    load_operation_modules()
+    return _registry
+
+
 def lookup(name: str) -> Registered | None:
-    return _registry.get(name)
+    return _loaded().get(name)
 
 
 def operations() -> dict[str, Registered]:
-    return dict(_registry)
+    return dict(_loaded())

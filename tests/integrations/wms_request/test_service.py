@@ -1,5 +1,4 @@
 import json
-from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -42,11 +41,9 @@ async def test_rollback_leaves_no_message(sessions, wms, clock):
     assert await rows(sessions) == []
 
 
-async def test_ttl_argument_sets_expiry(sessions, wms, clock):
+async def test_operation_declared_ttl_sets_expiry(sessions, wms, clock):
     async with sessions() as session, session.begin():
-        await wms.send(
-            session, FACT, DATA, operation_id=str(uuid7(clock())), ttl=timedelta(minutes=5)
-        )
+        await wms.send(session, "example.fact.timed@v1", DATA, operation_id=str(uuid7(clock())))
     (row,) = await rows(sessions)
     assert row.expires_at is not None
 

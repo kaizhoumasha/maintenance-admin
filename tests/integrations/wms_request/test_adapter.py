@@ -109,13 +109,13 @@ def test_build_request_refuses_a_message_that_does_not_belong_to_the_endpoint(pr
 
 def test_registry_is_loaded_before_an_existing_message_is_sent(monkeypatch):
     """重启后发送器会在任何 `send` 之前领取存量消息,不能因注册表为空而把它判为失败。"""
-    from app.integrations.wms_request import adapter as adapter_module
+    from app.integrations.wms_request import discovery
     from app.integrations.wms_request import operation as registry
 
     snapshot = dict(registry._registry)
     monkeypatch.setattr(registry, "_registry", {})
     monkeypatch.setattr(
-        adapter_module, "load_operation_modules", lambda: registry._registry.update(snapshot)
+        discovery, "load_operation_modules", lambda: registry._registry.update(snapshot)
     )
     target = TargetConfig("t", "http://example.test", FACTS_PROTOCOL)
     request = ADAPTERS[FACTS_PROTOCOL].build_request(message(FACT), target)

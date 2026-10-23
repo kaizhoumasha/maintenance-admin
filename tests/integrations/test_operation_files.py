@@ -3,14 +3,12 @@ import re
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.discovery import load_operation_modules as load_callbacks
 from app.integrations.wms_request import operation as requests
-from app.integrations.wms_request.discovery import load_operation_modules as load_requests
 
 IN_PACKAGE = re.compile(r"^app\.integrations\.\w+\.(callback|request)\.(\w+)$")
 
 
 def registered_modules():
     load_callbacks("production")
-    load_requests()
     for name, handler in callbacks.operations().items():
         yield name, type(handler).__module__
     for name, registered in requests.operations().items():

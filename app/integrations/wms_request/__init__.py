@@ -28,7 +28,8 @@ Transport 业务,在 `wms_transport`。
   - 合法的 409、422 是对端终局。
   - 其余一律算未知,继续重试。
   - 不属于本端点的消息会被拒绝。
-- `discovery.py`:第一次 `send` 时导入各业务包的 `request`,让装饰器完成注册。
+- `discovery.py`:第一次读注册表时(`send`,或发送器构造请求时)导入各业务包的 `request`,
+  让装饰器完成注册。
 
 发送、租约、退避、TTL 和终态清理都在 `app/reliable`,这个包不重复实现。
 

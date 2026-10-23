@@ -5,7 +5,6 @@ from app.http_client import DeliveryState, HttpRequest, HttpResult
 from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 
-from .discovery import load_operation_modules
 from .operation import Endpoint, lookup
 
 INT64_MAX = 2**63 - 1
@@ -30,8 +29,6 @@ class WmsEndpointAdapter:
         self.endpoint, self.path, self.success = endpoint, path, success
 
     def build_request(self, message: OutgoingMessage, target: TargetConfig) -> HttpRequest:
-        # 重启后发送器可能在任何 `send` 之前就领取存量消息,所以注册表要在这里保证已加载
-        load_operation_modules()
         request = json_object(message.request_raw) or {}
         registered = lookup(message.operation)
         if (
@@ -101,3 +98,5 @@ ADAPTERS = {
         frozenset({(200, "DECIDED"), (202, "PREPARE_ACCEPTED")}),
     ),
 }
+
+PROTOCOL_OF = {adapter.endpoint: protocol for protocol, adapter in ADAPTERS.items()}
