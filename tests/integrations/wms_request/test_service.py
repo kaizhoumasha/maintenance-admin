@@ -69,10 +69,24 @@ async def test_invalid_requests_never_reach_the_outbox(
     assert await rows(sessions) == []
 
 
+async def test_reentry_with_the_same_payload_returns_the_original_reference(sessions, wms, clock):
+    """调用方重入时时间戳已变,但 Payload 相同,应当得到原消息而不是冲突。"""
+    operation_id = str(uuid7(clock()))
+    async with sessions() as session, session.begin():
+        first = await wms.send(session, FACT, DATA, operation_id=operation_id)
+    clock.advance(30)
+    async with sessions() as session, session.begin():
+        again = await wms.send(session, FACT, DATA, operation_id=operation_id)
+    assert again.message_id == first.message_id
+    (row,) = await rows(sessions)
+    assert json.loads(row.request_raw)["data"] == DATA
+
+
 async def test_same_identity_with_changed_content_is_a_duplicate_message(sessions, wms, clock):
     operation_id = str(uuid7(clock()))
     async with sessions() as session, session.begin():
         await wms.send(session, FACT, DATA, operation_id=operation_id)
+    clock.advance(30)
     with pytest.raises(DuplicateMessage):
         async with sessions() as session, session.begin():
             await wms.send(session, FACT, {**DATA, "qty": 3}, operation_id=operation_id)

@@ -50,8 +50,8 @@ Transport 业务,在 `wms_transport`。
 
 ## 使用时要知道的限制
 
-- 同一 `operation_id` 再次入队时,内容有任何变化(包括时间戳)都会抛 `DuplicateMessage`。
-  重入口先读自己的业务记录,复用已有身份,不要重新生成。
+- 同一 `operation_id` 再次调用 `send` 时,Payload 相同返回原消息引用(时间戳不参与比较),
+  Payload 不同抛 `DuplicateMessage`。所以重入口可以放心重复调用,但仍应复用已保存的身份。
 - 默认不设 TTL,因为 facts 是已发生的事实,丢弃等于丢数据。Transport 提交的 1 小时 TTL
   是它自己的决定,不适用于这里。
 - 业务现在读不到 WMS 的响应。可靠层只把响应原文存在消息行里,没有公开的读取接口,
