@@ -45,7 +45,7 @@
 - 适配器要求所有应答回显 `transport_task_id`,包括 422。外发给 WMS 的接口说明书对此写法不同,
   联调前要和 WMS 确认。
 - 默认 `RELIABLE_TARGETS` 为空,不会发送。联调和上线的前置条件见
-  docs/device-command-integration.md 的 §5.3。
+  docs/superpowers/specs/device-command-integration.md 的 §5.3。
 
 设计记录:docs/superpowers/specs 下的 transport-outbound-design、rack-transport-integration-design、
 transport-callback-design。

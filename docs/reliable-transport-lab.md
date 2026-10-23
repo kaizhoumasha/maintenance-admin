@@ -1,6 +1,6 @@
 # 第一个可靠投递实验
 
-本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。先跑通本实验，再按[接入指南](device-command-integration.md)的任务表做协议开发。
+本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。先跑通本实验，再按[接入指南](superpowers/specs/device-command-integration.md)的任务表做协议开发。
 
 ## 1. 准备文件与命令
 
@@ -358,4 +358,4 @@ Transport 的正式实现已经落在仓库里，实验里的各部分对应如�
 
 实验仍是学习用的自给自足切片，不会随正式实现自动更新。新增其他协议时，才需要按实验拆分出自己的适配器、模型和入队服务。不让初级开发者自行修改重试预算、租约围栏、结果消费或设备动态路由。ECS 不使用本实验的静态 `wms` target。
 
-本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发指南 §9](device-command-integration.md#9-环境准备与全量验证)。
+本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发指南 §9](superpowers/specs/device-command-integration.md#9-环境准备与全量验证)。
