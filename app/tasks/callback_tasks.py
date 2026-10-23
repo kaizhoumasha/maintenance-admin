@@ -1,14 +1,11 @@
-import asyncio
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.pool import NullPool
 
 from app.core import get_settings
-from app.database import create_database_engine as create_async_engine
 from app.models import CallbackReceipt, CallbackSnapshot
 from app.reliable.config import positive
+from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
@@ -57,17 +54,9 @@ async def run_receipt_cleanup(factory, days, *, now=None, batch=500) -> int:
 
 def _run(cleanup, days_setting: str) -> int:
     settings = get_settings()
-
-    async def execute():
-        engine = create_async_engine(
-            settings.DATABASE_URL, poolclass=NullPool, hide_parameters=True
-        )
-        try:
-            return await cleanup(async_sessionmaker(engine), getattr(settings, days_setting))
-        finally:
-            await engine.dispose()
-
-    return asyncio.run(execute())
+    return run_with_factory(
+        settings.DATABASE_URL, lambda f: cleanup(f, getattr(settings, days_setting))
+    )
 
 
 @celery_app.task(name="callback.cleanup_snapshots")

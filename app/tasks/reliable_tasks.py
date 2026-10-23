@@ -1,13 +1,9 @@
-import asyncio
 from datetime import UTC, datetime
 
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.pool import NullPool
-
 from app.core import get_settings
-from app.database import create_database_engine as create_async_engine
 from app.reliable.store import CLEANUP_BATCH_SIZE
 from app.reliable.store import cleanup_terminal as delete_terminal
+from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
@@ -26,14 +22,6 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
 @celery_app.task(name="reliable.cleanup_terminal")
 def cleanup_terminal() -> int:
     settings = get_settings()
-
-    async def execute():
-        engine = create_async_engine(
-            settings.DATABASE_URL, poolclass=NullPool, hide_parameters=True
-        )
-        try:
-            return await run_cleanup(async_sessionmaker(engine), settings.RELIABLE_RETENTION_DAYS)
-        finally:
-            await engine.dispose()
-
-    return asyncio.run(execute())
+    return run_with_factory(
+        settings.DATABASE_URL, lambda f: run_cleanup(f, settings.RELIABLE_RETENTION_DAYS)
+    )

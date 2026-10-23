@@ -198,6 +198,8 @@ def settings_with(monkeypatch, targets):
     from app.core.config import Settings
     from app.integrations.wms_transport import service as service_module
 
+    # 进程环境里的 RELIABLE_TARGETS 会与传入值深度合并,测试必须与之隔离
+    monkeypatch.delenv("RELIABLE_TARGETS", raising=False)
     settings = Settings(_env_file=None, RELIABLE_TARGETS={"targets": targets})
     monkeypatch.setattr(service_module, "get_settings", lambda: settings)
 

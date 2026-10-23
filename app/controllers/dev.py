@@ -3,7 +3,6 @@
 场景由 app/integrations/<业务>/dev.py 里的 @dev_scenario 登记,启动时自动扫描,新增业务无需改这里。
 """
 
-import importlib
 import pkgutil
 from typing import Annotated, Union
 
@@ -15,6 +14,7 @@ from app.controllers.dev_mock_wms import router as mock_wms_router
 from app.controllers.dev_wms_request import wms_request_router
 from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
 from app.core.dev_scenarios import DevScenario, scenarios
+from app.core.module_tree import import_module_tree
 from app.core.routing import new_router
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import operations
@@ -27,12 +27,7 @@ def _load_dev_modules() -> None:
     for info in sorted(pkgutil.iter_modules(integrations.__path__), key=lambda i: i.name):
         if not info.ispkg:
             continue
-        name = f"{integrations.__name__}.{info.name}.dev"
-        try:
-            importlib.import_module(name)
-        except ModuleNotFoundError as error:
-            if error.name != name:  # 模块自身的导入错误必须暴露,不能让场景静默缺失
-                raise
+        import_module_tree(f"{integrations.__name__}.{info.name}.dev")
 
 
 def _submit_router(items: list[DevScenario]):
