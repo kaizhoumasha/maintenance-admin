@@ -3,9 +3,10 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core import get_settings
+from app.database import create_database_engine as create_async_engine
 from app.http_client import AsyncHttpClient, HttpClient, HttpClientConfig
 from app.reliable import Outbox, ProtocolAdapter
 from app.reliable.config import ReliableConfig

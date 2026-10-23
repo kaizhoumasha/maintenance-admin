@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import insert, inspect, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
+from app.database import create_database_engine as create_async_engine
 from app.models import TransportTask
 
 BASE = "a019c20261022"

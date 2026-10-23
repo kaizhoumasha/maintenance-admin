@@ -1,8 +1,9 @@
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text, update
+from sqlalchemy import event, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,24 @@ from .registry import (
 MAX_BODY_BYTES = 256 * 1024
 MAX_OPERATION_CHARS = 256
 LOCK_TIMEOUT = "5s"  # PostgreSQL 回调事务等待行锁的上限,超时整体回滚并返回 503
+logger = logging.getLogger(__name__)
+
+
+def _log_diagnostics(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    diagnostics = sync_session.info["callback_diagnostics"].pop(transaction, [])
+    if transaction.nested:
+        sync_session.info["callback_diagnostics"].setdefault(transaction.parent, []).extend(
+            diagnostics
+        )
+        return
+    for detail in diagnostics:
+        logger.warning("callback diagnostic %r", detail, extra=detail)
+
+
+def _drop_diagnostics(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    sync_session.info["callback_diagnostics"].pop(transaction, None)
 
 
 @dataclass(frozen=True)
@@ -89,7 +108,13 @@ def _answer(outcome: object, operation_id: str) -> CallbackResponse:
 
 
 async def _handle(
-    session: AsyncSession, handler, receipt_id: int, operation_id: str, timestamp: int, parsed: dict
+    session: AsyncSession,
+    handler,
+    receipt_id: int,
+    operation: str,
+    operation_id: str,
+    timestamp: int,
+    parsed: dict,
 ) -> CallbackResponse:
     """保存点内执行处理器:Rejected 显式回滚其写入;先构造并校验响应,再写回收据(同一事务)。"""
     async with session.begin_nested() as savepoint:
@@ -114,6 +139,21 @@ async def _handle(
             diagnostic=context.notes or None,
         )
     )
+    if context.notes:
+        sync_session = session.sync_session
+        if "callback_diagnostics" not in sync_session.info:
+            sync_session.info["callback_diagnostics"] = {}
+            event.listen(sync_session, "after_commit", _log_diagnostics)
+            event.listen(sync_session, "after_rollback", _drop_diagnostics)
+        transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        sync_session.info["callback_diagnostics"].setdefault(transaction, []).extend(
+            {
+                "operation": operation,
+                "operation_id": operation_id,
+                "diagnostic": {key: value for key, value in note.items() if key != "data"},
+            }
+            for note in context.notes
+        )
     return response
 
 
@@ -188,7 +228,9 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
     if receipt_id is not None:
         if reason:
             return reply
-        return await _handle(session, handler, receipt_id, operation_id, timestamp, parsed)
+        return await _handle(
+            session, handler, receipt_id, operation, operation_id, timestamp, parsed
+        )
     existing = await session.scalar(
         select(CallbackReceipt).where(
             CallbackReceipt.operation == operation,

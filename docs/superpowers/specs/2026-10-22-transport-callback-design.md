@@ -1,6 +1,6 @@
 # Transport 回调接收开发说明书
 
-状态:**第四版(2026-10-22):Transport 回调改为在请求事务内直接更新 `transport_task`,取消证据表与后台应用(见 §0);§0–§13 为现行方案,§14 起的评审记录与末尾评审报告针对第三版方案,待对第四版重新评审** · 依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md` §5(v0.4.0 Approved)、`wms-async-callback-envelope-contract.md`、`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md` §5 · 范围:WMS → 本项目的统一回调入口,以及首个具体业务 `transport.task.member_position_changed@v1`、`transport.task.resulted@v1`
+状态:**第四版已实现,2026-10-23 首轮代码评审见 §18,解除环境限制后的续验见 §19。通用接收、operation 注册、Transport 请求事务内应用均已落地;完整套件、PostgreSQL 并发与本机 Mock 五层架链路已通过。真实 WMS/设备联调按用户最新决定改为本机 Mock,不计作现场验收。§0–§13 为现行方案,§14–§16 为第三版历史记录,§17 为第四版设计评审记录** · 依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md` §5(v0.4.0 Approved)、`wms-async-callback-envelope-contract.md`、`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md` §5 · 范围:WMS → 本项目的统一回调入口,以及首个具体业务 `transport.task.member_position_changed@v1`、`transport.task.resulted@v1`
 
 ## 0. 第四版修订:在 `transport_task` 上直接应用(取代证据表与后台应用)
 
@@ -13,7 +13,7 @@
 | 料箱结果先到则证据保持 `PENDING` | `transport_task.pending_outcome` 暂存最高版本结果,位置事件应用后在同一事务内完成 |
 | 步骤 3–6 四步 | 步骤 3(接收并应用,含「收到回调即结束提交消息的发送」)一步;`STALLED` 定时对账取消(决定 10) |
 
-代价与约束(已评估):(1) 未知任务没有任务行可写,只输出结构化告警日志,原文靠诊断快照保留 7 天,对端仍得 `202`;(2) 应用逻辑**对已通过 DTO 校验的消息不得抛异常**(冲突、未知任务、冻结缺失一律记录并返回 `Accepted`),否则会形成无法越过的毒消息,只有数据库/序列化等真异常才走通用 `503`;(3) 不再逐条留存每个位置事件与结果版本,审计只有任务行当前状态、版本摘要与快照,有需要再加表;(4) 请求内多一次任务行锁,同任务的回调串行,吞吐足够。
+代价与约束(已评估):(1) 未知任务没有任务行可写,诊断与收据同事务持久化,提交成功后输出结构化告警日志,原文另靠诊断快照保留 7 天,对端仍得 `202`;(2) 应用逻辑**对已通过 DTO 校验的消息不得抛异常**(冲突、未知任务、冻结缺失一律记录并返回 `Accepted`),否则会形成无法越过的毒消息,只有数据库/序列化等真异常才走通用 `503`;(3) 不再逐条留存每个位置事件与结果版本,审计有收据诊断、任务行当前状态、版本摘要与快照,有需要再加表;(4) 请求内多一次任务行锁,同任务的回调串行,实际并发能力待 PostgreSQL 验收。
 
 ### 已确认的决定(2026-10-22 讨论)
 
@@ -32,7 +32,7 @@
 13. **提交消息 1 小时超时(2026-10-23,暂定)**:同一消息身份的最长重发时间不超过 1 小时,超过后再发已无意义。出站侧 Transport 提交消息统一带 `ttl = SUBMIT_TTL`(1 小时,`wms_transport/protocol.py`),到期未送达的消息由发送层转为 `EXPIRED` 而不再发送;对 WMS 的回调侧同样按 1 小时作为其重发窗口提请确认(§9)。过期后任务没有结果,由卡住任务告警(`TODOS.md`)暴露,由上游决定是否用新 `client_request_id` 重新下发。
 14. **合同符合性复核后的取舍(2026-10-23)**:(1) **创建前不做可信位置/当前面校验**是有意偏离(合同 §3.2、§4.1 要求换面前有可信精确位置与当前面、料箱同架面须等于可信当前面):没有位置投影,由 WMS 在接纳时兜底(`409/503`),我方只做请求内结构校验,不做补救。(2) **来源认证降为低优先级,联调完成后再实施**。(3) **换面模板 `CK04` 与 `CTU02` 同为旋转动作**:`ROTATE_TEMPLATES = {CTU02, CK04}`,转运/退料架用 `CK04`、五层架用 `CTU02`;合同文本只列 `CTU01/CTU02/CTU03/F01`,待合同同步。
 15. **货架生命周期分组键 `cycle_id`(2026-10-24)**:进场 → [换面…] → 离场作为一个货架的完整生命周期;`transport_task.cycle_id`(可空、有索引)是纯本地分组键,**不进入 wire、冻结请求与幂等摘要**,所以无需与 WMS 重新商定合同。每一步仍是独立任务(自己的 `transport_task_id`、版本、终态、重试隔离);不共用 `transport_task_id`,因为回调靠它区分物理任务,共用会让终态不可改写规则和重试隔离失效。`RackCycle` 创建时生成 `cycle_id`,后续步骤在别的进程重建句柄时传入首次的值;同一 `client_request_id` 重放以首次登记为准。料箱场景提供可选 `cycle_id` 参数,同一面的多批搬运想归组时才传。只做分组,不新建批次表,也不定义批次何时结束(留在 TODOS 的闭合语义)。
-16. **卡住任务告警(2026-10-24)**:`transport.scan_stuck`(beat 每 10 分钟,`app/tasks/transport_tasks.py`)扫描创建超过 `TRANSPORT_STUCK_ALERT_MINUTES`(默认 120,暂定)仍无确定终态的任务(无结果、`UNKNOWN`、料箱成功结果暂存),输出结构化告警日志 `transport task stuck`,`reason` 为 `SUBMIT_NOT_DELIVERED / RESULT_MISSING / RESULT_WAITING_FOR_POSITIONS / OUTCOME_UNKNOWN`。只读,不改状态,不伪造结果;仍卡住的任务每次扫描重复告警;每次最多 200 条。通知渠道与责任人由现场 SOP 决定。
+16. **卡住任务告警(2026-10-24)**:`transport.scan_stuck`(beat 每 10 分钟,`app/tasks/transport_tasks.py`)扫描创建超过 `TRANSPORT_STUCK_ALERT_MINUTES`(默认 120,暂定)仍无确定终态的任务(无结果、`UNKNOWN`、料箱成功结果暂存),输出结构化告警日志 `transport task stuck`,`reason` 为 `SUBMIT_NOT_DELIVERED / RESULT_MISSING / RESULT_WAITING_FOR_POSITIONS / OUTCOME_UNKNOWN`。只读,不改状态,不伪造结果;仍卡住的任务每次扫描重复告警;每批最多 200 条,按任务主键继续扫描后批,避免最老任务持续遮蔽其余任务。通知渠道与责任人由现场 SOP 决定。
 
 ## 1. 目标与边界
 
@@ -49,9 +49,11 @@
 - 跨任务的货架/料箱当前位置表与 `RackStateReader` 项目内实现:没有调用方,不做。
 - 非 Transport 的 WMS operation:通用层为其预留注册点,本文不实现。
 - 联调控制台的「回调投递」场景:已实现(`POST /api/v1/dev/transport/{transport_task_id}/callbacks`,仅 local),不属于本文范围外的未决项。
-- 不改基础层 `app/http_client`、`app/reliable`(冻结,见 [[transport-domain-layering]])。
+- 不改 `app/http_client`;`app/reliable` 仅允许已确认的 `Outbox.settle` 扩展(§6.4),不增加业务规则或第二套重试调度。
 
-## 2. 已核实的现状
+## 2. 实施前基线(历史,当前进度见 §18)
+
+下表保留设计时的缺口,不代表当前源码状态;当前模型、注册能力、清理与验收边界以 §18 为准。
 
 | 事实 | 来源 |
 |---|---|
@@ -158,7 +160,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 - 处理器在通用层打开的保存点内执行:先 `SELECT transport_task ... FOR UPDATE`(按 `transport_task_id`;SQLite 下按事务串行),再按下面规则更新任务行;同任务的回调因此串行,互不覆盖。
 - **应用逻辑对已通过 DTO 校验的消息不得抛异常**:未知任务、冻结信息缺失、事实与冻结任务矛盾、与已确定终态矛盾,一律输出结构化告警日志(任务号、operation、operation_id、原因)并返回 `Accepted`(对端仍得 `202`,不要求重发);原文靠诊断快照保留 7 天。只有数据库、序列化等真异常才走通用 `503`。
 - **ACK 必须回显 `transport_task_id`**(合同 §5.1 第 506 行:带任务 ID 的 ACK 回显冻结消息中的任务 ID,否则 WMS 不结束发送义务)。Transport 两个 operation 的**所有** `Accepted/Duplicate/Conflict` 响应,包括只告警的情形(未知任务、冻结缺失、事实矛盾、终态矛盾),`data` 都带 `{"transport_task_id": <本条消息解析出的任务 ID>}`;处理器内统一用一个小函数构造,避免遗漏。
-- **只告警的事实要有持久记录**:未知任务、冻结缺失、事实矛盾、终态矛盾、结果不完整这几种「返回 `202` 但不应用」的情形,处理器通过 `ctx` 附上诊断(原因码 + 规范化 `data`),通用层与收据同事务写入 `callback_receipt.diagnostic`(可空 JSON 列,随第 3 步的迁移新增;诊断内容超过 64 KiB 截断并标记)。快照有每进程每分钟上限,不能作为唯一记录。数据库、序列化等**意外异常**仍走通用 `503`(对端原样重发,不丢事实,修复后自愈),不吞成 `202`。
+- **只告警的事实要有持久记录**:未知任务、冻结缺失、事实矛盾、终态矛盾、结果不完整这几种「返回 `202` 但不应用」的情形,处理器通过 `ctx` 附上诊断(原因码 + 规范化 `data`),通用层与收据同事务写入 `callback_receipt.diagnostic`(可空 JSON 列,随第 3 步的迁移新增;受请求体与 DTO 大小约束,不另做 64 KiB 截断)。提交成功后输出 `callback diagnostic` 结构化告警,含 operation、operation_id 与诊断中的原因、任务号,不重复输出完整 `data`;事务回滚不输出已接纳诊断告警。快照有每进程每分钟上限,不能作为唯一记录。数据库、序列化等**意外异常**仍走通用 `503`(对端原样重发,不丢事实,修复后自愈),不吞成 `202`。
 - **不看出站消息状态做应用判断**:只要任务存在就应用(权威结果是物理事实,出站消息可能还在 `PENDING/SENDING/STALLED`);反过来,收到回调会结束该任务提交消息的发送(§6.4)。
 - 校验冻结事实(`rack_id`/`container_id` 属冻结对象、目标匹配)读 `transport_task.frozen`。
 
@@ -225,7 +227,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 |---|---|---|
 | 1 通用接收 | 路由、信封校验、严格 JSON(提到 core)、收据幂等与稳定重放、未注册 operation 的 `422`、意外异常 `503` 兜底、`RateLimit` 豁免、快照与其保留期配置/清理/写入速率上限、`docs/deploy.md` 的部署约束说明、迁移(收据、快照) | `413/400`;`operation` 缺失 `422` 不建收据;未知 operation `422 UNSUPPORTED_OPERATION` 并稳定重放;同身份同摘要重放、异摘要(含仅 `timestamp` 不同)`409`;并发同身份只写一份;快照写失败不影响响应;超过 100 次/分钟不返回 `429` |
 | 2 operation 注册 | 注册装饰器、处理器契约(`parse`/`handle`/`Outcome`)、与收据同事务、`Rejected` 回滚处理器写入、处理器异常 `503` | 用**测试里注册的测试 operation** 验证 `202/200/409/422`;`Rejected` 不留业务行;处理器异常合同形状 `503`;注册重复名报错 |
-| 3 Transport 接收并应用 | 两个 operation(`callback.py`,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;`callback_receipt.diagnostic` 列与 `ctx` 附加诊断;ACK 与 `409` 回显 `transport_task_id`(`echo_keys`);`applied_outcome` 保存完整规范化结果;`frozen` 从 `request_raw` 回填;回调事务 `lock_timeout`;结果应用后 `STALLED` 对账一次 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
+| 3 Transport 接收并应用 | 两个 operation(`callback.py`,`CallbackOperation` + `Payload`):DTO 校验、冻结事实校验、直接应用到 `transport_task`(位置、货架族与料箱族结果、版本登记、终态与前置规则);`transport_task` 新增列的迁移;`TransportService._register` 写 `frozen`;`callback_receipt.diagnostic` 列与 `ctx` 附加诊断;ACK 与 `409` 回显 `transport_task_id`(`echo_keys`);`applied_outcome` 保存完整规范化结果;`frozen` 从 `request_raw` 回填;回调事务 `lock_timeout`;收到回调即 settle 提交消息 | DTO 规则;未知任务/冻结缺失/事实矛盾/终态矛盾均 `202` 且告警、不抛异常;同版本相同 `data` 新身份 `200`、不同 `409`;低版本不回退;`UNKNOWN` 可收敛;料箱结果先到则暂存、位置到齐后完成;新登记任务带 `frozen`;PostgreSQL 并发:同任务回调串行、两个料箱的位置事件互不抹掉 |
 | ~~4 `STALLED` 定时对账~~ | 已取消(决定 10) | — |
 
 每步独立可验收、可合并;1、2 与业务无关,可先于任何具体 operation 完成并联调通用部分。**「可合并」不等于「可对 WMS 开放」**:第 1、2 步合并后入口上线,但此时真实 Transport 回调只会得到 `422 UNSUPPORTED_OPERATION`,WMS 按合同不再重试原内容,第 3 步上线也救不回,滚动发布期间打到旧实例同理。因此上线顺序约定(写入 `docs/deploy.md`):第 3 步在**全部接收实例与全部任务创建者(API、worker、脚本)**均已升级后,才在网关对 WMS 来源放行;在此之前联调只用测试 operation,不投真实 Transport 回调;滚动发布期间网关暂停来源。第 1 步另含两处对既有代码的小改动:`RateLimit` 增加 `limit is None` 豁免,`adapter.py` 的严格 JSON 解析提到 `app/core/strict_json.py`;第 3 步含 `TransportService._register` 写入 `frozen`。
@@ -259,7 +261,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 - 目标判定表逐格:`RACK_POSITION` 精确相等;`RACK`/`ZONE` 目标的成功结果被接受;面向不一致写诊断不应用;`FAILED/CANCELLED` 终位偏离目标仍被应用。
 - 完整结果落库:`applied_outcome` 含 `arrival_face`、`failure_code`、逐箱状态;未知任务、矛盾、不完整结果的诊断含原因码与规范化 `data`。
 - 迁移回填:现存任务的 `frozen` 从 `request_raw` 回填,消息已清理的保持为空;revision 取 Int64 边界值。
-- 锁超时:PostgreSQL 下任务行被另一事务长期占用时回调在预算内返回合同形状的 `503`,且不留收据与业务变更;「任务已更新、收据提交前失败」时任务、诊断、版本登记与 `resume` 全部回滚。
+- 锁超时:PostgreSQL 下任务行被另一事务长期占用时回调在预算内返回合同形状的 `503`,且不留收据与业务变更;「任务已更新、收据提交前失败」时任务、诊断、版本登记与 `settle` 全部回滚。
 - 回归:`test_service.py` 原用例通过,且登记任务时 `frozen` 等于冻结的 `data`;迁移升降级,新列与 SQLite `create_all` 一致。
 
 **4 `STALLED` 定时对账**:已取消(决定 10);「回调即结束发送」由第 3 步测试覆盖。
@@ -271,7 +273,7 @@ Outcome = Accepted(data) → 202 RECEIVED | Duplicate(data) → 200 | Conflict(d
 
 ## 10. 明确不做
 
-证据表与后台应用(第四版取消)、认证实现、`outcome_version` 发布、跨任务位置表与 `RackStateReader`、业务重试/窗口/换面、非 Transport operation、通用事件总线、控制台回调投递(暂缓)、基础层改动、收据与证据清理。
+证据表与后台应用(第四版取消)、认证实现、`outcome_version` 发布、跨任务位置表与 `RackStateReader`、业务重试/窗口/换面、非 Transport operation、通用事件总线、除 `Outbox.settle` 以外的可靠层扩展。控制台回调投递与收据清理已实现,不再列为暂缓项。
 
 ## 11. What already exists(复用与新增)
 
@@ -319,7 +321,7 @@ WMS ──POST /api/v1/wms/events──▶ 路由(有界读 ≤256KiB;RateLimit(
 | 应用 | 同任务并发回调 | 有(PG) | 锁任务行串行 | 不互相覆盖 |
 | 结束发送 | 回调到达而提交消息仍在重试或 `STALLED` | 有 | 锁消息行后 `settle`,迟到的发送结果按租约忽略 | 日志 |
 
-关键缺口(无测试、无处理且静默):无。「上线顺序」靠运维约束而非代码防呆,是已确认的取舍。
+本表的「有」表示存在相关测试,不表示全部场景已运行通过;PostgreSQL 并发与真实联调边界见 §18。「上线顺序」靠运维约束而非代码防呆,是已确认的取舍。
 
 ## 13. 并行实施策略
 
@@ -417,6 +419,8 @@ HTTP(要求) ─ 原始 body/严格 JSON ─ 信封与身份
 
 ## GSTACK REVIEW REPORT
 
+> 以下为 §17 的历史设计评审报告;当前代码评审与验收进度见 §18,不能用设计放行代替实现验收。
+
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | Eng Review | plan-eng-review,第四版 | Architecture / Code Quality / Tests / Performance | 本轮1;累计4 | clean(设计决定) | 12 项(原生 3 + 外部 9)均单独批准并写入;0 未决 |
@@ -427,3 +431,109 @@ HTTP(要求) ─ 原始 body/严格 JSON ─ 信封与身份
 - **VERDICT:** 第四版 ENG CLEARED FOR IMPLEMENTATION(第 3、4 步)。仅说明设计可实施,不证明回调代码、测试、WMS 合同同步或物理执行已完成,不授权实现、提交、推送或部署。位置事件先后规则仍是本方约定,联调前须与 WMS 确认。
 
 NO UNRESOLVED DECISIONS
+
+## 18. 首轮代码评审与实施进度同步(2026-10-23,历史记录)
+
+以下保留首轮权限受限时的结果;PostgreSQL、完整套件与 Mock 联调的最新结论以 §19 为准。
+
+核验基线:`feature/transport-callback-receiver`,HEAD `ea6a4c9`;工作区起始干净。GitHub PR 查询与远程刷新因本机代理连接被沙箱拒绝而失败;按本仓库 Git Flow 以本地 `origin/develop` 为集成基线,merge base 为 `8a90e2b`。本节记录代码与本地测试证据,不表示已合并、部署、开放真实回调或完成物理验收。
+
+Scope Check: CLEAN。主线为通用接收 → operation 注册 → Transport 请求事务内应用;控制台、settle、时效、收据清理、cycle_id 与卡住告警已有 §0 的决定记录。历史第三版证据表与后台扫描已取消,不再作为缺失要求。
+
+| 项目 | 当前状态 | 证据与边界 |
+|---|---|---|
+| 1 通用接收 | DONE(实现) | `controllers/wms_events.py`、`wms_callback/receiver.py`、`strict_json.py`;信封、幂等、快照、保存点回滚与 HTTP 测试已存在 |
+| 2 operation 注册 | DONE(实现) | `registry.py`、`operation.py`、`discovery.py`;生产也自动发现 Transport 的两个 operation,仅示例 `example.echo@v1` 限 local |
+| 3 Transport 应用 | DONE(实现),验收 PARTIAL | `callback.py`、`callback_payloads.py`、`callback_apply.py`;版本、终态、暂存结果、冻结事实、回显与新会话读回已有测试;不能据此认定 PostgreSQL 并发验收完成 |
+| 4 STALLED 定时对账 | CANCELLED | 已由回调触发 `Outbox.settle` 取代,不恢复旧扫描设计 |
+| 模型与迁移 | DONE(源码),运行验收 PARTIAL | `a020` 至 `a023`;`alembic heads` 仅 `a023a20261024`;迁移运行测试依赖显式独立 PostgreSQL,本轮未运行 |
+| 配套能力 | DONE(实现) | local 控制台回调投递、1 小时提交 TTL、90 天收据清理、cycle_id、卡住任务告警均有实现和相应用例 |
+| 第三版 T1 / T3 / T6 | T1 已实现;T3 / T6 按第四版替换,验收 PARTIAL | 有效字段比较、任务行版本登记、HTTP 直接应用已有覆盖;不再要求证据行或后台应用入口 |
+| 第三版 T2 / T4 / T5 | CANCELLED | 随证据表、待处理索引、领取扫描一并取消;§15 复选框仅保留历史记录 |
+| WMS 合同与现场验收 | UNVERIFIABLE / 待联调 | 收据清理、1 小时重发窗口、CK04 等合同同步及现场 SOP 尚无本轮外部确认;来源认证仍按既定低优先级安排 |
+
+### 本轮发现及处理
+
+- **[P2] confidence 10/10,已按 D1 A 授权修复**:原 `transport_tasks.py` 使用 `.order_by(TransportTask.created_at, TransportTask.id).limit(limit)`,且扫描不改变任务。201 条持续卡住任务连续扫描两次,每次只告警相同的前 200 条。现按主键分批续扫,批大小仍为 200;回归 `test_every_stuck_task_is_alerted_even_when_older_tasks_remain` 验证两轮均覆盖所有任务。
+- **[P2] confidence 10/10,已按 D1 A 授权修复**:原 `CallbackContext.note` 只有 `self.notes.append(...)`,接收器只有 `diagnostic=context.notes or None`,没有设计要求的告警日志。未知任务无任务行,也无法由卡住扫描补偿。现通用接收沿用 Outbox 的事务分层日志模式,保存点提交仅把诊断提升至父事务,外层事务成功提交后才输出告警,任一级回滚则丢弃。回归 `test_abnormal_callback_alerts_only_after_its_receipt_commits` 与 `test_callback_diagnostic_follows_the_callers_savepoint` 验证接纳后告警、提交失败与保存点回滚均不误报。
+- **验收缺口,不虚报完成**:当前 Transport 回调测试没有同任务双身份同版本竞争、同任务两个料箱位置并发、处理器改完任务后提交失败的完整事务回滚场景。§8.1 的这些验收要求仍保留,不能用 SQLite 顺序测试或已有通用收据并发测试代替。
+- **机械文档同步**:修正顶部“待评审”、历史基线、已取消对账、仍称暂缓的控制台/收据清理、诊断截断与基础层冻结的矛盾;部署说明和变更记录同步实际 operation 注册状态。
+
+### 验证与覆盖限制
+
+初次定向检查(修改前):512 passed、263 skipped(20.76 秒),覆盖接收路由、控制台、callback、Transport、settle、清理与告警、迁移目录、限流和分层。新增回归先得到预期失败:扫描只返回 200 而非 201,未知任务没有告警;提交失败不告警路径原本通过。修复后的最终检查记录在下表。
+
+| 检查 | 结果 |
+|---|---|
+| 修复后最终定向测试 | 517 passed、267 skipped(21.37 秒),覆盖与初次定向检查相同的目录并增加上述回归;没有失败 |
+| 完整套件尝试 | 第一轮修复后运行:1152 passed、348 skipped、17 failed(40.42 秒)。15 项 HTTP 实网测试在绑定 `127.0.0.1` 时收到 `PermissionError: [Errno 1] operation not permitted`;2 项站点挂载测试的 Docker Compose 命令被当前环境权限阻止。随后保存点修正由最终定向测试覆盖,未重复执行已知受环境阻断的全量套件;不能宣称全量通过 |
+| 静态与迁移结构 | `ruff check .` 通过,`ruff format --check .` 为 236 文件均已格式化,`git diff --check` 通过;Alembic 单 head 为 `a023a20261024` |
+| PostgreSQL | 未配置 `TEST_DATABASE_URL`,相关参数分支与迁移运行跳过;SQLite 不替代行锁、唯一索引等待与并发证据 |
+| 原生主审 + 独立对抗复核 | 两者均确认上述两项 P2;修复后复核发现保存点回滚误报并已修正,最终复核无剩余确定缺陷。独立 SQLite 验证保存点回滚、根事务回滚均为 0 日志/0 收据,两层提交为 1 日志/1 收据;独立复核对测试仅看 diff stat,主审读取测试并执行本地用例 |
+| 外部 Claude Code | unavailable:调用超时 30 秒,无审阅正文;stderr 报 `unrecognized_model`、配置模型 `glm-5.3`;不计作通过或完整跨模型覆盖 |
+| 技能评审日志 | `gstack-review-log --start review` 写 `~/.gstack/.../.review-starts` 被沙箱以 EPERM 拒绝;本文件保留报告,不声称已保存可供 `/ship` 使用的评审凭据。已尝试记录“只读监控固定前批会饥饿”的经验,`gstack-learnings-log` 同样被 EPERM 拒绝,未写入全局经验库 |
+
+完整套件失败用例(保留名字便于在具备权限的环境复验):
+
+- `tests/http_client/test_logging.py`: `test_real_transport_does_not_log_response_credentials`、`test_other_callers_httpcore_logs_remain_visible`。
+- `tests/http_client/test_network_behavior.py`: `test_plain_http_does_not_require_ca_files`、`test_connections_reused_environment_ignored_and_close_is_idempotent`、`test_real_timeout_stops_waiting_and_releases_connection`(2 个参数)、`test_pool_timeout_is_not_sent_and_cancel_does_not_leak_pool`、`test_slow_chunks_are_bounded_by_total_deadline`、`test_real_stream_errors_preserve_headers_and_free_pool`(4 个参数)、`test_connect_refusal_does_not_prove_business_failure`、`test_real_redirect_does_not_issue_a_second_request`、`test_cancellation_during_body_read_releases_pool`。
+- `tests/scripts/test_release_bundle.py`: `test_site_override_mounts_external_configuration_read_only`(True/False)。
+
+**结论:DONE_WITH_CONCERNS。** 本轮两项发现及复核发现的保存点问题均已修复,本地相关回归通过;设计第 1–3 步为“已实现、PostgreSQL 与联调验收未完成”,不标为全部验收通过。来源认证、网关开放、合同确认与调用方结果出口继续按既定范围推进。
+
+本轮没有改 WMS 合同、真实目标或数据,未提交、推送、部署。评审仅确认本节列明的实现和本地验证证据,其余验收仍按 §8.1 与 §9 推进。
+
+## 19. 解除环境限制后的续验(2026-10-23)
+
+用户要求继续推进首轮未完成的检查。权限解除后已刷新 `origin/develop`,仍为 `8a90e2b`;当前分支没有 GitHub PR。既有应用、worker、beat、PostgreSQL 和 Redis 未重启或改配置。测试单独创建临时 PostgreSQL/Redis,使用与 CI 相同的 TimescaleDB 镜像与 Redis 8;完整套件显式设置独立 `TEST_DATABASE_URL`、`TEST_REDIS_URL`,不借用业务库。
+
+### 验收补齐
+
+在 `tests/integrations/wms_transport/test_callback.py` 新增以下公开入口验收,均已在独立 PostgreSQL 通过:
+
+- `test_concurrent_results_have_one_winner_and_replayable_receipts`:同任务同版本、两个消息身份并发,相同结果为 `202+200`,不同结果为 `202+409`;只有一个结果应用,两份收据各自稳定重放。
+- `test_concurrent_member_positions_do_not_overwrite_each_other`:同任务两个料箱位置并发到达,两份位置都落库,暂存成功结果随前置位置到齐完成。
+- `test_failed_commit_rolls_back_task_revision_diagnostic_and_settlement`:正常结果与冻结事实矛盾结果两种路径,提交失败均返回 `503`,任务应用、版本登记、收据诊断与提交消息 settle 全部回滚,无已提交诊断告警。
+
+| 检查 | 本轮结果 |
+|---|---|
+| PostgreSQL 回调与迁移定向验收 | **212 passed、5 skipped**,47.35 秒;5 个跳过为只适用于 PostgreSQL 的 SQLite 参数分支 |
+| 完整套件(含显式 PostgreSQL/Redis) | **1526 passed、5 skipped**,79.66 秒;首轮 17 个端口绑定/Docker 权限失败均不再出现 |
+| 静态检查 | `ruff check .`、`ruff format --check .`、`git diff --check` 均通过 |
+| 原生独立对抗复核 | 无剩余源代码层确定问题;测试按 summary 模式查看,通过结论以主审实际测试结果为准 |
+| 外部结构审阅 | **completed / gate PASS**,provider=claude-code,运行时模型 `glm-5.3`;无 P1/P2,1 项 P3 扫描索引建议。主审保留为未测量的容量观察项,不新增迁移;原文与核对结论见[外部审阅记录](../reviews/2026-10-23-transport-callback-review.md) |
+| 外部对抗审阅 | **unavailable**,540000ms(9 分钟)超时,无审阅正文;stderr 为配置模型 `glm-5.3` 的 `unrecognized_model` 提示。没有把超时当作无发现;原生独立对抗复核与外部结构审阅是已完成的覆盖 |
+
+### 本机 Mock 五层架联调
+
+用户最初指定真实 WMS `10.24.199.217:8284`、货架 `510046`、点位 `KT18`、库位 `WH01`。只读探测确认 Swagger 上存在合同提交入口,但单架查询与 WH01 地码查询均返回 `ERR001 / 传输异常`,且提交合同没有逐任务回调地址字段。**在任何真实 Transport POST 之前,用户改选本机 Mock 并指定五层模板**;本轮没有向真实 WMS 发送任务、变更回调地址或触发设备动作。
+
+本机另建 `transport_callback_mock` 数据库,使用隔离 Redis DB 14,在 `127.0.0.1:18423` 启动当前工作区 API。`RELIABLE_TARGETS` 仅指向该 loopback 上的内置 Mock WMS;进程级环境变量未写回 `.env`。通过登录后的控制台 HTTP 提交任务,由真实 Sender/AsyncHttpClient 发往 Mock WMS,再经实际 `POST /api/v1/wms/events` 投递模拟结果;不是直接调用应用私有函数。朝向 90/270 是 Mock 输入,不是对真实货架朝向的判断。
+
+共同 `cycle_id`: `01a165ad-1c01-7743-a2f7-eab6862246d0`。
+
+| 步骤 | 模板 | 独立 transport_task_id | 模拟终位 | 数据库结果 |
+|---|---|---|---|---|
+| 进场 | CTU01 | `transport-01a165ad-1c03-7ef5-85a1-7a763870d5c6` | KT18 | SUCCEEDED,revision 2 |
+| 原地换面 | CTU02 | `transport-01a165ad-1f06-7f73-8ea8-3c91cfc10fd5` | KT18 | SUCCEEDED,revision 1 |
+| 回库 | CTU03 | `transport-01a165ad-2339-716b-98a9-3774a75d9d79` | WH01 | SUCCEEDED,revision 1 |
+
+额外验证:三次提交各实际发送 1 次、HTTP `202` 后消息 `DONE`,此时任务仍无结果;进场先收到 `FAILED/POSITION_UNKNOWN` 得到 `UNKNOWN`,再由较高版本成功结果收敛。三步的同身份回调重放均 `200 DUPLICATE`,改 timestamp 均 `409` 并回显原任务号;相同 client_request_id 再提交均返回原任务。独立数据库读回确认 3 个独立任务、3 条 DONE 提交消息、4 份回调收据,共同 cycle_id 不进入 wire。上述 SUCCEEDED 仅为 Mock 数据库结果,不证明真实物理到位。
+
+验收后已优雅停止临时 API,并删除本轮创建的两个测试容器;Mock 任务为纯模拟数据,关键任务号与读回结果保留在本文。既有 Compose 的 5 个服务仍为原镜像、原运行实例,API/PostgreSQL/Redis 健康,没有修改 `.env` 或留下真实 WMS target。
+
+### 剩余边界
+
+真实 WMS/设备验收本轮按用户改选不执行;收据清理周期、1 小时重发窗口与对端去重、CK04 合同同步、认证与现场 SOP 仍按 §9 和 `TODOS.md` 推进。没有提交、推送或生产部署。
+
+**结论:DONE_WITH_CONCERNS。** 本轮选定的 PostgreSQL、完整套件与本机 Mock 验收已完成;外部结构审阅完成,另一个外部对抗调用超时,完整双外部通道覆盖仍缺一项。唯一外部 P3 建议为长期容量观察,尚无现场规模/执行计划证据,不等于已发生的性能故障。
+
+## 20. 本机数据库 Schema 隔离（2026-10-23）
+
+用户随后批准将本项目迁入 `enterprise_backend` schema，只搬本项目表和数据，其他系统表不动。本节为 §19 之后的环境变更记录；§19 的“原镜像、原运行实例”只描述当时 Mock 验收结束的状态，不再代表当前本机状态。
+
+已统一 ORM、在线 Alembic、API、可靠发送器及 Celery 连接。迁移仅覆盖当前 12 张 ORM 表及版本表，停写窗口对比确认全部 75 张表的 OID、行数和内容摘要一致；13 张原地迁入新 schema，public 剩余 62 张保持不变，全部 384 个关系对象 OID 与 47 个序列状态保全。原始连接的全局 search_path 仍为 `"$user", public`，只给本项目连接设置独立 schema。
+
+本项目 API、worker、beat 已更新本机镜像；宿主机 8001 reload 进程在核对窗口暂挂后恢复。ORM 读取原有用户数据正常，容器和宿主机 `/ready` 均为 200，worker 返回 `pong`，beat 正常启动。`alembic current` 为 `a023a20261024 (head)`，`alembic check` 无差异。共享 PostgreSQL/Redis、其他项目容器、连接凭据和数据卷未替换，没有启用真实 WMS 目标。
+
+迁移碰撞、缺表、早期 public revision 及无法识别操作的 PostgreSQL 程序化调用均拒绝，不猜测归属；离线 `--sql` 不支持。完整边界、独立复核与回归证据见 [Schema 隔离实施记录](../reviews/2026-10-23-project-schema-isolation-review.md) 和 [部署说明](../../deploy.md#schema-隔离)。本轮不改变 §19 的真实 WMS/设备与外部双通道审阅边界，未提交、推送或生产部署。

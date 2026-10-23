@@ -15,13 +15,14 @@ import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from redis.asyncio import Redis  # noqa: E402
 from sqlalchemy import delete, exists, func, select, text  # noqa: E402
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.core.identifiers import uuid7
 from app.core.redis import get_redis  # noqa: E402
+from app.database import create_database_engine as create_async_engine  # noqa: E402
 from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (  # noqa: E402

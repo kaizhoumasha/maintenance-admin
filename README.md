@@ -31,7 +31,7 @@ docker compose ps   # 确认 postgres / redis 都是 healthy
 ```bash
 uv sync
 cp .env.example .env
-uv run alembic upgrade head     # 应用 migrations/versions 下已有的迁移
+uv run alembic upgrade head     # 在线校验归属并迁入 enterprise_backend schema，再应用迁移
 # 改了 models 之后才需要生成新迁移:
 # uv run alembic revision --autogenerate -m "说明"   # 生成后先检查再 upgrade
 uv run uvicorn app.main:app --reload
@@ -42,6 +42,8 @@ scripts/lint.sh      # ruff check --fix + format
 ```
 
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
+
+项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。已有完整 `a023a20261024` 旧库运行在线 `alembic upgrade head` 时，只原地移动本项目 12 张表及版本表；其他系统表不动。更早的旧库先用旧代码升级到该基线。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
 
 ```bash
 TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/enterprise_backend_test \

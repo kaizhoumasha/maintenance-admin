@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### PostgreSQL Schema 隔离
+
+- ORM、API、可靠发送器与 Celery 数据库连接统一使用 `enterprise_backend` schema，SQLite 测试映射为空；自动索引保留原名称。
+- 在线 Alembic 原子移动已确认归属且版本为 `a023a20261024` 的完整 12 张项目表及版本表，保留数据、索引、序列与对象身份，不触及其他 public 表；更早版本、缺表或同名冲突拒绝搬迁。新库直接创建独立 schema，PostgreSQL 离线 SQL 明确拒绝。
+- 增加旧库数据保全、同名冲突回滚、外部 ledger 隔离、运行连接及自动迁移差异检查；部署文档补充停机迁移与回退边界。
+
 ### 项目改名与定位
 
 - 项目统一命名为 `enterprise-backend`，定位为面向 WMS、MES、WES 等生产企业业务开发的通用企业级后端管理平台模板，提供第三方与内部 API 对接基础能力。
@@ -30,15 +36,16 @@
 - 仅 `ENVIRONMENT=local` 可用：在 Swagger 里用 `POST /api/v1/dev/transport/tasks` 的 Examples 下拉选择业务场景（货架进场、换面、离场，料箱投料、回架、交换），经真实业务接入层登记出站，再用 `GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文；服务层显式提交事务，保证发送器能看到消息。
 - 业务接入层新增 `app/integrations/<业务>/dev.py`，用 `@dev_scenario` 登记场景即可自动出现在下拉里，无需改 `main.py`；非法名字、重名、非法示例在导入期报错。
 - 内置 Mock WMS（`POST /api/v1/wes/transport-requests`，`PUT /api/v1/dev/mock-wms/mode` 切换 accept、duplicate、conflict、reject、unavailable、garbage、hang 七种响应），把 `RELIABLE_TARGETS` 指向本应用自身即可端到端验证重试与终态；响应与 Transport 适配器的判定由契约测试保持一致。
-- 新增 WMS 回调通用接收 `POST /api/v1/wms/events`（Transport 回调接收设计第 1 步）：有界读取（256 KiB）、严格 JSON（拒绝重复 key 与 NaN）、`operation + operation_id` 幂等收据（原信封指纹相同则稳定重放首次响应，不同则 409）、合同形状的 `422 REJECTED`/`503 UNAVAILABLE`、独立诊断快照（≤64 KiB，每进程每分钟限量，默认保留 7 天，由 `CALLBACK_SNAPSHOT_RETENTION_DAYS` 配置并每日清理）。`operation` 上限 256 字符，超长或缺失返回 `422` 且不建收据。该路径豁免全局限流（`RateLimit(None)`）；严格 JSON 解析提到 `app/core/strict_json.py` 与出站适配器共用。尚未注册任何具体 operation，合法 operation 一律得到持久化的 `422 UNSUPPORTED_OPERATION`；启用门槛见 `docs/deploy.md`「WMS 回调接收启用门槛」。新增表 `callback_receipt`、`callback_snapshot`，收据表非空时拒绝降级。
+- 新增 WMS 回调通用接收 `POST /api/v1/wms/events`（Transport 回调接收设计第 1 步）：有界读取（256 KiB）、严格 JSON（拒绝重复 key 与 NaN）、`operation + operation_id` 幂等收据（原信封指纹相同则稳定重放首次响应；已注册 operation 的规范化有效字段相同也可重放，否则 409）、合同形状的 `422 REJECTED`/`503 UNAVAILABLE`、独立诊断快照（≤64 KiB，每进程每分钟限量，默认保留 7 天，由 `CALLBACK_SNAPSHOT_RETENTION_DAYS` 配置并每日清理）。`operation` 上限 256 字符，超长或缺失返回 `422` 且不建收据。该路径豁免全局限流（`RateLimit(None)`）；严格 JSON 解析提到 `app/core/strict_json.py` 与出站适配器共用。未注册的 operation 得到持久化的 `422 UNSUPPORTED_OPERATION`；Transport 注册状态见下文，启用门槛见 `docs/deploy.md`「WMS 回调接收启用门槛」。新增表 `callback_receipt`、`callback_snapshot`，收据表非空时拒绝降级。
 - 联调控制台新增回调投递（仅 local）：`POST /api/v1/dev/transport/{transport_task_id}/callbacks`（`succeeded`、`position_unknown` 两个场景）按任务冻结事实构造样例位置事件与结果，逐条走真实 `receive` 管线并返回各条响应与诊断；`GET /api/v1/dev/transport/{transport_task_id}` 查看终态、已应用结果、料箱位置与暂存结果。结果版本自动取已应用版本加一，可先 `position_unknown` 再 `succeeded` 观察收敛。
 - 新增 Transport 回调接收与应用（回调接收设计第 3 步）：`transport.task.member_position_changed@v1` 与 `transport.task.resulted@v1` 两个 operation（`wms_transport/callback.py`，自动发现），在请求事务内锁 `transport_task` 行后直接应用位置里程碑与结果（版本登记、终态规则、货架/料箱判定表、料箱结果等位置到齐后在同一次处理里完成），不再设证据表与后台扫描。所有 ACK 与身份冲突的 `409` 回显 `transport_task_id`（`CallbackOperation.echo_keys`）；未知任务、冻结缺失、事实矛盾等只告警的情形仍返回 `202`，诊断写入 `callback_receipt.diagnostic`（`ctx.note`）；PostgreSQL 回调事务设置 `lock_timeout`，超时返回 `503`。迁移 `a021a20261023` 给 `transport_task` 增加 `frozen/member_positions/outcome_status/applied_outcome/applied_outcome_revision/outcome_digests/pending_outcome`，并从 `reliable_message.request_raw` 回填既有任务的 `frozen`；已保存回调结果时拒绝降级。登记任务时写入 `frozen`。任务收到任何回调即用新增的 `Outbox.settle` 把其提交消息（`PENDING/SENDING/STALLED`）转为 `DONE`、结束发送（不写响应；正在发送的租约失效）。不做 `STALLED` 定时对账：`STALLED` 仅在目标配置了未送达预算时出现，默认不会出现，对端长期不可用靠告警与显式 `Outbox.resume`。位置事实按集合累积、与到达先后无关，`POSITION_UNKNOWN` 事件只留诊断不存状态（wire 不变）。尚未启用真实目标，网关放行门槛见 `docs/deploy.md`。
 - 新增卡住任务告警：Celery beat 每 10 分钟扫描 `transport_task`，创建后超过 `TRANSPORT_STUCK_ALERT_MINUTES`（默认 120，暂定）仍无确定终态的任务输出结构化告警日志（`SUBMIT_NOT_DELIVERED`、`RESULT_MISSING`、`RESULT_WAITING_FOR_POSITIONS`、`OUTCOME_UNKNOWN`），只读，不改任务状态。
+- 修复告警遗漏：卡住任务按主键每批 200 条续扫，避免持续卡住的前批遮蔽后批；回调诊断在收据事务成功提交后输出结构化告警，提交失败不输出已接纳告警。
 - 升级提示（仅影响联调前的开发库）：迁移 `a020a20261022` 在发布前被原地改写——表名由早期的 `inbound_*` 改为 `callback_receipt`/`callback_snapshot`，版本号未变。曾用旧版本升级过的开发库会停在 `a020` 却没有 `callback_*` 表，之后 `a021` 报 `relation "callback_receipt" does not exist`。处理：确认旧表只含联调数据后删除旧名字的表，`alembic stamp a019d20261022`，再 `alembic upgrade head`；或直接重建开发库。
 - `transport_task.cycle_id`（迁移 `a023a20261024`）：货架一轮生命周期（进场、换面、离场）的本地分组键，不进入 wire、冻结请求与幂等摘要；`RackCycle` 自动生成，后续步骤重建句柄时传入同一个值，料箱场景提供可选参数；控制台任务状态与换面/进离场请求体同步支持。
 - Transport 提交消息统一带 1 小时超时（`SUBMIT_TTL`，暂定）：1 小时仍未送达的提交转 `EXPIRED`，不再重发；联调前与 WMS 确认其重发窗口同样不超过 1 小时。
 - 回调收据按 `RELIABLE_RETENTION_DAYS`（默认 90 天）每日清理（`callback.cleanup_receipts`，迁移 `a022a20261023` 为 `callback_receipt.created_at` 加索引）；合同要求的清理周期变更须在联调前与 WMS 确认。
-- 新增回调 operation 注册（回调接收设计第 2 步；写法已简化为继承 `CallbackOperation` + 内嵌 `Payload(CallbackPayload)` 声明字段 + 实现 `execute(ctx, payload)`，校验、规范化、422 响应与 Swagger 示例由 `Payload` 生成，`Accepted/Duplicate/Conflict/Rejected` 既可 return 也可 raise，返回 dict/None 即接纳）：`@callback_operation("域.名称@vN")` 注册处理器类（`parse(data)` 纯函数校验业务 DTO、`handle(ctx)` 在保存点内写业务行并返回 `Accepted/Duplicate/Conflict/Rejected`）。通用层先占收据再调用处理器，`Rejected` 显式回滚处理器写入，先构造并校验响应再写回收据；处理器异常或响应不可序列化时整体回滚并返回合同形状的 `503`。已注册 operation 的结构合法消息启用有效摘要比较（仅冗余字段不同视为同一消息，`timestamp` 或已定义字段改变为 `409`）；此前保存的 `422` 在注册上线后仍稳定重放。新增示例 operation `example.echo@v1`（`outcome` 取 `accept/duplicate/conflict/reject` 演示四种结果，不写业务表），位于 `wms_callback/dev_callback.py`，仅 `ENVIRONMENT=local` 被自动发现；生产环境仍无任何 operation 注册。operation 模块自动发现：`app/integrations/<业务>/callback.py` 所有环境导入、`dev_callback.py` 仅 local，类属性 `title`/`example` 自动生成 Swagger 请求体示例，新增 operation 无需修改控制器或 `main.py`。
+- 新增回调 operation 注册（回调接收设计第 2 步；写法已简化为继承 `CallbackOperation` + 内嵌 `Payload(CallbackPayload)` 声明字段 + 实现 `execute(ctx, payload)`，校验、规范化、422 响应与 Swagger 示例由 `Payload` 生成，`Accepted/Duplicate/Conflict/Rejected` 既可 return 也可 raise，返回 dict/None 即接纳）：`@callback_operation("域.名称@vN")` 注册处理器类（`parse(data)` 纯函数校验业务 DTO、`handle(ctx)` 在保存点内写业务行并返回 `Accepted/Duplicate/Conflict/Rejected`）。通用层先占收据再调用处理器，`Rejected` 显式回滚处理器写入，先构造并校验响应再写回收据；处理器异常或响应不可序列化时整体回滚并返回合同形状的 `503`。已注册 operation 的结构合法消息启用有效摘要比较（仅冗余字段不同视为同一消息，`timestamp` 或已定义字段改变为 `409`）；此前保存的 `422` 在注册上线后仍稳定重放。新增示例 operation `example.echo@v1`（`outcome` 取 `accept/duplicate/conflict/reject` 演示四种结果，不写业务表），位于 `wms_callback/dev_callback.py`，仅 `ENVIRONMENT=local` 被自动发现；生产环境自动注册 Transport 的两个 operation。operation 模块自动发现：`app/integrations/<业务>/callback.py` 所有环境导入、`dev_callback.py` 仅 local，类属性 `title`/`example` 自动生成 Swagger 请求体示例，新增 operation 无需修改控制器或 `main.py`。
 - 部署必须显式设置 `ENVIRONMENT`：默认值 `local` 会同时挂出该控制台；控制台只校验登录、不校验权限码，Mock 接收端无认证，仅限本地联调。
 
 ### 既有 0.2.0 发布准备记录

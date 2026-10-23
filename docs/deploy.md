@@ -152,11 +152,24 @@ python3 scripts/release_bundle.py check . --project enterprise-backend-prod
 
 ### WMS 回调接收启用门槛
 
-`POST /api/v1/wms/events` 当前仅实现通用接收，合法但未注册的 operation（`ENVIRONMENT=local` 仅注册示例 `example.echo@v1`，生产无任何注册）返回持久化的 `422 REJECTED / UNSUPPORTED_OPERATION`，不是临时失败。此响应会按原消息身份稳定重放，不能将部署接口等同于已支持 Transport 回调。
+`POST /api/v1/wms/events` 已实现通用接收，并在所有环境自动注册 `transport.task.member_position_changed@v1` 与 `transport.task.resulted@v1`；示例 `example.echo@v1` 仅在 `ENVIRONMENT=local` 注册。合法但未注册的 operation 返回持久化的 `422 REJECTED / UNSUPPORTED_OPERATION`，不是临时失败；此前已保存的不支持响应仍按原消息身份稳定重放。代码具备 Transport 接收能力不等于所有部署实例已升级或真实回调已启用。
 
 在鉴权方案落地前，网关必须限制 WMS 来源，禁止向公网无保护开放该接口。完成设计第 3 步并确认所有实例已加载实际 Transport 接收能力、所有任务创建者(API、worker、脚本)均已升级之前，不得启用真实回调；滚动升级时先暂停网关回调入口，全部实例就绪后再恢复，避免旧实例将合法业务消息永久记录为不支持。详细协议和后续启用条件见[回调接收设计](superpowers/specs/2026-10-22-transport-callback-design.md)。
 
 请求体上限为 256 KiB；独立诊断快照最多保存 64 KiB 的 base64 内容，按进程限量、尽力写入，不影响协议响应。`CALLBACK_SNAPSHOT_RETENTION_DAYS` 默认为 7，必须为正整数，由现有 Celery beat 每日清理过期快照；幂等收据不随快照清理,而是按 `RELIABLE_RETENTION_DAYS`（默认 90 天）由 beat 每日清理。`TRANSPORT_STUCK_ALERT_MINUTES`（默认 120，必须为正整数，按现场 SOP 调整）：beat 每 10 分钟扫描创建后超过该时长仍无确定终态的 Transport 任务，输出结构化告警日志 `transport task stuck`（含 `transport_task_id`、`cycle_id`、`reason`、`waiting_minutes`），不改任务状态；`reason` 为 `SUBMIT_NOT_DELIVERED`（提交已过期或被拒）、`RESULT_MISSING`（已提交无结果）、`RESULT_WAITING_FOR_POSITIONS`（料箱成功结果等不到位置事件）、`OUTCOME_UNKNOWN`。仍卡住的任务每次扫描都会重复告警，直到结果到达。上线前先迁移数据库，非空收据表禁止降级删除，以免丢失消息身份及首次响应。
+
+### Schema 隔离
+
+PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 是两个独立概念，`DATABASE_URL` 仍连接原数据库。`app.database.create_database_engine` 统一给 API、可靠发送器及各 Celery 数据库连接设置会话 `search_path=enterprise_backend`，ORM 元数据也显式限定 schema。没有新增环境变量，不要对共享数据库执行全局 `ALTER DATABASE/ROLE ... SET search_path`。SQLite 测试通过 schema 映射继续使用无 schema 表。
+
+在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行历史迁移，版本表同时移入新 schema。历史 revision 不重写，当前 head 仍为 `a023a20261024`。迁移白名单为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
+
+- 仅自动搬迁版本为 `a023a20261024` 且白名单完整的旧 public 库。更早的旧库须先使用旧代码升级到该基线；不按完整白名单猜测历史版本的表归属。缺表、目标同名表冲突或等待锁超过 5 秒时整笔回滚，不覆盖、不合并、不清空。
+- 新库直接在独立 schema 建表。未知 revision 的 public 版本表视为其他系统所有，不读取为项目迁移进度、不移动；只读 `current`/`check` 不触发搬迁。已有项目 schema 版本表后不再扫描 public 同名表。
+- `public` 中的其他表（包括未纳入当前 ORM 的历史 `inbound_receipt`、`inbound_snapshot`）不移动、不删除。项目白名单不能替代人工确认旧库确属本项目；混合来源或手工改过 ledger 的库先人工核对。
+- PostgreSQL 通过 Alembic CLI 在线执行，不支持 `--sql` 或没有 CLI 命令上下文的 Python API 调用：无法确定操作及在线检查归属和冲突时明确失败。`downgrade` 仅回退业务 revision，不把 schema 迁回 public；旧版应用不能直接连接迁移后的表。回退应用前须单独制定并批准反向迁移，禁止用 `stamp` 伪造完成。
+
+既有站点操作顺序：确认数据库和白名单归属 → 停本项目 API/worker/beat（不停止共享 PostgreSQL 或其他系统）→ 记录本项目和其他系统表的 OID、行数及内容摘要 → 用新版本运行 `uv run alembic upgrade head` → 对比迁移前后对象/数据及其他系统表不变 → 用新版本启动应用 → 检查 `alembic current`、`alembic check`、`/ready`、worker 响应和业务查询。只运行一个迁移进程；保留原数据卷、数据库名及连接凭证，不重跑管理员种子。
 
 ### 数据库改名
 

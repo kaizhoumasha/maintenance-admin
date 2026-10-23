@@ -69,3 +69,16 @@ async def test_only_old_tasks_without_a_determined_outcome_raise_an_alert(db, ca
 async def test_alert_threshold_must_be_a_positive_integer(db, minutes):
     with pytest.raises((TypeError, ValueError)):
         await scan_stuck(async_sessionmaker(db.bind), minutes)
+
+
+async def test_every_stuck_task_is_alerted_even_when_older_tasks_remain(db, caplog):
+    tasks = [task(180) for _ in range(201)]
+    db.add_all(tasks)
+    await db.commit()
+    caplog.set_level(logging.WARNING)
+    expected = {item.transport_task_id for item in tasks}
+    for current in (NOW, NOW + timedelta(minutes=10)):
+        caplog.clear()
+        assert await scan_stuck(async_sessionmaker(db.bind), 120, now=current) == len(tasks)
+        alerted = [record.transport_task_id for record in caplog.records]
+        assert len(alerted) == len(expected) and set(alerted) == expected

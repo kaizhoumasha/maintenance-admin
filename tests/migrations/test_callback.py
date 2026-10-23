@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import inspect, select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.database import create_database_engine as create_async_engine
 from app.models import CallbackReceipt, CallbackSnapshot
 
 BASE = "a019d20261022"

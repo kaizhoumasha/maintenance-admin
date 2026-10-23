@@ -1,8 +1,10 @@
+import asyncio
 import json
+import logging
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import receiver
@@ -201,6 +203,58 @@ async def test_same_revision_from_a_new_identity_is_duplicate_or_conflict(client
     assert (await task_row(callback_store, task_id)).outcome_status == "SUCCEEDED"
 
 
+@pytest.mark.parametrize("conflicting", [False, True])
+async def test_concurrent_results_have_one_winner_and_replayable_receipts(
+    client, callback_store, conflicting
+):
+    if callback_store.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("PostgreSQL task-row serialization")
+    task_id = await add_task(callback_store, rack_data())
+    messages = [rack_result(task_id), rack_result(task_id)]
+    if conflicting:
+        messages[1]["status"] = "CANCELLED"
+    identities = [str(uuid7()), str(uuid7())]
+    responses = await asyncio.gather(
+        *(
+            send(client, RESULTED, data, operation_id=identity)
+            for identity, data in zip(identities, messages, strict=True)
+        )
+    )
+    assert sorted(response.status_code for response in responses) == (
+        [202, 409] if conflicting else [200, 202]
+    )
+    winner = next(index for index, response in enumerate(responses) if response.status_code == 202)
+    row = await task_row(callback_store, task_id)
+    assert row.outcome_status == messages[winner]["status"]
+    assert row.applied_outcome_revision == 1
+    assert len(await receipts(callback_store)) == 2
+    for identity, data, first in zip(identities, messages, responses, strict=True):
+        replay = await send(client, RESULTED, data, operation_id=identity)
+        expected = dict(first.json())
+        if first.status_code == 202:
+            expected["code"] = "DUPLICATE"
+        assert replay.status_code == (200 if first.status_code == 202 else first.status_code)
+        assert replay.json() == expected
+
+
+async def test_concurrent_member_positions_do_not_overwrite_each_other(client, callback_store):
+    if callback_store.kw["bind"].dialect.name != "postgresql":
+        pytest.skip("PostgreSQL task-row serialization")
+    task_id = await add_task(callback_store, bin_data())
+    assert (await send(client, RESULTED, bin_result(task_id))).status_code == 202
+    responses = await asyncio.gather(
+        send(client, POSITION, placed(task_id, "C1", "S1")),
+        send(client, POSITION, placed(task_id, "C2", "S2")),
+    )
+    assert [response.status_code for response in responses] == [202, 202]
+    row = await task_row(callback_store, task_id)
+    assert row.member_positions == {
+        "C1": {"TARGET_PLACED": slot("S1")},
+        "C2": {"TARGET_PLACED": slot("S2")},
+    }
+    assert row.outcome_status == "SUCCEEDED" and row.pending_outcome is None
+
+
 async def test_results_that_contradict_the_frozen_task_are_accepted_but_not_applied(
     client, callback_store
 ):
@@ -311,6 +365,52 @@ async def test_unknown_task_and_missing_frozen_are_acked_with_a_durable_diagnost
     assert (await task_row(callback_store, legacy)).outcome_status is None
 
 
+@pytest.mark.parametrize("commit_fails", [False, True])
+async def test_abnormal_callback_alerts_only_after_its_receipt_commits(
+    client, callback_store, caplog, commit_fails
+):
+    task_id = "transport-" + str(uuid7())
+    operation_id = str(uuid7())
+    engine = callback_store.kw["bind"]
+    if commit_fails:
+
+        def fail_once(connection):
+            event.remove(engine.sync_engine, "commit", fail_once)
+            raise RuntimeError("commit unavailable")
+
+        event.listen(engine.sync_engine, "commit", fail_once)
+    caplog.set_level(logging.WARNING)
+    response = await send(client, RESULTED, rack_result(task_id), operation_id=operation_id)
+    assert response.status_code == (503 if commit_fails else 202)
+    alerts = [record for record in caplog.records if hasattr(record, "diagnostic")]
+    if commit_fails:
+        assert alerts == [] and await receipts(callback_store) == []
+    else:
+        [alert] = alerts
+        assert alert.diagnostic["reason_code"] == "UNKNOWN_TASK"
+        assert alert.diagnostic["transport_task_id"] == task_id
+        assert alert.operation == RESULTED and alert.operation_id == operation_id
+        assert (await receipts(callback_store))[0].diagnostic[0]["reason_code"] == "UNKNOWN_TASK"
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_callback_diagnostic_follows_the_callers_savepoint(callback_store, caplog, rollback):
+    task_id = "transport-" + str(uuid7())
+    envelope = dict(
+        operation_id=str(uuid7()), operation=RESULTED, timestamp=1, data=rack_result(task_id)
+    )
+    caplog.set_level(logging.WARNING)
+    async with callback_store.begin() as session:
+        async with session.begin_nested() as savepoint:
+            response = await receiver.receive(session, json.dumps(envelope).encode())
+            assert response.status_code == 202
+            if rollback:
+                await savepoint.rollback()
+        assert not any(hasattr(record, "diagnostic") for record in caplog.records)
+    alerts = [record for record in caplog.records if hasattr(record, "diagnostic")]
+    assert len(alerts) == len(await receipts(callback_store)) == (0 if rollback else 1)
+
+
 async def test_an_abnormal_callback_does_not_affect_another_task(client, callback_store):
     broken = await add_task(callback_store, rack_data())
     healthy = await add_task(callback_store, rack_data())
@@ -410,6 +510,31 @@ async def test_unknown_task_callback_settles_nothing(client, callback_store):
     await submit_message(callback_store, task_id, status="PENDING")
     assert (await send(client, RESULTED, rack_result(task_id))).status_code == 202
     assert await message_statuses(callback_store, task_id) == [(SUBMIT, "PENDING")]
+
+
+@pytest.mark.parametrize("contradicting", [False, True])
+async def test_failed_commit_rolls_back_task_revision_diagnostic_and_settlement(
+    client, callback_store, caplog, contradicting
+):
+    task_id = await add_task(callback_store, rack_data())
+    await submit_message(callback_store, task_id, status="PENDING")
+    engine = callback_store.kw["bind"]
+
+    def fail_once(connection):
+        event.remove(engine.sync_engine, "commit", fail_once)
+        raise RuntimeError("commit unavailable")
+
+    event.listen(engine.sync_engine, "commit", fail_once)
+    caplog.set_level(logging.WARNING)
+    data = rack_result(task_id, rack_id="OTHER" if contradicting else "R1")
+    response = await send(client, RESULTED, data)
+    assert response.status_code == 503 and response.json()["code"] == "UNAVAILABLE"
+    row = await task_row(callback_store, task_id)
+    assert row.outcome_status is row.applied_outcome is row.applied_outcome_revision is None
+    assert row.outcome_digests is None
+    assert await receipts(callback_store) == []
+    assert await message_statuses(callback_store, task_id) == [(SUBMIT, "PENDING")]
+    assert not any(hasattr(record, "diagnostic") for record in caplog.records)
 
 
 # ---- 锁等待上限 ----

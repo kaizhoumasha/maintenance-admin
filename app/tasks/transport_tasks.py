@@ -3,10 +3,11 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core import get_settings
+from app.database import create_database_engine as create_async_engine
 from app.models import ReliableMessage, TransportTask
 from app.reliable.config import positive
 from app.tasks.celery_app import celery_app
@@ -33,42 +34,51 @@ async def scan_stuck(factory, minutes, *, now=None, limit=SCAN_LIMIT) -> int:
     阈值按现场 SOP 调整;任务一直卡住会每次扫描重复告警,直到结果到达。
     """
     positive(minutes, "TRANSPORT_STUCK_ALERT_MINUTES")
-    cutoff = (now or datetime.now(UTC)) - timedelta(minutes=minutes)
-    async with factory() as session:
-        tasks = list(
-            await session.scalars(
-                select(TransportTask)
-                .where(
-                    TransportTask.created_at < cutoff,
-                    TransportTask.outcome_status.is_(None)
-                    | (TransportTask.outcome_status == "UNKNOWN"),
-                )
-                .order_by(TransportTask.created_at, TransportTask.id)
-                .limit(limit)
-            )
-        )
-        status = dict(
-            (
-                await session.execute(
-                    select(ReliableMessage.business_key, ReliableMessage.status).where(
-                        ReliableMessage.business_key.in_([t.transport_task_id for t in tasks]),
-                        ReliableMessage.operation == "transport.task.submit@v1",
-                    )
-                )
-            ).all()
-        )
+    positive(limit, "limit")
     current = now or datetime.now(UTC)
-    for task in tasks:
-        created = task.created_at if task.created_at.tzinfo else task.created_at.replace(tzinfo=UTC)
-        context = {
-            "transport_task_id": task.transport_task_id,
-            "cycle_id": task.cycle_id,
-            "kind": task.kind,
-            "reason": _reason(task, status.get(task.transport_task_id)),
-            "waiting_minutes": int((current - created).total_seconds() // 60),
-        }
-        logger.warning("transport task stuck %r", context, extra=context)
-    return len(tasks)
+    cutoff = current - timedelta(minutes=minutes)
+    last_id, total = 0, 0
+    while True:
+        async with factory() as session:
+            tasks = list(
+                await session.scalars(
+                    select(TransportTask)
+                    .where(
+                        TransportTask.id > last_id,
+                        TransportTask.created_at < cutoff,
+                        TransportTask.outcome_status.is_(None)
+                        | (TransportTask.outcome_status == "UNKNOWN"),
+                    )
+                    .order_by(TransportTask.id)
+                    .limit(limit)
+                )
+            )
+            if not tasks:
+                return total
+            status = dict(
+                (
+                    await session.execute(
+                        select(ReliableMessage.business_key, ReliableMessage.status).where(
+                            ReliableMessage.business_key.in_([t.transport_task_id for t in tasks]),
+                            ReliableMessage.operation == "transport.task.submit@v1",
+                        )
+                    )
+                ).all()
+            )
+        for task in tasks:
+            created = (
+                task.created_at if task.created_at.tzinfo else task.created_at.replace(tzinfo=UTC)
+            )
+            context = {
+                "transport_task_id": task.transport_task_id,
+                "cycle_id": task.cycle_id,
+                "kind": task.kind,
+                "reason": _reason(task, status.get(task.transport_task_id)),
+                "waiting_minutes": int((current - created).total_seconds() // 60),
+            }
+            logger.warning("transport task stuck %r", context, extra=context)
+        total += len(tasks)
+        last_id = tasks[-1].id
 
 
 @celery_app.task(name="transport.scan_stuck")

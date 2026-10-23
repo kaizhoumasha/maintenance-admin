@@ -2,10 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.identifiers import uuid7
+from app.database import create_database_engine as create_async_engine
 from app.http_client import HttpRequest
 from app.reliable import MessageDraft, Verdict, VerdictKind
 from app.reliable.config import TargetConfig

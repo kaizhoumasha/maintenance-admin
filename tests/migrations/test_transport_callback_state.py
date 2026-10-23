@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine
+
+from app.database import create_database_engine as create_async_engine
 
 BASE = "a020a20261022"
 REVISION = "a021a20261023"

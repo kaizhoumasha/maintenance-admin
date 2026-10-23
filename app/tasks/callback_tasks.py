@@ -2,10 +2,11 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.core import get_settings
+from app.database import create_database_engine as create_async_engine
 from app.models import CallbackReceipt, CallbackSnapshot
 from app.reliable.config import positive
 from app.tasks.celery_app import celery_app
