@@ -5,10 +5,10 @@ operation 由 `app/integrations/<业务>/request` 注册(演示 operation 在 `w
 """
 
 import re
-from typing import Annotated, Literal, Union
+from typing import Annotated, Any, Literal, Union
 
 from fastapi import Body, Depends
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from app.core import SessionDep, error_responses, get_current_user
 from app.core.identifiers import uuid7
@@ -30,7 +30,10 @@ def _model(item: Registered) -> type[_DevWmsRequest]:
         name,
         __base__=_DevWmsRequest,
         operation=(Literal[item.name], item.name),
-        data=(item.operation.Payload, ...),
+        data=(
+            dict[str, Any],
+            Field(..., description="Payload,字段见 GET /operations 的 payload_schema"),
+        ),
     )
 
 
@@ -67,7 +70,7 @@ def wms_request_router():
             session,
             req.operation,
             req.operation_id or str(uuid7()),
-            req.data.model_dump(mode="json"),
+            req.data,
         )
 
     @router.get(

@@ -23,11 +23,7 @@ from .operation import Endpoint, RequestOperation, RequestPayload, request_opera
 class _DemoPayload(RequestPayload):
     task_id: str
     qty: int
-    model_config = ConfigDict(
-        strict=True,
-        extra="forbid",
-        json_schema_extra={"examples": [{"task_id": "T-1", "qty": 2}]},
-    )
+    model_config = ConfigDict(json_schema_extra={"examples": [{"task_id": "T-1", "qty": 2}]})
 
 
 @request_operation("example.fact.demo@v1", Endpoint.FACTS)

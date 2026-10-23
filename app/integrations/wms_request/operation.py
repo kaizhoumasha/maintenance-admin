@@ -13,6 +13,7 @@
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
+from functools import cached_property
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
@@ -34,7 +35,12 @@ class InvalidRequestPayload(ValueError):
 
 
 class RequestPayload(BaseModel):
-    """严格按 JSON 类型校验,不接受多余字段(合同 REQ-COM-16)。"""
+    """严格按 JSON 类型校验,不接受多余字段(合同 REQ-COM-16)。
+
+    字段尽量用 JSON 原生类型(str、int、float、bool、list、dict、Literal、嵌套模型)。datetime 等写成
+    str 再自行解析最省事:直接调用 `send` 传 Python 对象可以通过校验,但联调界面的 JSON 请求体要先
+    把 ISO 字符串校验成对象,两条路径都能走通的前提是类型能经过 JSON 往返。
+    """
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -52,9 +58,13 @@ class RequestOperation:
                 f"{type(self).__qualname__} must define a Payload(RequestPayload) class"
             )
 
+    @cached_property
+    def payload_schema(self) -> dict:
+        return self.Payload.model_json_schema()
+
     @property
     def example(self) -> dict | None:
-        examples = self.Payload.model_json_schema().get("examples")
+        examples = self.payload_schema.get("examples")
         return examples[0] if examples else None
 
 
@@ -72,7 +82,7 @@ class Registered:
             "endpoint": self.endpoint.value,
             "title": self.operation.title or self.name,
             "ttl_seconds": None if ttl is None else ttl.total_seconds(),
-            "payload_schema": self.operation.Payload.model_json_schema(),
+            "payload_schema": self.operation.payload_schema,
             "example": self.operation.example,
         }
 

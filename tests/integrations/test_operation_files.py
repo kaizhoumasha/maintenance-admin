@@ -7,6 +7,15 @@ from app.integrations.wms_request import operation as requests
 IN_PACKAGE = re.compile(r"^app\.integrations\.\w+\.(callback|request)\.(\w+)$")
 
 
+def violation(name: str, module: str) -> str | None:
+    """`a.b@v1` 必须写在 `a_b_v1.py`:文件名与注册名是两份信息,靠这条规则防止对不上。
+    只检查目录形式(`<业务>/callback/`、`<业务>/request/`)里的文件。"""
+    match = IN_PACKAGE.match(module)
+    if match and match.group(2) != re.sub(r"[.@]", "_", name):
+        return f"{name} is in {module}"
+    return None
+
+
 def registered_modules():
     load_callbacks("production")
     for name, handler in callbacks.operations().items():
@@ -15,12 +24,15 @@ def registered_modules():
         yield name, type(registered.operation).__module__
 
 
-def test_operation_files_in_a_package_are_named_after_the_operation():
-    """`a.b@v1` 必须写在 `a_b_v1.py`:文件名与注册名是两份信息,靠这条规则防止对不上。"""
-    checked = 0
-    for name, module in registered_modules():
-        match = IN_PACKAGE.match(module)
-        if match:
-            checked += 1
-            assert match.group(2) == re.sub(r"[.@]", "_", name), f"{name} is in {module}"
-    assert checked  # 至少有一个按目录组织的 operation,规则才算被执行过
+def test_registered_operation_files_are_named_after_the_operation():
+    assert [v for name, module in registered_modules() if (v := violation(name, module))] == []
+
+
+def test_the_rule_covers_both_directions_and_ignores_single_modules():
+    for kind in ("callback", "request"):
+        base = f"app.integrations.biz.{kind}"
+        assert violation("biz.thing.done@v1", f"{base}.biz_thing_done_v1") is None
+        assert violation("biz.thing.done@v1", f"{base}.done") is not None
+        assert violation("biz.thing.done@v2", f"{base}.biz_thing_done_v1") is not None
+        assert violation("biz.thing.done@v1", base) is None  # 单个模块形式不检查
+    assert violation("example.fact.demo@v1", "app.integrations.wms_request.dev") is None

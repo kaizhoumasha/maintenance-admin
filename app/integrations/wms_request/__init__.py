@@ -49,6 +49,14 @@ Transport 业务,在 `wms_transport`。
 只有一两个很小的 operation 时,也可以用单个 `request.py`,发现逻辑两种形式都认。
 调用方保存自己的业务记录和 `operation_id`(小写 canonical UUIDv7),在同一个事务里调用 `send`。
 
+## 上线前要配置
+
+facts 默认不设 TTL(事实不能丢),目标默认也不设 `max_not_received_attempts`。WMS 长期不可用或
+一直返回无法解析的内容时,消息会按退避(上限默认 300 秒)无限重试,不会进入终态,只有
+`alert_after_attempts` 的告警日志。上线前要在 `RELIABLE_TARGETS` 的对应目标上按现场约定设置
+`max_not_received_attempts` 或 `fixed_retry_interval_s`,把告警接入通知渠道,并确认 WMS 的幂等记录
+不过期(合同 REQ-COM-25),否则无 TTL 的重试没有安全前提。
+
 ## 本地联调
 
 `ENVIRONMENT=local` 时联调控制台提供 operation 目录、触发入口、状态查询和能认识这两个端点的

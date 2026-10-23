@@ -211,7 +211,8 @@ RELIABLE_TARGETS='{"targets":{"wms-facts":{"base_url":"http://127.0.0.1:8000","p
 ## 10. 实施与验收记录(2026-10-24)
 
 - **实现**:`wms_request/operation.py`(`title`、`example`、`name`、`describe()`、示例注册期校验)、`wms_request/dev.py`(演示 operation)、`wms_request/service.py`(默认实例 `wms_requests`)、`schemas/dev_console.py`、`services/dev_submit_service.py`(抽出 `message_out`)、`services/dev_wms_request_service.py`、`controllers/dev_wms_request.py`、`controllers/dev_mock_wms.py`、`controllers/dev.py`(挂载与 WARNING)。describe 的 Schema 字段最终命名为 `payload_schema`。
-- **`send` 的同身份重入**(F1 的独立小改动):`Outbox.enqueue` 抛 `DuplicateMessage` 后,按身份读出原消息,用 `canonical_digest` 比较 `data`,相同返回原引用,不同才继续抛出。已反向验证:去掉该分支,重入测试失败。
+- **`send` 的同身份重入**(F1 的独立小改动):最初在 `WmsRequests.send` 里捕获 `DuplicateMessage` 后比较;全面 review 后改为 `Outbox` 的可选适配器端口 `same_request`,`WmsEndpointAdapter` 用 `canonical_digest` 比较 `operation_id`、`operation`、`data`(忽略 `timestamp`,区分 `1` 与 `1.0`),没有该方法的适配器仍要求字节完全相同。
+- **review 后的修订**:联调请求体的 `data` 改为按 JSON 模式校验再以 Python 对象交给 `send`(兼容 datetime 等字段);`InvalidMessage` 映射为 400;Schema 缓存;`read_ack` 与目标查找辅助函数与 Transport 共用。
 - **测试**:全量 `1247 passed, 366 skipped`,`ruff` 通过。新增 `tests/controllers/test_dev_wms_request.py`(§7-3 至 §7-6)、`test_operation.py` 的描述与示例校验、`test_service.py` 的重入用例。
 - **本地端到端验收**(独立 SQLite 与 Redis 库 9,端口 8765,`wms-facts` 配 `max_not_received_attempts=3`):
   - facts 触发后发送器自调用 Mock,消息 `DONE`,响应 `RECORDED`。
