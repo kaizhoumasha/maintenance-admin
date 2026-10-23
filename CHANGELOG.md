@@ -7,6 +7,7 @@
 - 新增 `app/integrations/wms_request`：WES → WMS 的 `decisions`、`facts` 两个端点（协议 `wms-decisions`、`wms-facts`），提供 operation 注册、信封冻结、公共响应分类和事务内入队 `WmsRequests.send`；目前没有任何具体 operation，每个 operation 对照合同确认后再单独添加。两个端点都走可靠层，业务暂时读不到 WMS 响应。
 - 入站与出站 operation 的发现支持「单个模块或目录」：`<业务>/callback`、`<业务>/request` 为目录时，一个 operation 一个文件并整目录导入，文件名为注册名把 `.`、`@` 换成 `_`，有测试检查一致。Transport 回调据此拆为 `wms_transport/callback/`，行为不变。
 - `WmsRequests.send` 同身份、同 Payload 重入时返回原消息引用:`Outbox` 新增可选的适配器端口 `same_request(existing_raw, new_raw)`,适配器可以声明字节不同但内容等价(例如只有时间戳变了);没有该方法时仍要求字节完全相同,同身份不同内容仍抛 `DuplicateMessage`。
+- Transport 与 `wms_request` 共用合同 §4 的响应前置检查 `read_ack`,以及 `targets_for_protocol`、`target_config_hint` 两个目标查找辅助函数;Transport 的响应判定与报错文字不变。
 - 补全 `app/integrations` 各 `__init__.py` 的职责与开发方式说明；接入指南和离线实验同步到当前代码，实验改用 `create_database_engine` 建表。
 
 ### PostgreSQL Schema 隔离

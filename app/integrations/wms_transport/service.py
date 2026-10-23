@@ -11,7 +11,7 @@ from app.core import get_settings
 from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
-from app.reliable.config import parse_reliable_config
+from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
 from .adapter import ADAPTERS
 from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL, SUBMIT_TTL
@@ -61,15 +61,11 @@ class TransportService:
     @property
     def target(self) -> str:
         if self._target is None:
-            names = [
-                name for name, item in self.outbox.targets.items() if item.protocol == PROTOCOL
-            ]
+            names = targets_for_protocol(self.outbox.targets, PROTOCOL)
             if not names:
-                existing = ", ".join(f"{n}[{t.protocol}]" for n, t in self.outbox.targets.items())
-                example = f'{{"targets":{{"{PROTOCOL}":{{"base_url":"http://host:port","protocol":"{PROTOCOL}"}}}}}}'
                 raise RuntimeError(
                     f"未配置 WMS Transport 目标:RELIABLE_TARGETS 中没有 protocol={PROTOCOL} "
-                    f"的目标(现有:{existing or '无'})。示例:RELIABLE_TARGETS='{example}'"
+                    f"的目标" + target_config_hint(self.outbox.targets, PROTOCOL)
                 )
             if len(names) > 1:
                 raise RuntimeError(f"配置了多个 WMS Transport 目标 {names},请显式指定 target")

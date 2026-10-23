@@ -1,15 +1,14 @@
 from urllib.parse import unquote
 
 from app.core.strict_json import json_object as _json_object
-from app.http_client import DeliveryState, HttpRequest, HttpResult
+from app.http_client import HttpRequest, HttpResult
+from app.integrations.wms_request.adapter import UNKNOWN, read_ack
 from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 
 from .protocol import DEFAULT_SUBMIT_PATH, OPERATION, PROTOCOL, REJECTION_REASONS
 
 MAX_PATH_LENGTH = 2048
-INT64_MAX = 2**63 - 1
-UNKNOWN = Verdict(VerdictKind.UNKNOWN)
 
 
 def _validate_submit_path(path: str) -> str:
@@ -62,25 +61,11 @@ class TransportSubmitAdapter:
 
     def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict:
         task_id = _requested_task_id(message)
-        if (
-            result.delivery_state != DeliveryState.HTTP_RESPONSE_COMPLETE
-            or result.failure_kind is not None
-            or not isinstance(result.body, bytes)
-        ):
-            return UNKNOWN
-        if result.status_code in (400, 413) and result.body == b"":
-            return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
-        ack = _json_object(result.body)
-        if ack is None:
-            return UNKNOWN
-        timestamp, data = ack.get("timestamp"), ack.get("data")
-        if (
-            ack.get("operation_id") != message.operation_id
-            or type(timestamp) is not int
-            or not 0 <= timestamp <= INT64_MAX
-            or not isinstance(data, dict)
-            or data.get("transport_task_id") != task_id
-        ):
+        ack = read_ack(message, result)
+        if isinstance(ack, Verdict):
+            return ack
+        data = ack["data"]
+        if data.get("transport_task_id") != task_id:
             return UNKNOWN
         pair = (result.status_code, ack.get("code"))
         if pair in ((202, "RECEIVED"), (200, "DUPLICATE")):
