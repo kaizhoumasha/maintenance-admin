@@ -2,15 +2,12 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_settings
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
-from app.core.strict_json import canonical_digest, json_object
-from app.models import ReliableMessage
-from app.reliable import DuplicateMessage, EnqueueResult, MessageDraft, MessageStatus, Outbox
+from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config
 
 from .adapter import ADAPTERS, PROTOCOL_OF
@@ -21,8 +18,8 @@ class WmsRequests:
     """在调用方事务内校验并冻结一条出站消息后入队;不提交、不发网。
 
     `operation_id` 由调用方生成并随业务记录保存;同一身份的重复调用必须复用原值。入队后请求字节
-    即冻结:同身份、同 Payload 的重复调用返回原消息引用(时间戳不参与比较),同身份改换 Payload
-    抛 `DuplicateMessage`。
+    即冻结:同身份、同 Payload 的重复调用返回原消息引用(时间戳不参与比较,由适配器的
+    `same_request` 判定),同身份改换 Payload 抛 `DuplicateMessage`。
     """
 
     def __init__(
@@ -85,23 +82,7 @@ class WmsRequests:
             raw,
             ttl=registered.operation.ttl,
         )
-        try:
-            return await self.outbox.enqueue(session, draft)
-        except DuplicateMessage:
-            # 同身份重入:时间戳每次不同,所以只在 Payload 相同时返回原引用,否则才是真冲突
-            existing = await session.scalar(
-                select(ReliableMessage)
-                .where(
-                    ReliableMessage.target == draft.target,
-                    ReliableMessage.operation == operation,
-                    ReliableMessage.operation_id == operation_id,
-                )
-                .execution_options(populate_existing=True)
-            )
-            sent = json_object(existing.request_raw) if existing is not None else None
-            if sent is None or canonical_digest(sent.get("data")) != canonical_digest(payload):
-                raise
-            return EnqueueResult(existing.id, MessageStatus(existing.status))
+        return await self.outbox.enqueue(session, draft)
 
 
 # 外部调用的统一入口:无需任何接线,首次使用时从配置惰性取得 Outbox 与目标。

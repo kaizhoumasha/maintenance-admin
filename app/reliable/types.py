@@ -104,3 +104,7 @@ class ProtocolAdapter(Protocol):
     def build_request(self, message: OutgoingMessage, target: "TargetConfig") -> HttpRequest: ...
 
     def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict: ...
+
+    # 可选:`same_request(existing_raw: bytes, new_raw: bytes) -> bool`。同身份重入时字节不同,
+    # 适配器可以声明内容等价(如只有时间戳变了),此时 `Outbox.enqueue` 返回原消息而不是抛
+    # `DuplicateMessage`。没有这个方法时,字节必须完全相同。

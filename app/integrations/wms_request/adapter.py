@@ -1,6 +1,6 @@
 """decisions / facts 端点的协议适配器:信封核对与公共响应联合(合同 §4.4)的分类,不含任何业务字段。"""
 
-from app.core.strict_json import json_object
+from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpRequest, HttpResult
 from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
@@ -44,6 +44,17 @@ class WmsEndpointAdapter:
             headers=(("accept", "application/json"), ("content-type", "application/json")),
             body=message.request_raw,
         )
+
+    def same_request(self, existing_raw: bytes, new_raw: bytes) -> bool:
+        """信封里每次入队都会换 timestamp,所以只比较身份、operation 与 data(区分 1 与 1.0)。"""
+        old, new = json_object(existing_raw), json_object(new_raw)
+        if old is None or new is None:
+            return False
+        keys = ("operation_id", "operation", "data")
+        try:
+            return all(canonical_digest(old.get(k)) == canonical_digest(new.get(k)) for k in keys)
+        except (ValueError, RecursionError):
+            return False
 
     def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict:
         if (
