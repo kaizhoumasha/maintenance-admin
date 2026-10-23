@@ -1,5 +1,7 @@
 """decisions / facts 端点的协议适配器:信封核对与公共响应联合(合同 §4.4)的分类,不含任何业务字段。"""
 
+import re
+
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import HttpRequest, HttpResult
 from app.integrations.wms_envelope import UNKNOWN, read_ack
@@ -62,21 +64,42 @@ class WmsEndpointAdapter:
         ack = read_ack(message, result)
         if isinstance(ack, Verdict):
             return ack
+        if set(ack) != {"operation_id", "code", "timestamp", "data"} or not isinstance(
+            ack["code"], str
+        ):
+            return UNKNOWN
         data = ack["data"]
-        pair = (result.status_code, ack.get("code"))
+        pair = (result.status_code, ack["code"])
         if pair in self.success:
+            if data and pair != (200, "DECIDED"):
+                return UNKNOWN
             return Verdict(VerdictKind.DELIVERED, response=result.body)
-        if pair == (503, "UNAVAILABLE"):
+        if pair == (503, "UNAVAILABLE") and not data:
             return Verdict(VerdictKind.NOT_RECEIVED)
         if pair == (429, "BUSY"):
             wait = data.get("retry_after_ms")
-            if type(wait) is int and 1 <= wait <= 60000:
+            if set(data) == {"retry_after_ms"} and type(wait) is int and 1 <= wait <= 60000:
                 return Verdict(VerdictKind.NOT_RECEIVED, retry_after_ms=wait)
             return UNKNOWN
-        if pair == (409, "CONFLICT") and data.get("reason_code") in CONFLICT_REASONS:
+        reason = data.get("reason_code")
+        if not isinstance(reason, str):
+            return UNKNOWN
+        if (
+            pair == (409, "CONFLICT")
+            and set(data) == {"reason_code"}
+            and reason in CONFLICT_REASONS
+        ):
             return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.CONFLICT)
-        if pair == (422, "REJECTED") and data.get("reason_code") in REJECTION_REASONS:
-            return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
+        if pair == (422, "REJECTED") and reason in REJECTION_REASONS:
+            path = data.get("field_path")
+            if set(data) == {"reason_code"} or (
+                reason == "INVALID_DATA"
+                and set(data) == {"reason_code", "field_path"}
+                and isinstance(path, str)
+                and 1 <= len(path) <= 256
+                and re.fullmatch(r"/(?:[^~\ud800-\udfff]|~[01])*", path)
+            ):
+                return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
         return UNKNOWN
 
 

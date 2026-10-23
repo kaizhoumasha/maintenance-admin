@@ -1,3 +1,8 @@
+import json
+from datetime import date, datetime
+from decimal import Decimal
+from uuid import UUID
+
 import pytest
 
 from app.integrations.wms_request import Endpoint, RequestOperation, request_operation
@@ -48,3 +53,23 @@ def test_an_invalid_example_fails_at_registration():
 
     with pytest.raises(ValueError, match="example is invalid"):
         request_operation("example.bad.example@v1", Endpoint.FACTS)(Bad)
+
+
+@pytest.mark.parametrize(
+    "annotation,value",
+    [
+        (datetime, "2026-10-24T00:00:00Z"),
+        (date, "2026-10-24"),
+        (UUID, "019b76da-a800-7000-8000-000000000001"),
+        (Decimal, "1.25"),
+    ],
+)
+def test_json_schema_examples_use_json_validation_at_registration(annotation, value):
+    class WithExample(RequestOperation):
+        class Payload(registry.RequestPayload):
+            field: annotation
+            model_config = registry.ConfigDict(json_schema_extra={"examples": [{"field": value}]})
+
+    WithExample.Payload.model_validate_json(json.dumps({"field": value}))
+    request_operation("example.json.fields@v1", Endpoint.FACTS)(WithExample)
+    assert registry.lookup("example.json.fields@v1").describe()["example"] == {"field": value}

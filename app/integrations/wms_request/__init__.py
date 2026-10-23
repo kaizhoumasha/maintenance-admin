@@ -19,13 +19,15 @@ Transport 业务,在 `wms_transport`。
 
 - `operation.py`:operation 注册表。`@request_operation(名称, Endpoint.FACTS 或 DECISIONS)`
   登记,同名重复登记会报错。`RequestPayload` 禁止多余字段,与 WMS 拒绝未知字段的合同一致。
+  JSON Schema 示例按严格 JSON 模式验证,不合法时在导入期报错。
 - `service.py`:`WmsRequests.send(session, 名称, 数据, operation_id=...)`。在调用方的事务里
   校验 UUIDv7 和 Payload,冻结信封(operation_id、operation、timestamp、data),再交给
   可靠层 `Outbox` 入队。不提交,不发网。
 - `adapter.py`:`WmsEndpointAdapter` 按端点发 POST,并按合同 §4.4 的公共响应联合分类。
   - 成功码算已送达。
-  - 503,以及带 `retry_after_ms`(1 到 60000)的 429,算未送达,按原身份重试。
-  - 合法的 409、422 是对端终局。
+  - 合法的 503(空 data),以及只有 `retry_after_ms`(1 到 60000)的 429,算未送达,按原身份重试。
+  - 合法的 409、422 是对端终局;公共错误 data 为闭集,`field_path` 仅 `INVALID_DATA` 可选。
+  - 信封为四字段闭集;facts 和 `PREPARE_ACCEPTED` 的成功 data 必须为空,`DECIDED` 业务 data 不解释。
   - 其余一律算未知,继续重试。
   - 不属于本端点的消息会被拒绝。
 - 合同 §4 的响应前置检查在 `app/integrations/wms_envelope.py`,Transport 适配器共用它。

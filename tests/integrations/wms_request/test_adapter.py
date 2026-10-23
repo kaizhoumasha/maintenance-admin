@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -68,6 +69,73 @@ def test_common_error_union(protocol):
     for status in (400, 413):
         empty = HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, status, (), b"")
         assert classify(protocol, empty).reason == "REJECTED"
+
+
+@pytest.mark.parametrize("protocol", [FACTS_PROTOCOL, DECISIONS_PROTOCOL])
+@pytest.mark.parametrize("value", [[], {}, None, True, 1])
+def test_non_string_response_codes_and_reasons_remain_unknown(protocol, value):
+    for result in (
+        ack(200, value),
+        ack(409, "CONFLICT", reason_code=value),
+        ack(422, "REJECTED", reason_code=value),
+    ):
+        assert classify(protocol, result).kind == "UNKNOWN"
+
+
+@pytest.mark.parametrize("protocol", [FACTS_PROTOCOL, DECISIONS_PROTOCOL])
+@pytest.mark.parametrize(
+    "status,code,data",
+    [
+        (503, "UNAVAILABLE", {"unexpected": True}),
+        (429, "BUSY", {"retry_after_ms": 1000, "unexpected": True}),
+        (409, "CONFLICT", {"reason_code": "STATE_CONFLICT", "unexpected": True}),
+        (422, "REJECTED", {"reason_code": "INVALID_DATA", "unexpected": True}),
+        (422, "REJECTED", {"reason_code": "UNSUPPORTED_OPERATION", "field_path": "/data"}),
+        (422, "REJECTED", {"reason_code": "INVALID_ENVELOPE", "field_path": None}),
+        *[
+            (422, "REJECTED", {"reason_code": "INVALID_DATA", "field_path": path})
+            for path in (None, [], {}, 1, "", "data/x", "/~", "/~2", "/" + "x" * 256, "/\ud800")
+        ],
+    ],
+)
+def test_invalid_common_error_fields_remain_unknown(protocol, status, code, data):
+    assert classify(protocol, ack(status, code, **data)).kind == "UNKNOWN"
+
+
+@pytest.mark.parametrize("path", ["/", "/data/qty", "/data/a~1b~0c", "/" + "x" * 255])
+def test_invalid_data_rejections_accept_a_valid_optional_field_path(path):
+    for protocol in (FACTS_PROTOCOL, DECISIONS_PROTOCOL):
+        result = classify(
+            protocol, ack(422, "REJECTED", reason_code="INVALID_DATA", field_path=path)
+        )
+        assert (result.kind, result.reason) == ("PEER_TERMINAL", "REJECTED")
+
+
+@pytest.mark.parametrize(
+    "protocol,status,code",
+    [
+        (FACTS_PROTOCOL, 200, "RECORDED"),
+        (FACTS_PROTOCOL, 200, "DUPLICATE"),
+        (DECISIONS_PROTOCOL, 202, "PREPARE_ACCEPTED"),
+    ],
+)
+def test_success_responses_without_business_fields_require_empty_data(protocol, status, code):
+    assert classify(protocol, ack(status, code, unexpected=True)).kind == "UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    "protocol,code", [(FACTS_PROTOCOL, "RECORDED"), (DECISIONS_PROTOCOL, "DECIDED")]
+)
+def test_unknown_response_envelope_fields_remain_unknown(protocol, code):
+    result = ack(200, code)
+    body = {**json.loads(result.body), "unexpected": True}
+    assert classify(protocol, replace(result, body=json.dumps(body).encode())).kind == "UNKNOWN"
+
+
+def test_decision_success_preserves_business_data_without_interpreting_it():
+    result = ack(200, "DECIDED", decision="ready")
+    verdict = classify(DECISIONS_PROTOCOL, result)
+    assert verdict.kind == "DELIVERED" and verdict.response == result.body
 
 
 def test_response_must_echo_the_request_identity_with_an_int64_timestamp():

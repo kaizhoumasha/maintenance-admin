@@ -220,3 +220,17 @@ RELIABLE_TARGETS='{"targets":{"wms-facts":{"base_url":"http://127.0.0.1:8000","p
   - `busy` 与 `unavailable` 下判为未送达,达到预算后 `STALLED`;同 `operation_id`、同 Payload 再触发返回同一 `message_id`。
   - Swagger UI 中出现 `dev-wms-request` 标签与三个路由,POST 的 Examples 下拉显示 operation 标题。
 - **未实测**:PostgreSQL 下的联调控制台(验收用 SQLite);Examples 下拉选择后请求体自动填充的交互、`oneOf` 之外的页面细节只看了标签与下拉。
+
+## 11. 深度评审修复与回归（2026-10-24）
+
+用户批准修复三项 P2，范围仅为请求端点 ACK 与 operation 示例校验：
+
+- 在集合匹配前检查 `code`、`reason_code` 类型，非法值返回 `UNKNOWN`，不再因 `TypeError` 被可靠层记为永久 `FAILED/LOCAL_ERROR`。
+- 请求端点的响应信封限定四字段；facts 和 `PREPARE_ACCEPTED` 的成功 data 必须为空，503/409/422/429 按公共错误联合闭集校验。`field_path` 仅 `INVALID_DATA` 可选，非 null，长度 1..256，验证转义和合法 Unicode。`DECIDED` 业务数据仍仅保留原文，不新增业务解析；共享 `read_ack`、Transport 判定、空体 400/413 拒绝和重试策略不变。
+- JSON Schema 示例统一用严格 JSON 模式验证，合法 datetime/date/UUID/Decimal 示例可注册，非法示例仍在导入期失败。
+
+永久回归包括分类器的非法类型、闭集及合法边界，以及两个端点的完整 `send → enqueue → claim → send_one` 链：未接收预算设为 1，非法 ACK 后仍为 `PENDING/UNKNOWN`，保留不确定性，不增加未接收计数；之后使用同一冻结字节重试并完成。
+
+验证记录：新增回归先得到预期的 **59 failed、42 passed**；修复后请求端点、联调路由和 Transport 适配器定向 **279 passed**。独立只读复核三个变更测试文件 **101 passed**，未发现新增阻断项。使用一次性独立 PostgreSQL/Redis 跑完整套件 **1684 passed、5 skipped（92.38 秒）**；5 个跳过均为 SQLite 不支持的 PostgreSQL 等待/行锁参数分支，对应 PostgreSQL 分支已执行。Ruff、格式和差异检查通过。
+
+没有调用真实 WMS、修改共享开发库、重启应用或部署，也未提交/推送。浏览器交互和真实对端验收仍不在本轮覆盖内；前轮外部结构/对抗审阅均因上游 429 无正文，本轮只完成原生修复复核，不能宣称已补齐外部覆盖。

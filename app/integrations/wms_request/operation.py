@@ -10,6 +10,7 @@
 调用方再用 `WmsRequests.send(session, "域.名称@v1", {...}, operation_id=...)` 在自己的事务里入队。
 """
 
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
@@ -105,7 +106,7 @@ def request_operation(name: str, endpoint: Endpoint):
         operation = cls()
         if (example := operation.example) is not None:
             try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
-                operation.Payload.model_validate(example)
+                operation.Payload.model_validate_json(json.dumps(example, allow_nan=False))
             except ValueError as error:
                 raise ValueError(f"{cls.__qualname__}: example is invalid: {error}") from None
         _registry[name] = Registered(name, endpoint, operation)
