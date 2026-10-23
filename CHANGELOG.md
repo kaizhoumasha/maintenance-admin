@@ -8,7 +8,7 @@
 - 迁移 `a024a20261024`:`callback_receipt.operation_id` 加宽到 64 位;`callback_snapshot` 新增可空列 `source`(ECS 写 `ecs`,旧行与 WMS 为空)。降级遇到 64 位身份行或非空 `source` 时拒绝而不丢数据。
 - 共享改动(WMS 回调行为基本不变,两处小差异:读取请求流中途失败时,WMS 的 503 快照现在存空请求体而不是已读前缀;诊断告警的 logger 名现为 `app.integrations.callback_diagnostics`):诊断快照限额按来源分组并记录 `source`(ECS 高频不占 WMS 的 120 条/分钟,限额按进程分别计数);诊断队列抽到 `app/integrations/callback_diagnostics.py`;收据插入与查询抽到 `app/integrations/callback_receipts.py`;请求体分块读取抽到 `app/core/request_body.py`。
 - 限制:不内置 `ESTOP_PRESSED` 回 400(白皮书 §4.2 条款待供应商确认);未注册事件没有回放;同毫秒同内容的两个真实事件会被当作重报;新增事件类型须先部署处理器、再在 ECS 侧启用,否则旧实例会按未注册 ACK 并占住身份。处理器契约见包说明。部署前提:对外开放 `/api/v1/callback/event` 之前,网关必须先对它做 IP 白名单或限流(与 WMS 回调入口同样的信任假设,但每个未注册事件可持久化约 32 KiB,而不是约 0.5 KiB 的摘要行)。
-- 验证范围(2026-10-24):`ruff check`、`ruff format --check` 通过,`alembic heads` 单头 `a024a20261024`;对一次性本地 PostgreSQL 17 容器(`TEST_DATABASE_URL`)执行 `pytest -ra`:1771 通过、22 跳过、0 失败。跳过项:14 个 Redis 用例(未设置 `TEST_REDIS_URL`,未运行),8 个仅 PostgreSQL 的用例在 sqlite 参数下跳过(PostgreSQL 参数下已执行)。未验证:生产 PostgreSQL 与真实数据的 schema 迁移、真实 ECS 设备或供应商实现的联调。
+- 验证范围(2026-10-24,计数在提交 a3476ae 确认):`ruff check`、`ruff format --check` 通过,`alembic heads` 单头 `a024a20261024`;对一次性本地 PostgreSQL 17 容器(`TEST_DATABASE_URL`)执行 `pytest -ra`:1775 通过、22 跳过、0 失败。跳过项:14 个 Redis 用例(未设置 `TEST_REDIS_URL`,未运行),8 个仅 PostgreSQL 的用例在 sqlite 参数下跳过(PostgreSQL 参数下已执行)。未验证:生产 PostgreSQL 与真实数据的 schema 迁移、真实 ECS 设备或供应商实现的联调。
 
 ### 内部整理
 
