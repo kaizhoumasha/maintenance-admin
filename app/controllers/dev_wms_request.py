@@ -38,7 +38,7 @@ def _model(item: Registered) -> type[_DevWmsRequest]:
 
 
 def wms_request_router():
-    items = sorted(operations().values(), key=lambda item: item.name)
+    items = list(operations().values())
     # 判别器必须写在 Body(discriminator=...) 上:放进 Annotated 里的 Field 会被 FastAPI 丢弃
     body = Union[tuple(_model(item) for item in items)]  # noqa: UP007  运行时构造
     examples = {
@@ -58,7 +58,7 @@ def wms_request_router():
     @router.get("/operations", response_model=list[DevOperationOut])
     async def list_operations() -> list[dict]:
         """已注册的 WMS 请求 operation:端点、标题、TTL、Payload 的 JSON Schema 和示例。"""
-        return [item.describe() for item in sorted(operations().values(), key=lambda i: i.name)]
+        return [item.describe() for item in operations().values()]
 
     @router.post("", response_model=DevRequestOut, responses=error_responses(409))
     async def send_request(

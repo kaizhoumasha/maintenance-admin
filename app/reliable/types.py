@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from math import isfinite
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from app.http_client import HttpRequest, HttpResult
 
@@ -105,6 +105,11 @@ class ProtocolAdapter(Protocol):
 
     def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict: ...
 
-    # 可选:`same_request(existing_raw: bytes, new_raw: bytes) -> bool`。同身份重入时字节不同,
-    # 适配器可以声明内容等价(如只有时间戳变了),此时 `Outbox.enqueue` 返回原消息而不是抛
-    # `DuplicateMessage`。没有这个方法时,字节必须完全相同。
+
+@runtime_checkable
+class ComparableRequests(Protocol):
+    """可选能力:同身份重入时字节不同,适配器可以声明内容等价(例如只有时间戳变了),
+    此时 `Outbox.enqueue` 返回原消息而不是抛 `DuplicateMessage`。没有这个方法的适配器,
+    字节必须完全相同。"""
+
+    def same_request(self, existing_raw: bytes, new_raw: bytes) -> bool: ...

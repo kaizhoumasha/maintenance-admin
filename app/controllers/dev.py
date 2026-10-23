@@ -18,7 +18,7 @@ from app.core.dev_scenarios import DevScenario, scenarios
 from app.core.routing import new_router
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import operations
-from app.reliable.config import parse_reliable_config
+from app.reliable.config import parse_reliable_config, target_config_hint
 from app.schemas.dev_console import DevMessageOut, DevSubmitOut
 from app.services import dev_submit_service
 
@@ -87,12 +87,12 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
         app.include_router(wms_request_router(), prefix=prefix)
     targets = parse_reliable_config(get_settings()).targets
     missing = {FACTS_PROTOCOL, DECISIONS_PROTOCOL} - {t.protocol for t in targets.values()}
-    if missing:
+    for protocol in sorted(missing):
         logger.warning(
             "dev console: RELIABLE_TARGETS has no target for protocol %s, triggering those "
-            'requests fails with 500. Example: \'{"targets":{"wms-facts":{"base_url":'
-            '"http://127.0.0.1:8000","protocol":"wms-facts"}}}\'',
-            ", ".join(sorted(missing)),
+            "requests fails with 500 %s",
+            protocol,
+            target_config_hint(targets, protocol),
         )
     if not targets:
         logger.warning(

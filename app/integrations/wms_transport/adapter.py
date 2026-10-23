@@ -2,7 +2,7 @@ from urllib.parse import unquote
 
 from app.core.strict_json import json_object as _json_object
 from app.http_client import HttpRequest, HttpResult
-from app.integrations.wms_request.adapter import UNKNOWN, read_ack
+from app.integrations.wms_envelope import UNKNOWN, read_ack
 from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 

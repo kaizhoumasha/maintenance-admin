@@ -18,7 +18,6 @@ from app.reliable import Outbox, OutgoingMessage, VerdictKind
 from app.reliable.config import TargetConfig
 
 BASE = "/api/v1/dev/wms/requests"
-MOCK = "/api/v1/dev/mock-wms/mode"
 PATHS = {FACTS_PROTOCOL: "/api/v1/wes/facts", DECISIONS_PROTOCOL: "/api/v1/wes/decisions"}
 FACT, DECISION = "example.fact.demo@v1", "example.decision.demo@v1"
 
@@ -92,16 +91,6 @@ async def test_invalid_input_is_rejected_with_400(client, admin, wms):
 
 async def test_status_of_an_unknown_operation_id_is_404(client, admin):
     assert (await client.get(f"{BASE}/status/{uuid7()}", headers=admin)).status_code == 404
-
-
-@pytest.fixture
-async def mock_mode(client, admin):
-    async def use(mode):
-        r = await client.put(MOCK, json={"mode": mode}, headers=admin)
-        assert r.status_code == 200
-
-    yield use
-    await use("accept")
 
 
 @pytest.mark.parametrize("protocol", [FACTS_PROTOCOL, DECISIONS_PROTOCOL])

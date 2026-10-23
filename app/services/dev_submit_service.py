@@ -10,16 +10,24 @@ from app.models import ReliableMessage
 from app.schemas.dev_console import DevMessageOut
 
 
-async def submit(session: AsyncSession, scenario: DevScenario, req: DevRequest) -> DevOutcome:
-    """调用场景 handler 并提交:get_session 不提交,不提交的话发送器看不到消息。"""
+async def commit_or_map(session: AsyncSession, work, errors: dict[type[Exception], ErrorCode]):
+    """等待 `work` 并提交,`errors` 里的异常回滚并转 AppError。
+
+    get_session 不提交,不提交的话发送器看不到消息。
+    """
     try:
-        outcome = await scenario.handler(session, req)
+        outcome = await work
         await session.commit()
-    except tuple(scenario.errors) as error:
+    except tuple(errors) as error:
         await session.rollback()
-        code = next(c for t, c in scenario.errors.items() if isinstance(error, t))
+        code = next(c for t, c in errors.items() if isinstance(error, t))
         raise AppError(code, str(error)) from error
     return outcome
+
+
+async def submit(session: AsyncSession, scenario: DevScenario, req: DevRequest) -> DevOutcome:
+    """调用场景 handler 并提交。"""
+    return await commit_or_map(session, scenario.handler(session, req), scenario.errors)
 
 
 def _decode(raw: bytes | None) -> Any:
@@ -56,14 +64,22 @@ def message_out(m: ReliableMessage) -> DevMessageOut:
     )
 
 
-async def message_status(session: AsyncSession, business_key: str) -> list[DevMessageOut]:
+async def messages_where(
+    session: AsyncSession, column, value: str, not_found: str
+) -> list[DevMessageOut]:
     rows = await session.scalars(
         select(ReliableMessage)
-        .where(ReliableMessage.business_key == business_key)
+        .where(column == value)
         .order_by(ReliableMessage.id)
         .execution_options(populate_existing=True)
     )
     messages = list(rows)
     if not messages:
-        raise AppError(ErrorCode.NOT_FOUND, "没有该 business_key 的出站消息")
+        raise AppError(ErrorCode.NOT_FOUND, not_found)
     return [message_out(m) for m in messages]
+
+
+async def message_status(session: AsyncSession, business_key: str) -> list[DevMessageOut]:
+    return await messages_where(
+        session, ReliableMessage.business_key, business_key, "没有该 business_key 的出站消息"
+    )

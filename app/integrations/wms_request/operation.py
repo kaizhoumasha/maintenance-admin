@@ -18,7 +18,7 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
-from app.integrations.wms_callback.registry import MAX_NAME_CHARS, NAME_PATTERN
+from app.core.operation_names import is_operation_name
 
 
 class Endpoint(StrEnum):
@@ -92,7 +92,7 @@ _registry: dict[str, Registered] = {}
 
 def request_operation(name: str, endpoint: Endpoint):
     def register(cls):
-        if len(name) > MAX_NAME_CHARS or not NAME_PATTERN.fullmatch(name):
+        if not is_operation_name(name):
             raise ValueError(f"invalid operation name {name!r}")
         if not isinstance(endpoint, Endpoint):
             raise TypeError("endpoint must be an Endpoint")
@@ -127,4 +127,4 @@ def lookup(name: str) -> Registered | None:
 
 
 def operations() -> dict[str, Registered]:
-    return dict(_loaded())
+    return dict(sorted(_loaded().items()))
