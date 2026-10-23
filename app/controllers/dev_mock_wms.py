@@ -15,7 +15,7 @@ from app.core import get_current_user
 from app.core.clock import unix_ms
 from app.core.routing import new_router
 from app.integrations.wms_transport.protocol import DEFAULT_SUBMIT_PATH
-from app.schemas.dev_outbound import MockWmsMode, MockWmsModeBody
+from app.schemas.dev_console import MockWmsMode, MockWmsModeBody
 
 router = new_router(tags=["dev-mock-wms"])
 

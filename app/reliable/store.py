@@ -13,7 +13,7 @@ from app.models.reliable import ReliableMessage
 
 from .config import TargetConfig, positive
 from .policy import retry_delay_s
-from .types import FailReason, MessageStatus, OutboundMessage, Verdict, VerdictKind
+from .types import FailReason, MessageStatus, OutgoingMessage, Verdict, VerdictKind
 
 logger = logging.getLogger(__name__)
 TERMINAL = (MessageStatus.DONE, MessageStatus.FAILED, MessageStatus.EXPIRED)
@@ -22,7 +22,7 @@ TERMINAL = (MessageStatus.DONE, MessageStatus.FAILED, MessageStatus.EXPIRED)
 @dataclass(frozen=True)
 class Claim:
     message_id: int
-    message: OutboundMessage
+    message: OutgoingMessage
     lease_id: str
     lease_until: datetime
     attempt_no: int
@@ -73,7 +73,7 @@ class MessageStore:
         return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
     def _claim(self, session, row):
-        message = OutboundMessage(
+        message = OutgoingMessage(
             row.target,
             row.operation,
             row.operation_id,

@@ -214,7 +214,7 @@ async def test_pg_audit_fields_cursor_sql_and_no_writes(
     engine = pg_sessions.kw["bind"].sync_engine
 
     def capture(conn, cursor, statement, parameters, context, executemany):
-        if "FROM audit_logs" in statement:
+        if f"FROM {AuditLog.__table__.fullname}" in statement:
             sql.append(statement.upper())
 
     async with pg_sessions() as session:

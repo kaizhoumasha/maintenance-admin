@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.identifiers import uuid7
+from app.database import create_database_engine as create_async_engine
 
 BASE, HEAD = "a019b20261021", "a019c20261022"
 ROOT = Path(__file__).parents[2]

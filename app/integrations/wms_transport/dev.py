@@ -71,6 +71,7 @@ class TransportHandoffIn(_Strict):
 class RackMoveIn(DevRequest, TransportRouteIn):
     role: RackRole
     rack_id: str
+    cycle_id: str | None = None  # 同一轮的后续步骤填首步返回任务里的 cycle_id
     target: TransportDestinationIn
     target_face: str | None = None
 
@@ -78,6 +79,7 @@ class RackMoveIn(DevRequest, TransportRouteIn):
 class RackRotateIn(DevRequest, TransportRouteIn):
     role: RackRole
     rack_id: str
+    cycle_id: str | None = None
     position_code: str
     target_face: str
 
@@ -129,7 +131,9 @@ _SLOT = {"rack_id": "510004", "rack_face": "90", "slot_id": "1-1"}
     errors=ERRORS,
 )
 async def rack_enter(session: AsyncSession, req: RackMoveIn) -> DevOutcome:
-    cycle = rack_scenarios.cycle(role=req.role, rack_id=req.rack_id, caller=req.caller())
+    cycle = rack_scenarios.cycle(
+        role=req.role, rack_id=req.rack_id, caller=req.caller(), cycle_id=req.cycle_id
+    )
     return _outcome(
         await cycle.enter(
             session,
@@ -147,7 +151,9 @@ async def rack_enter(session: AsyncSession, req: RackMoveIn) -> DevOutcome:
     errors=ERRORS,
 )
 async def rack_rotate(session: AsyncSession, req: RackRotateIn) -> DevOutcome:
-    cycle = rack_scenarios.cycle(role=req.role, rack_id=req.rack_id, caller=req.caller())
+    cycle = rack_scenarios.cycle(
+        role=req.role, rack_id=req.rack_id, caller=req.caller(), cycle_id=req.cycle_id
+    )
     return _outcome(
         await cycle.rotate(
             session,
@@ -165,7 +171,9 @@ async def rack_rotate(session: AsyncSession, req: RackRotateIn) -> DevOutcome:
     errors=ERRORS,
 )
 async def rack_depart(session: AsyncSession, req: RackMoveIn) -> DevOutcome:
-    cycle = rack_scenarios.cycle(role=req.role, rack_id=req.rack_id, caller=req.caller())
+    cycle = rack_scenarios.cycle(
+        role=req.role, rack_id=req.rack_id, caller=req.caller(), cycle_id=req.cycle_id
+    )
     return _outcome(
         await cycle.depart(
             session,

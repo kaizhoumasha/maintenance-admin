@@ -13,6 +13,7 @@ from app.controllers.menus import router as menus_router
 from app.controllers.permissions import router as permissions_router
 from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
+from app.controllers.wms_events import include_wms_events
 from app.core import error_responses, get_settings, register_exception_handlers, setup_logging
 from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
@@ -76,6 +77,7 @@ app.include_router(permissions_router, prefix="/api/v1")
 app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(menus_router, prefix="/api/v1")
 app.include_router(health_router)
+include_wms_events(app, environment=settings.ENVIRONMENT)
 include_dev_routers(app, environment=settings.ENVIRONMENT)
 
 _openapi = app.openapi

@@ -168,9 +168,9 @@ def ack_result(
 
 
 def message():
-    from app.reliable import OutboundMessage
+    from app.reliable import OutgoingMessage
 
-    return OutboundMessage(
+    return OutgoingMessage(
         "wms", OPERATION, OPERATION_ID, REQUEST_RAW, None, None, FakeClock()(), None
     )
 

@@ -1,8 +1,8 @@
-import json
 from urllib.parse import unquote
 
+from app.core.strict_json import json_object as _json_object
 from app.http_client import DeliveryState, HttpRequest, HttpResult
-from app.reliable import FailReason, OutboundMessage, Verdict, VerdictKind
+from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 
 from .protocol import DEFAULT_SUBMIT_PATH, OPERATION, PROTOCOL, REJECTION_REASONS
@@ -27,30 +27,7 @@ def _validate_submit_path(path: str) -> str:
     return path
 
 
-def _unique_keys(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_constant(value):
-    raise ValueError("non-finite JSON number")
-
-
-def _json_object(raw: bytes) -> dict | None:
-    try:
-        value = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=_unique_keys, parse_constant=_reject_constant
-        )
-    except (UnicodeError, ValueError, RecursionError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _requested_task_id(message: OutboundMessage) -> str:
+def _requested_task_id(message: OutgoingMessage) -> str:
     request = _json_object(message.request_raw) or {}
     data = request.get("data")
     task_id = data.get("transport_task_id") if isinstance(data, dict) else None
@@ -74,7 +51,7 @@ class TransportSubmitAdapter:
     def __init__(self, submit_path: str = DEFAULT_SUBMIT_PATH):
         self.submit_path = _validate_submit_path(submit_path)
 
-    def build_request(self, message: OutboundMessage, target: TargetConfig) -> HttpRequest:
+    def build_request(self, message: OutgoingMessage, target: TargetConfig) -> HttpRequest:
         _requested_task_id(message)
         return HttpRequest(
             method="POST",
@@ -83,7 +60,7 @@ class TransportSubmitAdapter:
             body=message.request_raw,
         )
 
-    def classify_response(self, message: OutboundMessage, result: HttpResult) -> Verdict:
+    def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict:
         task_id = _requested_task_id(message)
         if (
             result.delivery_state != DeliveryState.HTTP_RESPONSE_COMPLETE

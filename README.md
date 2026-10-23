@@ -31,7 +31,7 @@ docker compose ps   # 确认 postgres / redis 都是 healthy
 ```bash
 uv sync
 cp .env.example .env
-uv run alembic upgrade head     # 应用 migrations/versions 下已有的迁移
+uv run alembic upgrade head     # 在线校验归属并迁入 enterprise_backend schema，再应用迁移
 # 改了 models 之后才需要生成新迁移:
 # uv run alembic revision --autogenerate -m "说明"   # 生成后先检查再 upgrade
 uv run uvicorn app.main:app --reload
@@ -42,6 +42,8 @@ scripts/lint.sh      # ruff check --fix + format
 ```
 
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
+
+项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。已有完整 `a023a20261024` 旧库运行在线 `alembic upgrade head` 时，只原地移动本项目 12 张表及版本表；其他系统表不动。更早的旧库先用旧代码升级到该基线。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
 
 ```bash
 TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/enterprise_backend_test \
@@ -165,11 +167,13 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 #### 联调控制台(仅 `ENVIRONMENT=local`)
 
-Swagger 里 `POST /api/v1/dev/outbound` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/outbound/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
+Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
 
 ```bash
 RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"}}}'
 ```
+
+回调侧:`POST /api/v1/dev/transport/{transport_task_id}/callbacks` 选 `succeeded` 或 `position_unknown`,按该任务的冻结事实构造样例回调并走真实接收管线,返回每条的响应与诊断;`GET /api/v1/dev/transport/{transport_task_id}` 看任务状态。
 
 新增业务接入层时,在 `app/integrations/<业务>/dev.py` 里用 `@dev_scenario` 登记场景即可自动出现在下拉里,详见 `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`。非 local 环境这些路由不存在。**部署时必须显式设置 `ENVIRONMENT`(如 `production`)**:它的默认值是 `local`,漏设会同时挂出该控制台(含无认证的 Mock WMS 接收端)、开放 API 文档并关闭 Cookie 的 Secure。示例里的 Zone、储位、滚筒线编码是占位值,联调前按现场替换。
 

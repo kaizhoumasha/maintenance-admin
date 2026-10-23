@@ -4,8 +4,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.database import create_database_engine as create_async_engine
 from app.http_client import DeliveryState, HttpRequest, HttpResult
 from app.reliable import Verdict, VerdictKind
 from app.reliable.config import TargetConfig

@@ -6,6 +6,12 @@ from app.core.config import Settings
 BASE = {"DATABASE_URL": "sqlite+aiosqlite://", "REDIS_URL": "redis://x/0"}
 
 
+@pytest.mark.parametrize("days", [0, -1, True, False, 1.5])
+def test_snapshot_retention_requires_positive_integer_days(days):
+    with pytest.raises(ValidationError, match="CALLBACK_SNAPSHOT_RETENTION_DAYS"):
+        Settings(_env_file=None, **BASE, CALLBACK_SNAPSHOT_RETENTION_DAYS=days)
+
+
 def _settings(**kw):
     return Settings(_env_file=None, **BASE, **kw)
 

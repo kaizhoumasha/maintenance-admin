@@ -6,7 +6,7 @@
 
 ### 1.1 目标
 
-在 FastAPI Swagger 里提供**一个**联调入口 `POST /api/v1/dev/outbound`:从下拉里选业务场景(货架进场、货架换面、货架离场、料箱投料、回架、交换),填写请求体即可走**真实的业务接入层**登记出站义务,再用统一的状态节点查看投递结果。以后新增 RELIABLE 业务接入层时,新增一个文件即可出现在下拉里,不改通用代码、不改 `main.py`。
+在 FastAPI Swagger 里提供**一个**联调入口 `POST /api/v1/dev/transport/tasks`:从下拉里选业务场景(货架进场、货架换面、货架离场、料箱投料、回架、交换),填写请求体即可走**真实的业务接入层**登记出站义务,再用统一的状态节点查看投递结果。以后新增 RELIABLE 业务接入层时,新增一个文件即可出现在下拉里,不改通用代码、不改 `main.py`。
 
 ### 1.2 非目标
 
@@ -35,8 +35,8 @@
 ```text
 app/core/dev_scenarios.py          注册表 + @dev_scenario 装饰器 + DevRequest/DevOutcome  (仅 pydantic,无 fastapi)
 app/integrations/<业务>/dev.py     场景定义:请求模型 + 被装饰的 handler               (调用本业务的门面;无 fastapi)
-app/schemas/dev_outbound.py        响应契约 DevSubmitOut、DevMessageOut
-app/services/dev_outbound_service.py   submit(调 handler + 映射错误 + 提交)、message_status(按 business_key 查消息)
+app/schemas/dev_console.py        响应契约 DevSubmitOut、DevMessageOut
+app/services/dev_submit_service.py   submit(调 handler + 映射错误 + 提交)、message_status(按 business_key 查消息)
 app/controllers/dev.py             include_dev_routers(app, environment):扫描 + 构建路由 + 挂载
 app/main.py                        一行:include_dev_routers(app, environment=settings.ENVIRONMENT)
 ```
@@ -78,19 +78,19 @@ def scenarios() -> list[DevScenario]                  # 按 name 排序
 2. 扫描:`pkgutil.iter_modules(app.integrations.__path__)`,按包名排序,对每个包尝试 `importlib.import_module(f"app.integrations.{pkg}.dev")`;**仅当该模块不存在(`ModuleNotFoundError` 且 `name` 恰为该模块)时跳过**,模块内部的导入错误必须原样抛出,让联调环境启动即失败。
 3. `scenarios()` 为空则不挂载。
 4. 构建联合体:`body = Union[tuple(s.model for s in scenarios())]`;`examples = {s.name: {"summary": s.title, "value": {"scenario": s.name, **s.example}}}`。
-5. 两个路由(`new_router(prefix="/dev/outbound", tags=["dev-outbound"])`,依赖 `get_current_user`):
+5. 两个路由(`new_router(prefix="/dev/transport/tasks", tags=["dev-transport"])`,依赖 `get_current_user`):
    - `POST ""`:`req: Annotated[body, Body(discriminator="scenario", openapi_examples=examples)]` → `DevSubmitOut`
    - `GET "/status/{business_key}"` → `list[DevMessageOut]`(无消息 404)
 6. 挂载时若已配置的 `RELIABLE_TARGETS` 里没有任何目标,打一条 WARNING(含 `.env.example` 的配置示例),否则联调时会因 E7 得到 500。
 
 > **实现硬约束**:判别器必须写在 `Body(discriminator=...)` 上。把 `Field(discriminator=...)` 放进 `Annotated` 别名会被 FastAPI 静默丢弃(§9 V2)。
 
-### 4.3 服务(`app/services/dev_outbound_service.py`)
+### 4.3 服务(`app/services/dev_submit_service.py`)
 
 - `submit(session, scenario, req) -> DevOutcome`:`await scenario.handler(session, req)`,成功后 **`await session.commit()`**(E1/E2,否则发送器永远看不到消息);捕获 `scenario.errors` 里列出的异常,`rollback` 后抛 `AppError(code, str(exc))`。
 - `message_status(session, business_key) -> list[DevMessageOut]`:`select(ReliableMessage).where(business_key == …).order_by(id)`。`request_raw`/`response_raw`/`last_response_raw` 解码为 JSON(失败则 UTF-8 `replace` 文本)。
 
-### 4.4 响应契约(`app/schemas/dev_outbound.py`)
+### 4.4 响应契约(`app/schemas/dev_console.py`)
 
 - `DevSubmitOut`:`scenario`、`title`、`business_key`、`client_request_id`。**不含 `replayed`**:门面只返回句柄,无法区分新建与重放(重放可再提交同号并比较 `business_key` 一致来观察)。
 - `DevMessageOut`:`message_id`、`target`、`operation`、`operation_id`、`status`、`fail_reason`、`attempts`、`not_received_count`、`delivery_uncertain`、`next_attempt_at`、`last_attempt_at`、`last_http_status`、`last_failure_kind`、`last_verdict`、`request`、`response`、`last_response`、`created_at`、`updated_at`。
@@ -153,7 +153,7 @@ ACK 体回显请求里的 `operation_id`、`data.transport_task_id` 并带整数
 
 1. **非 local 不挂载**:`include_dev_routers(FastAPI(), environment="production")` 后应用里没有任何 `/dev` 路径,且未导入 `*.dev` 模块。
 2. **注册表规则**:对已加载的全部场景断言:名字唯一且合规、`example` 通过自身模型校验、`/openapi.json` 里每个场景都出现在判别映射中。规则式,不枚举当前场景。
-3. **提交即可见(E1/E2)**:经 `dev_outbound_service.submit` 提交一个 Transport 场景后,用**全新会话**能查到 `TransportTask` 和 `PENDING` 的 `ReliableMessage`。
+3. **提交即可见(E1/E2)**:经 `dev_submit_service.submit` 提交一个 Transport 场景后,用**全新会话**能查到 `TransportTask` 和 `PENDING` 的 `ReliableMessage`。
 4. **幂等与冲突**:同一 `client_request_id` 重放得到同一 `business_key`;同号不同入参为 409;方向错误的投料为 400。
 5. **状态节点**:无消息 404;有消息时返回解码后的 `request`。
 
@@ -212,10 +212,10 @@ ACK 体回显请求里的 `operation_id`、`data.transport_task_id` 并带整数
 
 ## 10. 实施与验收记录(2026-10-22)
 
-- **实现**:`app/core/dev_scenarios.py`、`app/schemas/dev_outbound.py`、`app/services/dev_outbound_service.py`、`app/controllers/dev.py`、`app/controllers/dev_mock_wms.py`、`app/integrations/wms_transport/dev.py`,`app/main.py` 加一行挂载。测试:`tests/core/test_dev_scenarios.py`、`tests/controllers/test_dev_outbound.py`(按 §7,另加"Mock WMS 的响应经 `TransportSubmitAdapter` 判定与预期一致"这一条长期合同)。
+- **实现**:`app/core/dev_scenarios.py`、`app/schemas/dev_console.py`、`app/services/dev_submit_service.py`、`app/controllers/dev.py`、`app/controllers/dev_mock_wms.py`、`app/integrations/wms_transport/dev.py`,`app/main.py` 加一行挂载。测试:`tests/core/test_dev_scenarios.py`、`tests/controllers/test_dev_console.py`(按 §7,另加"Mock WMS 的响应经 `TransportSubmitAdapter` 判定与预期一致"这一条长期合同)。
 - **自动化**:`ruff check`、`ruff format --check` 通过;全量 `pytest` 1030 passed、243 skipped(跳过项是未配置 `TEST_DATABASE_URL` 的既有集成测试)。
 - **端到端(临时 SQLite 库 + 随机端口 + `RELIABLE_TARGETS` 指向自身,未碰开发库)**:真实发送器自调用 Mock WMS,终态与 §4.7 一致:`accept`→DONE、`duplicate`→DONE、`conflict`→FAILED/CONFLICT、`reject`→FAILED/REJECTED、`unavailable`→重试后 STALLED、`garbage`→PENDING(UNKNOWN,待重试)。`hang`(目标超时 2 秒)→ 首次投递以 `TOTAL_TIMEOUT` 结束并标记 `delivery_uncertain`,随后按固定间隔重试(轮询时第 2 次投递在途,状态 SENDING)。
-- **浏览器(Swagger UI)**:`POST /api/v1/dev/outbound` 的 Examples 下拉出现 6 项,选中后请求体自动填充,§9.1 未验证项已关闭。
+- **浏览器(Swagger UI)**:`POST /api/v1/dev/transport/tasks` 的 Examples 下拉出现 6 项,选中后请求体自动填充,§9.1 未验证项已关闭。
 - **实施中的调整**:嵌套请求模型加 `Transport` 前缀(`Slot`、`Route` 等泛名会在不同业务间冲突 OpenAPI schema 名)。
 - **Postgres 实测**:在本机 25432 实例里临时新建库、`alembic upgrade head`、种子管理员后,同一组 6 种模式的终态与 SQLite 完全一致;库已删除,未碰开发库。请求日志里的 3 条 ERROR 是 `unavailable` 模式有意返回的 503。
 - **仍未做**:无。

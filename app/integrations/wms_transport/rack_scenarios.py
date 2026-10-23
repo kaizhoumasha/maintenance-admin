@@ -1,7 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.identifiers import uuid7
 
 from .service import TransportService, transport_service
 from .types import (
@@ -11,6 +13,7 @@ from .types import (
     TransportCaller,
     TransportHandle,
     Zone,
+    require_uuid7,
 )
 
 
@@ -49,9 +52,12 @@ class RackCycle:
     role: RackRole
     rack_id: str
     caller: TransportCaller
+    # 这一轮的本地分组键(不进 wire):三步共用,后续步骤在别的进程重建句柄时须传入同一个
+    cycle_id: str = field(default_factory=lambda: str(uuid7()))
 
     def __post_init__(self):
         _template(self.role, "enter")  # 创建时即拒绝未知角色
+        require_uuid7(self.cycle_id)
 
     async def enter(
         self,
@@ -89,6 +95,7 @@ class RackCycle:
             position=position,
             target_face=target_face,
             rcs_template_id=_template(self.role, "rotate"),
+            cycle_id=self.cycle_id,
         )
 
     async def _move(
@@ -110,6 +117,7 @@ class RackCycle:
             target=target,
             target_face=target_face,
             rcs_template_id=_template(self.role, action),
+            cycle_id=self.cycle_id,
         )
 
 
@@ -119,8 +127,18 @@ class RackScenarios:
     def __init__(self, transport: TransportService):
         self.transport = transport
 
-    def cycle(self, *, role: RackRole, rack_id: str, caller: TransportCaller) -> RackCycle:
-        return RackCycle(self.transport, role, rack_id, caller)
+    def cycle(
+        self,
+        *,
+        role: RackRole,
+        rack_id: str,
+        caller: TransportCaller,
+        cycle_id: str | None = None,
+    ) -> RackCycle:
+        """`cycle_id` 不传就开始新的一轮;同一轮的后续步骤在别处重建句柄时传入首次的值。"""
+        if cycle_id is None:
+            return RackCycle(self.transport, role, rack_id, caller)
+        return RackCycle(self.transport, role, rack_id, caller, cycle_id)
 
 
 # 外部调用的统一入口:无需接线,依赖由 `transport_service` 从配置惰性取得。
