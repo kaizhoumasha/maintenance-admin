@@ -266,3 +266,63 @@ async def test_ctx_note_is_persisted_and_alert_follows_commit(callback_store, ca
         [alert] = alerts()
         assert alert.diagnostic == {"reason_code": "X", "k": 1}
         assert (await receipts(callback_store))[0].diagnostic == [{"reason_code": "X", "k": 1}]
+
+
+def _errors(caplog):
+    return [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_oversized_unregistered_event_logs_error_without_data(callback_store, caplog):
+    caplog.set_level(logging.INFO)
+    await receive(callback_store, EVENT)
+    assert _errors(caplog) == []
+    body = {**BASE, "timestamp": 2, "data": {"blob": "SECRETDATA" * 5000}}
+    await receive(callback_store, json.dumps(body).encode())
+    [record] = _errors(caplog)
+    assert "digest=" in record.getMessage() and "SECRETDATA" * 3 not in record.getMessage()
+    assert all("SECRETDATA" * 3 not in r.getMessage() for r in caplog.records)
+
+
+async def test_alert_renders_every_string_value_of_handler_notes(callback_store, caplog):
+    async def handler(ctx, data):
+        ctx.note("X", detail="Z" * 5000, n=1)
+
+    ecs_event("SCAN_COMPLETED")(handler)
+    caplog.set_level(logging.WARNING)
+    await receive(callback_store, EVENT)
+    [alert] = [r for r in caplog.records if hasattr(r, "diagnostic")]
+    assert alert.diagnostic["reason_code"] == "X" and alert.diagnostic["n"] == 1
+    assert len(alert.diagnostic["detail"]) <= 70
+    assert (await receipts(callback_store))[0].diagnostic[0]["detail"] == "Z" * 5000
+
+
+async def test_cap_applies_to_persisted_list_at_boundary(callback_store):
+    def sized(pad: int) -> bytes:
+        return json.dumps({**BASE, "timestamp": pad, "data": {"p": "x" * pad}}).encode()
+
+    def persisted_size(pad: int) -> int:
+        event = {
+            "device_code": "D1",
+            "event_type": "SCAN_COMPLETED",
+            "timestamp": pad,
+            "is_debug": False,
+            "data": {"p": "x" * pad},
+        }
+        note = {
+            "reason_code": "UNREGISTERED_EVENT_TYPE",
+            "device_code": "D1",
+            "event_type": "SCAN_COMPLETED",
+            "data": event,
+        }
+        return len(json.dumps([note]).encode())
+
+    # timestamp 随 pad 变化,位数变化会让大小不单调;找到恰好等于上限的 pad
+    pad = next(p for p in range(30_000, 33_000) if persisted_size(p) == MAX_DIAGNOSTIC_BYTES)
+    for p, reduced in ((pad, False), (pad + 1, True)):
+        assert (persisted_size(p) > MAX_DIAGNOSTIC_BYTES) == reduced
+        await receive(callback_store, sized(p))
+    stored = {r.operation_id: r.diagnostic for r in await receipts(callback_store)}
+    assert len(stored) == 2
+    for diagnostic in stored.values():
+        assert len(json.dumps(diagnostic).encode()) <= MAX_DIAGNOSTIC_BYTES
+    assert sorted("digest" in d[0]["data"] for d in stored.values()) == [False, True]

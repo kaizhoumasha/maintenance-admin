@@ -4,23 +4,25 @@
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
-from sqlalchemy import select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import unix_ms
 from app.core.strict_json import canonical_digest, json_object
 from app.integrations.callback_diagnostics import queue_diagnostics
-from app.integrations.wms_callback.receiver import LOCK_TIMEOUT, CallbackResponse
+from app.integrations.callback_receipts import find_receipt, insert_receipt
+from app.integrations.wms_callback.receiver import CallbackResponse
 from app.models import CallbackReceipt
 
 from .envelope import EcsEventEnvelope, issues_from
 from .registry import EcsEventContext, lookup
+
+logger = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 256 * 1024
 MAX_DIAGNOSTIC_BYTES = 32 * 1024
@@ -77,7 +79,7 @@ def unregistered_note(event: dict) -> dict:
         "event_type": event["event_type"],
         "data": event,
     }
-    if len(json.dumps(note).encode()) <= MAX_DIAGNOSTIC_BYTES:
+    if len(json.dumps([note]).encode()) <= MAX_DIAGNOSTIC_BYTES:  # 落库的是 [note]
         return note
     canonical = json.dumps(event, sort_keys=True, separators=(",", ":"))  # ASCII,按字节切不会断字符
     return {
@@ -95,18 +97,10 @@ def unregistered_note(event: dict) -> dict:
 def _alert(operation_id: str, note: dict) -> dict:
     """告警日志副本:无 data,不可信字段经 render_untrusted;顶层键固定,避免撞 LogRecord 保留名。"""
     diagnostic = {key: value for key, value in note.items() if key != "data"}
-    for key in ("device_code", "event_type"):
-        if isinstance(diagnostic.get(key), str):
-            diagnostic[key] = render_untrusted(diagnostic[key])
+    for key, value in diagnostic.items():
+        if key != "reason_code" and isinstance(value, str):
+            diagnostic[key] = render_untrusted(value)
     return {"operation": OPERATION, "operation_id": operation_id, "diagnostic": diagnostic}
-
-
-async def _existing(session: AsyncSession, identity: str) -> CallbackReceipt | None:
-    return await session.scalar(
-        select(CallbackReceipt).where(
-            CallbackReceipt.operation == OPERATION, CallbackReceipt.operation_id == identity
-        )
-    )
 
 
 def _event(envelope: EcsEventEnvelope) -> dict:
@@ -137,7 +131,7 @@ async def receive_ecs_event(session: AsyncSession, raw: bytes) -> EcsResponse:
             existing.status_code, existing.body, "duplicate", event_type, device_code, identity
         )
 
-    existing = await _existing(session, identity)
+    existing = await find_receipt(session, OPERATION, identity)
     if existing is not None:  # 先查重:不再校验 data,处理器后来收紧校验也不影响原样重报
         return duplicate(existing)
     registered = lookup(event_type)
@@ -148,33 +142,35 @@ async def receive_ecs_event(session: AsyncSession, raw: bytes) -> EcsResponse:
         except ValidationError as error:
             issues = issues_from(error, model=registered.data_model, prefix="data")
             return _invalid(issues, envelope)
-    postgresql = session.get_bind().dialect.name == "postgresql"
-    if postgresql:  # 等待行锁有上限:超时整体回滚并返回 503,ECS 原样重报
-        await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
-    insert = pg_insert if postgresql else sqlite_insert
-    receipt_id = await session.scalar(
-        insert(CallbackReceipt)
-        .values(
-            operation=OPERATION,
-            operation_id=identity,
-            raw_digest=raw_digest,
-            effective_digest=None,
-            compare_mode="RAW",
-            status_code=200,
-            body=dict(ACK),
-            resp_timestamp=unix_ms(datetime.now(UTC)),
-            created_at=datetime.now(UTC),
-        )
-        .on_conflict_do_nothing(index_elements=["operation", "operation_id"])
-        .returning(CallbackReceipt.id)
+    receipt_id = await insert_receipt(
+        session,
+        operation=OPERATION,
+        operation_id=identity,
+        raw_digest=raw_digest,
+        effective_digest=None,
+        compare_mode="RAW",
+        status_code=200,
+        body=dict(ACK),
+        resp_timestamp=unix_ms(datetime.now(UTC)),
+        created_at=datetime.now(UTC),
     )
     if receipt_id is None:  # 并发的同身份事件先提交了
-        existing = await _existing(session, identity)
+        existing = await find_receipt(session, OPERATION, identity)
         if existing is None:
             raise RuntimeError("receipt identity conflict without a visible receipt")
         return duplicate(existing)
     if registered is None:
-        outcome, notes = "unregistered", [unregistered_note(_event(envelope))]
+        note = unregistered_note(_event(envelope))
+        if isinstance(note["data"], dict) and "digest" in note["data"]:  # 已缩减:完整事件不会落库
+            logger.error(
+                "oversized unregistered ECS event reduced: digest=%s size=%s device_code=%s "
+                "event_type=%s",
+                note["data"]["digest"],
+                note["data"]["size"],
+                render_untrusted(device_code),
+                render_untrusted(event_type),
+            )
+        outcome, notes = "unregistered", [note]
     else:
         ctx = EcsEventContext(
             session=session,
