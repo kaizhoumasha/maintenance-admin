@@ -48,6 +48,11 @@ Transport 业务,在 `wms_transport`。
 只有一两个很小的 operation 时,也可以用单个 `request.py`,发现逻辑两种形式都认。
 调用方保存自己的业务记录和 `operation_id`(小写 canonical UUIDv7),在同一个事务里调用 `send`。
 
+## 本地联调
+
+`ENVIRONMENT=local` 时联调控制台提供 operation 目录、触发入口、状态查询和能认识这两个端点的
+Mock WMS,演示 operation 在 `dev.py`。用法和配置见 README 的「联调控制台」。
+
 ## 使用时要知道的限制
 
 - 同一 `operation_id` 再次调用 `send` 时,Payload 相同返回原消息引用(时间戳不参与比较),
@@ -71,7 +76,7 @@ from .operation import (
     UnknownOperation,
     request_operation,
 )
-from .service import WmsRequests
+from .service import WmsRequests, wms_requests
 
 __all__ = [
     "ADAPTERS",
@@ -83,5 +88,6 @@ __all__ = [
     "RequestPayload",
     "UnknownOperation",
     "WmsRequests",
+    "wms_requests",
     "request_operation",
 ]

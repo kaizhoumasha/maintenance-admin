@@ -99,3 +99,7 @@ class WmsRequests:
             if sent is None or canonical_digest(sent.get("data")) != canonical_digest(payload):
                 raise
             return EnqueueResult(existing.id, MessageStatus(existing.status))
+
+
+# 外部调用的统一入口:无需任何接线,首次使用时从配置惰性取得 Outbox 与目标。
+wms_requests = WmsRequests()

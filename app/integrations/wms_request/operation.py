@@ -40,6 +40,7 @@ class RequestPayload(BaseModel):
 
 
 class RequestOperation:
+    title: ClassVar[str | None] = None  # Swagger 里的标题,缺省用 operation 名
     Payload: ClassVar[type[RequestPayload]]
     # 默认不过期:事实是已发生的业务事实,丢弃等于丢数据;需要时效的 operation 自行声明
     ttl: ClassVar[timedelta | None] = None
@@ -51,11 +52,29 @@ class RequestOperation:
                 f"{type(self).__qualname__} must define a Payload(RequestPayload) class"
             )
 
+    @property
+    def example(self) -> dict | None:
+        examples = self.Payload.model_json_schema().get("examples")
+        return examples[0] if examples else None
+
 
 @dataclass(frozen=True)
 class Registered:
+    name: str
     endpoint: Endpoint
     operation: RequestOperation
+
+    def describe(self) -> dict:
+        """目录、联调下拉等所有展示的唯一来源,可直接序列化。"""
+        ttl = self.operation.ttl
+        return {
+            "name": self.name,
+            "endpoint": self.endpoint.value,
+            "title": self.operation.title or self.name,
+            "ttl_seconds": None if ttl is None else ttl.total_seconds(),
+            "payload_schema": self.operation.Payload.model_json_schema(),
+            "example": self.operation.example,
+        }
 
 
 _registry: dict[str, Registered] = {}
@@ -73,7 +92,13 @@ def request_operation(name: str, endpoint: Endpoint):
                 f"{type(_registry[name].operation).__qualname__} and "
                 f"{cls.__module__}.{cls.__qualname__}"
             )
-        _registry[name] = Registered(endpoint, cls())
+        operation = cls()
+        if (example := operation.example) is not None:
+            try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
+                operation.Payload.model_validate(example)
+            except ValueError as error:
+                raise ValueError(f"{cls.__qualname__}: example is invalid: {error}") from None
+        _registry[name] = Registered(name, endpoint, operation)
         return cls
 
     return register

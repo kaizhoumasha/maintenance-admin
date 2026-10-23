@@ -12,9 +12,12 @@ from fastapi import Body, Depends, FastAPI
 from app import integrations
 from app.controllers.dev_callback import router as callback_router
 from app.controllers.dev_mock_wms import router as mock_wms_router
+from app.controllers.dev_wms_request import wms_request_router
 from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
 from app.core.dev_scenarios import DevScenario, scenarios
 from app.core.routing import new_router
+from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+from app.integrations.wms_request.operation import operations
 from app.reliable.config import parse_reliable_config
 from app.schemas.dev_console import DevMessageOut, DevSubmitOut
 from app.services import dev_submit_service
@@ -80,7 +83,18 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     # Mock WMS 是 Transport 协议专用的,显式挂载,不走场景自动扫描;以后别的协议要 mock 再加一行
     app.include_router(mock_wms_router, prefix=prefix)
     app.include_router(callback_router, prefix=prefix)
-    if not parse_reliable_config(get_settings()).targets:
+    if operations():
+        app.include_router(wms_request_router(), prefix=prefix)
+    targets = parse_reliable_config(get_settings()).targets
+    missing = {FACTS_PROTOCOL, DECISIONS_PROTOCOL} - {t.protocol for t in targets.values()}
+    if missing:
+        logger.warning(
+            "dev console: RELIABLE_TARGETS has no target for protocol %s, triggering those "
+            'requests fails with 500. Example: \'{"targets":{"wms-facts":{"base_url":'
+            '"http://127.0.0.1:8000","protocol":"wms-facts"}}}\'',
+            ", ".join(sorted(missing)),
+        )
+    if not targets:
         logger.warning(
             "dev console mounted but RELIABLE_TARGETS has no target: submitting fails with 500. "
             'Example (mock WMS on this app): RELIABLE_TARGETS=\'{"targets":{"wms-transport":'

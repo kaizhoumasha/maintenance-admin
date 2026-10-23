@@ -28,3 +28,23 @@ def test_operations_must_declare_a_payload():
 
 def test_business_packages_are_discovered_by_request_module_name():
     assert "app.integrations.wms_transport.request" in candidate_modules()
+
+
+def test_describe_exposes_what_every_display_needs():
+    info = registry.lookup("example.fact.report@v1").describe()
+    assert info["name"] == "example.fact.report@v1" and info["endpoint"] == "facts"
+    assert info["title"] == "example.fact.report@v1"  # 没有标题时用 operation 名
+    assert info["ttl_seconds"] is None and info["example"] is None
+    assert set(info["payload_schema"]["properties"]) == {"task_id", "qty"}
+
+
+def test_an_invalid_example_fails_at_registration():
+    class Bad(RequestOperation):
+        class Payload(registry.RequestPayload):
+            qty: int
+            model_config = registry.ConfigDict(
+                strict=True, extra="forbid", json_schema_extra={"examples": [{"qty": "x"}]}
+            )
+
+    with pytest.raises(ValueError, match="example is invalid"):
+        request_operation("example.bad.example@v1", Endpoint.FACTS)(Bad)
