@@ -73,7 +73,8 @@ async def _answer(
     except (ValueError, KeyError, TypeError):
         return Response(status_code=400)  # 合同:无法解析的信封返回空 400
     if mode in success:
-        (status_code, code), extra = success[mode], {}
+        status_code, code = success[mode]
+        extra = {}
     else:
         status_code, code, extra = _FAILURES[mode]
     return JSONResponse(

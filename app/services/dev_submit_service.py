@@ -67,13 +67,13 @@ def message_out(m: ReliableMessage) -> DevMessageOut:
 async def messages_where(
     session: AsyncSession, column, value: str, not_found: str
 ) -> list[DevMessageOut]:
-    rows = await session.scalars(
+    query = (
         select(ReliableMessage)
         .where(column == value)
         .order_by(ReliableMessage.id)
         .execution_options(populate_existing=True)
     )
-    messages = list(rows)
+    messages = (await session.scalars(query)).all()
     if not messages:
         raise AppError(ErrorCode.NOT_FOUND, not_found)
     return [message_out(m) for m in messages]

@@ -69,6 +69,7 @@ class WmsEndpointAdapter:
         ):
             return UNKNOWN
         data = ack["data"]
+        data_fields = set(data)
         pair = (result.status_code, ack["code"])
         if pair in self.success:
             if data and pair != (200, "DECIDED"):
@@ -78,7 +79,7 @@ class WmsEndpointAdapter:
             return Verdict(VerdictKind.NOT_RECEIVED)
         if pair == (429, "BUSY"):
             wait = data.get("retry_after_ms")
-            if set(data) == {"retry_after_ms"} and type(wait) is int and 1 <= wait <= 60000:
+            if data_fields == {"retry_after_ms"} and type(wait) is int and 1 <= wait <= 60000:
                 return Verdict(VerdictKind.NOT_RECEIVED, retry_after_ms=wait)
             return UNKNOWN
         reason = data.get("reason_code")
@@ -86,15 +87,15 @@ class WmsEndpointAdapter:
             return UNKNOWN
         if (
             pair == (409, "CONFLICT")
-            and set(data) == {"reason_code"}
+            and data_fields == {"reason_code"}
             and reason in CONFLICT_REASONS
         ):
             return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.CONFLICT)
         if pair == (422, "REJECTED") and reason in REJECTION_REASONS:
             path = data.get("field_path")
-            if set(data) == {"reason_code"} or (
+            if data_fields == {"reason_code"} or (
                 reason == "INVALID_DATA"
-                and set(data) == {"reason_code", "field_path"}
+                and data_fields == {"reason_code", "field_path"}
                 and isinstance(path, str)
                 and 1 <= len(path) <= 256
                 and re.fullmatch(r"/(?:[^~\ud800-\udfff]|~[01])*", path)
