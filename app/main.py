@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
 from app.controllers.dev import include_dev_routers
+from app.controllers.ecs_callback import include_ecs_callback
 from app.controllers.health import router as health_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
@@ -76,6 +77,7 @@ app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(menus_router, prefix="/api/v1")
 app.include_router(health_router)
 include_wms_events(app, environment=settings.ENVIRONMENT)
+include_ecs_callback(app, environment=settings.ENVIRONMENT)
 include_dev_routers(app, environment=settings.ENVIRONMENT)
 
 _openapi = app.openapi
