@@ -1,6 +1,6 @@
 # ECS 事件回调接收设计
 
-状态:**设计待批准。实施前工程评审已做两轮(2026-10-24,均含外部独立意见),评审决定已并入正文;尚无实现,未运行。** · 依据:`wes_backend/docs/integration/third_party_integration_whitepaper.md`(v1.1,Approved)§1–2、§4.2、§5;[WMS 回调接收设计](2026-10-22-transport-callback-design.md);[ECS 接入指南](device-command-integration.md) · 范围:`POST /api/v1/callback/event` 的接收机制。结果回调、命令出站、状态查询另行设计。
+状态:**已实现(2026-10-24)。实施前工程评审两轮(均含外部独立意见),决定已并入正文;正文为设计时的表述,以代码和 `app/integrations/ecs_callback/` 包说明为准。验证:一次性本地 PostgreSQL 17 容器上全量 1771 通过、22 跳过(14 个 Redis 用例未运行)、0 失败;生产 PostgreSQL 与真实数据迁移、真实 ECS 联调未验证,详见 CHANGELOG「ECS 事件回调接收」。** · 依据:`wes_backend/docs/integration/third_party_integration_whitepaper.md`(v1.1,Approved)§1–2、§4.2、§5;[WMS 回调接收设计](2026-10-22-transport-callback-design.md);[ECS 接入指南](device-command-integration.md) · 范围:`POST /api/v1/callback/event` 的接收机制。结果回调、命令出站、状态查询另行设计。
 
 ## 1. 意图
 
@@ -116,9 +116,9 @@ pydantic 错误按下表翻译,只写路径、码和期望类型,**不回显值*
 ### 5.5 处理器契约
 
 ```python
-@ecs_event("SCAN_COMPLETED", data=ScanCompletedData)   # ScanCompletedData 继承 CallbackPayload
+@ecs_event("SCAN_COMPLETED", data=ScanCompletedData)  # ScanCompletedData 继承 CallbackPayload
 async def scan_completed(ctx: EcsEventContext, data: ScanCompletedData) -> None:
-    ...   # 返回 None 即 ACK
+    return None  # 业务写入在这里;返回 None 即 ACK
 ```
 
 - `data=Model` 可省略(白皮书里事件的 `data` 是可选字段):省略时不校验 `data`,处理器收到原始 `dict`(缺省为 `{}`),签名为 `async def handler(ctx, data: dict)`。

@@ -38,6 +38,8 @@ ECS 被动态路由、地址快照和客户端管理阻塞，任务见 E1/E2/E3�
                 ECS 按设备/命令关联（业务项目自建），Transport 按任务/事件版本关联
                 （已实现：POST /api/v1/wms/events，见 §7.2）
                 不能依靠读取可靠层表完成业务流程
+                ECS 设备事件入口（已实现）：POST /api/v1/callback/event，见 app/integrations/ecs_callback/ 与
+                2026-10-24-ecs-event-callback-design.md
 ```
 
 图中的静态目标链是模板的通用机制。实验只演示这条链；Transport 的正式实现见 `app/integrations/wms_transport/`，业务结果消费（T4）和真实联调条件按 T 任务验收。
