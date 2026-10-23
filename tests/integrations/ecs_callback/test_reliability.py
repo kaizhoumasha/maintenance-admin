@@ -48,7 +48,7 @@ def snapshot(request_id: str) -> CallbackSnapshot:
     )
 
 
-async def race(factory, handler_after_release):
+async def race(factory, wait_for_lock, handler_after_release):
     """A 的处理器写入业务行后停住,B 此时进入并阻塞在收据唯一索引上,再放行 A。"""
     inserted, release, calls = asyncio.Event(), asyncio.Event(), []
 
@@ -65,12 +65,22 @@ async def race(factory, handler_after_release):
 
     ecs_event("SCAN_COMPLETED")(handler)
     task_a = asyncio.create_task(receive(factory))
-    await asyncio.wait_for(inserted.wait(), 3)
-    task_b = asyncio.create_task(receive(factory))
-    await asyncio.sleep(0.3)  # B 已卡在唯一索引上(lock_timeout 为 5s)
-    assert not task_b.done()
-    release.set()
-    return calls, task_a, task_b
+    task_b = None
+    try:
+        await asyncio.wait_for(inserted.wait(), 3)
+        task_b = asyncio.create_task(receive(factory))
+        await wait_for_lock(task_b)  # 观察到 B 确实卡在 A 未提交的唯一索引项上
+        assert not task_b.done()
+        release.set()
+        async with asyncio.timeout(10):
+            results = await asyncio.gather(task_a, task_b, return_exceptions=True)
+    finally:
+        release.set()
+        pending = [t for t in (task_a, task_b) if t is not None]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    return calls, results
 
 
 async def rows(factory):
@@ -80,23 +90,20 @@ async def rows(factory):
     return receipts, sorted(ids)
 
 
-async def test_concurrent_identical_events_run_handler_once(pg_factory):
-    calls, task_a, task_b = await race(pg_factory, lambda: None)
-    responses = await asyncio.gather(task_a, task_b)
+async def test_concurrent_identical_events_run_handler_once(pg_factory, wait_for_lock):
+    calls, responses = await race(pg_factory, wait_for_lock, lambda: None)
     assert [(r.status_code, r.body) for r in responses] == [(200, ACK)] * 2
     assert sorted(r.outcome for r in responses) == ["duplicate", "received"]
     assert len(calls) == 1
     assert await rows(pg_factory) == (1, ["A"])
 
 
-async def test_waiter_takes_over_when_first_request_rolls_back(pg_factory):
+async def test_waiter_takes_over_when_first_request_rolls_back(pg_factory, wait_for_lock):
     def fail():
         raise RuntimeError("boom")
 
-    calls, task_a, task_b = await race(pg_factory, fail)
-    with pytest.raises(RuntimeError, match="boom"):
-        await task_a
-    resp_b = await task_b
+    calls, (error_a, resp_b) = await race(pg_factory, wait_for_lock, fail)
+    assert isinstance(error_a, RuntimeError) and str(error_a) == "boom"
     assert (resp_b.status_code, resp_b.body, resp_b.outcome) == (200, ACK, "received")
     assert len(calls) == 2  # A 失败一次,B 成功一次
     assert await rows(pg_factory) == (1, ["B"])
