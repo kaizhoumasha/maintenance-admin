@@ -59,7 +59,7 @@ class WmsRequests:
             raise UnknownOperation(f"operation {operation!r} is not registered")
         try:
             validate_uuid7(operation_id)
-            payload = registered.operation.Payload.model_validate(data).model_dump(mode="json")
+            payload = registered.data_model.model_validate(data).model_dump(mode="json")
             raw = json.dumps(
                 {
                     "operation_id": operation_id,
@@ -78,7 +78,7 @@ class WmsRequests:
             operation,
             operation_id,
             raw,
-            ttl=registered.operation.ttl,
+            ttl=registered.ttl,
         )
         return await self.outbox.enqueue(session, draft)
 

@@ -175,7 +175,7 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
         )
     )
     # 已接纳路径先写临时响应占住身份,处理器返回后在同一事务内覆盖;事务提交前对外不可见。
-    echo_for = getattr(handler, "echo", None)  # 手写结构化处理器可以没有 echo
+    echo_for = handler.echo if handler is not None else None
     echo = echo_for(payload["data"]) if echo_for and valid_envelope else {}
     reply = (
         _reply(422, operation_id, "REJECTED", {"reason_code": reason, **echo}, "rejected")

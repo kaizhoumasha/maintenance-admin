@@ -169,7 +169,18 @@ ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封
 
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
 
+#### 接入声明与排障
+
+三类接入统一为“选目录 → 新建文件 → 装饰器声明名称和 Payload”。ECS/WMS 回调声明异步处理函数，
+WMS 请求直接装饰 `RequestPayload` 模型。旧类式注册已移除，迁移方法见接入指南。
+文件名统一为 `name.lower().replace('.', '_').replace('@', '_') + '.py'`，导入期报错提供双方来源或
+正确文件名及修复方法。完整示例、协议差异和排障步骤见 [接入指南](docs/integrations/registration.md)。
+
 #### 联调控制台(仅 `ENVIRONMENT=local`)
+
+登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看 ECS 事件、WMS 回调和 WMS 请求的
+实际注册名称、来源文件/符号、local-only、请求端点和 Payload Schema。local-only 在发现入口记录；
+清单存在不代表消息执行或物理完成。应用启动失败时按启动异常中的修复路标处理。
 
 Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
 

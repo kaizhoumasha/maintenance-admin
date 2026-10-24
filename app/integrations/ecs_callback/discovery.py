@@ -6,7 +6,7 @@
 import pkgutil
 
 from app import integrations
-from app.core.module_tree import import_module_tree
+from app.integrations.registration import DEV_MODULES, import_registration_module
 
 
 def candidate_modules(environment: str) -> list[str]:
@@ -21,4 +21,4 @@ def candidate_modules(environment: str) -> list[str]:
 
 def load_event_modules(environment: str) -> None:
     for name in candidate_modules(environment):
-        import_module_tree(name)
+        import_registration_module(name, local_only=name.rsplit(".", 1)[-1] in DEV_MODULES)

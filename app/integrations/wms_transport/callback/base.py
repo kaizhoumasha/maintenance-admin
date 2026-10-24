@@ -1,37 +1,31 @@
+from collections.abc import Callable
+
 from sqlalchemy import select
 
-from app.integrations.wms_callback import Accepted, CallbackContext, CallbackOperation
+from app.integrations.wms_callback import Accepted, CallbackContext
 from app.models.transport import TransportTask
 
 from ..settle import settle_submitted
 from .apply import TaskCallbacks
 
 
-class TransportCallback(CallbackOperation):
-    echo_keys = ("transport_task_id",)
-
-    async def _locked_task(self, ctx: CallbackContext, task_id: str) -> TransportTask | None:
-        return await ctx.session.scalar(
-            select(TransportTask)
-            .where(TransportTask.transport_task_id == task_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-
-    async def execute(self, ctx: CallbackContext, payload):
-        data = ctx.parsed  # 已是 Payload 规范化后的 dict,不必再转一次
-        ack = {"transport_task_id": data["transport_task_id"]}
-        task = await self._locked_task(ctx, data["transport_task_id"])
-        if task is None:
-            ctx.note("UNKNOWN_TASK", transport_task_id=ack["transport_task_id"], data=data)
-            return ack
-        await settle_submitted(ctx.session, task.transport_task_id)  # 对端已知该任务,不必再重试提交
-        if task.frozen is None:
-            ctx.note("FROZEN_MISSING", transport_task_id=ack["transport_task_id"], data=data)
-            return ack
-        state = TaskCallbacks(task, ctx)
-        self.apply(state, data, ack)  # 判重为 Duplicate/Conflict 时直接抛出
-        return Accepted(ack)
-
-    def apply(self, state: TaskCallbacks, data: dict, ack: dict) -> None:
-        raise NotImplementedError
+async def apply_callback(
+    ctx: CallbackContext, apply: Callable[[TaskCallbacks, dict, dict], None]
+) -> Accepted | dict:
+    data = ctx.parsed  # 保留 Payload 规范化后的 dict
+    ack = {"transport_task_id": data["transport_task_id"]}
+    task = await ctx.session.scalar(
+        select(TransportTask)
+        .where(TransportTask.transport_task_id == data["transport_task_id"])
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if task is None:
+        ctx.note("UNKNOWN_TASK", transport_task_id=ack["transport_task_id"], data=data)
+        return ack
+    await settle_submitted(ctx.session, task.transport_task_id)  # 对端已知该任务,不必再重试提交
+    if task.frozen is None:
+        ctx.note("FROZEN_MISSING", transport_task_id=ack["transport_task_id"], data=data)
+        return ack
+    apply(TaskCallbacks(task, ctx), data, ack)  # 判重为 Duplicate/Conflict 时直接抛出
+    return Accepted(ack)

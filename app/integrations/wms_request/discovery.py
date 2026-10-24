@@ -7,7 +7,7 @@ import pkgutil
 from functools import cache
 
 from app import integrations
-from app.core.module_tree import import_module_tree
+from app.integrations.registration import import_registration_module
 
 
 def candidate_modules() -> list[str]:
@@ -20,4 +20,4 @@ def candidate_modules() -> list[str]:
 @cache
 def load_operation_modules() -> None:
     for name in candidate_modules():
-        import_module_tree(name)
+        import_registration_module(name)

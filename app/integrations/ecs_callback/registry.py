@@ -9,6 +9,12 @@ from dataclasses import dataclass, field
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.integrations.registration import (
+    RegistrationSource,
+    registration_source,
+    validate_function,
+    validate_registration_file,
+)
 from app.integrations.wms_callback.operation import CallbackPayload
 
 _EVENT_TYPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -34,27 +40,31 @@ class EcsEventContext:
 class Registered:
     func: object
     data_model: type[CallbackPayload] | None
+    registration_source: RegistrationSource
 
 
 _registry: dict[str, Registered] = {}
-
-
-def _where(func: object) -> str:
-    return f"{func.__module__}.{func.__qualname__}"  # type: ignore[attr-defined]
 
 
 def ecs_event(event_type: str, data: type[CallbackPayload] | None = None):
     """注册 `async def handler(ctx: EcsEventContext, data) -> None`;返回原函数。"""
 
     def register(func):
-        if not _EVENT_TYPE.match(event_type):
-            raise ValueError(f"invalid event type {event_type!r}")
+        if not isinstance(event_type, str) or not _EVENT_TYPE.fullmatch(event_type):
+            source = registration_source(func)
+            raise ValueError(
+                f"{source.location}: invalid event type {event_type!r}; "
+                "修复: 使用大写字母开头的大写字母、数字或下划线，例如 SCAN_COMPLETED"
+            )
+        source = validate_registration_file(event_type, func)
         if event_type in _registry:
             raise ValueError(
-                f"duplicate event type {event_type!r}: {_where(_registry[event_type].func)} "
-                f"and {_where(func)}"
+                f"duplicate event type {event_type!r}: "
+                f"{_registry[event_type].registration_source.location} and {source.location}; "
+                "修复: 删除重复声明或更正 event_type，使每个名称只注册一次"
             )
-        _registry[event_type] = Registered(func, data)
+        validate_function(func, data, optional_data=True)
+        _registry[event_type] = Registered(func, data, source)
         return func
 
     return register

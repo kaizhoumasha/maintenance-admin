@@ -28,6 +28,10 @@ def isolated(monkeypatch):
     monkeypatch.setattr(registry, "_registry", {})
 
 
+async def unexpected_handler(ctx, payload):
+    raise AssertionError("validation or replay must stop before execution")
+
+
 async def receive(factory, raw: bytes):
     async with factory() as session, session.begin():
         return await receive_ecs_event(session, raw)
@@ -87,7 +91,7 @@ async def test_registered_data_failure_is_400_with_data_path(callback_store):
     class Model(CallbackPayload):
         bin_code: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(lambda ctx, data: None)
+    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
     resp = await receive(callback_store, json.dumps({**BASE, "data": {}}).encode())
     assert resp.status_code == 400
     assert resp.body["error_detail"]["issues"] == [
@@ -100,7 +104,7 @@ async def test_existing_receipt_short_circuits_before_data_validation(callback_s
     class Model(CallbackPayload):
         bin_code: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(lambda ctx, data: None)
+    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
     envelope = EcsEventEnvelope.model_validate(BASE)
     identity = event_identity(envelope)
     async with callback_store() as session, session.begin():
@@ -160,7 +164,7 @@ async def test_replay_after_handler_validation_tightened_still_acks(callback_sto
     class Model(CallbackPayload):
         barcode: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(lambda ctx, data: None)
+    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
     resp = await receive(callback_store, raw)
     assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
 

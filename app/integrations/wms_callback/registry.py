@@ -5,11 +5,15 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.operation_names import is_operation_name
+from app.integrations.registration import (
+    operation_source,
+    validate_function,
+)
 
 
 class InvalidPayload(Exception):
@@ -73,37 +77,41 @@ class CallbackContext:
         self.notes.append({"reason_code": reason_code, **detail})
 
 
-_registry: dict[str, Any] = {}
+if TYPE_CHECKING:
+    from .operation import Registered
 
 
-def _where(handler: object) -> str:
-    return f"{type(handler).__module__}.{type(handler).__qualname__}"
+_registry: dict[str, "Registered"] = {}
 
 
-def callback_operation(name: str):
-    """注册处理器类。类需提供 `parse(data) -> dict`(纯函数,非法抛 `InvalidPayload`)
-    和 `async handle(ctx) -> Outcome`(在保存点内写业务行,不得自行 commit/rollback)。"""
+def callback_operation(
+    name: str,
+    *,
+    data: type[BaseModel],
+    title: str | None = None,
+    echo_keys: tuple[str, ...] = (),
+):
+    """注册 async handler(ctx, payload);返回原函数，Payload 校验及结果转换由注册项完成。"""
 
-    def register(cls):
-        if not is_operation_name(name):
-            raise ValueError(f"invalid operation name {name!r}")
-        for method in ("parse", "handle"):
-            if not callable(getattr(cls, method, None)):
-                raise TypeError(f"{cls.__qualname__} must define {method}()")
+    def register(target):
+        source = operation_source(name, target)
         if name in _registry:
             raise ValueError(
-                f"duplicate operation {name!r}: {_where(_registry[name])} "
-                f"and {cls.__module__}.{cls.__qualname__}"
+                f"duplicate operation {name!r}: {_registry[name].registration_source.location} "
+                f"and {source.location}; 修复: 删除重复声明或更正 operation，使每个名称只注册一次"
             )
-        _registry[name] = cls()
-        return cls
+        from .operation import Registered
+
+        validate_function(target, data)
+        _registry[name] = Registered(target, data, title, echo_keys, source)
+        return target
 
     return register
 
 
-def lookup(name: str):
+def lookup(name: str) -> "Registered | None":
     return _registry.get(name)
 
 
-def operations() -> dict[str, Any]:
+def operations() -> dict[str, "Registered"]:
     return dict(_registry)

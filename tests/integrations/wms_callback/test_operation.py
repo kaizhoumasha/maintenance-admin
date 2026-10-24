@@ -3,7 +3,6 @@ from pydantic import ConfigDict
 
 from app.integrations.wms_callback import (
     Accepted,
-    CallbackOperation,
     CallbackPayload,
     Conflict,
     InvalidPayload,
@@ -25,14 +24,12 @@ class Task(CallbackPayload):
     retries: int = 0
 
 
-def make(execute_body, payload=Task):
-    class Op(CallbackOperation):
-        Payload = payload
+def make(result_for, payload=Task):
+    @callback_operation("example.task@v1", data=payload)
+    async def handler(ctx, payload):
+        return result_for(payload)
 
-        async def execute(self, ctx, payload):
-            return execute_body(payload)
-
-    return Op()
+    return registry.lookup("example.task@v1")
 
 
 def test_parse_normalizes_defaults_and_drops_redundant_fields():
@@ -47,19 +44,16 @@ def test_parse_is_strict_about_json_types(data):
     assert error.value.reason_code == "INVALID_EVIDENCE"
 
 
-def test_example_comes_from_the_payload_schema():
-    class Bare(CallbackPayload):
-        value: int
-
-    assert make(lambda p: None).example == {"task_id": "t1"}
-    assert make(lambda p: None, Bare).example is None
+@pytest.mark.parametrize("payload,example", [(Task, {"task_id": "t1"}), (CallbackPayload, None)])
+def test_example_comes_from_the_payload_schema(payload, example):
+    assert make(lambda p: None, payload).example == example
 
 
 @pytest.mark.parametrize(
     ("result", "expected"),
     [(None, Accepted), ({"id": 1}, Accepted), (Conflict({"x": 1}), Conflict)],
 )
-async def test_handle_turns_the_execute_result_into_an_outcome(result, expected):
+async def test_handle_turns_the_handler_result_into_an_outcome(result, expected):
     op = make(lambda p: result)
 
     class Ctx:
@@ -69,18 +63,6 @@ async def test_handle_turns_the_execute_result_into_an_outcome(result, expected)
     assert isinstance(outcome, expected)
     if isinstance(result, dict):
         assert outcome.data == result
-
-
-def test_operation_must_declare_payload_and_override_execute():
-    with pytest.raises(TypeError, match="Payload"):
-        callback_operation("example.broken@v1")(type("NoPayload", (CallbackOperation,), {}))
-
-    class NoExecute(CallbackOperation):
-        Payload = Task
-
-    with pytest.raises(TypeError, match="execute"):
-        callback_operation("example.broken@v1")(NoExecute)
-    assert registry.lookup("example.broken@v1") is None
 
 
 def test_outcomes_can_be_raised_or_returned():

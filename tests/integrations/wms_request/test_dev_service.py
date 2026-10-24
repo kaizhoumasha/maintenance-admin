@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.core.errors import AppError, ErrorCode
 from app.core.identifiers import uuid7
-from app.integrations.wms_request import Endpoint, RequestOperation, RequestPayload
+from app.integrations.wms_request import Endpoint, RequestPayload
 from app.integrations.wms_request import operation as registry
 from app.models import ReliableMessage
 from app.services import dev_wms_request_service
@@ -19,9 +19,8 @@ def use_the_fixture_requests(monkeypatch, wms):
 
 @pytest.fixture
 def dated():
-    class Dated(RequestOperation):
-        class Payload(RequestPayload):
-            at: datetime
+    class Dated(RequestPayload):
+        at: datetime
 
     registry.request_operation("example.fact.dated@v1", Endpoint.FACTS)(Dated)
     return "example.fact.dated@v1"

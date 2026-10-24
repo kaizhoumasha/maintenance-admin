@@ -26,7 +26,7 @@ async def send(
     registered = lookup(operation)
     try:
         # 请求体是 JSON:按 JSON 模式严格校验(ISO 字符串可以成为 datetime),再以 Python 对象交给 send
-        payload = registered.operation.Payload.model_validate_json(json.dumps(data))
+        payload = registered.data_model.model_validate_json(json.dumps(data))
     except ValidationError as error:
         raise AppError(ErrorCode.INVALID_REQUEST, str(error)) from error
     reference = await commit_or_map(

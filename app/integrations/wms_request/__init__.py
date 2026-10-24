@@ -39,14 +39,15 @@ Transport 业务,在 `wms_transport`。
 ## 怎么新增一个 operation
 
 在 `app/integrations/<业务>/request/` 目录里加一个文件,一个 operation 一个文件,整个目录自动导入。
-文件名是注册名把 `.` 和 `@` 换成 `_`,有测试检查两者一致。例如下面这个 operation 写在
+文件名是注册名把 `.` 和 `@` 换成 `_`,导入期检查两者一致。例如下面这个 operation 写在
 `app/integrations/<业务>/request/<域>_<名称>_v1.py`:
 
     @request_operation("域.名称@v1", Endpoint.FACTS)
-    class MyFact(RequestOperation):
-        ttl = None                              # 可选;默认不过期
-        class Payload(RequestPayload):
-            task_id: str
+    class MyFact(RequestPayload):
+        task_id: str
+
+可选装饰器参数 title=、ttl= 声明标题及有效期；注册项直接保存模型与元数据。
+完整接入步骤与注册清单排障见 docs/integrations/registration.md。
 
 只有一两个很小的 operation 时,也可以用单个 `request.py`,发现逻辑两种形式都认。
 调用方保存自己的业务记录和 `operation_id`(小写 canonical UUIDv7),在同一个事务里调用 `send`。
@@ -82,7 +83,6 @@ from .adapter import ADAPTERS, DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from .operation import (
     Endpoint,
     InvalidRequestPayload,
-    RequestOperation,
     RequestPayload,
     UnknownOperation,
     request_operation,
@@ -95,7 +95,6 @@ __all__ = [
     "FACTS_PROTOCOL",
     "Endpoint",
     "InvalidRequestPayload",
-    "RequestOperation",
     "RequestPayload",
     "UnknownOperation",
     "WmsRequests",
