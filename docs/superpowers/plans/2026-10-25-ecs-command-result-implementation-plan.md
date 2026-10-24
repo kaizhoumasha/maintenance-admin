@@ -1,6 +1,6 @@
 # ECS 命令与结果闭环实施计划及 develop 核对
 
-> **执行状态：** P1 实现已在 `24d33bf` 提交，后台摘要诊断修复与全局统一日志诊断已在 `8f37387` 提交；合并前评审发现的两个日志 P2 问题及回归测试、simplify 已完成隔离验证。两个 P2 修复已在 `968c9d4` 提交；用户随后授权 SHIP 与全面评审，功能分支已推送，PR 由 SHIP 主流程创建。本机数据库迁移、真实设备发送、合并和部署仍不在本轮范围。下列进度以实际文件和测试为准，不把隔离机制验收等同于供应商或现场验收。
+> **执行状态：** P1、后台日志诊断、两个日志 P2 修复及回归已完成，PR #22 已合并到 develop，合并提交 `ed9005ff0c12e6b090cfcf6cb19ffa3df4a44eea`。合并提交 CI 为 2054 passed、11 skipped，Ruff/格式通过；本地 develop 已快进同步，原功能分支已清理。真实供应商、现场设备、生产部署与数据库升级未验收。当前仅授权修正文档并补齐下一阶段设计/计划，不授权新代码、提交、推送、迁移或真实发送。
 
 **Goal:** 在业务事务内登记冻结 ECS 命令，通过唯一可靠 Sender 投递，持久接收关联结果，并向授权消费方公开可区分接纳与物理结果的查询。
 
@@ -8,22 +8,24 @@
 
 **Tech Stack:** Python 3.13+、FastAPI、SQLAlchemy async、Alembic、现有 HTTPX 封装、pytest/pytest-asyncio；不新增依赖或重试框架。
 
-**Spec:** ../specs/2026-10-25-ecs-command-result-design.md（工作区版本，不仅是暂存版本）。
+**Spec:** [ECS P1 设计](../specs/2026-10-25-ecs-command-result-design.md)（当前工作区状态修订版；原协议与事务基线不变）。
 
-**Source SHA-256:** `464fb5732293103451a7b1ded7e3474992969c5b69341f73a88dd4ee6185b8a3`。
+**设计期源稿 SHA-256（历史）：** `464fb5732293103451a7b1ded7e3474992969c5b69341f73a88dd4ee6185b8a3`。当前状态修订版 SHA-256 见下文；仅历史摘要不再作为当前文档一致性证明。
 
-**Status:** P1_AND_DIAGNOSTICS_ISOLATION_VERIFIED。实现分支 `feature/ecs-command-result-p1` 基于下述 develop 基线；S1/S2、评审修复及后台日志优化均已实现；统一安全诊断已接入 HTTP、Sender、维护与 Celery；本轮补齐 Celery 空 throws 与 Sender 同 SQLSTATE 对象变化的诊断边界。SHIP 最终完整隔离回归为 **2054 passed, 11 skipped**；功能分支已推送，未迁移本机数据库、未启用真实设备发送。
+**Status:** P1_MERGED_AND_MERGE_CI_VERIFIED，develop @ `ed9005f`。原实现分支 `feature/ecs-command-result-p1` 已合并并清理；S1/S2、日志诊断及相关回归已完成。SHIP 隔离回归和合并 CI 均为 **2054 passed, 11 skipped**；未迁移本机数据库、未启用真实设备发送。下一阶段见[隔离接入设计](../specs/2026-10-25-ecs-first-consumer-isolation-design.md)与[实施计划](2026-10-25-ecs-first-consumer-isolation-plan.md)，输入尚待确认。
+
+**当前状态修订版设计 SHA-256:** `9de88d49ebc1505f074a2e40c59e9522473835d2ecacd76094a4782bc67f89bb`。
 
 ## Global Constraints
 
-- 基线是 develop @ `9f912d6cccf36d821e05b6424b65fd5ea5d229ae`；源稿 §1.2 的 c65c014/注册暂存快照已过时。当前函数式注册已合并，旧 CallbackOperation/RequestOperation 不能作为新依赖。
+- 原 P1 实施基线是 develop @ `9f912d6cccf36d821e05b6424b65fd5ea5d229ae`；源稿 §1.2 的 c65c014/注册暂存快照已过时。当前函数式注册已合并，旧 CallbackOperation/RequestOperation 不能作为新依赖。
 - 命令 `POST /api/v1/device/command`；结果 `POST /api/v1/callback/result`；Event 原语义不动；Status 仅诊断并延后。
 - 请求闭集 `device_code, command_code, task_type, priority, timeout, timestamp, params`；priority 固定严格整数 1；核心整数排除 bool；单消息 256 KiB；无 source 双协议兼容。
 - `command_code` 全局唯一；业务调用键独立；时间、地址、协议、策略、附录和请求字节首次冻结。ACK、可靠 DONE、设备 SUCCESS、消费方业务完成各自独立。
 - UNKNOWN/中断不自动重放；HELD 不领取、不普通 resume、不 TTL/终态清理；不以历史失败阻塞同设备的新独立有效意图。
 - 所有双表/多表状态变更在一个数据库事务；锁顺序为命令 → 原授权（门禁才需要）→ 消息 → 结果收据。不持锁发 HTTP、获取/关闭客户端。
 - 不新增库存逻辑、WorkLine、取消、纠正版本、回放、结果总线、人工重发接口、真实设备附录或 ECS 交互控制台。
-- ECS P1 已在 `24d33bf` 提交，全局安全诊断已在 `8f37387` 提交。本轮提交仅包含两个日志 P2 修复、回归测试、simplify 与本计划进度；不重排其他待办。其他改动及 stash 保留；本轮 SHIP 已获推送与创建 PR 授权，合并、部署、本机迁移和真实设备发送仍需单独授权。
+- P1（`24d33bf`）、全局安全诊断（`8f37387`）与两个日志 P2 修复（`968c9d4`）已随 PR #22 合并；历史任务完成记录保留。本次只修正文档和下一阶段计划，不重排其他待办，保留其他改动、暂存区和 stash。部署、本机迁移和真实设备发送仍需单独授权。
 
 ## 已确认并同步修正的两项
 
@@ -45,7 +47,7 @@
 
 PostgreSQL 官方明确 NOWAIT/SKIP LOCKED 只约束行锁，所需表锁仍正常等待；lock_timeout 覆盖表、索引和行锁，statement_timeout 覆盖整条语句。来源见本文末尾。
 
-## 当前实现可以复用与不能照搬的接缝
+## 原 P1 实施前的接缝分析（历史，实际完成情况见下列任务）
 
 | 当前文件/入口 | 已有能力 | ECS 必须增加/隔离的行为 |
 |---|---|---|
@@ -142,7 +144,7 @@ PostgreSQL 官方明确 NOWAIT/SKIP LOCKED 只约束行锁，所需表锁仍正�
 - [x] 完整隔离回归 **2050 passed, 11 skipped**；Ruff lint/format 与 `git diff --check` 通过。
 - [ ] 本机/部署库升级及版本切换：本轮明确不执行。仍须先停用所有旧 Sender/维护进程，再迁移并启新版本；旧二进制不能读取新快照/HOLD。
 - [ ] 供应商合同、真实路由授权、回调来源限制及现场设备验收：保持下文 C1–C7 门槛，不启用真实发送。
-- [x] 用户已单独授权本轮最终改动重新暂存并提交；推送/合并/部署不在本轮授权范围。
+- [x] 原实施阶段的命名提交授权已执行；后续 SHIP 与合并由用户另行授权，并已完成 PR #22。服务器部署未执行；当前文档任务不授权提交或推送。
 
 ## 后台错误日志优化与 simplify
 
@@ -152,7 +154,7 @@ PostgreSQL 官方明确 NOWAIT/SKIP LOCKED 只约束行锁，所需表锁仍正�
 - [x] ECS simplify 合并 SQLite 保存点前的事务准备与重复对账状态更新，简化等价状态分支；日志 simplify 合并结构化字段与冗余空值保护。协议、事务、幂等、重试及未知交付语义保持不变。
 - [x] 初轮 `tests/reliable/test_sender_logging.py` 新增 13 项回归，连同 `test_sender.py` 的脱敏/轮询回归通过；当轮 simplify 前后相关回归均为 25 passed, 17 skipped。后续摘要诊断修复和全局统一的最新证据见下节。
 
-## 后台诊断修复与全局统一（本轮）
+## 后台诊断修复与全局统一（已完成阶段）
 
 - [x] 摘要诊断缺失已修复：周期摘要保留 SQLSTATE、驱动类型、受限缺表/缺列对象名、项目内调用位置和修复提示；错误变化先使用旧诊断汇总，不回显任意驱动消息、SQL、参数、异常链或源码。
 - [x] `app/diagnostics.py` 统一安全字段、文本格式与堆栈，不读取配置、不访问数据库、不管理任务状态；上下文仅接收白名单标量元数据，拒绝密码/参数字典及诊断字段覆盖。
@@ -199,13 +201,22 @@ Task 1–7 是分层验证点，当前已完成统一 P1 隔离机制验收；�
 
 ## 本轮验证与限制
 
-- 设计稿内容 SHA-256 与上文一致；未修改 ECS/WMS wire 合同。Task 1–7 的实现与隔离验收完成，Task 8 的本机迁移及现场步骤明确保留未完成。
+- 当前设计稿状态文字已同步 P1 实现/合并事实，SHA-256 与上文当前摘要一致；原设计期摘要保留为历史。未修改 ECS/WMS wire 合同。Task 1–7 的实现与隔离验收完成，Task 8 的本机迁移及现场步骤明确保留未完成。
 - 最新完整验证（SHIP，含补齐的 FAILED 结果与首次缺原附录回归）：显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向独立临时 PostgreSQL/Redis，执行 `uv run pytest -q -rs`，结果 **2054 passed, 11 skipped in 105.76s**。11 个跳过均为 PostgreSQL 专用用例的 SQLite 参数，对应 PostgreSQL 参数通过。
 - `uv run ruff check .`、`uv run ruff format --check .`、`git diff --check` 通过。临时测试容器及其匿名卷已清理，未操作现有开发存储。
 - PostgreSQL 专项证据包括：创建/结果竞争、消费唯一键、表锁 deadline、授权锁顺序、事务失败回滚与迁移往返；HTTP 仅使用隔离模拟对端；另使用实际一次性 Redis broker/result backend 与 Celery solo worker 验证失败/重试，不代表生产 prefork、供应商去重或物理完成。
 - 原仅文档评审阶段的 75 passed / 29 skipped 不再作为当前验收证据；未执行的供应商请求、真实设备、现场/生产回调验证仍然未验收。
-- 本机开发库尚未执行 `a025a20261025`；此前只读复现的缺列故障须按接入指南的停机迁移顺序另行处理。日志优化只改善排障和降噪，不消除数据库版本差异。
-- 本轮 SHIP 已完成原生工程/对抗评审，未发现新增缺陷；外部结构化及对抗评审均在 9 分钟后超时，并报告 `unrecognized_model: glm-5.2`，明确保留为缺失覆盖。已推送功能分支；PR 由主流程创建，不合并、不部署、不迁移本机数据库、不启用真实设备发送，保留其他改动及 stash。
+- 本次未查询或迁移本机开发库；历史验收记录为本机库未执行 `a025a20261025`，不将此历史记录冒充当前数据库检查。缺列故障须按接入指南的停机迁移顺序另行处理。日志优化只改善排障和降噪，不消除数据库版本差异。
+- 本轮 SHIP 已完成原生工程/对抗评审，未发现新增缺陷；外部结构化及对抗评审均在 9 分钟后超时，并报告 `unrecognized_model: glm-5.2`，明确保留为缺失覆盖。PR #22 随后已获单独授权并合并到 develop；未部署、未迁移本机数据库、未启用真实设备发送，保留其他改动及 stash。
+
+## 合并落地与下一阶段
+
+- [x] [PR #22](https://github.com/kaizhoumasha/maintenance-admin/pull/22) 于 2026-10-24 21:13:31 UTC（北京时间 2026-10-25 05:13:31）合并，双父 merge commit 为 `ed9005ff0c12e6b090cfcf6cb19ffa3df4a44eea`。
+- [x] [合并提交 CI #40133270990](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40133270990) 对上述精确 SHA 通过：2054 passed、11 skipped in 186.91s；Ruff/格式通过。11个跳过是SQLite参数下不适用的PostgreSQL用例，对应PostgreSQL参数通过。
+- [x] 本地 develop 已快进到已验收合并提交，已合并的本地/远端 feature 分支已清理；代码内容、暂存区和 stash 未丢失。没有服务器部署、重启或现场设备验收。
+- [x] 用户已选择首个消费项目单设备、单动作隔离接入方向；本次只形成下一阶段文档，不改变 P1 协议/事务/幂等/未知交付约定。
+- [ ] 新设计中的 I1–I8 待项目/业务/协议/环境负责人提供证据；未指定消费项目，不默认使用相邻仓库或测试设备。
+- [ ] 输入绑定后的设计和文件级计划待审阅，代码实施需另行授权；真实发送仍须关闭 C1/C2/C3/C5、来源限制及适用发布/现场门槛。
 
 ## 参考依据
 
