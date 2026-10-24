@@ -18,7 +18,7 @@ def _task_failed(sender=None, task_id=None, exception=None, **kwargs):
             exception,
             component="celery",
             phase="execute",
-            level=logging.INFO if isinstance(exception, sender.throws) else logging.ERROR,
+            level=logging.INFO if isinstance(exception, sender.throws or ()) else logging.ERROR,
             context={"task": sender.name, "task_id": task_id},
         )
 

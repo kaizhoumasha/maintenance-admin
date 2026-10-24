@@ -8,9 +8,10 @@ from sqlalchemy.exc import ProgrammingError
 from app.reliable.sender import Sender
 
 
-def database_error(code, message="private_driver_message"):
+def database_error(code, message="private_driver_message", *, constraint=None):
     cause = RuntimeError(message)
     cause.sqlstate = code
+    cause.constraint_name = constraint
     return ProgrammingError("private_sql", {"secret": "private_parameter"}, cause)
 
 
@@ -230,3 +231,50 @@ async def test_sender_instances_do_not_share_failure_or_recovery_state(caplog):
     assert len([r for r in records if "scan failed" in r.getMessage()]) == 2
     recovered = [r for r in records if "scan recovered" in r.getMessage()]
     assert len(recovered) == 1 and recovered[0].failure_count == 1
+
+
+@pytest.mark.parametrize("field,code", [("missing", "42703"), ("constraint", "23505")])
+async def test_changed_database_object_is_reported_before_summary_interval(caplog, field, code):
+    if field == "missing":
+        old = database_error(code, "column old_object does not exist")
+        new = database_error(code, "column new_object does not exist")
+    else:
+        old = database_error(code, constraint="old_object")
+        new = database_error(code, constraint="new_object")
+    records, calls = await scan_script(
+        caplog,
+        [("claim", old, 1)] * 2 + [("claim", new, 1)] * 2 + [(None, None, 1)],
+    )
+    failed = [r for r in records if "scan failed" in r.getMessage()]
+    assert len(failed) == 2
+    assert [getattr(r, field) for r in failed] == ["old_object", "new_object"]
+    summaries = [r for r in records if "scan failure summary" in r.getMessage()]
+    assert len(summaries) == 1 and getattr(summaries[0], field) == "old_object"
+    assert summaries[0].failure_count == 2 and summaries[0].suppressed_count == 1
+    assert "reason=changed" in summaries[0].getMessage()
+    recovered = [r for r in records if "scan recovered" in r.getMessage()]
+    assert len(recovered) == 1 and getattr(recovered[0], field) == "new_object"
+    assert recovered[0].failure_count == 2 and recovered[0].suppressed_count == 1
+    assert len([c for c in calls if c[1] == "claim"]) == 5
+    assert "private_" not in caplog.text
+
+
+@pytest.mark.parametrize("field,code", [("missing", "42703"), ("constraint", "23505")])
+async def test_same_safe_database_object_still_suppresses_message_variants(caplog, field, code):
+    if field == "missing":
+        first = database_error(code, "column stable_column does not exist")
+        second = database_error(code, 'column "stable_column" does not exist')
+    else:
+        first = database_error(code, "private_first_driver_message", constraint="stable_constraint")
+        second = database_error(
+            code, "private_second_driver_message", constraint="stable_constraint"
+        )
+    records, _ = await scan_script(
+        caplog, [("claim", first, 60), ("claim", second, 1), (None, None, 1)]
+    )
+    assert len([r for r in records if "scan failed" in r.getMessage()]) == 1
+    summaries = [r for r in records if "scan failure summary" in r.getMessage()]
+    assert len(summaries) == 1 and summaries[0].failure_count == 2
+    recovered = [r for r in records if "scan recovered" in r.getMessage()]
+    assert len(recovered) == 1 and recovered[0].failure_count == 2
+    assert "private_" not in caplog.text

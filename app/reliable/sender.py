@@ -150,7 +150,17 @@ class Sender:
         cause = error_cause(error)
         frames = list(traceback.walk_tb(error.__traceback__))
         origin = (frames[-1][0].f_code, frames[-1][1]) if frames else None
-        key = (self._scan_phase, type(error), type(cause), getattr(cause, "sqlstate", None), origin)
+        diagnostic = diagnose(error)
+        key = (
+            self._scan_phase,
+            type(error),
+            type(cause),
+            getattr(cause, "sqlstate", None),
+            origin,
+            diagnostic.get("missing"),
+            diagnostic.get("constraint"),
+            diagnostic.get("origin"),
+        )
         failure = self._scan_failure
         if failure is not None and failure.key == key:
             failure.count += 1
@@ -159,7 +169,6 @@ class Sender:
                 self._summarize_scan_failure(now, "continuing")
             return
         self._summarize_scan_failure(now, "changed")
-        diagnostic = diagnose(error)
         self._scan_failure = _ScanFailure(key, self._scan_phase, now, now, diagnostic)
         _log_failure(
             "reliable scan failed",

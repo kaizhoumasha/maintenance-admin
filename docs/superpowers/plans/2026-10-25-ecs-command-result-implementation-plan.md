@@ -1,6 +1,6 @@
 # ECS 命令与结果闭环实施计划及 develop 核对
 
-> **执行状态：** P1 实现已在 `24d33bf` 提交；后续后台摘要诊断修复、全局统一日志诊断及 simplify 已完成隔离验证。用户已授权将最终改动与本计划进度一起暂存并提交；推送、本机数据库迁移和真实设备发送仍未授权。下列进度以实际文件和测试为准，不把隔离机制验收等同于供应商或现场验收。
+> **执行状态：** P1 实现已在 `24d33bf` 提交，后台摘要诊断修复与全局统一日志诊断已在 `8f37387` 提交；合并前评审发现的两个日志 P2 问题及回归测试、simplify 已完成隔离验证。用户已授权将本轮最终改动与本计划进度一起暂存并提交；推送、本机数据库迁移和真实设备发送仍未授权。下列进度以实际文件和测试为准，不把隔离机制验收等同于供应商或现场验收。
 
 **Goal:** 在业务事务内登记冻结 ECS 命令，通过唯一可靠 Sender 投递，持久接收关联结果，并向授权消费方公开可区分接纳与物理结果的查询。
 
@@ -12,7 +12,7 @@
 
 **Source SHA-256:** `464fb5732293103451a7b1ded7e3474992969c5b69341f73a88dd4ee6185b8a3`。
 
-**Status:** P1_AND_DIAGNOSTICS_ISOLATION_VERIFIED。实现分支 `feature/ecs-command-result-p1` 基于下述 develop 基线；S1/S2、评审修复及后台日志优化均已实现；本轮统一安全诊断接入 HTTP、Sender、维护与 Celery。最近完整隔离回归为 **2045 passed, 11 skipped**；提交已获授权，未推送、未迁移本机数据库、未启用真实设备发送。
+**Status:** P1_AND_DIAGNOSTICS_ISOLATION_VERIFIED。实现分支 `feature/ecs-command-result-p1` 基于下述 develop 基线；S1/S2、评审修复及后台日志优化均已实现；统一安全诊断已接入 HTTP、Sender、维护与 Celery；本轮补齐 Celery 空 throws 与 Sender 同 SQLSTATE 对象变化的诊断边界。最近完整隔离回归为 **2050 passed, 11 skipped**；提交已获授权，未推送、未迁移本机数据库、未启用真实设备发送。
 
 ## Global Constraints
 
@@ -23,7 +23,7 @@
 - UNKNOWN/中断不自动重放；HELD 不领取、不普通 resume、不 TTL/终态清理；不以历史失败阻塞同设备的新独立有效意图。
 - 所有双表/多表状态变更在一个数据库事务；锁顺序为命令 → 原授权（门禁才需要）→ 消息 → 结果收据。不持锁发 HTTP、获取/关闭客户端。
 - 不新增库存逻辑、WorkLine、取消、纠正版本、回放、结果总线、人工重发接口、真实设备附录或 ECS 交互控制台。
-- ECS P1 已在 `24d33bf` 提交。本轮提交仅包含后续后台摘要诊断修复、全局安全诊断、simplify、相关文档/计划与回归测试；不重排其他待办。其他改动及 stash 保留；推送、部署、本机迁移和真实设备发送仍需单独授权。
+- ECS P1 已在 `24d33bf` 提交，全局安全诊断已在 `8f37387` 提交。本轮提交仅包含两个日志 P2 修复、回归测试、simplify 与本计划进度；不重排其他待办。其他改动及 stash 保留；推送、部署、本机迁移和真实设备发送仍需单独授权。
 
 ## 已确认并同步修正的两项
 
@@ -139,7 +139,7 @@ PostgreSQL 官方明确 NOWAIT/SKIP LOCKED 只约束行锁，所需表锁仍正�
 - [x] 默认不装配正式 ECS 路由、附录或客户端；未装配结果入口返回 503，不能 ACK 掉未处理结果。
 - [x] README、AGENTS、`.env.example`、接入指南、设计稿及 TODOS 中的 ECS 伪造结果风险说明与实现同步；保持原待办格式。
 - [x] A1–A26 的隔离机制证据覆盖身份/事务、协议矩阵、HOLD、锁/租约、保留期、查询/消费和 STATIC/WMS 兼容，分布于上述 ECS 测试及现有 WMS request、Transport、Event 和可靠层测试；未把供应商或现场门槛标为完成。
-- [x] 完整隔离回归 **2045 passed, 11 skipped**；Ruff lint/format 与 `git diff --check` 通过。
+- [x] 完整隔离回归 **2050 passed, 11 skipped**；Ruff lint/format 与 `git diff --check` 通过。
 - [ ] 本机/部署库升级及版本切换：本轮明确不执行。仍须先停用所有旧 Sender/维护进程，再迁移并启新版本；旧二进制不能读取新快照/HOLD。
 - [ ] 供应商合同、真实路由授权、回调来源限制及现场设备验收：保持下文 C1–C7 门槛，不启用真实发送。
 - [x] 用户已单独授权本轮最终改动重新暂存并提交；推送/合并/部署不在本轮授权范围。
@@ -166,6 +166,15 @@ PostgreSQL 官方明确 NOWAIT/SKIP LOCKED 只约束行锁，所需表锁仍正�
 - [x] 最终完整隔离回归 **2045 passed, 11 skipped in 104.07s**；Ruff lint/format 与 diff 检查通过。临时 PostgreSQL/Redis 容器及匿名卷已清理。
 - [ ] 生产 prefork 进程池及现场设备验证未执行；日志脱敏不代表 Celery 结果后端或事件数据也已脱敏。真实发送、本机迁移及推送不在本轮范围。
 
+## 合并前日志 P2 修复与 simplify
+
+- [x] Celery `throws=None` 按无预期异常类型处理，避免失败信号的诊断回调再抛 TypeError；任务状态、原异常传播及重试行为不变。
+- [x] Sender 在原故障指纹中增加安全诊断的缺失对象、约束名与项目来源；同 SQLSTATE 下对象变化立即报告，并先汇总旧故障。同一对象仅异常措辞变化仍降噪，不以原始异常消息构造指纹。
+- [x] 回归覆盖空 throws 的唯一诊断、开发与 Celery 原生日志格式脱敏、真实 Redis solo worker 失败/重试，以及对象变化后的汇总/恢复计数与相同对象的降噪；Sender 实例隔离及轮询行为不变。
+- [x] simplify 合并测试重复导入与诊断记录断言，统一对象样本以删除多余期望值变量；生产修复保持直接实现，不新增抽象。
+- [x] 定向隔离回归 **32 passed**；simplify 后完整隔离回归 **2050 passed, 11 skipped in 108.30s**。Ruff lint/format 与 diff 检查通过；临时 PostgreSQL/Redis 容器及匿名卷已清理。
+- [x] 用户已授权本轮修复、回归、simplify 与计划进度一并暂存并本地提交；不推送、不迁移本机数据库、不启用真实设备发送，保留其他改动及 stash。
+
 ## 验收映射与交付顺序
 
 | 阶段 | 覆盖矩阵 | 可独立核验的成果 |
@@ -191,7 +200,7 @@ Task 1–7 是分层验证点，当前已完成统一 P1 隔离机制验收；�
 ## 本轮验证与限制
 
 - 设计稿内容 SHA-256 与上文一致；未修改 ECS/WMS wire 合同。Task 1–7 的实现与隔离验收完成，Task 8 的本机迁移及现场步骤明确保留未完成。
-- 最新完整验证：显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向独立临时 PostgreSQL/Redis，执行 `uv run pytest -q -rs`，结果 **2045 passed, 11 skipped in 104.07s**。11 个跳过均为 PostgreSQL 专用用例的 SQLite 参数，对应 PostgreSQL 参数通过。
+- 最新完整验证：显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向独立临时 PostgreSQL/Redis，执行 `uv run pytest -q -rs`，结果 **2050 passed, 11 skipped in 108.30s**。11 个跳过均为 PostgreSQL 专用用例的 SQLite 参数，对应 PostgreSQL 参数通过。
 - `uv run ruff check .`、`uv run ruff format --check .`、`git diff --check` 通过。临时测试容器及其匿名卷已清理，未操作现有开发存储。
 - PostgreSQL 专项证据包括：创建/结果竞争、消费唯一键、表锁 deadline、授权锁顺序、事务失败回滚与迁移往返；HTTP 仅使用隔离模拟对端；另使用实际一次性 Redis broker/result backend 与 Celery solo worker 验证失败/重试，不代表生产 prefork、供应商去重或物理完成。
 - 原仅文档评审阶段的 75 passed / 29 skipped 不再作为当前验收证据；未执行的供应商请求、真实设备、现场/生产回调验证仍然未验收。
