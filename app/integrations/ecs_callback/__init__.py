@@ -42,12 +42,12 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
 有测试检查两者一致。事件类型很少时也可以用单个 `ecs_event.py`。`event_type` 必须匹配
 `^[A-Z][A-Z0-9_]*$`,否则导入期报错。`dev_ecs_event` 只在 `ENVIRONMENT=local` 导入,放联调样例。
 
+    class ScanCompletedData(CallbackPayload):   # 严格 JSON 类型,冗余字段忽略
+        barcode: str
+
     @ecs_event("SCAN_COMPLETED", data=ScanCompletedData)
     async def scan_completed(ctx: EcsEventContext, data: ScanCompletedData) -> None:
         ...                                     # 在请求事务内写业务;返回 None 即 ACK
-
-    class ScanCompletedData(CallbackPayload):   # 严格 JSON 类型,冗余字段忽略
-        barcode: str
 
 `data=` 可省略,此时不校验 `data`,处理器收到原始 dict(缺省 `{}`)。
 注册表是模块级全局状态,同名重复注册会报错并指出两个函数。测试里用 `monkeypatch` 换成空 dict。
