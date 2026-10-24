@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import bindparam, delete, select, update
+from sqlalchemy import and_, bindparam, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.identifiers import uuid7
@@ -13,7 +13,14 @@ from app.models.reliable import ReliableMessage
 
 from .config import TargetConfig, positive
 from .policy import retry_delay_s
-from .types import FailReason, MessageStatus, OutgoingMessage, Verdict, VerdictKind
+from .types import (
+    DeliverySnapshot,
+    FailReason,
+    MessageStatus,
+    OutgoingMessage,
+    Verdict,
+    VerdictKind,
+)
 
 logger = logging.getLogger(__name__)
 TERMINAL = (MessageStatus.DONE, MessageStatus.FAILED, MessageStatus.EXPIRED)
@@ -40,6 +47,7 @@ class AttemptOutcome:
     # None 表示保持原值;发送结果据此写入未送达计数与未知事实。
     not_received_count: int | None = None
     delivery_uncertain: bool | None = None
+    pause_reason: str | None = None
 
 
 def utc_datetime(value: datetime | None, *, known_sqlite_utc: bool = False) -> datetime | None:
@@ -61,6 +69,8 @@ class MessageStore:
         uniform: Callable[[float, float], float] = random.uniform,
         lease_id_factory: Callable[[], str] = lambda: uuid7().hex,
         lease_margin_s: float = 5,
+        lifecycles=None,
+        served_snapshot_protocols=None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -68,11 +78,16 @@ class MessageStore:
         self.uniform = uniform
         self.lease_id_factory = lease_id_factory
         self.lease_margin_s = lease_margin_s
+        from .lifecycle import SnapshotTransactions
+
+        self.snapshots = SnapshotTransactions(self, lifecycles or {})
+        self.served_snapshot_protocols = served_snapshot_protocols
+        self._skipped_claim_cursor = None
 
     def _time(self, session, value):
         return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
-    def _claim(self, session, row):
+    def _claim(self, session, row, *, include_snapshot=True):
         message = OutgoingMessage(
             row.target,
             row.operation,
@@ -82,6 +97,9 @@ class MessageStore:
             row.trace_id,
             self._time(session, row.created_at),
             self._time(session, row.expires_at),
+            DeliverySnapshot(**row.delivery_snapshot)
+            if row.delivery_snapshot is not None and include_snapshot
+            else None,
         )
         return Claim(
             row.id,
@@ -98,11 +116,22 @@ class MessageStore:
             return ()
         now = utc_datetime(self.clock())
         async with self.session_factory() as session, session.begin():
+            after_skip = True
+            if self._skipped_claim_cursor is not None:
+                skipped_at, skipped_id = self._skipped_claim_cursor
+                after_skip = or_(
+                    ReliableMessage.next_attempt_at > skipped_at,
+                    and_(
+                        ReliableMessage.next_attempt_at == skipped_at,
+                        ReliableMessage.id > skipped_id,
+                    ),
+                )
             rows = await session.scalars(
                 select(ReliableMessage)
                 .where(
                     # 只领取本进程能服务的目标;其余消息保持 PENDING,不因配置漂移被终态失败。
                     ReliableMessage.target.in_(list(targets)),
+                    after_skip,
                     ReliableMessage.status == MessageStatus.PENDING,
                     ReliableMessage.next_attempt_at <= now,
                     (ReliableMessage.expires_at.is_(None)) | (ReliableMessage.expires_at > now),
@@ -111,8 +140,29 @@ class MessageStore:
                 .limit(limit)
                 .with_for_update(skip_locked=True)
             )
+            rows = list(rows)
+            if not rows:
+                self._skipped_claim_cursor = None
             claims = []
             for row in rows:
+                if row.delivery_snapshot is not None:
+                    try:
+                        snapshot = DeliverySnapshot(**row.delivery_snapshot)
+                        targets[row.target].effective(snapshot)
+                        if snapshot.protocol not in self.snapshots.lifecycles:
+                            raise ValueError("snapshot lifecycle unavailable")
+                        if (
+                            self.served_snapshot_protocols is not None
+                            and snapshot.protocol not in self.served_snapshot_protocols
+                        ):
+                            raise ValueError("snapshot sending assembly unavailable")
+                    except (ValueError, TypeError, KeyError):
+                        self._skipped_claim_cursor = (
+                            self._time(session, row.next_attempt_at),
+                            row.id,
+                        )
+                        logger.error("snapshot claim unavailable id=%s", row.id)
+                        continue
                 timeout = targets[row.target].timeout_ms / 1000
                 row.status = MessageStatus.SENDING
                 row.lease_id = self.lease_id_factory()
@@ -124,7 +174,15 @@ class MessageStore:
             self._log(claim.message, MessageStatus.PENDING, MessageStatus.SENDING)
         return tuple(claims)
 
+    async def before_send(self, claim, target):
+        return await self.snapshots.gate(claim, target)
+
+    async def maintain_snapshots(self, limit, targets, deadline):
+        return await self.snapshots.maintain(limit, targets, deadline)
+
     async def finish(self, claim: Claim, outcome: AttemptOutcome) -> bool:
+        if claim.message.delivery_snapshot is not None:
+            return await self.snapshots.finish(claim, outcome)
         if outcome.status not in (*TERMINAL, MessageStatus.PENDING, MessageStatus.STALLED):
             raise ValueError("invalid attempt transition")
         if outcome.status == MessageStatus.FAILED and outcome.fail_reason is None:
@@ -230,6 +288,7 @@ class MessageStore:
                     select(ReliableMessage)
                     .where(
                         ReliableMessage.status == MessageStatus.SENDING,
+                        ReliableMessage.delivery_snapshot.is_(None),
                         ReliableMessage.lease_until <= now,
                     )
                     .order_by(ReliableMessage.lease_until, ReliableMessage.id)
@@ -257,6 +316,8 @@ class MessageStore:
         return len(rows)
 
     async def release(self, claim: Claim, targets: Mapping[str, TargetConfig]) -> bool:
+        if claim.message.delivery_snapshot is not None:
+            return await self.snapshots.release(claim)
         now = utc_datetime(self.clock())
         async with self.session_factory() as session, session.begin():
             changed = await self._recover(session, claim, now, targets)
@@ -335,6 +396,7 @@ class MessageStore:
                     select(ReliableMessage.id)
                     .where(
                         ReliableMessage.status == MessageStatus.PENDING,
+                        ReliableMessage.delivery_snapshot.is_(None),
                         ReliableMessage.expires_at <= now,
                     )
                     .order_by(ReliableMessage.expires_at, ReliableMessage.id)

@@ -14,6 +14,7 @@ class MessageStatus(StrEnum):
     PENDING = "PENDING"
     SENDING = "SENDING"
     STALLED = "STALLED"
+    HELD = "HELD"
     DONE = "DONE"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
@@ -32,6 +33,7 @@ class VerdictKind(StrEnum):
     NOT_RECEIVED = "NOT_RECEIVED"
     PEER_TERMINAL = "PEER_TERMINAL"
     UNKNOWN = "UNKNOWN"
+    HOLD = "HOLD"
 
 
 class InvalidMessage(ValueError):
@@ -43,6 +45,24 @@ class DuplicateMessage(ValueError):
 
 
 @dataclass(frozen=True)
+class DeliverySnapshot:
+    origin: str
+    protocol: str
+    unknown_policy: str
+
+    def __post_init__(self):
+        import httpx
+
+        from app.http_client import HttpClientConfig
+
+        HttpClientConfig(self.origin, "snapshot")
+        if httpx.URL(self.origin).raw_path not in (b"", b"/") or self.origin.endswith("/"):
+            raise ValueError("snapshot requires normalized origin")
+        if not self.protocol or self.unknown_policy != "HOLD":
+            raise ValueError("invalid delivery snapshot")
+
+
+@dataclass(frozen=True)
 class MessageDraft:
     target: str
     operation: str
@@ -50,6 +70,8 @@ class MessageDraft:
     request_raw: bytes
     ttl: timedelta | None = None
     business_key: str | None = None
+    delivery_snapshot: DeliverySnapshot | None = None
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +84,7 @@ class OutgoingMessage:
     trace_id: str | None
     created_at: datetime
     expires_at: datetime | None
+    delivery_snapshot: DeliverySnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -76,8 +99,13 @@ class Verdict:
     response: bytes | None = None
     retry_after_ms: float | None = None
     reason: FailReason | None = None
+    pause_reason: str | None = None
 
     def __post_init__(self):
+        if (self.kind == VerdictKind.HOLD) != (
+            isinstance(self.pause_reason, str) and bool(self.pause_reason)
+        ):
+            raise ValueError("HOLD requires pause reason")
         if not isinstance(self.kind, VerdictKind):
             raise ValueError("invalid verdict kind")
         if self.kind == VerdictKind.DELIVERED and not isinstance(self.response, bytes):

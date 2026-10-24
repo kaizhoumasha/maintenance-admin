@@ -2,12 +2,75 @@ import asyncio
 import logging
 import random
 import time
+import traceback
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from .config import ReliableConfig
 from .delivery import send_one
 
 logger = logging.getLogger(__name__)
+
+
+def _error_cause(error: BaseException) -> BaseException:
+    cause = getattr(error, "orig", None) or error
+    return cause.__cause__ or cause
+
+
+def _log_failure(
+    message: str, error: BaseException, *, phase: str = "delivery", retry_in_s=None
+) -> None:
+    detail = ""
+    if isinstance(error, SQLAlchemyError):
+        cause = _error_cause(error)
+        sqlstate = getattr(cause, "sqlstate", None)
+        detail = f" sqlstate={sqlstate} driver_type={type(cause).__name__}"
+        if sqlstate in {"42703", "42P01"}:
+            detail += (
+                " hint=check database migrations; stop senders before uv run alembic upgrade head"
+            )
+    # 消息、异常链及栈帧源码可能含业务数据;只记录类型、诊断码和调用位置。
+    stack = "".join(
+        traceback.format_list(
+            [
+                (f.f_code.co_filename, line, f.f_code.co_name, "")
+                for f, line in traceback.walk_tb(error.__traceback__)
+            ]
+        )
+    )
+    logger.error(
+        "%s task=reliable_sender phase=%s retry_in_s=%s error_type=%s%s"
+        "\nTraceback (most recent call last):\n%s",
+        message,
+        phase,
+        retry_in_s,
+        type(error).__name__,
+        detail,
+        stack,
+        extra={"phase": phase, "retry_in_s": retry_in_s},
+    )
+
+
+@dataclass
+class _ScanFailure:
+    key: tuple
+    phase: str
+    error_type: str
+    started_at: float
+    reported_at: float
+    count: int = 1
+    suppressed: int = 0
+
+    @property
+    def log_fields(self) -> dict[str, str | int]:
+        return {
+            "phase": self.phase,
+            "failure_count": self.count,
+            "suppressed_count": self.suppressed,
+        }
 
 
 class Sender:
@@ -24,34 +87,58 @@ class Sender:
         wait=asyncio.sleep,
         budget=None,
         dispose=None,
+        provider=None,
     ):
         self.store, self.targets, self.adapters, self.clients = store, targets, adapters, clients
         self.clock, self.monotonic, self.uniform, self.wait = clock, monotonic, uniform, wait
         self.budget = budget or ReliableConfig(targets)
         self.dispose = dispose
+        self.provider = provider
         self.inflight = {}
         self.runner = None
         self.stopping = False
         self.closed = False
         self._wakeup = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
+        self._scan_phase = "scan"
+        self._scan_failure: _ScanFailure | None = None
 
     async def tick(self, *, maintain: bool = True) -> int:
         if self.stopping:
             return 0
+        self._scan_phase = "scan"
         limit = self.budget.claim_batch_size
         if maintain:
+            if hasattr(self.store, "maintain_snapshots"):
+                self._scan_phase = "maintain_snapshots"
+                await self.store.maintain_snapshots(
+                    self.budget.maintenance_batch_size,
+                    self.targets,
+                    time.monotonic() + self.budget.poll_interval_s,
+                )
+            self._scan_phase = "expire_pending"
             await self.store.expire_pending(self.budget.maintenance_batch_size)
+            self._scan_phase = "recover_expired"
             await self.store.recover_expired(self.budget.maintenance_batch_size, self.targets)
         free = self.budget.max_concurrency - len(self.inflight)
         if free <= 0 or self.stopping:
             return 0
+        self._scan_phase = "claim"
         served = {
             name: target
             for name, target in self.targets.items()
-            if name in self.clients and target.protocol in self.adapters
+            if target.protocol in self.adapters
+            and (
+                (target.address_mode == "STATIC" and name in self.clients)
+                or (
+                    target.address_mode == "SNAPSHOT"
+                    and self.provider is not None
+                    and target.protocol in self.store.snapshots.lifecycles
+                )
+            )
         }
         claims = await self.store.claim(min(limit, free), served)
+        self._scan_phase = "dispatch"
         for claim in claims:
             task = asyncio.create_task(
                 send_one(
@@ -62,6 +149,7 @@ class Sender:
                     clients=self.clients,
                     clock=self.clock,
                     uniform=self.uniform,
+                    provider=self.provider,
                 )
             )
             self.inflight[task] = claim
@@ -74,9 +162,65 @@ class Sender:
         self._wakeup.set()
 
     @staticmethod
-    def _observe(task):
+    def _observe(task, *, phase="delivery"):
         if not task.cancelled() and task.exception() is not None:
-            logger.error("reliable task failed error_type=%s", type(task.exception()).__name__)
+            _log_failure("reliable task failed", task.exception(), phase=phase)
+
+    def _record_scan_failure(self, error: Exception) -> None:
+        now = self.monotonic()
+        cause = _error_cause(error)
+        frames = list(traceback.walk_tb(error.__traceback__))
+        origin = (frames[-1][0].f_code, frames[-1][1]) if frames else None
+        key = (self._scan_phase, type(error), type(cause), getattr(cause, "sqlstate", None), origin)
+        failure = self._scan_failure
+        if failure is not None and failure.key == key:
+            failure.count += 1
+            failure.suppressed += 1
+            if now - failure.reported_at >= 60:
+                self._summarize_scan_failure(now, "continuing")
+            return
+        self._summarize_scan_failure(now, "changed")
+        self._scan_failure = _ScanFailure(key, self._scan_phase, type(error).__name__, now, now)
+        _log_failure(
+            "reliable scan failed",
+            error,
+            phase=self._scan_phase,
+            retry_in_s=self.budget.poll_interval_s,
+        )
+
+    def _summarize_scan_failure(self, now: float, reason: str) -> None:
+        failure = self._scan_failure
+        if failure is None or not failure.suppressed:
+            return
+        logger.warning(
+            "reliable scan failure summary task=reliable_sender phase=%s error_type=%s "
+            "failure_count=%s suppressed_count=%s elapsed_s=%.1f reason=%s",
+            failure.phase,
+            failure.error_type,
+            failure.count,
+            failure.suppressed,
+            now - failure.started_at,
+            reason,
+            extra=failure.log_fields,
+        )
+        failure.suppressed = 0
+        failure.reported_at = now
+
+    def _record_scan_recovery(self) -> None:
+        failure = self._scan_failure
+        # 满并发等提前返回没有重新验证领取/派发,不能宣称整轮扫描恢复。
+        if failure is None or self._scan_phase != "dispatch":
+            return
+        logger.info(
+            "reliable scan recovered task=reliable_sender phase=%s "
+            "failure_count=%s suppressed_count=%s elapsed_s=%.1f scope=scan_only",
+            failure.phase,
+            failure.count,
+            failure.suppressed,
+            self.monotonic() - failure.started_at,
+            extra=failure.log_fields,
+        )
+        self._scan_failure = None
 
     async def run(self) -> None:
         self.runner = asyncio.current_task()
@@ -96,10 +240,11 @@ class Sender:
             try:
                 claimed = await self.tick(maintain=maintain)
             except Exception as error:
-                logger.error("reliable scan failed error_type=%s", type(error).__name__)
+                self._record_scan_failure(error)
                 await self.wait(self.budget.poll_interval_s)
                 timer_fired = True
                 continue
+            self._record_scan_recovery()
             if maintain:
                 maintained_at = now
             if claimed and len(self.inflight) < self.budget.max_concurrency:
@@ -119,7 +264,7 @@ class Sender:
             return set()
         done, pending = await asyncio.wait(tasks, timeout=max(0, deadline - self.monotonic()))
         for task in done:
-            self._observe(task)
+            self._observe(task, phase=phase)
         if pending:
             logger.warning(
                 "reliable shutdown unconfirmed phase=%s count=%s",
@@ -130,7 +275,7 @@ class Sender:
             for task in pending:
                 if cancel:
                     task.cancel()
-                task.add_done_callback(self._observe)
+                task.add_done_callback(partial(self._observe, phase=phase))
         return done
 
     async def aclose(self) -> None:
@@ -139,7 +284,7 @@ class Sender:
             self.stopping = True
             deadline = self.monotonic() + self.budget.shutdown_grace_s
             self._close_task = asyncio.create_task(self._close(deadline))
-            self._close_task.add_done_callback(self._observe)
+            self._close_task.add_done_callback(partial(self._observe, phase="shutdown"))
         await asyncio.shield(self._close_task)
 
     async def _close(self, deadline: float) -> None:
@@ -173,6 +318,8 @@ class Sender:
             releases, self.monotonic() + max(0, deadline - self.monotonic()) / 2, "lease release"
         )
         closures = {asyncio.create_task(client.aclose()) for client in self.clients.values()}
+        if self.provider is not None:
+            closures.add(asyncio.create_task(self.provider.aclose()))
         await self._bounded(
             closures, self.monotonic() + max(0, deadline - self.monotonic()) / 2, "HTTP close"
         )

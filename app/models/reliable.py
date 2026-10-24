@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -24,9 +25,14 @@ class ReliableMessage(Base):
             "target", "operation", "operation_id", name="reliable_message_identity_key"
         ),
         CheckConstraint(
-            "status IN ('PENDING','SENDING','STALLED','DONE','FAILED','EXPIRED')", name="status"
+            "status IN ('PENDING','SENDING','STALLED','HELD','DONE','FAILED','EXPIRED')",
+            name="status",
         ),
-        CheckConstraint("status = 'STALLED' OR next_attempt_at IS NOT NULL", name="next_attempt"),
+        CheckConstraint(
+            "(status IN ('STALLED','HELD') AND next_attempt_at IS NULL) OR "
+            "(status NOT IN ('STALLED','HELD') AND next_attempt_at IS NOT NULL)",
+            name="next_attempt",
+        ),
         Index("reliable_message_due_idx", "status", "next_attempt_at"),
         Index("reliable_message_expiry_idx", "status", "expires_at"),
         Index("reliable_message_lease_idx", "status", "lease_until"),
@@ -38,6 +44,8 @@ class ReliableMessage(Base):
     target: Mapped[str] = mapped_column(Text)
     operation: Mapped[str] = mapped_column(Text)
     operation_id: Mapped[str] = mapped_column(Text)
+    delivery_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    pause_reason: Mapped[str | None] = mapped_column(String(64))
     request_raw: Mapped[bytes] = mapped_column(LargeBinary)
     response_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
     status: Mapped[str] = mapped_column(String(16), default="PENDING")

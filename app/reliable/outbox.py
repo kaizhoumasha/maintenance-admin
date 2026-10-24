@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import event, select, update
@@ -49,10 +50,12 @@ class Outbox:
         adapters: Mapping[str, ProtocolAdapter],
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        lifecycles=None,
     ):
         self.targets = targets
         self.adapters = adapters
         self.clock = clock
+        self.lifecycles = lifecycles or {}
 
     async def enqueue(self, session: AsyncSession, draft: MessageDraft) -> EnqueueResult:
         if not isinstance(draft, MessageDraft) or not isinstance(draft.request_raw, bytes):
@@ -78,7 +81,11 @@ class Outbox:
             raise InvalidMessage("invalid ttl")
         now = utc_datetime(self.clock())
         try:
-            expires_at = now + draft.ttl if draft.ttl is not None else None
+            expires_at = (
+                utc_datetime(draft.expires_at)
+                if draft.expires_at is not None
+                else (now + draft.ttl if draft.ttl is not None else None)
+            )
             message = OutgoingMessage(
                 draft.target,
                 draft.operation,
@@ -88,8 +95,9 @@ class Outbox:
                 None if get_trace_id() == "-" else get_trace_id(),
                 now,
                 expires_at,
+                draft.delivery_snapshot,
             )
-            target = self.targets[draft.target]
+            target = self.targets[draft.target].effective(draft.delivery_snapshot)
             request = self.adapters[target.protocol].build_request(message, target)
             if request.body != message.request_raw:
                 raise ValueError("adapter changed frozen body")
@@ -99,6 +107,7 @@ class Outbox:
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
         values = dict(
+            delivery_snapshot=asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None,
             target=message.target,
             operation=message.operation,
             operation_id=message.operation_id,
@@ -126,12 +135,17 @@ class Outbox:
                 return self._existing(existing, draft)
 
     def _existing(self, existing, draft) -> EnqueueResult:
+        snapshot = asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None
+        if existing.delivery_snapshot != snapshot:
+            raise DuplicateMessage("identity already has different delivery snapshot")
         if existing.request_raw != draft.request_raw and not self._same_request(existing, draft):
             raise DuplicateMessage("identity already has different bytes")
         return EnqueueResult(existing.id, MessageStatus(existing.status))
 
     def _same_request(self, existing, draft) -> bool:
         """字节不同但适配器认定内容等价(例如只有时间戳变了)时,同身份重入返回原消息。"""
+        if draft.delivery_snapshot is not None:
+            return False
         target = self.targets.get(draft.target)
         adapter = self.adapters.get(target.protocol) if target is not None else None
         return isinstance(adapter, ComparableRequests) and adapter.same_request(
@@ -183,6 +197,11 @@ class Outbox:
         不再发送,也不写响应(`response_raw` 为空以区别于收到对端应答的 DONE);正在发送的租约随之
         失效,迟到的发送结果会被忽略。已处于终态返回 False。
         """
+        snapshot_changed = await self._snapshot_transition(
+            session, target, operation, operation_id, "DONE"
+        )
+        if snapshot_changed is not None:
+            return snapshot_changed
         now = utc_datetime(self.clock())
         row = (
             await session.execute(
@@ -192,7 +211,12 @@ class Outbox:
                     ReliableMessage.operation == operation,
                     ReliableMessage.operation_id == operation_id,
                     ReliableMessage.status.in_(
-                        (MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.STALLED)
+                        (
+                            MessageStatus.PENDING,
+                            MessageStatus.SENDING,
+                            MessageStatus.STALLED,
+                            MessageStatus.HELD,
+                        )
                     ),
                 )
                 .values(
@@ -218,6 +242,96 @@ class Outbox:
                 "event": "settled",
             },
         )
+        return True
+
+    async def hold(self, session, target, operation, operation_id, *, reason):
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("pause reason required")
+        snapshot_changed = await self._snapshot_transition(
+            session, target, operation, operation_id, "HELD", reason
+        )
+        if snapshot_changed is not None:
+            return snapshot_changed
+        row = await session.scalar(
+            update(ReliableMessage)
+            .where(
+                ReliableMessage.target == target,
+                ReliableMessage.operation == operation,
+                ReliableMessage.operation_id == operation_id,
+                ReliableMessage.status.in_(("PENDING", "SENDING", "STALLED", "HELD")),
+            )
+            .values(
+                status="HELD",
+                pause_reason=reason,
+                next_attempt_at=None,
+                lease_id=None,
+                lease_until=None,
+                updated_at=utc_datetime(self.clock()),
+            )
+            .returning(ReliableMessage.id)
+        )
+        return row is not None
+
+    async def _snapshot_transition(
+        self, session, target, operation, operation_id, status, reason=None
+    ):
+        from .lifecycle import ensure_savepoint_transaction, transaction_limits
+        from .store import AttemptOutcome, Claim
+        from .types import DeliverySnapshot
+
+        query = select(ReliableMessage).where(
+            ReliableMessage.target == target,
+            ReliableMessage.operation == operation,
+            ReliableMessage.operation_id == operation_id,
+        )
+        existing = await session.scalar(query)
+        if existing is None or existing.delivery_snapshot is None:
+            return None
+        snapshot = DeliverySnapshot(**existing.delivery_snapshot)
+        port = self.lifecycles.get(snapshot.protocol)
+        if port is None:
+            raise InvalidMessage("snapshot mutation requires its transaction lifecycle")
+        await ensure_savepoint_transaction(session)
+        async with session.begin_nested():
+            await transaction_limits(session)
+            context = await port.lock_context(session, operation_id)
+            row = await session.scalar(
+                query.with_for_update().execution_options(populate_existing=True)
+            )
+            if row is None or row.status not in ("PENDING", "SENDING", "STALLED", "HELD"):
+                return False
+            if row.delivery_snapshot != asdict(snapshot):
+                raise InvalidMessage("snapshot changed during transaction")
+            now = utc_datetime(self.clock())
+            message = OutgoingMessage(
+                row.target,
+                row.operation,
+                row.operation_id,
+                row.request_raw,
+                row.business_key,
+                row.trace_id,
+                utc_datetime(row.created_at, known_sqlite_utc=True),
+                utc_datetime(row.expires_at, known_sqlite_utc=True),
+                snapshot,
+            )
+            claim = Claim(
+                row.id,
+                message,
+                row.lease_id or "",
+                utc_datetime(row.lease_until, known_sqlite_utc=True) or now,
+                row.attempts + 1,
+                row.not_received_count,
+                bool(row.delivery_uncertain),
+            )
+            row.status = status
+            row.pause_reason = reason
+            row.lease_id = row.lease_until = None
+            row.next_attempt_at = None if status == "HELD" else now
+            row.updated_at = now
+            await port.apply_transition(
+                session, context, claim, AttemptOutcome(MessageStatus(status), pause_reason=reason)
+            )
+            await session.flush()
         return True
 
     @staticmethod

@@ -725,3 +725,66 @@ async def test_cancelled_shutdown_waiter_keeps_original_deadline(rig, caplog):
         blocked.set()
         await asyncio.gather(first, *resources, return_exceptions=True)
         await sender.aclose()
+
+
+@pytest.mark.parametrize("sqlstate", ["42703", "42P01", "23505"])
+async def test_scan_database_error_logs_safe_diagnostics_and_keeps_polling(caplog, sqlstate):
+    import logging
+
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.core.logger import DevFormatter
+    from app.reliable.sender import Sender
+
+    class DriverError(Exception):
+        pass
+
+    cause = DriverError("private_driver_message")
+    cause.sqlstate = sqlstate
+    wrapped = RuntimeError("private_wrapper_message")
+    wrapped.__cause__ = cause
+
+    class Store:
+        async def expire_pending(self, limit):
+            raise ProgrammingError(
+                "SELECT private_payload FROM private_table",
+                {"password": "private_parameter"},
+                wrapped,
+            )
+
+    waits = []
+
+    async def wait(seconds):
+        waits.append(seconds)
+        sender.stopping = True
+
+    sender = Sender(Store(), {}, {}, {}, wait=wait)
+    with caplog.at_level(logging.ERROR, logger="app.reliable.sender"):
+        await sender.run()
+    record = next(r for r in caplog.records if "reliable scan failed" in r.getMessage())
+    output = DevFormatter(color=False).format(record)
+    assert "ProgrammingError" in output
+    assert sqlstate in output and "DriverError" in output
+    assert ("alembic upgrade head" in output) == (sqlstate in {"42703", "42P01"})
+    assert "Traceback" in output and "expire_pending" in output
+    assert "private_" not in output
+    assert waits == [sender.budget.poll_interval_s]
+
+
+async def test_background_task_error_logs_traceback(caplog):
+    import logging
+
+    from app.core.logger import DevFormatter
+    from app.reliable.sender import Sender
+
+    async def fail():
+        raise RuntimeError("adapter assembly failed")
+
+    task = asyncio.create_task(fail())
+    await asyncio.gather(task, return_exceptions=True)
+    with caplog.at_level(logging.ERROR, logger="app.reliable.sender"):
+        Sender._observe(task)
+    record = next(r for r in caplog.records if "reliable task failed" in r.getMessage())
+    output = DevFormatter(color=False).format(record)
+    assert "Traceback" in output and "RuntimeError" in output and "in fail" in output
+    assert "adapter assembly failed" not in output
