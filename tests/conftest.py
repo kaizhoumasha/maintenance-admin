@@ -92,9 +92,7 @@ async def callback_db(request, tmp_path, monkeypatch):
 # 回调接收合同测试用:另外保证回调路径不碰 Redis 限流,并重置快照计数
 @pytest.fixture
 async def callback_store(callback_db, monkeypatch, redis):
-    monkeypatch.setattr(snapshots, "_written", 0)
-    monkeypatch.setattr(snapshots, "_dropped", 0)
-    monkeypatch.setattr(snapshots, "_window_start", 0.0)
+    monkeypatch.setattr(snapshots, "_windows", {})
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("callback must not access Redis rate limiting")

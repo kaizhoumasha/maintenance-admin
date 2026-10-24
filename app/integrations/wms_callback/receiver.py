@@ -1,17 +1,16 @@
 import json
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import event, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
 from app.core.strict_json import canonical_digest as _digest
 from app.core.strict_json import json_object
+from app.integrations.callback_diagnostics import queue_diagnostics
+from app.integrations.callback_receipts import LOCK_TIMEOUT, find_receipt, insert_receipt
 from app.models import CallbackReceipt
 
 from .registry import (
@@ -26,24 +25,6 @@ from .registry import (
 
 MAX_BODY_BYTES = 256 * 1024
 MAX_OPERATION_CHARS = 256
-LOCK_TIMEOUT = "5s"  # PostgreSQL 回调事务等待行锁的上限,超时整体回滚并返回 503
-logger = logging.getLogger(__name__)
-
-
-def _log_diagnostics(sync_session):
-    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
-    queued = sync_session.info["callback_diagnostics"]
-    diagnostics = queued.pop(transaction, [])
-    if transaction.nested:
-        queued.setdefault(transaction.parent, []).extend(diagnostics)
-        return
-    for detail in diagnostics:
-        logger.warning("callback diagnostic %r", detail, extra=detail)
-
-
-def _drop_diagnostics(sync_session):
-    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
-    sync_session.info["callback_diagnostics"].pop(transaction, None)
 
 
 @dataclass(frozen=True)
@@ -139,19 +120,16 @@ async def _handle(
         )
     )
     if context.notes:
-        sync_session = session.sync_session
-        if "callback_diagnostics" not in sync_session.info:
-            sync_session.info["callback_diagnostics"] = {}
-            event.listen(sync_session, "after_commit", _log_diagnostics)
-            event.listen(sync_session, "after_rollback", _drop_diagnostics)
-        transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
-        sync_session.info["callback_diagnostics"].setdefault(transaction, []).extend(
-            {
-                "operation": operation,
-                "operation_id": operation_id,
-                "diagnostic": {key: value for key, value in note.items() if key != "data"},
-            }
-            for note in context.notes
+        queue_diagnostics(
+            session,
+            [
+                {
+                    "operation": operation,
+                    "operation_id": operation_id,
+                    "diagnostic": {key: value for key, value in note.items() if key != "data"},
+                }
+                for note in context.notes
+            ],
         )
     return response
 
@@ -204,25 +182,18 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
         if reason
         else _reply(202, operation_id, "RECEIVED", {}, "received")
     )
-    postgresql = session.get_bind().dialect.name == "postgresql"
-    if postgresql:  # 等待行锁有上限:拿不到锁就整体回滚并返回 503,WMS 用原身份重发
-        await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
-    insert = pg_insert if postgresql else sqlite_insert
-    receipt_id = await session.scalar(
-        insert(CallbackReceipt)
-        .values(
-            operation=operation,
-            operation_id=operation_id,
-            raw_digest=digest,
-            effective_digest=effective,
-            compare_mode="RAW" if effective is None else "EFFECTIVE",
-            status_code=reply.status_code,
-            body=reply.body,
-            resp_timestamp=reply.body["timestamp"],
-            created_at=datetime.now(UTC),
-        )
-        .on_conflict_do_nothing(index_elements=["operation", "operation_id"])
-        .returning(CallbackReceipt.id)
+    receipt_id = await insert_receipt(
+        session,
+        lock_timeout=LOCK_TIMEOUT,
+        operation=operation,
+        operation_id=operation_id,
+        raw_digest=digest,
+        effective_digest=effective,
+        compare_mode="RAW" if effective is None else "EFFECTIVE",
+        status_code=reply.status_code,
+        body=reply.body,
+        resp_timestamp=reply.body["timestamp"],
+        created_at=datetime.now(UTC),
     )
     if receipt_id is not None:
         if reason:
@@ -230,12 +201,7 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
         return await _handle(
             session, handler, receipt_id, operation, operation_id, timestamp, parsed
         )
-    existing = await session.scalar(
-        select(CallbackReceipt).where(
-            CallbackReceipt.operation == operation,
-            CallbackReceipt.operation_id == operation_id,
-        )
-    )
+    existing = await find_receipt(session, operation, operation_id)
     if existing is None:
         raise RuntimeError("receipt identity conflict without a visible receipt")
     if existing.raw_digest == digest:
