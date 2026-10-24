@@ -10,6 +10,7 @@ from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.core.strict_json import json_object
+from app.diagnostics import log_exception
 from app.integrations.ecs_callback.discovery import load_event_modules
 from app.integrations.ecs_callback.receiver import (
     MAX_BODY_BYTES,
@@ -69,7 +70,9 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
             async with factory() as session, session.begin():
                 result = await receive_ecs_event(session, raw)
     except Exception as error:  # 含提交失败:整个事务已回滚
-        logger.error("ecs callback receive failed error_type=%s", type(error).__name__)
+        log_exception(
+            logger, "ecs callback receive failed", error, component="http", phase="ecs_event"
+        )
         event_type, device_code = _best_effort_identity(raw)
         result = EcsResponse(
             503,

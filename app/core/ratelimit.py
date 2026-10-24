@@ -1,5 +1,7 @@
 """Redis 滑动窗口限流:一个 Lua 脚本一次往返完成清理、计数、写入,保证原子。"""
 
+import logging
+
 from fastapi import Request
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -8,6 +10,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.identifiers import uuid7
 from app.core.logger import logger
 from app.core.redis import RedisDep
+from app.diagnostics import log_exception
 
 # 用 Redis 的 TIME 而不是应用时钟,多实例部署不受时钟偏差影响;被拒绝的请求不入账,
 # 否则持续被拒的客户端会一直续期自己的封禁。返回 {是否放行, 需等待秒数}
@@ -62,10 +65,18 @@ class RateLimit:
                 self.limit,
                 uuid7().hex,
             )
-        except (RedisConnectionError, RedisTimeoutError):
+        except (RedisConnectionError, RedisTimeoutError) as error:
             # fail-open:限流是保护不是门禁,Redis 挂了不能把整个 API 一起拖下水;
             # 只放行连接/超时,脚本报错(ResponseError)是 bug,要暴露而不是静默放行
-            logger.warning("ratelimit unavailable, fail-open | %s", key, exc_info=True)
+            log_exception(
+                logger,
+                "ratelimit unavailable, fail-open",
+                error,
+                component="http",
+                phase="rate_limit",
+                level=logging.WARNING,
+                context={"limit": self.name, "route": route.path},
+            )
             return
         if not allowed:
             raise AppError(

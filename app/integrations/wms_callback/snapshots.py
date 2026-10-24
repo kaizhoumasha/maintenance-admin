@@ -7,6 +7,7 @@ from time import monotonic
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.diagnostics import log_exception
 from app.models import CallbackSnapshot
 
 from .receiver import CallbackResponse
@@ -60,4 +61,12 @@ async def record_snapshot(
                 )
             )
     except Exception as error:
-        logger.warning("callback snapshot failed error_type=%s", type(error).__name__)
+        log_exception(
+            logger,
+            "callback snapshot failed",
+            error,
+            component="callback",
+            phase="snapshot",
+            level=logging.WARNING,
+            context={"source": source, "request_id": request_id},
+        )

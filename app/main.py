@@ -8,6 +8,7 @@ from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
 from app.controllers.dev import include_dev_routers
 from app.controllers.ecs_callback import include_ecs_callback
+from app.controllers.ecs_result import router as ecs_result_router
 from app.controllers.health import router as health_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
@@ -33,9 +34,15 @@ settings = get_settings()
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     try:
         async with reliable_lifespan(
-            parse_reliable_config(settings), getattr(application.state, "reliable_adapters", {})
+            parse_reliable_config(settings),
+            getattr(application.state, "reliable_adapters", {}),
+            lifecycles=getattr(application.state, "reliable_lifecycles", {}),
+            client_provider=getattr(application.state, "reliable_client_provider", None),
         ) as outbox:
             application.state.outbox = outbox
+            ecs_commands = getattr(application.state, "ecs_commands", None)
+            if ecs_commands is not None:
+                ecs_commands.outbox = outbox
             yield
     finally:
         application.state.outbox = None
@@ -76,6 +83,7 @@ app.include_router(permissions_router, prefix="/api/v1")
 app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(menus_router, prefix="/api/v1")
 app.include_router(health_router)
+app.include_router(ecs_result_router, prefix="/api/v1")
 include_wms_events(app, environment=settings.ENVIRONMENT)
 include_ecs_callback(app, environment=settings.ENVIRONMENT)
 include_dev_routers(app, environment=settings.ENVIRONMENT)

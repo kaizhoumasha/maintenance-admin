@@ -21,7 +21,19 @@ async def send_one(
     clients: Mapping[str, HttpClient],
     clock: Callable[[], datetime],
     uniform: Callable[[float, float], float],
+    provider=None,
 ) -> None:
+    if claim.message.delivery_snapshot is not None:
+        await send_snapshot(
+            claim,
+            store=store,
+            targets=targets,
+            adapters=adapters,
+            provider=provider,
+            clock=clock,
+            uniform=uniform,
+        )
+        return
     result = verdict = None
     target = targets.get(claim.message.target)
     try:
@@ -109,3 +121,104 @@ async def send_one(
             logger.warning("reliable retry hint capped %r", context, extra=context)
         if claim.attempt_no >= target.alert_after_attempts:
             logger.warning("reliable retry threshold %r", context, extra=context)
+
+
+async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uniform):
+    from .client_provider import PoolUnavailable
+
+    result = verdict = None
+    gated = False
+    pre_reason = "CONFIG_DRIFT"
+    try:
+        target = targets[claim.message.target]
+        effective = target.effective(claim.message.delivery_snapshot)
+        pre_reason = "ASSEMBLY_UNAVAILABLE"
+        adapter = adapters[claim.message.delivery_snapshot.protocol]
+        if provider is None:
+            raise ValueError("dynamic client provider unavailable")
+        pre_reason = "PRE_GATE_VALIDATION"
+        request = adapter.build_request(claim.message, effective)
+        if request.body != claim.message.request_raw:
+            raise ValueError("adapter changed frozen bytes")
+        validate_request(effective.http_config(), request)
+        async with provider.borrow(effective.http_config()) as client:
+            until = await store.before_send(claim, target)
+            if not until:
+                return
+            gated = True
+            now = utc_datetime(clock())
+            if until <= now or (
+                claim.message.expires_at is not None and claim.message.expires_at <= now
+            ):
+                result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
+            else:
+                result = await client.send(request)
+            if not isinstance(result, HttpResult):
+                raise ValueError("invalid HTTP result")
+            if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
+                if not isinstance(result.body, bytes) or len(result.body) > target.max_body_bytes:
+                    raise ValueError("invalid complete response")
+                verdict = adapter.classify_response(claim.message, result)
+                if not isinstance(verdict, Verdict):
+                    raise ValueError("invalid verdict")
+                if verdict.kind == VerdictKind.DELIVERED and verdict.response != result.body:
+                    raise ValueError("adapter changed response")
+        definite = result.delivery_state == DeliveryState.NOT_SENT or (
+            verdict and verdict.kind == VerdictKind.NOT_RECEIVED
+        )
+        if verdict and verdict.kind == VerdictKind.DELIVERED:
+            outcome = AttemptOutcome(MessageStatus.DONE, result=result, verdict=verdict)
+        elif verdict and verdict.kind == VerdictKind.PEER_TERMINAL:
+            outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)
+        elif verdict and verdict.kind == VerdictKind.HOLD:
+            outcome = AttemptOutcome(
+                MessageStatus.HELD,
+                result=result,
+                verdict=verdict,
+                pause_reason=verdict.pause_reason,
+                delivery_uncertain=True
+                if verdict.pause_reason != "CONTRACT_NON_COMPLIANT"
+                else None,
+            )
+        elif definite:
+            hint = verdict.retry_after_ms if verdict else None
+            now = utc_datetime(clock())
+            if hint is not None and hint / 1000 > target.max_retry_after_s:
+                outcome = AttemptOutcome(
+                    MessageStatus.HELD,
+                    result=result,
+                    verdict=verdict,
+                    pause_reason="CONTRACT_NON_COMPLIANT",
+                )
+            elif claim.message.expires_at is not None and claim.message.expires_at <= now:
+                outcome = AttemptOutcome(MessageStatus.EXPIRED, result=result, verdict=verdict)
+            else:
+                delay = retry_delay_s(claim.attempt_no, target, None, uniform)
+                delay = max(delay, (hint or 0) / 1000)
+                outcome = AttemptOutcome(
+                    MessageStatus.PENDING,
+                    result=result,
+                    verdict=verdict,
+                    next_attempt_at=now + timedelta(seconds=delay),
+                    not_received_count=claim.not_received_count + 1,
+                )
+        else:
+            outcome = AttemptOutcome(
+                MessageStatus.HELD,
+                result=result,
+                verdict=verdict,
+                pause_reason="DELIVERY_UNKNOWN",
+                delivery_uncertain=True,
+            )
+    except PoolUnavailable:
+        outcome = AttemptOutcome(
+            MessageStatus.PENDING, next_attempt_at=utc_datetime(clock()) + timedelta(seconds=1)
+        )
+    except Exception:
+        outcome = AttemptOutcome(
+            MessageStatus.HELD,
+            result=result if isinstance(result, HttpResult) else None,
+            pause_reason="DELIVERY_UNKNOWN" if gated else pre_reason,
+            delivery_uncertain=True if gated else None,
+        )
+    await store.finish(claim, outcome)

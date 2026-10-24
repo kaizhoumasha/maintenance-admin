@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -21,7 +21,7 @@ def positive(value: float, name: str) -> None:
 @dataclass(frozen=True)
 class TargetConfig:
     name: str
-    base_url: str
+    base_url: str | None
     protocol: str
     timeout_ms: float = 10000
     alert_after_attempts: int = 8
@@ -31,6 +31,7 @@ class TargetConfig:
     max_body_bytes: int = 262144
     max_not_received_attempts: int | None = None
     fixed_retry_interval_s: float | None = None
+    address_mode: str = "STATIC"
 
     def __post_init__(self):
         if not isinstance(self.protocol, str) or not self.protocol:
@@ -53,9 +54,24 @@ class TargetConfig:
                 raise TypeError("max_not_received_attempts must be an integer")
         if self.fixed_retry_interval_s is not None:
             positive(self.fixed_retry_interval_s, "fixed_retry_interval_s")
+        if self.address_mode not in {"STATIC", "SNAPSHOT"}:
+            raise ValueError("invalid address mode")
+        if self.address_mode == "SNAPSHOT":
+            if self.base_url is not None:
+                raise ValueError("SNAPSHOT has no static base_url")
+            return
         self.http_config()
         if self.base_url.endswith("/"):
             raise ValueError("target base_url must not end with slash")
+
+    def effective(self, snapshot):
+        if snapshot is None:
+            if self.address_mode != "STATIC":
+                raise ValueError("snapshot required")
+            return self
+        if self.address_mode != "SNAPSHOT" or self.protocol != snapshot.protocol:
+            raise ValueError("delivery configuration drift")
+        return replace(self, base_url=snapshot.origin, address_mode="STATIC")
 
     def http_config(self) -> HttpClientConfig:
         timeout = self.timeout_ms / 1000
@@ -143,7 +159,7 @@ def parse_reliable_config(settings: "Settings") -> ReliableConfig:
                 f"RELIABLE_TARGETS target {name!r}: must be an object without name override"
             )
         with _config_error(f"target {name!r}"):
-            targets[name] = TargetConfig(name=name, **(defaults | overrides))
+            targets[name] = TargetConfig(name=name, **({"base_url": None} | defaults | overrides))
     # 轮询间隔、租约余量、停机宽限、连接池等待是内部常量(ReliableConfig 默认值),不暴露为环境变量。
     return ReliableConfig(
         targets,

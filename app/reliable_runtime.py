@@ -23,6 +23,8 @@ async def reliable_lifespan(
     *,
     database_url: str | None = None,
     client_factory: Callable[[HttpClientConfig], HttpClient] = AsyncHttpClient,
+    lifecycles=None,
+    client_provider=None,
 ) -> AsyncIterator[Outbox | None]:
     url = database_url or get_settings().DATABASE_URL
     pool = dict(
@@ -33,11 +35,30 @@ async def reliable_lifespan(
     )
     clients = {}
     store = MessageStore(
-        async_sessionmaker(engine, expire_on_commit=False), lease_margin_s=config.lease_margin_s
+        async_sessionmaker(engine, expire_on_commit=False),
+        lease_margin_s=config.lease_margin_s,
+        lifecycles=lifecycles,
+        served_snapshot_protocols=set(adapters) if client_provider is not None else set(),
     )
-    sender = Sender(store, config.targets, adapters, clients, budget=config, dispose=engine.dispose)
+    sender = Sender(
+        store,
+        config.targets,
+        adapters,
+        clients,
+        budget=config,
+        dispose=engine.dispose,
+        provider=client_provider,
+    )
     try:
         for name, target in config.targets.items():
+            if target.address_mode == "SNAPSHOT":
+                if client_provider is None or target.protocol not in (lifecycles or {}):
+                    logger.error(
+                        "snapshot target %r unavailable: explicit lifecycle/client "
+                        "assembly required",
+                        name,
+                    )
+                continue
             if target.protocol in adapters:
                 clients[name] = client_factory(target.http_config())
             else:
@@ -49,6 +70,6 @@ async def reliable_lifespan(
                     target.protocol,
                 )
         sender.runner = asyncio.create_task(sender.run())
-        yield Outbox(config.targets, adapters) if config.targets else None
+        yield Outbox(config.targets, adapters, lifecycles=lifecycles) if config.targets else None
     finally:
         await sender.aclose()

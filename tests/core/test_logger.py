@@ -73,3 +73,15 @@ def test_endpoint_src_survives_missing_source():
     exec(compile("def f():\n    pass\n", "/nonexistent/dir/x.py", "exec"), ns)
     assert endpoint_src(ns["f"]) == "x.py:1"
     assert endpoint_src(functools.partial(print)) == "-"  # 没有 __code__ 的可调用对象
+
+
+def test_formatter_fallback_never_prints_exception_messages_chains_or_source():
+    try:
+        raise RuntimeError("private_message") from ValueError("private_cause")
+    except RuntimeError:
+        record = logging.LogRecord(
+            "fallback", logging.ERROR, __file__, 1, "failed", (), sys.exc_info()
+        )
+    output = DevFormatter(color=False).format(record)
+    assert "error_type=RuntimeError" in output and "Traceback" in output
+    assert "private_" not in output

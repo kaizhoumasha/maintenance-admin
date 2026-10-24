@@ -143,7 +143,7 @@ def test_openapi_error_responses_follow_route_rules():
             assert "422" in codes and "429" not in codes and "200" not in codes
             assert "400" in codes and "413" in codes and "503" in codes
             continue
-        if path == "/api/v1/callback/event":
+        if path.startswith("/api/v1/callback/"):
             assert "429" not in codes and "422" not in codes
             assert "400" in codes and "413" in codes and "503" in codes
             continue

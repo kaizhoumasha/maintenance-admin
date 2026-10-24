@@ -189,7 +189,9 @@ async def test_audit_failure_does_not_break_business(client, admin, monkeypatch,
         r = await strict.post(USERS, json=PAYLOAD, headers=admin)
     assert r.status_code == 201
     assert (await client.get(f"{USERS}/{r.json()['id']}", headers=admin)).status_code == 200
-    assert any("审计日志写入失败" in rec.getMessage() for rec in caplog.records)
+    records = [rec for rec in caplog.records if "审计日志写入失败" in rec.getMessage()]
+    assert records and records[0].component == "audit" and records[0].phase == "write"
+    assert "origin=" in records[0].getMessage()
     assert "audit-secret" not in caplog.text
 
 
