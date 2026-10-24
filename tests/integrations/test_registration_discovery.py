@@ -141,3 +141,16 @@ def test_fresh_production_registration_is_blocked_and_scope_recovers(business_mo
     assert module not in sys.modules
     import_registration_module(module)
     assert registered(kind, name).registration_source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize("package", [False, True])
+def test_business_entrypoints_can_register_without_per_operation_files(
+    business_modules, kind, package
+):
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+    entry = f"guard_probe.{kind}"
+    module = business_modules(entry + (".__init__" if package else ""), declaration(kind, name))
+    import_registration_module(module.removesuffix(".__init__"))
+    assert registered(kind, name).registration_source.module == f"app.integrations.{entry}"
+    assert registered(kind, name).registration_source.local_only is False

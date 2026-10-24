@@ -104,3 +104,18 @@ for registry in registries:
         timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def test_registry_describes_events_with_unvalidated_data(client, admin, monkeypatch):
+    monkeypatch.setattr(ecs, "_registry", {})
+
+    @ecs.ecs_event("RAW_DATA")
+    async def raw(ctx, payload):
+        pass
+
+    response = await client.get(PATH, headers=admin)
+    assert response.status_code == 200, response.text
+    row = next(row for row in response.json() if row["kind"] == "ecs_event")
+    assert row["name"] == "RAW_DATA"
+    assert row["payload_schema"] is None
+    assert row["endpoint"] is None

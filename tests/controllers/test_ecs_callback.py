@@ -193,3 +193,21 @@ async def test_wms_events_endpoint_cannot_reach_ecs_handlers(client, callback_st
     assert response.status_code == 422
     assert response.json()["data"] == {"reason_code": "UNSUPPORTED_OPERATION"}
     assert calls == []
+
+
+async def test_local_scan_example_validates_data_and_persists_one_note(client, callback_store):
+    from app.integrations.ecs_callback.dev_ecs_event import ExampleScan, example_scan
+
+    if registry.lookup("EXAMPLE_SCAN") is None:
+        ecs_event("EXAMPLE_SCAN", data=ExampleScan)(example_scan)
+    invalid = await client.post(PATH, json=body(event_type="EXAMPLE_SCAN", data={"barcode": ""}))
+    assert invalid.status_code == 400
+    assert await rows(callback_store, CallbackReceipt) == []
+
+    for _ in range(2):
+        response = await client.post(
+            PATH, json=body(event_type="EXAMPLE_SCAN", data={"barcode": "BIN-1"})
+        )
+        assert response.status_code == 200 and response.json() == ACK
+    [receipt] = await rows(callback_store, CallbackReceipt)
+    assert receipt.diagnostic == [{"reason_code": "LOCAL_EXAMPLE", "barcode": "BIN-1"}]

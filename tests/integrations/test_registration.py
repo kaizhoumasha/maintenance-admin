@@ -165,3 +165,28 @@ def test_invalid_request_model_and_example_have_fix_instructions():
 
     with pytest.raises(ValueError, match="example is invalid.*", check=lambda e: "修复" in str(e)):
         requests.request_operation("example.invalid@v1", requests.Endpoint.FACTS)(Bad)
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback"])
+@pytest.mark.parametrize("signature", ["ctx", "ctx, payload, extra", "ctx, *, payload", "*args"])
+def test_handlers_with_uncallable_signatures_do_not_enter_the_registry(kind, signature):
+    namespace = {"__name__": __name__}
+    exec(f"async def handler({signature}): pass", namespace)
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+    decorate = ecs.ecs_event if kind == "ecs_event" else callbacks.callback_operation
+    lookup = ecs.lookup if kind == "ecs_event" else callbacks.lookup
+
+    with pytest.raises(TypeError, match="ctx, payload"):
+        decorate(name, data=Payload)(namespace["handler"])
+    assert lookup(name) is None
+    decorate(name, data=Payload)(async_handler)
+    assert lookup(name).func is async_handler
+
+
+def test_invalid_request_endpoint_does_not_reserve_the_operation_name():
+    name = "example.endpoint@v1"
+    with pytest.raises(TypeError, match="Endpoint"):
+        requests.request_operation(name, "facts")(requests.RequestPayload)
+    assert requests.lookup(name) is None
+    requests.request_operation(name, requests.Endpoint.FACTS)(requests.RequestPayload)
+    assert requests.lookup(name).endpoint is requests.Endpoint.FACTS
