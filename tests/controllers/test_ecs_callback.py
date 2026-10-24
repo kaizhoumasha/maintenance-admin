@@ -43,6 +43,27 @@ async def test_valid_event_is_acked(client, callback_store):
     assert calls == ["D1"]
 
 
+async def test_validated_event_is_applied_once_on_replay(client, callback_store):
+    class ScanData(CallbackPayload):
+        barcode: str
+
+    applied = []
+
+    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    async def handler(ctx, data):
+        applied.append(data)
+        ctx.note("SCAN_APPLIED", barcode=data.barcode)
+
+    for _ in range(2):
+        response = await client.post(PATH, json=body(data={"barcode": "BIN_104"}))
+        assert response.status_code == 200 and response.json() == ACK
+
+    [data] = applied
+    assert isinstance(data, ScanData) and data.barcode == "BIN_104"
+    [receipt] = await rows(callback_store, CallbackReceipt)
+    assert receipt.diagnostic == [{"reason_code": "SCAN_APPLIED", "barcode": "BIN_104"}]
+
+
 async def test_bad_envelope_returns_issues_without_echoing_values(client, callback_store):
     response = await client.post(PATH, json=body(device_code="SECRET-DEV", timestamp="x"))
     assert response.status_code == 400
