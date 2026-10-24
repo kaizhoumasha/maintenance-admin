@@ -43,11 +43,11 @@ def wms_request_router():
     body = Union[tuple(_model(item) for item in items)]  # noqa: UP007  运行时构造
     examples = {
         item.name: {
-            "summary": item.operation.title or item.name,
-            "value": {"operation": item.name, "data": item.operation.example},
+            "summary": item.title or item.name,
+            "value": {"operation": item.name, "data": item.example},
         }
         for item in items
-        if item.operation.example is not None
+        if item.example is not None
     }
     router = new_router(
         prefix="/dev/wms/requests",

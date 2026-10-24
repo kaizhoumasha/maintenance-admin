@@ -38,8 +38,9 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
 ## 怎么新增一个事件类型
 
 在 `app/integrations/<业务>/ecs_event/` 目录里加一个文件,不用改控制器和 `main.py`。
-一个事件类型一个文件,文件名是小写的 `event_type`(`SCAN_COMPLETED` 对应 `scan_completed.py`),
-有测试检查两者一致。事件类型很少时也可以用单个 `ecs_event.py`。`event_type` 必须匹配
+一个事件类型一个文件,文件名统一按名称转小写并把点和 @ 换成下划线
+(`SCAN_COMPLETED` 对应 `scan_completed.py`),
+导入期检查两者一致。事件类型很少时也可以用单个 `ecs_event.py`。`event_type` 必须匹配
 `^[A-Z][A-Z0-9_]*$`,否则导入期报错。`dev_ecs_event` 只在 `ENVIRONMENT=local` 导入,放联调样例。
 
     class ScanCompletedData(CallbackPayload):   # 严格 JSON 类型,冗余字段忽略
@@ -50,7 +51,9 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
         ...                                     # 在请求事务内写业务;返回 None 即 ACK
 
 `data=` 可省略,此时不校验 `data`,处理器收到原始 dict(缺省 `{}`)。
-注册表是模块级全局状态,同名重复注册会报错并指出两个函数。测试里用 `monkeypatch` 换成空 dict。
+完整接入步骤与注册清单排障见 docs/integrations/registration.md。
+注册表是模块级全局状态,同名重复注册会报错并指出双方来源及修复方法。
+测试里用 `monkeypatch` 换成空 dict。
 
 ## 处理器契约
 

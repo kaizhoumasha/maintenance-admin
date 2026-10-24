@@ -31,7 +31,7 @@ def wms(monkeypatch):
 
 
 def trigger(operation, **extra):
-    example = operations()[operation].operation.example
+    example = operations()[operation].example
     return {"operation": operation, "data": example, **extra}
 
 
@@ -48,7 +48,7 @@ async def test_the_catalog_describes_every_registered_operation(client, admin):
     for item in listed:
         registered = operations()[item["name"]]
         assert item["endpoint"] == registered.endpoint.value
-        assert item["example"] == registered.operation.example
+        assert item["example"] == registered.example
         assert item["payload_schema"]["properties"]
 
 
@@ -66,7 +66,7 @@ async def test_every_operation_example_registers_a_visible_pending_message(
     rows = (await client.get(f"{BASE}/status/{out['operation_id']}", headers=admin)).json()
     assert [row["message_id"] for row in rows] == [out["message_id"]]
     assert rows[0]["request"]["operation"] == operation
-    assert rows[0]["request"]["data"] == operations()[operation].operation.example
+    assert rows[0]["request"]["data"] == operations()[operation].example
 
 
 async def test_replay_returns_the_same_message_and_changed_input_conflicts(client, admin, wms):

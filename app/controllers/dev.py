@@ -11,11 +11,12 @@ from fastapi import Body, Depends, FastAPI
 from app import integrations
 from app.controllers.dev_callback import router as callback_router
 from app.controllers.dev_mock_wms import router as mock_wms_router
+from app.controllers.dev_registry import router as registry_router
 from app.controllers.dev_wms_request import wms_request_router
 from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
 from app.core.dev_scenarios import DevScenario, scenarios
-from app.core.module_tree import import_module_tree
 from app.core.routing import new_router
+from app.integrations.registration import import_registration_module
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import operations
 from app.reliable.config import parse_reliable_config, target_config_hint
@@ -27,7 +28,7 @@ def _load_dev_modules() -> None:
     for info in sorted(pkgutil.iter_modules(integrations.__path__), key=lambda i: i.name):
         if not info.ispkg:
             continue
-        import_module_tree(f"{integrations.__name__}.{info.name}.dev")
+        import_registration_module(f"{integrations.__name__}.{info.name}.dev", local_only=True)
 
 
 def _submit_router(items: list[DevScenario]):
@@ -78,6 +79,7 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     # Mock WMS 是 Transport 协议专用的,显式挂载,不走场景自动扫描;以后别的协议要 mock 再加一行
     app.include_router(mock_wms_router, prefix=prefix)
     app.include_router(callback_router, prefix=prefix)
+    app.include_router(registry_router, prefix=prefix)
     if operations():
         app.include_router(wms_request_router(), prefix=prefix)
     targets = parse_reliable_config(get_settings()).targets

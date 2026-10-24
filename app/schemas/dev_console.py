@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -41,6 +41,17 @@ class DevOperationOut(BaseModel):
     ttl_seconds: float | None
     payload_schema: dict[str, Any]
     example: dict[str, Any] | None
+
+
+class DevRegistrationOut(BaseModel):
+    kind: Literal["ecs_event", "wms_callback", "wms_request"]
+    name: str
+    module: str
+    source_file: str
+    symbol: str
+    local_only: bool
+    endpoint: str | None
+    payload_schema: dict[str, Any] | None
 
 
 class DevRequestOut(BaseModel):

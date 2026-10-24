@@ -3,9 +3,8 @@
 新增一个 operation:在 `app/integrations/<业务>/request.py`(自动发现)里
 
     @request_operation("域.名称@v1", Endpoint.FACTS)
-    class MyFact(RequestOperation):
-        class Payload(RequestPayload):       # 字段闭集;WMS 拒绝未知字段,这里同样禁止多余键
-            task_id: str
+    class MyFact(RequestPayload):            # 严格类型、字段闭集
+        task_id: str
 
 调用方再用 `WmsRequests.send(session, "域.名称@v1", {...}, operation_id=...)` 在自己的事务里入队。
 """
@@ -15,11 +14,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 from functools import cached_property
-from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
-from app.core.operation_names import is_operation_name
+from app.integrations.registration import (
+    RegistrationSource,
+    operation_source,
+)
 
 
 class Endpoint(StrEnum):
@@ -46,70 +47,68 @@ class RequestPayload(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
 
-class RequestOperation:
-    title: ClassVar[str | None] = None  # Swagger 里的标题,缺省用 operation 名
-    Payload: ClassVar[type[RequestPayload]]
-    # 默认不过期:事实是已发生的业务事实,丢弃等于丢数据;需要时效的 operation 自行声明
-    ttl: ClassVar[timedelta | None] = None
-
-    def __init__(self) -> None:
-        payload = getattr(type(self), "Payload", None)
-        if not (isinstance(payload, type) and issubclass(payload, BaseModel)):
-            raise TypeError(
-                f"{type(self).__qualname__} must define a Payload(RequestPayload) class"
-            )
+@dataclass(frozen=True)
+class Registered:
+    name: str
+    endpoint: Endpoint
+    data_model: type[RequestPayload]
+    title: str | None
+    ttl: timedelta | None
+    registration_source: RegistrationSource
 
     @cached_property
     def payload_schema(self) -> dict:
-        return self.Payload.model_json_schema()
+        return self.data_model.model_json_schema()
 
     @property
     def example(self) -> dict | None:
         examples = self.payload_schema.get("examples")
         return examples[0] if examples else None
 
-
-@dataclass(frozen=True)
-class Registered:
-    name: str
-    endpoint: Endpoint
-    operation: RequestOperation
-
     def describe(self) -> dict:
         """目录、联调下拉等所有展示的唯一来源,可直接序列化。"""
-        ttl = self.operation.ttl
+        ttl = self.ttl
         return {
             "name": self.name,
             "endpoint": self.endpoint.value,
-            "title": self.operation.title or self.name,
+            "title": self.title or self.name,
             "ttl_seconds": None if ttl is None else ttl.total_seconds(),
-            "payload_schema": self.operation.payload_schema,
-            "example": self.operation.example,
+            "payload_schema": self.payload_schema,
+            "example": self.example,
         }
 
 
 _registry: dict[str, Registered] = {}
 
 
-def request_operation(name: str, endpoint: Endpoint):
+def request_operation(
+    name: str,
+    endpoint: Endpoint,
+    *,
+    title: str | None = None,
+    ttl: timedelta | None = None,
+):
     def register(cls):
-        if not is_operation_name(name):
-            raise ValueError(f"invalid operation name {name!r}")
+        source = operation_source(name, cls)
         if not isinstance(endpoint, Endpoint):
-            raise TypeError("endpoint must be an Endpoint")
+            raise TypeError("endpoint must be an Endpoint; 修复: 使用 Endpoint.FACTS 或 DECISIONS")
         if name in _registry:
             raise ValueError(
-                f"duplicate operation {name!r}: {type(_registry[name].operation).__module__}."
-                f"{type(_registry[name].operation).__qualname__} and "
-                f"{cls.__module__}.{cls.__qualname__}"
+                f"duplicate operation {name!r}: {_registry[name].registration_source.location} "
+                f"and {source.location}; 修复: 删除重复声明或更正 operation，使每个名称只注册一次"
             )
-        operation = cls()
-        if (example := operation.example) is not None:
+        if not (isinstance(cls, type) and issubclass(cls, RequestPayload)):
+            raise TypeError(f"{source.location}: 修复: 装饰 RequestPayload 模型")
+        item = Registered(name, endpoint, cls, title, ttl, source)
+        if (example := item.example) is not None:
             try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
-                operation.Payload.model_validate_json(json.dumps(example, allow_nan=False))
+                cls.model_validate_json(json.dumps(example, allow_nan=False))
             except ValueError as error:
-                raise ValueError(f"{cls.__qualname__}: example is invalid: {error}") from None
-        _registry[name] = Registered(name, endpoint, operation)
+                raise ValueError(
+                    f"{source.location}: example is invalid: {error}; "
+                    "修复: 修改 Payload 的 json_schema_extra.examples，使其满足严格 JSON 字段约束"
+                ) from None
+        _registry[name] = item
         return cls
 
     return register

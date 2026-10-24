@@ -10,7 +10,6 @@ from app.integrations.wms_request import (
     DECISIONS_PROTOCOL,
     FACTS_PROTOCOL,
     Endpoint,
-    RequestOperation,
     RequestPayload,
     WmsRequests,
     discovery,
@@ -23,10 +22,9 @@ from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
 
 
-class Report(RequestOperation):
-    class Payload(RequestPayload):
-        task_id: str
-        qty: int
+class Report(RequestPayload):
+    task_id: str
+    qty: int
 
 
 @pytest.fixture(autouse=True)
@@ -36,10 +34,8 @@ def isolated_registry(monkeypatch):
     # 发现函数带缓存且导入即注册:在被替换的注册表里首次调用会让真实 operation 永久丢失
     monkeypatch.setattr(discovery, "load_operation_modules", lambda: None)
     request_operation("example.fact.report@v1", Endpoint.FACTS)(Report)
-    request_operation("example.decision.ask@v1", Endpoint.DECISIONS)(type("Ask", (Report,), {}))
-    request_operation("example.fact.timed@v1", Endpoint.FACTS)(
-        type("Timed", (Report,), {"ttl": timedelta(minutes=5)})
-    )
+    request_operation("example.decision.ask@v1", Endpoint.DECISIONS)(Report)
+    request_operation("example.fact.timed@v1", Endpoint.FACTS, ttl=timedelta(minutes=5))(Report)
 
 
 @pytest.fixture

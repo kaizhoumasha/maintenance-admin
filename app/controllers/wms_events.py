@@ -94,11 +94,11 @@ def include_wms_events(app: FastAPI, *, environment: str, prefix: str = "/api/v1
     load_operation_modules(environment)
     EXAMPLES.clear()
     for name, handler in operations().items():
-        example = getattr(handler, "example", None)
+        example = handler.example
         if example is None:
             continue
         EXAMPLES[name] = {
-            "summary": getattr(handler, "title", name),
+            "summary": handler.title,
             "value": {
                 "operation_id": SAMPLE_OPERATION_ID,
                 "operation": name,

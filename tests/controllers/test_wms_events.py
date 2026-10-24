@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+from typing import Literal
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, event, insert, select
@@ -8,18 +9,16 @@ from sqlalchemy import Column, Integer, MetaData, String, Table, event, insert, 
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import (
     Accepted,
-    CallbackOperation,
     CallbackPayload,
     Conflict,
     Duplicate,
-    InvalidPayload,
     Rejected,
     callback_operation,
     registry,
     snapshots,
 )
 from app.integrations.wms_callback.dev_callback import OPERATION as EXAMPLE_OPERATION
-from app.integrations.wms_callback.dev_callback import EchoOperation
+from app.integrations.wms_callback.dev_callback import EchoPayload, echo
 from app.main import app
 from app.models import CallbackReceipt, CallbackSnapshot
 
@@ -316,34 +315,35 @@ probe_table = Table(
 OPERATION = "example.probe@v1"
 
 
-@pytest.fixture
-async def probe(callback_store, monkeypatch):
+@pytest.fixture(params=["return", "raise"])
+async def probe(callback_store, monkeypatch, request):
     """测试 operation:data.mode 决定处理器结果,业务行写进独立的 callback_probe 表。"""
     engine = callback_store.kw["bind"]
     async with engine.begin() as connection:
         await connection.run_sync(probe_table.create, checkfirst=True)
     monkeypatch.setattr(registry, "_registry", {})
 
-    @callback_operation(OPERATION)
-    class Probe:
-        def parse(self, data):
-            if data.get("mode") not in {"accept", "duplicate", "conflict", "reject", "boom", "nan"}:
-                raise InvalidPayload
-            return {"mode": data["mode"]}  # 冗余字段被剔除
+    class ProbePayload(CallbackPayload):
+        mode: Literal["accept", "duplicate", "conflict", "reject", "boom", "nan"]
 
-        async def handle(self, ctx):
-            mode = ctx.parsed["mode"]
-            if mode in {"accept", "reject", "boom"}:
-                await ctx.session.execute(insert(probe_table).values(note=mode))
-            if mode == "boom":
-                raise RuntimeError("handler failure")
-            return {
-                "accept": Accepted({"task": "t1"}),
-                "duplicate": Duplicate({"task": "t1"}),
-                "conflict": Conflict({"task": "t1"}),
-                "reject": Rejected("NOT_ALLOWED"),
-                "nan": Accepted({"value": float("nan")}),
-            }[mode]
+    @callback_operation(OPERATION, data=ProbePayload)
+    async def handler(ctx, payload):
+        assert isinstance(payload, ProbePayload)
+        mode = payload.mode
+        if mode in {"accept", "reject", "boom"}:
+            await ctx.session.execute(insert(probe_table).values(note=mode))
+        if mode == "boom":
+            raise RuntimeError("handler failure")
+        result = {
+            "accept": Accepted({"task": "t1"}),
+            "duplicate": Duplicate({"task": "t1"}),
+            "conflict": Conflict({"task": "t1"}),
+            "reject": Rejected("NOT_ALLOWED"),
+            "nan": Accepted({"value": float("nan")}),
+        }[mode]
+        if request.param == "raise":
+            raise result
+        return result
 
     try:
         yield
@@ -437,13 +437,9 @@ async def test_rejection_saved_before_registration_is_replayed_after(
     first = await client.post(PATH, json=envelope)
     assert first.json()["data"] == {"reason_code": "UNSUPPORTED_OPERATION"}
 
-    @callback_operation(OPERATION)
-    class Late:
-        def parse(self, data):
-            return data
-
-        async def handle(self, ctx):
-            raise AssertionError("an already rejected message must not run the handler")
+    @callback_operation(OPERATION, data=CallbackPayload)
+    async def late(ctx, payload):
+        raise AssertionError("an already rejected message must not run the handler")
 
     assert (await client.post(PATH, json=envelope)).json() == first.json()
 
@@ -474,7 +470,7 @@ async def test_concurrent_same_identity_runs_the_handler_once(
 @pytest.fixture
 def example(callback_store, monkeypatch):
     monkeypatch.setattr(registry, "_registry", {})
-    callback_operation(EXAMPLE_OPERATION)(EchoOperation)
+    callback_operation(EXAMPLE_OPERATION, data=EchoPayload)(echo)
 
 
 @pytest.mark.parametrize(
@@ -509,20 +505,19 @@ def test_swagger_request_examples_come_from_registered_operations():
     media = app.openapi()["paths"]["/api/v1/wms/events"]["post"]["requestBody"]["content"]
     examples = media["application/json"]["examples"]
     value = examples[EXAMPLE_OPERATION]["value"]
-    assert value["operation"] == EXAMPLE_OPERATION and value["data"] == EchoOperation().example
+    assert (
+        value["operation"] == EXAMPLE_OPERATION
+        and value["data"] == EchoPayload.model_json_schema()["examples"][0]
+    )
 
 
 async def test_raised_rejection_rolls_back_rows_written_before_it(
     client, callback_store, probe, envelope
 ):
-    @callback_operation("example.raising@v1")
-    class Raising(CallbackOperation):
-        class Payload(CallbackPayload):
-            pass
-
-        async def execute(self, ctx, payload):
-            await ctx.session.execute(insert(probe_table).values(note="before"))
-            raise Rejected("TOO_LATE")
+    @callback_operation("example.raising@v1", data=CallbackPayload)
+    async def raising(ctx, payload):
+        await ctx.session.execute(insert(probe_table).values(note="before"))
+        raise Rejected("TOO_LATE")
 
     envelope |= {"operation": "example.raising@v1", "data": {}}
     response = await client.post(PATH, json=envelope)
