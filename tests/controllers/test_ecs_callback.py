@@ -9,6 +9,7 @@ from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.receiver import MAX_BODY_BYTES
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback import snapshots
+from app.integrations.wms_callback.operation import CallbackPayload
 from app.models import CallbackReceipt, CallbackSnapshot
 
 PATH = "/api/v1/callback/event"
@@ -47,6 +48,48 @@ async def test_bad_envelope_returns_issues_without_echoing_values(client, callba
     assert response.status_code == 400
     assert response.json()["error_detail"]["issues"]
     assert "SECRET-DEV" not in response.text
+
+
+async def test_data_errors_keep_each_array_position_in_order(client, callback_store):
+    class ScanData(CallbackPayload):
+        samples: list[float]
+
+    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    async def handler(ctx, data):
+        pytest.fail("invalid event data must not reach the handler")
+
+    response = await client.post(PATH, json=body(data={"samples": ["SECRET", 1.0, None]}))
+
+    assert response.status_code == 400
+    assert response.json()["error_detail"]["issues"] == [
+        {"field": "data.samples[0]", "code": "INVALID_TYPE", "expected": "number"},
+        {"field": "data.samples[2]", "code": "INVALID_TYPE", "expected": "number"},
+    ]
+    assert "SECRET" not in response.text
+    assert await rows(callback_store, CallbackReceipt) == []
+
+
+async def test_masked_data_errors_merge_only_identical_issues(client, callback_store):
+    class ScanData(CallbackPayload):
+        readings: dict[str, int | float]
+        barcode: str
+
+    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    async def handler(ctx, data):
+        pytest.fail("invalid event data must not reach the handler")
+
+    response = await client.post(
+        PATH, json=body(data={"readings": {"SECRET_A": [], "SECRET_B": []}})
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error_detail"]["issues"] == [
+        {"field": "data.readings.*.*", "code": "INVALID_TYPE", "expected": "integer"},
+        {"field": "data.readings.*.*", "code": "INVALID_TYPE", "expected": "number"},
+        {"field": "data.barcode", "code": "FIELD_REQUIRED"},
+    ]
+    assert "SECRET" not in response.text
+    assert await rows(callback_store, CallbackReceipt) == []
 
 
 async def test_oversize_is_413_with_json_body(client, callback_store):

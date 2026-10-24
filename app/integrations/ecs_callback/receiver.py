@@ -41,15 +41,7 @@ class EcsResponse(CallbackResponse):
 
 
 def event_identity(envelope: EcsEventEnvelope) -> str:
-    return canonical_digest(
-        dict(
-            device_code=envelope.device_code,
-            event_type=envelope.event_type,
-            timestamp=envelope.timestamp,
-            is_debug=envelope.is_debug,
-            data=envelope.data,
-        )
-    )
+    return canonical_digest(_event(envelope))
 
 
 def _invalid(issues: list[dict], envelope: EcsEventEnvelope | None = None) -> EcsResponse:

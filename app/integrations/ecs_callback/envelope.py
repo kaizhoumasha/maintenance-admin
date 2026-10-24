@@ -62,6 +62,7 @@ def _path(prefix: str, loc: tuple[int | str, ...], allowed: set[str]) -> str:
 def issues_from(error: ValidationError, model: type[BaseModel], prefix: str = "") -> list[dict]:
     allowed = _allowed_segments(model)
     issues: list[dict] = []
+    seen: set[tuple[str, str, str | None]] = set()
     for err in error.errors(include_input=False, include_context=False, include_url=False):
         issue = {"field": _path(prefix, err["loc"], allowed)}
         if err["type"] == "missing":
@@ -71,6 +72,8 @@ def issues_from(error: ValidationError, model: type[BaseModel], prefix: str = ""
             issue["expected"] = _TYPE_ERRORS[err["type"]]
         else:
             issue["code"] = "INVALID_VALUE"
-        if issue not in issues:
+        key = (issue["field"], issue["code"], issue.get("expected"))
+        if key not in seen:
+            seen.add(key)
             issues.append(issue)
     return issues

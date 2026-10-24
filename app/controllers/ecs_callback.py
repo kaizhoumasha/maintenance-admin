@@ -97,8 +97,11 @@ def _best_effort_identity(raw: bytes) -> tuple[str | None, str | None]:
     """仅供 503 日志:尽力从请求体取标识,任何失败都当作没有,绝不影响响应。"""
     try:
         parsed = json_object(raw) or {}
-        values = (parsed.get("event_type"), parsed.get("device_code"))
-        return tuple(v if isinstance(v, str) else None for v in values)  # type: ignore[return-value]
+        event_type, device_code = parsed.get("event_type"), parsed.get("device_code")
+        return (
+            event_type if isinstance(event_type, str) else None,
+            device_code if isinstance(device_code, str) else None,
+        )
     except Exception:
         return None, None
 
