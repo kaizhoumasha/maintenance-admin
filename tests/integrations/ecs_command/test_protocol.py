@@ -89,7 +89,7 @@ def test_origin_normalized(value, expected):
 
 
 @pytest.mark.parametrize(
-    "value", ["http://a/path", "http://user:pass@a", "http://a/?x=1", "file:///a"]
+    "value", ["http://a/path", "http://USER:PASSWORD@a", "http://a/?x=1", "file:///a"]
 )
 def test_origin_rejects_non_origins(value):
     from app.integrations.ecs_command.routing import normalize_origin
