@@ -620,3 +620,71 @@ async def test_interrupted_snapshot_lease_holds_until_matching_result(ecs, inter
             session, owner=ecs.owner, command_code=command.command_code
         )
         assert view.status == "SUCCEEDED" and not view.ack_received
+
+
+async def test_failed_device_result_is_applied_and_queryable_without_ack(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    core = dict(
+        command_code=command.command_code,
+        device_code="D1",
+        result="FAILED",
+        finish_time=1,
+        data={"qty": 1},
+        error_detail={"code": "DEVICE_FAILURE", "msg": "movement failed"},
+    )
+    raw = json.dumps(core).encode()
+    async with ecs.factory.begin() as session:
+        first = await receive_ecs_result(session, raw, ecs.service)
+        assert first.status_code == 200
+    async with ecs.factory.begin() as session:
+        replay = await receive_ecs_result(session, raw, ecs.service)
+        assert replay.body == first.body
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "FAILED" and view.result == core
+        assert view.delivery_status == "DONE" and not view.ack_received
+        message = await session.scalar(select(ReliableMessage))
+        assert message.status == "DONE" and message.response_raw is None
+
+
+async def test_missing_original_annex_returns_retryable_503_without_result_evidence(ecs):
+    import httpx
+    from fastapi import FastAPI
+    from sqlalchemy import func
+
+    from app.controllers.ecs_result import router
+    from app.models import CallbackReceipt, EcsResultEvidence
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    annex = ecs.service.annexes.pop(("test", "1"))
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.ecs_commands = ecs.service
+    app.state.callback_session_factory = ecs.factory
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://wes.test"
+    ) as client:
+        response = await client.post(
+            "/api/v1/callback/result", content=result_body(command.command_code)
+        )
+        assert response.status_code == 503
+        assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+        async with ecs.factory() as session:
+            for model in (EcsResultEvidence, CallbackReceipt):
+                assert await session.scalar(select(func.count()).select_from(model)) == 0
+            assert (await session.scalar(select(ReliableMessage))).status == "SENDING"
+            assert (await session.scalar(select(EcsCommand))).status == "DISPATCHING"
+        ecs.service.annexes["test", "1"] = annex
+        retried = await client.post(
+            "/api/v1/callback/result", content=result_body(command.command_code)
+        )
+        assert retried.status_code == 200
