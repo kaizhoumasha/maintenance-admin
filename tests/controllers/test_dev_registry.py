@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -91,6 +92,7 @@ for registry in registries:
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
+        cwd=str(Path(__file__).resolve().parents[2]),
         env={
             **os.environ,
             "ENVIRONMENT": environment,

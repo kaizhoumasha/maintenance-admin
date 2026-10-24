@@ -91,7 +91,10 @@ def request_operation(
     def register(cls):
         source = operation_source(name, cls)
         if not isinstance(endpoint, Endpoint):
-            raise TypeError("endpoint must be an Endpoint; 修复: 使用 Endpoint.FACTS 或 DECISIONS")
+            raise TypeError(
+                f"{source.location}: endpoint must be an Endpoint; "
+                "修复: 使用 Endpoint.FACTS 或 DECISIONS"
+            )
         if name in _registry:
             raise ValueError(
                 f"duplicate operation {name!r}: {_registry[name].registration_source.location} "
@@ -103,7 +106,7 @@ def request_operation(
         if (example := item.example) is not None:
             try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
                 cls.model_validate_json(json.dumps(example, allow_nan=False))
-            except ValueError as error:
+            except (ValueError, TypeError) as error:
                 raise ValueError(
                     f"{source.location}: example is invalid: {error}; "
                     "修复: 修改 Payload 的 json_schema_extra.examples，使其满足严格 JSON 字段约束"

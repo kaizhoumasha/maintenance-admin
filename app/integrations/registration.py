@@ -99,4 +99,7 @@ def validate_function(target, data, *, optional_data: bool = False) -> None:
     if data is None and optional_data:
         return
     if not (isinstance(data, type) and issubclass(data, BaseModel)):
-        raise TypeError("invalid data model; 修复: data= 指定 Pydantic payload 模型")
+        raise TypeError(
+            f"{registration_source(target).location}: invalid data model; "
+            "修复: data= 指定 Pydantic payload 模型"
+        )

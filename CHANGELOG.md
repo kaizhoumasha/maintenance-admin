@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### 接入注册统一(破坏性内部 API 变更)
+
+- 三类业务扩展点(`@ecs_event`、`@callback_operation`、`@request_operation`)统一为函数式装饰器注册,共享校验核 `app/integrations/registration.py`:注册名与文件名一致性(文件名=注册名先转小写,再把 `.`、`@` 换成 `_`,规则扩到 `<业务>/ecs_event/` 目录)、处理器必须 `async (ctx, payload)`、data 必须是 Pydantic 模型;报错全部带来源位置和「修复:」提示,导入期即暴露。单模块形式不受文件名约束。
+- 破坏性:移除旧类 `CallbackOperation`、`RequestOperation`、`TransportCallback`,改为直接装饰函数或 `RequestPayload` 模型;Transport 回调迁移为 `apply_callback(ctx, apply)` 函数,流程及 ack/echo/note 语义不变。对端可见 wire 行为全部保持。迁移说明见 docs/integrations/registration.md。
+- local-only 标记:发现器改经 `import_registration_module` 导入业务模块,`dev_callback`、`dev_ecs_event` 入口在 `local_registration()` 作用域内注册并标记 `local_only`,注册表可区分演示项与生产项。
+- dev 控制台(仅 `ENVIRONMENT=local`,需登录)新增 `GET /api/v1/dev/integrations/registry`,列出本进程实际加载的三类注册项(名称、来源文件、local-only、endpoint、Payload JSON Schema)。
+- 接入指南与排障见 docs/integrations/registration.md;计划与验证记录见 docs/superpowers/plans/2026-10-24-unified-integration-registration.md(临时 PostgreSQL/Redis 下 `pytest -ra` 1840 通过、7 跳过,`ruff` 通过)。
+
 ### ECS 事件回调接收
 
 - 新增 `POST /api/v1/callback/event`(`app/integrations/ecs_callback/`、`app/controllers/ecs_callback.py`):接收 ECS 设备事件,wire 按白皮书不变。校验信封,非法回 `400 INVALID_ENVELOPE` 加 `issues[]`(不回显值);身份是 `device_code`、`event_type`、`timestamp`、`is_debug`、`data` 的 SHA-256 摘要,写入 `callback_receipt`(operation `ecs.event`,operation_id 为 64 位摘要);先去重再校验 `data`,重报返回首次的 `200 ACK`;按 `event_type` 分发到 `@ecs_event` 函数式处理器;未注册的事件类型回 `200 ACK`,事件完整存入收据诊断(至多 32 KiB,更大时只存摘要、大小和 1 KiB 预览)。目前没有任何具体事件类型。

@@ -12,7 +12,7 @@ IN_PACKAGE = re.compile(r"^app\.integrations\.\w+\.(callback|request|ecs_event)\
 
 def violation(name: str, module: str) -> str | None:
     """`a.b@v1` 必须写在 `a_b_v1.py`:文件名与注册名是两份信息,靠这条规则防止对不上。
-    只检查目录形式(`<业务>/callback/`、`<业务>/request/`)里的文件。"""
+    只检查目录形式(`<业务>/callback/`、`<业务>/request/`、`<业务>/ecs_event/`)里的文件。"""
     match = IN_PACKAGE.match(module)
     if match and match.group(2) != registration_filename(name).removesuffix(".py"):
         return f"{name} is in {module}"
