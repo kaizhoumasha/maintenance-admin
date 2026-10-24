@@ -30,6 +30,8 @@ POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已�
 
 POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略顶层诊断扩展；成功提交后返回 200/ACK。未知命令/设备不匹配 404，提前/矛盾 409，非法输入 400，超限 413，事务或原附录不可用 503。结果证据、收据、命令投影及 settle 同事务。长期证据在短期收据/可靠消息清理后仍提供原响应，不重新创建发送义务。Event 接口保持原语义。
 
+本项目内的通用能力隔离参考接入与端到端验收见[隔离设计](../superpowers/specs/2026-10-25-ecs-first-consumer-isolation-design.md)与[实施计划](../superpowers/plans/2026-10-25-ecs-first-consumer-isolation-plan.md)。参考目录、记录及消费只存在于 tests；通过不代表供应商、生产路由或现场验收，也不要求先指定外部业务项目。
+
 ## 发布与验证边界
 
 迁移 `a025a20261025` 扩展可靠状态/快照并创建命令、发送依据和结果证据表。旧 STATIC 数据保持可读。存在快照、HELD 或 ECS 证据时拒绝破坏性 downgrade。停用所有旧 Sender/维护进程后，执行 `uv run alembic upgrade head`，再启用新版本；不支持旧二进制回退后解释新消息。本地 `--reload` 仅重载代码，不会自动迁移数据库。若 Sender 日志出现 SQLSTATE `42703`（缺列）或 `42P01`（缺表），先用 `uv run alembic current` 对照 `uv run alembic heads` 检查迁移状态，按上述停机顺序升级，勿通过捕获后忽略异常继续发送。

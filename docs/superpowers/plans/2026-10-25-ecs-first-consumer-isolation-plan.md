@@ -1,6 +1,6 @@
 # enterprise_admin ECS 通用能力隔离参考接入与端到端验收实施计划
 
-> **For agentic workers:** 代码实施获批后使用 superpowers:executing-plans，或用户明确选择时使用 superpowers:subagent-driven-development，逐任务执行。Task 0–5 已在本项目测试范围完成，simplify 后专项验证通过；本轮命名暂存/本地提交已获授权，不推送，不执行本机迁移或真实发送。
+> **For agentic workers:** 代码实施获批后使用 superpowers:executing-plans，或用户明确选择时使用 superpowers:subagent-driven-development，逐任务执行。Task 0–5 已在本项目测试范围完成，simplify 后专项验证通过；前轮命名暂存/本地提交已完成；本轮 SHIP、推送与创建 develop PR 已获授权，不合并，不执行本机迁移或真实发送。
 
 **Goal:** 在 enterprise_admin 当前仓库内，复用 P1 现有测试，仅补隔离参考接入和端到端验收缺口。
 
@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-- 当前实施和 simplify 已完成；本轮仅将授权的四份文档与五份测试文件重新暂存并本地提交，不推送、不迁移本机数据库、不启用真实发送；保留其他改动和 stash。
+- 当前实施和 simplify 已完成，前轮最终改动已提交；本轮 SHIP 允许推送当前 feature 分支并创建 develop PR，不合并、不迁移本机数据库、不启用真实发送；保留其他改动和 stash。
 - 后续实现遵守本仓库 feature 分支规则；不直接在 develop 实现。代码开工和真实启用分别授权，不因计划写完自动执行。
 - 参考值复用 D1/MOVE、可信 owner=test、(test,1) 附录、qty:int、timeout 1–60000 ms 和五分钟窗口；全部为测试合同，不能导入生产默认装配或关闭 C1/C2/C3。
 - 先找等价行为测试，再补缺口。已有覆盖直接复用；不要求所有测试先失败，不为重构/夹具接线重复建测试。
@@ -112,7 +112,7 @@
 - [x] 执行 `uv run ruff check .`、`uv run ruff format --check .`、`git diff --check`，不自动修复无关文件。
 - [x] V1–V12 逐项链接实际测试函数及本轮执行证据，区分复用/新增；记录基线、命令、退出码、通过/跳过数和资源清理。P1 历史通过数不替代本轮结果。
 - [x] 复核仅测试/说明增量、默认真实发送仍未启用；保存现场供应商/物理验收/prefork 等未验证范围。只清理本次资源，不动其他容器、卷、改动或 stash。
-- [x] 用户已授权本轮最终改动重新暂存并本地提交；推送/SHIP、迁移本机或部署库和真实设备发送不在授权范围，保留其他改动和 stash。
+- [x] 前轮最终改动已按授权命名暂存并本地提交；本轮用户已授权 SHIP、推送和创建 develop PR，不合并、不迁移本机或部署库、不启用真实设备发送，保留其他改动和 stash。
 
 **验收：** 仅得出“enterprise_admin ECS 通用能力隔离参考验收通过”。真实启用保持 NOT_READY，直到设计 §7 各适用门槛有证据并获单独授权。
 
@@ -158,3 +158,13 @@
 以上测试使用锁定依赖的隔离 Python，对应计划中的 uv run pytest/ruff 入口。19项全量跳过（专项12项）均为SQLite不适用的PostgreSQL锁/并发参数，对应PostgreSQL参数通过。simplify 仅涉及 conftest、test_query、test_flow：查询分步读取、共用结果报文构造、合并重复导入、删除重复同步信号，净减45行；两个P2、当前许可、事务、幂等和未知交付覆盖完整保留。
 
 临时运行日志及JUnit用于当轮核验，不作为仓库链接依赖；本节保存可复核命令与测试定位，重跑须创建新的专属资源并再次预检。两轮专属容器、匿名卷、内部网络与测试镜像均已清理，文档/暂存区/其他改动及stash在实施、simplify阶段未被覆盖。没有本机数据库迁移、部署、真实发送或供应商/现场验收；真实门槛表仍全部未关闭。
+
+## SHIP 补充验收（2026-10-25）
+
+本节为 simplify 和前轮本地提交之后的新证据，不改写上节历史阶段结果。当前 feature 分支已按本轮授权推送，目标为创建合入 develop 的 PR，尚未合并或部署。
+
+- 外部结构化评审提出 P3 补测缺口，已在既有 `test_pending_route_keeps_active_route_and_revocation_only_fences_old_call` 参数化 `revoked=False/True`：A 失效但未撤销时旧命令仍获准，显式撤销时旧命令被围栏；新独立意图在两种情况下均冻结有效 B，旧身份与字节不变。定向 `python -m pytest tests/integrations/ecs_command/test_service.py -k pending_route -q` 为4 passed；隔离副本中临时把失效等同撤销的负向对照恰好检出 SQLite/PostgreSQL 两项失败，恢复后完整回归通过。未改变生产授权或协议。
+- 本次最终测试源码副本与当前测试内容逐字节一致，不复制本机 .env；专属内部 PostgreSQL/Redis、无发布端口，未接入真实设备。完整回归 `python -m pytest -q -rs --deselect=tests/scripts/test_release_bundle.py::test_site_override_mounts_external_configuration_read_only`：2114 passed、19 skipped、2 deselected in129.74s，退出码0。
+- 同一无 .env 源码副本另在宿主执行 `python -m pytest tests/scripts/test_release_bundle.py -k test_site_override_mounts_external_configuration_read_only -q`：2 passed、33 deselected in0.84s，退出码0。仅挂载用例使用独立 Compose 项目，不启动业务 API/DB，不向测试容器暴露宿主 socket。两路合计 **2116 passed、19 skipped**；19项均为SQLite不适用的PostgreSQL参数，对应PostgreSQL参数通过，没有将 deselected 视为通过。
+- `python -m ruff check .`、`python -m ruff format --check .` 通过，331 files already formatted；推送前测试与 Ruff 证据均为 FRESH。最终原生工程/覆盖/计划/对抗复核无遗留问题；外部结构化评审的 P3 已修复并经原生复核，不能将修复前外部报告当作修复后的独立认证；外部对抗审查540秒超时，保留为缺失覆盖。
+- 本轮专属容器、匿名卷、内部网络和测试镜像标签已按资源归属清理；其他容器、其他改动与 stash 保留。Task 0–5 仍为29项全部完成；现有8项 TODO 和真实接入门槛均未冒充完成，不迁移本机数据库、不启用真实发送。
