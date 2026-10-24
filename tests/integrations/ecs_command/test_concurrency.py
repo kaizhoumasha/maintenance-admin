@@ -217,3 +217,85 @@ async def test_authorization_is_locked_before_waiting_for_message(ecs):
         finally:
             await blocker.rollback()
             await task
+
+
+@pytest.mark.parametrize("first", ["revoke", "gate"])
+async def test_persistent_route_revocation_serializes_with_send_gate(
+    reference,
+    wait_for_lock,
+    monkeypatch,
+    first,
+):
+    from sqlalchemy import update
+
+    ecs = reference.ecs
+    if ecs.engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL original authorization row locking")
+    async with ecs.factory.begin() as session:
+        command = await reference.register(session)
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    claim = (await store.claim(1, ecs.targets))[0]
+    if first == "revoke":
+        async with ecs.factory.begin() as blocker:
+            await blocker.execute(update(reference.routes).values(revoked=True))
+            pending = asyncio.create_task(store.before_send(claim, ecs.targets["ecs"]))
+            try:
+                await wait_for_lock(pending)
+                assert not pending.done()
+            finally:
+                await blocker.commit()
+                permitted = await asyncio.wait_for(pending, 5)
+        assert not permitted
+    else:
+        authorized, release = asyncio.Event(), asyncio.Event()
+        original = reference.authorize_frozen
+
+        async def hold_authorization(session, route):
+            answer = await original(session, route)
+            authorized.set()
+            await release.wait()
+            return answer
+
+        monkeypatch.setattr(reference, "authorize_frozen", hold_authorization)
+        gate = asyncio.create_task(store.before_send(claim, ecs.targets["ecs"]))
+        revocation = None
+        try:
+            await asyncio.wait_for(authorized.wait(), 5)
+
+            async def revoke():
+                async with ecs.factory.begin() as session:
+                    await session.execute(update(reference.routes).values(revoked=True))
+
+            revocation = asyncio.create_task(revoke())
+            await wait_for_lock(revocation)
+            assert not revocation.done()
+        finally:
+            release.set()
+            permitted = await asyncio.wait_for(gate, 5)
+            if revocation:
+                await asyncio.wait_for(revocation, 5)
+        assert permitted
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == ("RECONCILING" if first == "revoke" else "DISPATCHING")
+        assert view.hold_reason == ("AUTHORIZATION_REVOKED" if first == "revoke" else None)
+        assert view.result is None
+
+
+async def test_missing_original_authorization_does_not_allow_dispatch(reference):
+    from sqlalchemy import delete
+
+    ecs = reference.ecs
+    async with ecs.factory.begin() as session:
+        command = await reference.register(session)
+        await session.execute(delete(reference.routes))
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert not await store.before_send(claim, ecs.targets["ecs"])
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "RECONCILING" and view.result is None

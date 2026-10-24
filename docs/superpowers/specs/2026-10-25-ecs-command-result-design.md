@@ -2,7 +2,7 @@
 
 日期：2026-10-25。当前状态：**P1 已实现并经 PR #22 合并到 develop，合并提交 `ed9005ff0c12e6b090cfcf6cb19ffa3df4a44eea`；隔离机制与合并 CI 验收通过，真实接入尚未验收**。合并 CI 为 2054 passed、11 skipped（SQLite 参数下不适用的 PostgreSQL 专项，对应 PostgreSQL 参数通过），Ruff 与格式检查通过。外部双路评审超时，仍为缺失覆盖，不计通过。
 
-用户已选择并实施“复用现有 HTTP 客户端和可靠出站框架”的方向。本文保留 P0 协议及 P1 行为基线，设计期决策与评审记录归档保留。当前授权仅修正文档并制定[首个消费项目隔离接入设计](2026-10-25-ecs-first-consumer-isolation-design.md)及其实施计划，不授权新代码、提交、推送、数据库迁移或真实设备发送。
+用户已选择并实施“复用现有 HTTP 客户端和可靠出站框架”的方向。本文保留 P0 协议及 P1 行为基线，设计期决策与评审记录归档保留。本轮范围已调整为 [enterprise_admin 内的通用能力隔离参考接入与端到端验收](2026-10-25-ecs-first-consumer-isolation-design.md)及其实施计划，不以指定外部业务项目为前置条件；参考测试及 simplify 已完成，当前仅授权最终改动本地提交，不推送、不迁移本机数据库或启用真实设备发送。
 
 ## 1. 目标、依据与现状
 
@@ -404,7 +404,7 @@ P0 内部评审可在 C1–C7 尚未全部取得供应商证据时完成，但�
 
 P1、全局日志诊断及回归已合并为 [PR #22](https://github.com/kaizhoumasha/maintenance-admin/pull/22)，[合并提交 CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40133270990) 已通过；本地 develop 已快进到 `ed9005f`，已合并的本地功能分支已清理。没有执行服务器部署、本机数据库迁移或真实设备发送。
 
-下一阶段采用“首个消费项目、一个设备、一种动作的隔离接入”。入口、附录、授权及业务消费由消费项目实现并验证；模板复用当前 P1，不扩展 Status、具体 Event、自动纠正或人工强制重发。详见[下一阶段设计](2026-10-25-ecs-first-consumer-isolation-design.md)与[实施计划](../plans/2026-10-25-ecs-first-consumer-isolation-plan.md)。待确认输入未关闭前只完成文档；真实发送仍须关闭 §9 的 C1/C2/C3/C5、回调来源限制及独立现场门槛。
+下一阶段范围已修正为“enterprise_admin 内的通用能力隔离参考接入与端到端验收”。项目仍为当前 maintenance-admin 仓库，不涉及重命名；不再等待指定外部业务项目、真实设备或正式业务规则。复用 P1 现有测试，仅补测试目录授权、参考记录事务/幂等消费及真实回环 HTTP 闭环缺口，保留旧路由撤销但新路由有效、消费与取消/换绑/版本变化竞争两个 P2 的验收条件。参考记录/附录只在 tests 中，不新增生产业务模块、模型、迁移或默认装配。详见[下一阶段设计](2026-10-25-ecs-first-consumer-isolation-design.md)与[实施计划](../plans/2026-10-25-ecs-first-consumer-isolation-plan.md)。当前参考测试与 simplify 已获授权并完成，验证阶段与结果见实施计划；本轮仅授权本地提交，不推送；真实发送仍须关闭 §9 的 C1/C2/C3/C5、回调来源限制及适用发布/现场门槛，正式项目和业务规则在真实接入时确认。
 
 下列 Decision ledger 与 GSTACK REVIEW REPORT 为设计期归档。其“未实施/未授权/未运行”语句仅描述当时状态；当前状态以上述已实现基线和实施计划为准，不回写或伪造历史评审结论。
 
