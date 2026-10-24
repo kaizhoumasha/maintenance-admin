@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.models import ReliableMessage
 
@@ -77,7 +77,10 @@ async def test_command_and_message_share_exact_sending_deadline(ecs):
         assert command.expires_at == message.expires_at
 
 
-async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_call(reference):
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_call(
+    reference, revoked
+):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
     from app.models import EcsCommand
@@ -93,6 +96,9 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
         assert (await session.get(EcsCommand, pending.command_code)).route["route_id"] == "A"
     async with ecs.factory.begin() as session:
         await reference.switch_route(session)
+        await session.execute(
+            update(reference.routes).where(reference.routes.c.id == "A").values(revoked=revoked)
+        )
     async with ecs.factory.begin() as session:
         again = await reference.register(session)
         second = await reference.register(session, key="new")
@@ -108,7 +114,8 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
         permitted[claim.message.operation_id] = bool(
             await store.before_send(claim, ecs.targets["ecs"])
         )
-    assert not permitted[first.command_code] and not permitted[pending.command_code]
+    assert permitted[first.command_code] is (not revoked)
+    assert permitted[pending.command_code] is (not revoked)
     assert permitted[second.command_code]
     async with ecs.factory.begin() as session:
         assert (await reference.register(session)).command_code == first.command_code
