@@ -4,11 +4,12 @@
 
 ### 接入注册统一(破坏性内部 API 变更)
 
-- 三类业务扩展点(`@ecs_event`、`@callback_operation`、`@request_operation`)统一为函数式装饰器注册,共享校验核 `app/integrations/registration.py`:注册名与文件名一致性(文件名=注册名先转小写,再把 `.`、`@` 换成 `_`,规则扩到 `<业务>/ecs_event/` 目录)、处理器必须 `async (ctx, payload)`、data 必须是 Pydantic 模型;报错全部带来源位置和「修复:」提示,导入期即暴露。单模块形式不受文件名约束。
-- 破坏性:移除旧类 `CallbackOperation`、`RequestOperation`、`TransportCallback`,改为直接装饰函数或 `RequestPayload` 模型;Transport 回调迁移为 `apply_callback(ctx, apply)` 函数,流程及 ack/echo/note 语义不变。对端可见 wire 行为全部保持。迁移说明见 docs/integrations/registration.md。
-- local-only 标记:发现器改经 `import_registration_module` 导入业务模块,`dev_callback`、`dev_ecs_event` 入口在 `local_registration()` 作用域内注册并标记 `local_only`,注册表可区分演示项与生产项;生产注册项在 local 作用域内首次注册时即报错,已缓存模块和缺失入口的发现不受影响。
-- dev 控制台(仅 `ENVIRONMENT=local`,需登录)新增 `GET /api/v1/dev/integrations/registry`,列出本进程实际加载的三类注册项(名称、来源文件、local-only、endpoint、Payload JSON Schema)。
-- 接入指南与排障见 docs/integrations/registration.md;计划与验证记录见 docs/superpowers/plans/2026-10-24-unified-integration-registration.md(临时 PostgreSQL/Redis 下 `pytest -ra` 1840 通过、7 跳过,`ruff` 通过)。
+- ECS 事件和 WMS 回调统一声明名称、Payload 模型与异步处理函数；WMS 请求直接注册 `RequestPayload` 模型，新增接入无需定义外层 operation 类。迁移说明见 [接入指南](docs/integrations/registration.md)。
+- local 开发控制台新增需登录的 `GET /api/v1/dev/integrations/registry`，一处查看三类实际注册项、来源文件、local-only、请求端点和 Payload Schema；非 local 环境不挂载。
+- 文件名统一为注册名先转小写，再把 `.`、`@` 换成 `_` 并加 `.py`；非法名称、重名、文件名或声明错误给出来源与修复方法。保留单模块和入口包根声明，不强制逐项文件名。
+- local-only 按实际接入入口及注册时作用域记录；生产项在 local 作用域内首次注册会报错，名称中包含 `dev` 不会绕过检查，缺失入口和已缓存模块的发现仍可安全执行。
+- 移除旧 `CallbackOperation`、`RequestOperation`、`TransportCallback` 类及动态适配；Transport 共享流程改为普通函数，协议、ACK/回显、身份重放、TTL、加锁与事务回滚语义保持。
+- 独立临时 PostgreSQL/Redis 全套验证 `1870 passed, 7 skipped`，跳过均为 SQLite 参数下不适用的 PostgreSQL 专属检查；补齐注册失败不占名称、入口兼容、原始事件清单与本地示例回放的行为测试。
 
 ### ECS 事件回调接收
 
