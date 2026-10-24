@@ -15,6 +15,8 @@ from app.core.operation_names import is_operation_name
 _local_only = ContextVar("integration_local_only", default=False)
 _root = Path(__file__).resolve().parents[2]
 _entrypoints = {"ecs_event", "callback", "request", "dev_ecs_event", "dev_callback"}
+# 仅 local 导入的模块名尾段;发现器与联调控制台据此标记 local_only
+DEV_MODULES = frozenset({"dev", "dev_callback", "dev_ecs_event"})
 
 
 @contextmanager
@@ -55,7 +57,16 @@ def registration_source(target) -> RegistrationSource:
     if path:
         resolved = Path(path).resolve()
         source_file = str(resolved.relative_to(_root)) if resolved.is_relative_to(_root) else path
-    return RegistrationSource(module, source_file, target.__qualname__, _local_only.get())
+    local_only = _local_only.get()
+    # 只拦实际注册，无论来自发现器还是普通 import；缓存或缺失模块不会触发误标。
+    parts = module.split(".")
+    in_dev_entry = len(parts) > 3 and parts[3] in DEV_MODULES
+    if local_only and parts[:2] == ["app", "integrations"] and not in_dev_entry:
+        raise RuntimeError(
+            f"{module}.{target.__qualname__}: 首次注册发生在 local_registration() 作用域内, "
+            "local_only 会被误标且无法恢复; 修复: dev 模块的导入链不要 import 生产注册模块"
+        )
+    return RegistrationSource(module, source_file, target.__qualname__, local_only)
 
 
 def validate_registration_file(name: str, target) -> RegistrationSource:

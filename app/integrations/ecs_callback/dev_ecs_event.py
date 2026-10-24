@@ -2,8 +2,7 @@
 
 from pydantic import ConfigDict, Field
 
-from app.integrations.wms_callback import CallbackPayload
-
+from . import CallbackPayload
 from .registry import EcsEventContext, ecs_event
 
 

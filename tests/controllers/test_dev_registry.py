@@ -7,9 +7,9 @@ import pytest
 from fastapi import FastAPI
 
 from app.controllers.dev import include_dev_routers
+from app.integrations.ecs_callback import CallbackPayload
 from app.integrations.ecs_callback import registry as ecs
 from app.integrations.wms_callback import registry as callbacks
-from app.integrations.wms_callback.operation import CallbackPayload
 from app.integrations.wms_request import operation as requests
 
 PATH = "/api/v1/dev/integrations/registry"

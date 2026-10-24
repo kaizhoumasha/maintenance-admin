@@ -26,8 +26,7 @@
 文件：`app/integrations/example/ecs_event/scan_completed.py`。
 
 ```python
-from app.integrations.ecs_callback import EcsEventContext, ecs_event
-from app.integrations.wms_callback import CallbackPayload
+from app.integrations.ecs_callback import CallbackPayload, EcsEventContext, ecs_event
 
 
 class ScanCompleted(CallbackPayload):

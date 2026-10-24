@@ -6,7 +6,7 @@
 
 - 三类业务扩展点(`@ecs_event`、`@callback_operation`、`@request_operation`)统一为函数式装饰器注册,共享校验核 `app/integrations/registration.py`:注册名与文件名一致性(文件名=注册名先转小写,再把 `.`、`@` 换成 `_`,规则扩到 `<业务>/ecs_event/` 目录)、处理器必须 `async (ctx, payload)`、data 必须是 Pydantic 模型;报错全部带来源位置和「修复:」提示,导入期即暴露。单模块形式不受文件名约束。
 - 破坏性:移除旧类 `CallbackOperation`、`RequestOperation`、`TransportCallback`,改为直接装饰函数或 `RequestPayload` 模型;Transport 回调迁移为 `apply_callback(ctx, apply)` 函数,流程及 ack/echo/note 语义不变。对端可见 wire 行为全部保持。迁移说明见 docs/integrations/registration.md。
-- local-only 标记:发现器改经 `import_registration_module` 导入业务模块,`dev_callback`、`dev_ecs_event` 入口在 `local_registration()` 作用域内注册并标记 `local_only`,注册表可区分演示项与生产项。
+- local-only 标记:发现器改经 `import_registration_module` 导入业务模块,`dev_callback`、`dev_ecs_event` 入口在 `local_registration()` 作用域内注册并标记 `local_only`,注册表可区分演示项与生产项;生产注册项在 local 作用域内首次注册时即报错,已缓存模块和缺失入口的发现不受影响。
 - dev 控制台(仅 `ENVIRONMENT=local`,需登录)新增 `GET /api/v1/dev/integrations/registry`,列出本进程实际加载的三类注册项(名称、来源文件、local-only、endpoint、Payload JSON Schema)。
 - 接入指南与排障见 docs/integrations/registration.md;计划与验证记录见 docs/superpowers/plans/2026-10-24-unified-integration-registration.md(临时 PostgreSQL/Redis 下 `pytest -ra` 1840 通过、7 跳过,`ruff` 通过)。
 

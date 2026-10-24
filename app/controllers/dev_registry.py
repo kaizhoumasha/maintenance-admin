@@ -29,12 +29,13 @@ async def list_registrations() -> list[dict]:
     ):
         for name, item in items.items():
             model = item.data_model
+            endpoint = getattr(item, "endpoint", None)
             rows.append(
                 {
                     "kind": kind,
                     "name": name,
                     **asdict(item.registration_source),
-                    "endpoint": item.endpoint.value if kind == "wms_request" else None,
+                    "endpoint": endpoint.value if endpoint is not None else None,
                     "payload_schema": model.model_json_schema() if model is not None else None,
                 }
             )

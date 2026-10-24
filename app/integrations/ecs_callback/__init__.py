@@ -72,6 +72,8 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
 会把它按未注册 ACK 并占住身份,升级后重报只会得到重复,业务效果补不上。
 """
 
+from app.integrations.wms_callback import CallbackPayload
+
 from .registry import EcsEventContext, ecs_event
 
-__all__ = ["EcsEventContext", "ecs_event"]
+__all__ = ["CallbackPayload", "EcsEventContext", "ecs_event"]
