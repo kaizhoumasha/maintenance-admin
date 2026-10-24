@@ -6,10 +6,8 @@
 import json
 import re
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.core import logger
-from app.core.logger import safe_db_exception
+from app.diagnostics import log_exception
 from app.models import AuditLog
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -94,9 +92,12 @@ class AuditMiddleware:
                     scope, state, trace_id, bytes(body), None if req_too_big else bytes(req_body)
                 )
             except Exception as exc:
-                logger.exception(
+                log_exception(
+                    logger,
                     "审计日志写入失败",
-                    exc_info=safe_db_exception(exc) if isinstance(exc, SQLAlchemyError) else exc,
+                    exc,
+                    component="audit",
+                    phase="write",
                 )
 
     async def _record(

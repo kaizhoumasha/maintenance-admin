@@ -58,7 +58,7 @@ async def test_concurrent_create_and_result_apply_once(ecs):
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 
-async def test_projection_failure_rolls_back_both_records_and_maintenance_continues(ecs):
+async def test_projection_failure_rolls_back_both_records_and_maintenance_continues(ecs, caplog):
     from app.reliable.testing import FakeClock
 
     clock = FakeClock()
@@ -74,6 +74,11 @@ async def test_projection_failure_rolls_back_both_records_and_maintenance_contin
     store = MessageStore(ecs.factory, clock=clock, lifecycles={PROTOCOL: Broken(ecs.service)})
     clock.advance(seconds=301)
     await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.2)
+    records = [r for r in caplog.records if "snapshot maintenance unavailable" in r.getMessage()]
+    assert records and records[0].component == "reliable"
+    assert records[0].phase == "maintain_snapshots" and records[0].message_id
+    assert "origin=" in records[0].getMessage() and "Traceback" in records[0].getMessage()
+    assert "injected projection failure" not in caplog.text
     async with ecs.factory() as session:
         assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
         assert (await session.scalar(select(EcsCommand))).status == "QUEUED"

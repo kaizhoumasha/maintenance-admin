@@ -9,6 +9,7 @@ from typing import Protocol
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.diagnostics import log_exception
 from app.models.reliable import ReliableMessage
 
 from .types import MessageStatus, VerdictKind
@@ -269,10 +270,13 @@ class SnapshotTransactions:
                             await self.apply(session, port, context, row, claim, outcome)
                             count += 1
                     except Exception as error:
-                        logger.error(
-                            "snapshot maintenance unavailable id=%s error_type=%s",
-                            identity,
-                            type(error).__name__,
+                        log_exception(
+                            logger,
+                            "snapshot maintenance unavailable",
+                            error,
+                            component="reliable",
+                            phase="maintain_snapshots",
+                            context={"message_id": identity},
                         )
         except TimeoutError:
             logger.warning("snapshot maintenance deadline reached")

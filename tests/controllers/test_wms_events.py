@@ -200,7 +200,7 @@ async def test_callback_has_no_rate_limit_and_snapshot_budget_does_not_change_ac
 
 
 async def test_snapshot_storage_failure_does_not_change_committed_ack(
-    client, callback_store, envelope, monkeypatch
+    client, callback_store, envelope, monkeypatch, caplog
 ):
     calls = 0
 
@@ -216,6 +216,10 @@ async def test_snapshot_storage_failure_does_not_change_committed_ack(
     assert response.status_code == 422
     assert len(await stored(callback_store, CallbackReceipt)) == 1
     assert await stored(callback_store, CallbackSnapshot) == []
+
+    records = [r for r in caplog.records if "callback snapshot failed" in r.getMessage()]
+    assert records and records[0].component == "callback" and records[0].phase == "snapshot"
+    assert "snapshot unavailable" not in caplog.text
 
 
 async def test_snapshot_timeout_does_not_change_ack(client, callback_store, envelope, monkeypatch):

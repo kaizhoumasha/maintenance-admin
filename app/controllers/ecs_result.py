@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
+from app.diagnostics import log_exception
 from app.integrations.ecs_command.result import receive_ecs_result, reply
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,8 @@ async def result_callback(request: Request):
             async with factory() as session, session.begin():
                 result = await receive_ecs_result(session, raw, service)
     except Exception as error:
-        logger.error("ECS result transaction failed error_type=%s", type(error).__name__)
+        log_exception(
+            logger, "ECS result transaction failed", error, component="http", phase="ecs_result"
+        )
         result = reply(503, "TEMPORARILY_UNAVAILABLE")
     return JSONResponse(result.body, status_code=result.status_code)

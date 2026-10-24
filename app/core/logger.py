@@ -2,15 +2,13 @@ import inspect
 import logging
 import os
 import sys
-import traceback
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.core.config import get_settings
 from app.core.request_context import get_trace_id
+from app.diagnostics import diagnose, diagnostic_text, project_frame, safe_traceback
 
 _ROOT = Path(__file__).resolve().parents[2]
 _APP = _ROOT / "app"
@@ -24,11 +22,6 @@ _LEVEL_COLOR = {
 }
 
 
-def safe_db_exception(exc: BaseException) -> SQLAlchemyError:
-    """驱动异常及异常链可能回显参数;只保留异常类型与原始栈位置。"""
-    return SQLAlchemyError(type(exc).__name__).with_traceback(exc.__traceback__)
-
-
 class TraceIdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.trace_id = get_trace_id()
@@ -40,24 +33,15 @@ def _short(path: Path) -> str:
     return str(path.relative_to(_APP)) if path.is_relative_to(_APP) else path.name
 
 
-def _innermost_app_frame(exc: BaseException) -> tuple[Path, int, str] | None:
-    found = None
-    for frame, lineno in traceback.walk_tb(exc.__traceback__):
-        path = Path(frame.f_code.co_filename)
-        if path.is_relative_to(_ROOT) and ".venv" not in path.parts:
-            found = (path, lineno, frame.f_code.co_name)
-    return found
-
-
 def _origin(exc: BaseException) -> str | None:
     """异常最内层、属于本项目代码的栈帧，格式 `app/x.py:12 in func`；开发不用翻整段堆栈。"""
-    frame = _innermost_app_frame(exc)
+    frame = project_frame(exc)
     return f"{frame[0].relative_to(_ROOT)}:{frame[1]} in {frame[2]}" if frame else None
 
 
 def origin_src(exc: BaseException) -> str | None:
     """异常实际抛出处的 `目录/文件:行号`，用作日志的位置列。"""
-    frame = _innermost_app_frame(exc)
+    frame = project_frame(exc)
     return f"{_short(frame[0])}:{frame[1]}" if frame else None
 
 
@@ -91,6 +75,10 @@ class DevFormatter(logging.Formatter):
 
     def _paint(self, text: str, code: str) -> str:
         return f"{code}{text}{_RESET}" if self.color else text
+
+    def formatException(self, ei) -> str:
+        error = ei[1]
+        return diagnostic_text(diagnose(error)) + "\n" + safe_traceback(error, ei[2])
 
     def format(self, record: logging.LogRecord) -> str:
         time_ = f"{self.formatTime(record, '%H:%M:%S')}.{int(record.msecs):03d}"

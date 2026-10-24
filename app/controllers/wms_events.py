@@ -8,6 +8,7 @@ from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
+from app.diagnostics import log_exception
 from app.integrations.wms_callback import MAX_BODY_BYTES, CallbackResponse, receive, unavailable
 from app.integrations.wms_callback.discovery import load_operation_modules
 from app.integrations.wms_callback.registry import operations
@@ -71,7 +72,9 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
             async with factory() as session, session.begin():
                 result = await receive(session, body)
     except Exception as error:
-        logger.error("callback receive failed error_type=%s", type(error).__name__)
+        log_exception(
+            logger, "callback receive failed", error, component="http", phase="wms_callback"
+        )
         result = unavailable(body)
     if allow_snapshot():  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(

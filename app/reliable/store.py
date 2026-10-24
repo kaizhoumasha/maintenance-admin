@@ -8,6 +8,7 @@ from sqlalchemy import and_, bindparam, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.identifiers import uuid7
+from app.diagnostics import log_exception
 from app.http_client import DeliveryState, HttpResult
 from app.models.reliable import ReliableMessage
 
@@ -156,12 +157,19 @@ class MessageStore:
                             and snapshot.protocol not in self.served_snapshot_protocols
                         ):
                             raise ValueError("snapshot sending assembly unavailable")
-                    except (ValueError, TypeError, KeyError):
+                    except (ValueError, TypeError, KeyError) as error:
                         self._skipped_claim_cursor = (
                             self._time(session, row.next_attempt_at),
                             row.id,
                         )
-                        logger.error("snapshot claim unavailable id=%s", row.id)
+                        log_exception(
+                            logger,
+                            "snapshot claim unavailable",
+                            error,
+                            component="reliable",
+                            phase="claim",
+                            context={"message_id": row.id},
+                        )
                         continue
                 timeout = targets[row.target].timeout_ms / 1000
                 row.status = MessageStatus.SENDING

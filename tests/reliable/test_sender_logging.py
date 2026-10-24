@@ -8,8 +8,8 @@ from sqlalchemy.exc import ProgrammingError
 from app.reliable.sender import Sender
 
 
-def database_error(code):
-    cause = RuntimeError("private_driver_message")
+def database_error(code, message="private_driver_message"):
+    cause = RuntimeError(message)
     cause.sqlstate = code
     return ProgrammingError("private_sql", {"secret": "private_parameter"}, cause)
 
@@ -163,3 +163,70 @@ async def test_shutdown_error_identifies_cleanup_phase(caplog):
     assert len(records) == 1 and records[0].phase == "HTTP close"
     assert "Traceback" in records[0].getMessage()
     assert "private_close_error" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "code,message,missing",
+    [
+        (
+            "42703",
+            "column reliable_message.delivery_snapshot does not exist",
+            "reliable_message.delivery_snapshot",
+        ),
+        (
+            "42P01",
+            'relation "enterprise_backend.ecs_command" does not exist',
+            "enterprise_backend.ecs_command",
+        ),
+        ("42703", 'column "delivery_snapshot" does not exist', "delivery_snapshot"),
+    ],
+)
+async def test_summary_contains_standalone_safe_database_diagnosis(caplog, code, message, missing):
+    records, _ = await scan_script(
+        caplog,
+        [("maintain_snapshots", database_error(code, message), 60)] * 2,
+    )
+    summary = next(r.getMessage() for r in records if "scan failure summary" in r.getMessage())
+    assert f"sqlstate={code}" in summary and "driver_type=RuntimeError" in summary
+    assert f"missing={missing}" in summary
+    assert "origin=app/reliable/sender.py:" in summary
+    assert "alembic upgrade head" in summary
+    assert "Traceback" not in summary and "private_" not in summary
+
+
+async def test_changed_error_summary_keeps_previous_diagnosis(caplog):
+    records, _ = await scan_script(
+        caplog,
+        [("claim", database_error("42703", "column old_column does not exist"), 1)] * 2
+        + [("claim", database_error("42P01", "relation new_table does not exist"), 1)],
+    )
+    summary = next(r.getMessage() for r in records if "scan failure summary" in r.getMessage())
+    assert "sqlstate=42703" in summary and "missing=old_column" in summary
+    assert "new_table" not in summary and "42P01" not in summary
+
+
+@pytest.mark.parametrize(
+    "code,message",
+    [
+        ("42703", 'column "private_payload with spaces" does not exist'),
+        ("42703", "column safe_column does not exist; private_payload"),
+        ("23505", "column private_payload does not exist"),
+        ("42703", "private_driver_message"),
+    ],
+)
+async def test_summary_never_falls_back_to_raw_error_message(caplog, code, message):
+    records, _ = await scan_script(
+        caplog,
+        [("claim", database_error(code, message), 60)] * 2,
+    )
+    summary = next(r.getMessage() for r in records if "scan failure summary" in r.getMessage())
+    assert f"sqlstate={code}" in summary and "origin=" in summary
+    assert "private_" not in caplog.text and "missing=" not in summary
+
+
+async def test_sender_instances_do_not_share_failure_or_recovery_state(caplog):
+    await scan_script(caplog, [("claim", database_error("42703"), 1)] * 2)
+    records, _ = await scan_script(caplog, [("claim", database_error("42703"), 1), (None, None, 1)])
+    assert len([r for r in records if "scan failed" in r.getMessage()]) == 2
+    recovered = [r for r in records if "scan recovered" in r.getMessage()]
+    assert len(recovered) == 1 and recovered[0].failure_count == 1

@@ -276,3 +276,5 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 `filter` 上限为 **2048 UTF-8 字节**,URL 编码后最多约 6KB,部署时还须计入路径和其他参数,核对代理的请求行长度限制。筛选值可能含用户名、邮箱等个人信息;应用日志不记录 query string,反向代理和网关也应避免记录完整查询参数。筛选不保证所有组合都走索引,出现慢查询后再评估索引。
 
 ECS 命令与结果闭环的显式装配、事务及启用门槛见 [ECS P1 接入说明](docs/integrations/ecs-command.md)。模板不包含真实设备路由或附录。
+
+HTTP、Sender、维护与 Celery 的统一安全诊断、字段规则及降噪边界见 [安全日志诊断](docs/logging.md)。

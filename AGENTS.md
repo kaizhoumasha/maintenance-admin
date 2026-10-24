@@ -13,6 +13,7 @@
 
 - `app/controllers/` → `app/services/` → `app/models/`: routes, business rules/transactions, SQLAlchemy models.
 - `app/schemas/`: Pydantic contracts; `core/`, `middlewares/`, `tasks/` under `app/`: infrastructure, middleware, Celery jobs.
+- `app/diagnostics.py`: configuration-free safe error fields, origin and stack generation for HTTP, reliable maintenance and Celery. Use `log_exception` with a fixed message and allowlisted identifiers; never log raw exceptions, SQL, payloads or credentials. Each task owns its suppression/recovery state; diagnostics never change retry, transaction or delivery decisions. See `docs/logging.md`.
 - `app/http_client/`: standalone HTTP client; no `app.core`, business, database, Redis, Celery, or FastAPI imports. single-request scope only (no retries, rate limiting, or application assembly).
 - `app/reliable/`: protocol-agnostic outgoing-message outbox, leases, retries and TTL; uses only injected adapter ports. No business/protocol implementations, FastAPI, Celery or result-consumption API. Assembly lives in `app/reliable_runtime.py`; Celery only cleans terminal rows. Never stack another retry scheduler around these messages.
 - `app/integrations/<business>/dev.py` + `app/core/dev_scenarios.py` + `app/controllers/dev*.py`: local-only (`ENVIRONMENT=local`) dev console (task submission) and built-in mock WMS; register scenarios with `@dev_scenario`. See `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`.

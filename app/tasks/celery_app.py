@@ -2,7 +2,9 @@ from celery import Celery
 from celery.schedules import crontab
 
 from app.core import get_settings
+from app.tasks.diagnostics import install_celery_diagnostics
 
+install_celery_diagnostics()
 settings = get_settings()
 
 celery_app = Celery(

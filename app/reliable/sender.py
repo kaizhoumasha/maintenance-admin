@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 
-from sqlalchemy.exc import SQLAlchemyError
+from app.diagnostics import diagnose, diagnostic_text, error_cause, log_exception
 
 from .config import ReliableConfig
 from .delivery import send_one
@@ -15,42 +15,15 @@ from .delivery import send_one
 logger = logging.getLogger(__name__)
 
 
-def _error_cause(error: BaseException) -> BaseException:
-    cause = getattr(error, "orig", None) or error
-    return cause.__cause__ or cause
-
-
-def _log_failure(
-    message: str, error: BaseException, *, phase: str = "delivery", retry_in_s=None
-) -> None:
-    detail = ""
-    if isinstance(error, SQLAlchemyError):
-        cause = _error_cause(error)
-        sqlstate = getattr(cause, "sqlstate", None)
-        detail = f" sqlstate={sqlstate} driver_type={type(cause).__name__}"
-        if sqlstate in {"42703", "42P01"}:
-            detail += (
-                " hint=check database migrations; stop senders before uv run alembic upgrade head"
-            )
-    # 消息、异常链及栈帧源码可能含业务数据;只记录类型、诊断码和调用位置。
-    stack = "".join(
-        traceback.format_list(
-            [
-                (f.f_code.co_filename, line, f.f_code.co_name, "")
-                for f, line in traceback.walk_tb(error.__traceback__)
-            ]
-        )
-    )
-    logger.error(
-        "%s task=reliable_sender phase=%s retry_in_s=%s error_type=%s%s"
-        "\nTraceback (most recent call last):\n%s",
+def _log_failure(message, error, *, diagnostic, phase="delivery", retry_in_s=None):
+    log_exception(
+        logger,
         message,
-        phase,
-        retry_in_s,
-        type(error).__name__,
-        detail,
-        stack,
-        extra={"phase": phase, "retry_in_s": retry_in_s},
+        error,
+        component="reliable",
+        phase=phase,
+        context={"task": "reliable_sender", "retry_in_s": retry_in_s},
+        diagnostic=diagnostic,
     )
 
 
@@ -58,15 +31,18 @@ def _log_failure(
 class _ScanFailure:
     key: tuple
     phase: str
-    error_type: str
     started_at: float
     reported_at: float
+    diagnostic: dict[str, str]
     count: int = 1
     suppressed: int = 0
 
     @property
     def log_fields(self) -> dict[str, str | int]:
         return {
+            **self.diagnostic,
+            "component": "reliable",
+            "task": "reliable_sender",
             "phase": self.phase,
             "failure_count": self.count,
             "suppressed_count": self.suppressed,
@@ -163,12 +139,15 @@ class Sender:
 
     @staticmethod
     def _observe(task, *, phase="delivery"):
-        if not task.cancelled() and task.exception() is not None:
-            _log_failure("reliable task failed", task.exception(), phase=phase)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            _log_failure("reliable task failed", error, diagnostic=diagnose(error), phase=phase)
 
     def _record_scan_failure(self, error: Exception) -> None:
         now = self.monotonic()
-        cause = _error_cause(error)
+        cause = error_cause(error)
         frames = list(traceback.walk_tb(error.__traceback__))
         origin = (frames[-1][0].f_code, frames[-1][1]) if frames else None
         key = (self._scan_phase, type(error), type(cause), getattr(cause, "sqlstate", None), origin)
@@ -180,10 +159,12 @@ class Sender:
                 self._summarize_scan_failure(now, "continuing")
             return
         self._summarize_scan_failure(now, "changed")
-        self._scan_failure = _ScanFailure(key, self._scan_phase, type(error).__name__, now, now)
+        diagnostic = diagnose(error)
+        self._scan_failure = _ScanFailure(key, self._scan_phase, now, now, diagnostic)
         _log_failure(
             "reliable scan failed",
             error,
+            diagnostic=diagnostic,
             phase=self._scan_phase,
             retry_in_s=self.budget.poll_interval_s,
         )
@@ -193,10 +174,10 @@ class Sender:
         if failure is None or not failure.suppressed:
             return
         logger.warning(
-            "reliable scan failure summary task=reliable_sender phase=%s error_type=%s "
+            "reliable scan failure summary task=reliable_sender phase=%s %s "
             "failure_count=%s suppressed_count=%s elapsed_s=%.1f reason=%s",
             failure.phase,
-            failure.error_type,
+            diagnostic_text(failure.diagnostic),
             failure.count,
             failure.suppressed,
             now - failure.started_at,
