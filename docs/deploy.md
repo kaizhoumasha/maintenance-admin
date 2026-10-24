@@ -162,7 +162,7 @@ python3 scripts/release_bundle.py check . --project enterprise-backend-prod
 
 PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 是两个独立概念，`DATABASE_URL` 仍连接原数据库。`app.database.create_database_engine` 统一给 API、可靠发送器及各 Celery 数据库连接设置会话 `search_path=enterprise_backend`，ORM 元数据也显式限定 schema。没有新增环境变量，不要对共享数据库执行全局 `ALTER DATABASE/ROLE ... SET search_path`。SQLite 测试通过 schema 映射继续使用无 schema 表。
 
-在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行历史迁移，版本表同时移入新 schema。历史 revision 不重写，当前 head 仍为 `a023a20261024`。迁移白名单为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
+在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行历史迁移，版本表同时移入新 schema。历史 revision 不重写，schema 隔离的搬迁基线仍为 `a023a20261024`；本分支新增 ECS 迁移后的 head 为 `a025a20261025`，发布时以 `uv run alembic heads` 核对。迁移白名单为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
 
 - 仅自动搬迁版本为 `a023a20261024` 且白名单完整的旧 public 库。更早的旧库须先使用旧代码升级到该基线；不按完整白名单猜测历史版本的表归属。缺表、目标同名表冲突或等待锁超过 5 秒时整笔回滚，不覆盖、不合并、不清空。
 - 新库直接在独立 schema 建表。未知 revision 的 public 版本表视为其他系统所有，不读取为项目迁移进度、不移动；只读 `current`/`check` 不触发搬迁。已有项目 schema 版本表后不再扫描 public 同名表。

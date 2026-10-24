@@ -1,6 +1,6 @@
 # ECS 命令与结果闭环实施计划及 develop 核对
 
-> **执行状态：** P1 实现已在 `24d33bf` 提交，后台摘要诊断修复与全局统一日志诊断已在 `8f37387` 提交；合并前评审发现的两个日志 P2 问题及回归测试、simplify 已完成隔离验证。用户已授权将本轮最终改动与本计划进度一起暂存并提交；推送、本机数据库迁移和真实设备发送仍未授权。下列进度以实际文件和测试为准，不把隔离机制验收等同于供应商或现场验收。
+> **执行状态：** P1 实现已在 `24d33bf` 提交，后台摘要诊断修复与全局统一日志诊断已在 `8f37387` 提交；合并前评审发现的两个日志 P2 问题及回归测试、simplify 已完成隔离验证。两个 P2 修复已在 `968c9d4` 提交；用户随后授权 SHIP 与全面评审，功能分支已推送，PR 由 SHIP 主流程创建。本机数据库迁移、真实设备发送、合并和部署仍不在本轮范围。下列进度以实际文件和测试为准，不把隔离机制验收等同于供应商或现场验收。
 
 **Goal:** 在业务事务内登记冻结 ECS 命令，通过唯一可靠 Sender 投递，持久接收关联结果，并向授权消费方公开可区分接纳与物理结果的查询。
 
@@ -12,7 +12,7 @@
 
 **Source SHA-256:** `464fb5732293103451a7b1ded7e3474992969c5b69341f73a88dd4ee6185b8a3`。
 
-**Status:** P1_AND_DIAGNOSTICS_ISOLATION_VERIFIED。实现分支 `feature/ecs-command-result-p1` 基于下述 develop 基线；S1/S2、评审修复及后台日志优化均已实现；统一安全诊断已接入 HTTP、Sender、维护与 Celery；本轮补齐 Celery 空 throws 与 Sender 同 SQLSTATE 对象变化的诊断边界。最近完整隔离回归为 **2050 passed, 11 skipped**；提交已获授权，未推送、未迁移本机数据库、未启用真实设备发送。
+**Status:** P1_AND_DIAGNOSTICS_ISOLATION_VERIFIED。实现分支 `feature/ecs-command-result-p1` 基于下述 develop 基线；S1/S2、评审修复及后台日志优化均已实现；统一安全诊断已接入 HTTP、Sender、维护与 Celery；本轮补齐 Celery 空 throws 与 Sender 同 SQLSTATE 对象变化的诊断边界。SHIP 最终完整隔离回归为 **2054 passed, 11 skipped**；功能分支已推送，未迁移本机数据库、未启用真实设备发送。
 
 ## Global Constraints
 
@@ -23,7 +23,7 @@
 - UNKNOWN/中断不自动重放；HELD 不领取、不普通 resume、不 TTL/终态清理；不以历史失败阻塞同设备的新独立有效意图。
 - 所有双表/多表状态变更在一个数据库事务；锁顺序为命令 → 原授权（门禁才需要）→ 消息 → 结果收据。不持锁发 HTTP、获取/关闭客户端。
 - 不新增库存逻辑、WorkLine、取消、纠正版本、回放、结果总线、人工重发接口、真实设备附录或 ECS 交互控制台。
-- ECS P1 已在 `24d33bf` 提交，全局安全诊断已在 `8f37387` 提交。本轮提交仅包含两个日志 P2 修复、回归测试、simplify 与本计划进度；不重排其他待办。其他改动及 stash 保留；推送、部署、本机迁移和真实设备发送仍需单独授权。
+- ECS P1 已在 `24d33bf` 提交，全局安全诊断已在 `8f37387` 提交。本轮提交仅包含两个日志 P2 修复、回归测试、simplify 与本计划进度；不重排其他待办。其他改动及 stash 保留；本轮 SHIP 已获推送与创建 PR 授权，合并、部署、本机迁移和真实设备发送仍需单独授权。
 
 ## 已确认并同步修正的两项
 
@@ -200,12 +200,12 @@ Task 1–7 是分层验证点，当前已完成统一 P1 隔离机制验收；�
 ## 本轮验证与限制
 
 - 设计稿内容 SHA-256 与上文一致；未修改 ECS/WMS wire 合同。Task 1–7 的实现与隔离验收完成，Task 8 的本机迁移及现场步骤明确保留未完成。
-- 最新完整验证：显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向独立临时 PostgreSQL/Redis，执行 `uv run pytest -q -rs`，结果 **2050 passed, 11 skipped in 108.30s**。11 个跳过均为 PostgreSQL 专用用例的 SQLite 参数，对应 PostgreSQL 参数通过。
+- 最新完整验证（SHIP，含补齐的 FAILED 结果与首次缺原附录回归）：显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向独立临时 PostgreSQL/Redis，执行 `uv run pytest -q -rs`，结果 **2054 passed, 11 skipped in 105.76s**。11 个跳过均为 PostgreSQL 专用用例的 SQLite 参数，对应 PostgreSQL 参数通过。
 - `uv run ruff check .`、`uv run ruff format --check .`、`git diff --check` 通过。临时测试容器及其匿名卷已清理，未操作现有开发存储。
 - PostgreSQL 专项证据包括：创建/结果竞争、消费唯一键、表锁 deadline、授权锁顺序、事务失败回滚与迁移往返；HTTP 仅使用隔离模拟对端；另使用实际一次性 Redis broker/result backend 与 Celery solo worker 验证失败/重试，不代表生产 prefork、供应商去重或物理完成。
 - 原仅文档评审阶段的 75 passed / 29 skipped 不再作为当前验收证据；未执行的供应商请求、真实设备、现场/生产回调验证仍然未验收。
 - 本机开发库尚未执行 `a025a20261025`；此前只读复现的缺列故障须按接入指南的停机迁移顺序另行处理。日志优化只改善排障和降噪，不消除数据库版本差异。
-- 本轮仅准备并完成已授权的本地提交；不推送、不部署、不迁移本机数据库、不启用真实设备发送，保留其他改动及 stash。
+- 本轮 SHIP 已完成原生工程/对抗评审，未发现新增缺陷；外部结构化及对抗评审均在 9 分钟后超时，并报告 `unrecognized_model: glm-5.2`，明确保留为缺失覆盖。已推送功能分支；PR 由主流程创建，不合并、不部署、不迁移本机数据库、不启用真实设备发送，保留其他改动及 stash。
 
 ## 参考依据
 
