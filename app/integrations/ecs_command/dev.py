@@ -168,7 +168,7 @@ def configure_local_ecs(
     app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None
 ):
     if environment != "local":
-        if history_annexes or client_factory is not AsyncHttpClient:
+        if history_annexes or client_factory is not AsyncHttpClient or routes is not None:
             raise ValueError("ECS debug configuration requires ENVIRONMENT=local")
         return
     check_assembly(app)

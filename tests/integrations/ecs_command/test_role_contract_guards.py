@@ -18,6 +18,7 @@ from app.integrations.ecs_command.dev import (
     PROTOCOL_MODELS,
     DevEcsRoutes,
     LocalEcsRoutes,
+    configure_local_ecs,
 )
 from app.integrations.ecs_command.routing import RouteAuthorization
 from app.models import CallbackReceipt
@@ -81,6 +82,13 @@ def test_role_contract_assembly_rejects_duplicates_and_missing_annexes(runtime):
     application = FastAPI()
     with pytest.raises(ValueError, match="confirmed annex"):
         configure_ecs(application, routes=runtime.routes, annexes={})
+    assert not hasattr(application.state, "ecs_commands")
+
+
+def test_local_role_configuration_cannot_be_silently_ignored_in_production(runtime):
+    application = FastAPI()
+    with pytest.raises(ValueError, match="ENVIRONMENT=local"):
+        configure_local_ecs(application, environment="production", routes=runtime.routes)
     assert not hasattr(application.state, "ecs_commands")
 
 
