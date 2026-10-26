@@ -450,6 +450,8 @@ UNKNOWN不等于“没发出”，不能换命令号或普通resume重发；HELD
 
 params及Result.data须为合法JSON对象，可以包含不同动作的不同字段；完整保留这些字段，不套用测试qty模型，也不丢弃未知业务字段。task_type只校验统一文本协议，不做动作白名单；具体动作/参数语义由对端ECS校验，合法但不支持的动作按原协议拒绝并持久记录，不报本方“未装配动作”。统一信封、ACK/错误、ErrorDetail(code,msg)、SUCCESS/FAILED条件及身份/体积校验不放宽。
 
+内置`POST /api/v1/device/command` mock仍是严格演示对端：仅接受回环调用、D1/MOVE、1–60000ms的执行timeout及严格`params={"qty": int}`（不接受额外参数），只返回ACK，不产生Result或业务消费。它与上述通用登记服务的接收范围不同；协议合法的其他设备/动作/JSON由实际对端判定语义。§11的通用验证使用`tests.ecs_swagger`持有的两个独立模拟端，不能改用内置演示mock来验证LIFT等通用动作。超出演示合同的请求若得到不符合ECS响应合同的错误信封，原分类会保守进入UNKNOWN→HELD，不自动重放；登记成功不保证该mock接纳。
+
 仅local挂载，登录及dev:ecs:send_real仍必需。ecs_url继续要求规范化HTTP(S) IP origin与固定命令路径，拒绝凭据/query/fragment/DNS/重定向/环境代理及非法地址。普通登录不等于具备权限，权限不等于现场许可；请求不能自报owner、附录/策略、mock类别或权限来绕过检查。
 
 ### 时间与安全边界

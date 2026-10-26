@@ -1,6 +1,6 @@
 # ECS 最小业务示例与入门教程实施计划
 
-> **For agentic workers:** 状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING。Task 17设计决策已关闭，Task 18–19共10项已实现并隔离验收：v3通用合同自动装配、调试/正式新命令共享W=300秒、可信历史模型合并与实际主启动/受限出口。Task 10的3项及原C3供应商/现场项仍未关闭。实现与simplify阶段保持未提交；现按用户后续授权整理为本地提交，不推送/合并PR。无本机迁移/服务停止/真实设备连接，其他改动和stash保持。新证据及提交范围见下节。
+> **For agentic workers:** 状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING。Task 17设计决策已关闭，Task 18–19共10项已实现并隔离验收：v3通用合同自动装配、调试/正式新命令共享W=300秒、可信历史模型合并与实际主启动/受限出口。Task 10的3项及原C3供应商/现场项仍未关闭。实现与simplify阶段的未提交记录保留为历史；现按用户后续SHIP授权完成提交及分支推送，PR #23的描述由SHIP同步；尚未合并或部署。无本机迁移/服务停止/真实设备连接，其他改动和stash保持。新证据及提交范围见下节。
 
 **Goal:** Swagger直接填写ecs_url、device_code、task_type、params，以框架内置通用协议合同自动登记和闭环，不逐动作手工装配，保留专用权限及事务/幂等/未知交付边界。
 
@@ -10,9 +10,24 @@
 
 **Spec:** [设计§10](../specs/2026-10-25-ecs-minimal-business-tutorial-design.md)为合同来源；[教程§11](../../integrations/ecs-command-tutorial.md)已在本轮隔离环境兑现。Task 10独立未完成。
 
+## SHIP当前验证与文档同步（2026-10-26）
+
+Task 17设计决策已关闭，Task 18–19保持10/10；Task 10保持0/3，属于外部供应商/现场门槛，本轮未执行。以下是最终提交源码的独立隔离验证；下方1342专项、实施阶段全仓及simplify证据按当时范围保留，不作为当前全仓结果。
+
+| 当前检查 | 结果与边界 |
+|---|---|
+| 最终全仓 | 无.env副本、一次性PostgreSQL/Redis及受限回环出口执行`uv run pytest -q -rs -k 'not test_site_override_mounts_external_configuration_read_only'`：2320 passed、25 skipped、2 deselected，退出码0；对应PostgreSQL参数实际执行，SQLite跳过不算PG通过 |
+| 独立Docker CLI | 独立副本执行`tests/scripts/test_release_bundle.py::test_site_override_mounts_external_configuration_read_only`：2 passed，退出码0；与全仓排除项单独报告，不向runner挂宿主socket |
+| Ruff与证据时效 | 全仓check及format --check均退出0，341 files already formatted；最终tests、docker-cli、lint三项证据均为FRESH |
+| 新增覆盖 | 两个行为测试共10个参数：自动通道拒绝并行ECS目标配置且保留原配置；动作行未变化时，当前权威事实缺失/撤权/换绑/版本改变仍阻止业务消费，保留合法Result与WAITING_RESULT且零终态副作用 |
+| 审查 | 主代理及独立原生复核、外部CLI（配置模型glm-5.2）均完成；无未解决审查发现。外部关于lifespan注入泄漏的判断在核对实际monkeypatch恢复后撤回，未据此修改应用 |
+| 发布前保护 | 凭据拒绝测试使用明确合成占位符并加强脱敏断言；公开发布扫描HIGH为0，未绕过hook。仅提交、推送授权范围；无合并、部署、真实发送或Task 10执行 |
+
+通用登记服务保留合法task/JSON，具体动作语义由对端负责；内置演示mock仅D1/MOVE、timeout 1–60000ms和严格qty:int，只ACK。教程§11使用两个自持模拟端验证通用合同。新正式/调试命令共享W=300秒，旧调用重入及原冻结期限不变；D仍为对端确定终态后至少24小时、活动/未决无TTL清理。可信历史v1/v2附录只供原严格Result校验，不恢复旧发送；UNKNOWN/HELD不自动重放。上述证据不认证供应商持久去重、真实物理动作或业务现场验收。
+
 ## Global Constraints
 
-- 本轮按用户授权实施Task 18–19及同步四份文档；仅修改必要ECS装配/共享创建校验、配置注释和回归。无新增表/迁移/依赖；实现及simplify阶段保留原暂存区，现按后续授权重新暂存最终改动并本地提交；不推送/合并，不操作本机数据库、服务或真实设备，其他改动和stash保留。
+- 本轮按用户授权实施Task 18–19及同步四份文档；仅修改必要ECS装配/共享创建校验、配置注释和回归。无新增表/迁移/依赖；实现及simplify阶段保留原暂存区，后续SHIP已授权提交、分支推送及PR整理；不合并或部署，不操作本机数据库、服务或真实设备，其他改动和stash保留。
 - local+登录+dev:ecs:send_real控制所有新登记，保留原URL/IP/路径/无代理/重定向校验；不加开关、地址/动作清单、设备表前置条件或mock/real豁免。DEVICE_CODE全系统唯一，正式地址来自设备管理，调试来自请求。
 - ecs_url/device_code/task_type/params直接请求；client_request_id仍必填稳定调用键，timeout_ms仍为非负int64执行毫秒，不新增默认timeout或请求合同/窗口字段。不同动作使用不同JSON对象，框架保留内容，对端/业务校验语义。
 - 原CommandEnvelope/ResultEnvelope、统一ErrorDetail、ACK/错误分类、JSON/体积约束不变；删除调试ActionBinding/actions及逐动作查模型，不保留双模式或通用回退。正式configure_ecs/DeviceAnnex能力及原结果依赖不删除。
@@ -77,7 +92,7 @@
 - [x] 在一次性存储运行`uv run pytest tests/controllers/test_dev_ecs_command.py tests/integrations/ecs_command/ tests/reliable/ tests/integrations/wms_request/ tests/integrations/wms_transport/ tests/scripts/test_seed_admin.py tests/core/test_permission_code.py -q -rs`；按风险完成全仓与Ruff，Docker CLI专用用例独立执行。PG专用参数实际通过，SQLite skip不冒充PG，不改skip/放宽断言；新数量单列，不复用历史。
 - [x] 成功/故意失败路径仅按本轮标签清理容器/卷/网络/镜像并保留日志；核对仅授权文件变化、index/HEAD/stash与其他文件未动，补齐命令/退出码/skip/命中/零TCP证据后再标GENERIC_PROTOCOL_VERIFIED。不提交/推送/合并，不执行Task 10。
 
-## 本轮Task 18–19实施与验证结论
+## Task 18–19实施与验证记录（SHIP前历史证据）
 
 2026-10-26，Task 18–19共10项已完成。默认主lifespan装配dev.ecs.network/v3及ecs.dev.protocol/1，删除逐动作ActionBinding/actions与旧调试参数，不保留兼容别名。通用params/data保留原JSON内容，正式严格DeviceAnnex端口不变。共享PROTOCOL_RETRY_WINDOW只约束新创建，旧调用查找及输入比较在其之前；历史正式60/600秒、原next_attempt_at、期限、字节不重算。无新增表、迁移、依赖、重试器或生产地址。
 
