@@ -33,7 +33,7 @@ ecs_url填写你指定的模拟ECS实际地址；上面只展示字段形状，�
 
 client_request_id标识一次业务调用，重试时保持不变；同键同输入同规范化地址返回原命令，异输入/换址409。内部重试由Sender处理，不需要再次登记。通过GET /api/v1/dev/ecs/commands/{command_code}查看状态、ACK、结果与核对标记，不能跨owner读取。
 
-如果只想观察接纳，可连接本地开发服务的内置/api/v1/device/command mock：它只接受D1/MOVE、timeout 1–60000ms和严格qty:int，只ACK。其他动作使用支持对应动作的模拟ECS，不需要临时测试夹具。Swagger只操作框架命令，不创建业务动作表、不自动消费业务结果。
+如果只想观察接纳，可连接本地开发服务的内置/api/v1/device/command mock：它仅接受回环调用（调用方IP为回环地址，如127.0.0.1或::1）、D1/MOVE、timeout 1–60000ms和严格qty:int，只ACK。其他动作使用支持对应动作的模拟ECS，不需要临时测试夹具。Swagger只操作框架命令，不创建业务动作表、不自动消费业务结果。
 
 ## 3. 接入业务：维护者装配一次
 
