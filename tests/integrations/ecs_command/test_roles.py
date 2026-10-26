@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, Request
+from sqlalchemy import func, select
 
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import CallbackPayload, registry
@@ -15,6 +16,7 @@ from app.integrations.ecs_callback.receiver import receive_ecs_event
 from app.integrations.ecs_command import CommandBinding, DeviceAnnex, RoleRoutes
 from app.integrations.ecs_command.contracts import ErrorDetail
 from app.integrations.ecs_command.routing import RouteAuthorization
+from app.models import EcsCommand, ReliableMessage
 from tests.helpers import loopback_app, simulator_sender
 
 SCAN1 = "SCAN1"
@@ -80,6 +82,65 @@ async def test_role_route_selects_contract_only_after_runtime_resolution(role_ru
     role_runtime.binding = replace(role_runtime.binding, device_code="OTHER")
     with pytest.raises(ValueError, match="binding.*device"):
         await role_runtime.routes.resolve(None, "D1", "MOVE")
+
+
+@pytest.mark.parametrize(
+    "route_id",
+    [
+        None,
+        1,
+        "",
+        "device.route.invalid",
+        "other.019b1234-abcd-7abc-8def-123456789abc",
+        "device.route.019b1234-abcd-4abc-8def-123456789abc",
+        "device.route.019B1234-ABCD-7ABC-8DEF-123456789ABC",
+        "device.route.019b1234abcd7abc8def123456789abc",
+    ],
+)
+async def test_invalid_role_routes_do_not_persist_commands(ecs, role_runtime, route_id):
+    ecs.service.routes = role_runtime.routes
+    ecs.service.annexes.update(role_runtime.annexes)
+    role_runtime.route_id = route_id
+    arguments = dict(
+        owner=ecs.owner,
+        call_key="invalid-role-route",
+        device_code="D1",
+        task_type="MOVE",
+        timeout_ms=30000,
+        params={"qty": 1},
+    )
+    async with ecs.factory.begin() as session:
+        with pytest.raises(ValueError):
+            await ecs.service.create(session, **arguments)
+        assert (
+            await ecs.service.get_by_call(session, owner=ecs.owner, call_key=arguments["call_key"])
+            is None
+        )
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ReliableMessage)
+                .where(ReliableMessage.target == "ecs")
+            )
+            == 0
+        )
+        role_runtime.route_id = "device.route.019b1234-abcd-7abc-8def-123456789abc"
+        command = await ecs.service.create(session, **arguments)
+    async with ecs.factory.begin() as session:
+        stored = await ecs.service.get_by_call(
+            session, owner=ecs.owner, call_key=arguments["call_key"]
+        )
+        assert stored.command_code == command.command_code
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ReliableMessage)
+                .where(ReliableMessage.target == "ecs")
+            )
+            == 1
+        )
 
 
 async def test_role_route_revocation_and_damaged_snapshots(role_runtime):

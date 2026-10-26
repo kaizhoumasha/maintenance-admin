@@ -3,11 +3,11 @@
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, fields
-from uuid import UUID
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.identifiers import validate_uuid7
 from app.integrations.ecs_callback.binding import BindingResolver, DeviceBinding
 from app.integrations.ecs_command.contracts import PROTOCOL_RETRY_WINDOW, DeviceAnnex
 from app.integrations.ecs_command.routing import (
@@ -16,6 +16,12 @@ from app.integrations.ecs_command.routing import (
     RouteSnapshot,
     normalize_origin,
 )
+
+
+def _validate_route_id(route_id):
+    if not isinstance(route_id, str) or not route_id.startswith("device.route."):
+        raise ValueError("ECS role route_id must be device.route.<UUIDv7>")
+    validate_uuid7(route_id.removeprefix("device.route."))
 
 
 class RoleRoutes:
@@ -48,6 +54,7 @@ class RoleRoutes:
 
     async def _snapshot(self, session, binding, entry: CommandBinding) -> RouteSnapshot:
         origin, route_id = await self._resolve_route(session, binding)
+        _validate_route_id(route_id)
         return RouteSnapshot(
             binding.device_code,
             origin,
@@ -77,12 +84,11 @@ class RoleRoutes:
             }:
                 return RouteAuthorization.UNKNOWN
             key = frozen["route_id"]
+            _validate_route_id(key)
             version = frozen["version"]
             commands = frozen["commands"]
             if (
-                not isinstance(key, str)
-                or not key.startswith("device.route.")
-                or not isinstance(version, str)
+                not isinstance(version, str)
                 or not re.fullmatch(r"2:[0-9a-f]{64}", version)
                 or not isinstance(commands, (tuple, list))
                 or len(commands) != 1
@@ -96,11 +102,7 @@ class RoleRoutes:
                 or frozen["retry_window"] != PROTOCOL_RETRY_WINDOW.total_seconds()
             ):
                 return RouteAuthorization.UNKNOWN
-            identity = key.removeprefix("device.route.")
             if normalize_origin(frozen["origin"]) != frozen["origin"]:
-                return RouteAuthorization.UNKNOWN
-            identity_uuid = UUID(identity)
-            if str(identity_uuid) != identity or identity_uuid.version != 7:
                 return RouteAuthorization.UNKNOWN
         except (KeyError, TypeError, ValueError, AttributeError, httpx.InvalidURL):
             return RouteAuthorization.UNKNOWN
