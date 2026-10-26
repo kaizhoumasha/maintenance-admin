@@ -18,11 +18,11 @@ Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_
 
 本节适用于正式业务严格接入；Swagger通用入口由框架自动装配，不要求开发者手工维护动作合同。
 
-应用启动前调用 `configure_ecs(app, routes=routes, annexes=annexes)`，从 `app.integrations.ecs_command` 导入。无需给RELIABLE_TARGETS添加ECS条目，也不用为每个ECS或DEVICE配置发送目标。`routes` 实现 `DeviceRouteProvider`：创建时解析生效快照，发送门禁中锁原授权记录并返回 ALLOW/REVOKED/UNKNOWN；A→B 不改写旧命令的 A，也不自动撤销 A。缺省 UnconfiguredRoutes 拒绝解析。
+应用启动前调用 `configure_ecs(app, routes=routes, annexes=annexes)`，从 `app.integrations.ecs_command` 导入。无需给RELIABLE_TARGETS添加ECS条目，也不用为每个ECS或DEVICE配置发送目标。`routes` 实现 `DeviceRouteProvider`：创建时解析生效快照，发送门禁中锁原授权记录并返回 ALLOW/REVOKED/UNKNOWN；A→B 不改写旧命令的 A，原授权是否撤销由路由提供方决定。`RoleRoutes` 按 `(device_role, task_type)` 选择严格附录，注入绑定与地址解析器；配置版本或地址变化即停止旧命令后续发送，保留执行记录及已可能交付命令的原身份迟到结果，见[角色接入](ecs-roles.md)。缺省 UnconfiguredRoutes 拒绝解析。
 
 `annexes` 使用 `(annex_id, annex_version)` 映射到 `DeviceAnnex(params_model, result_model, error_model, timeout_min_ms, timeout_max_ms)`，必须是已确认的参数、结果、错误及 timeout 合同；测试附录在tests中。local v3自动提供内置协议合同，详见下节。正式业务仍可保留严格版本化附录，测试qty模型不作为通用合同或供应商保证。
 
-configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.state.ecs_commands，保留原WMS映射并拒绝重复/冲突装配。主应用lifespan将统一ECS逻辑通道加入原有Sender配置，并关联同一个outbox；启动完成前不可调用create，不再启动第二个Sender。local Swagger由框架自动调用联调装配，不要重复装配正式路由。低层EcsCommands(outbox, target, routes, annexes)仍供独立运行时/测试注入使用，不是主应用的手工配置步骤。
+configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.state.ecs_commands，保留原WMS映射并拒绝重复/冲突装配。主应用lifespan将统一ECS逻辑通道加入原有Sender配置，并关联同一个outbox；启动完成前不可调用create，不再启动第二个Sender。local Swagger由框架自动调用联调装配；可信启动模块可按[角色接入](ecs-roles.md)一次组合正式角色与调试路由，不重复装配服务。低层EcsCommands(outbox, target, routes, annexes)仍供独立运行时/测试注入使用，不是主应用的手工配置步骤。
 
 自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。当前快照仅接受已实现的 HOLD，快照 RETRY 明确拒绝；STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
 
@@ -44,9 +44,9 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 ecs_url必填且沿用HTTP(S) IP origin规范化、固定路径、无凭据/query/fragment/DNS/重定向/环境代理及非法地址拒绝。DEVICE_CODE全系统唯一；不新建ECS表、逐地址/动作清单或联网开关。新增设备、动作或改址只改请求；client_request_id保持稳定，timeout_ms仍为现有非负int64执行毫秒值，不新增默认值或请求窗口字段。
 
-受限工厂及历史附录通过可信Python启动依赖传入，接口为configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient)。普通主lifespan只传environment，自动使用内置合同；测试夹具先持有本轮模拟端并绑定受限client_factory，再进入真实主lifespan。它须在服务/provider均未预装时调用原生产装配函数一次，先检查冲突、合并合同并构造DynamicClients(factory=client_factory)，再发布服务/provider、关联outbox、启动唯一Sender。不得提前占用app.state.reliable_client_provider、先手工造服务绕过自动分支或在冲突时重置状态。底层configure_ecs只增加同名可选工厂依赖，现有冲突保护不放宽。
+受限工厂及历史附录通过可信Python启动依赖传入，接口为configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None)。`routes` 可组合正式角色路由，`history_annexes` 同时提供其严格附录；非 local 显式传入角色路由会报错。普通主lifespan只传environment，自动使用内置合同；测试夹具先持有本轮模拟端并绑定受限client_factory，再进入真实主lifespan。它须在服务/provider均未预装时调用原生产装配函数一次，先检查冲突、合并合同并构造DynamicClients(factory=client_factory)，再发布服务/provider、关联outbox、启动唯一Sender。不得提前占用app.state.reliable_client_provider、先手工造服务绕过自动分支或在冲突时重置状态。底层configure_ecs只增加同名可选工厂依赖，现有冲突保护不放宽。
 
-history_annexes仅来自可信启动模块的版本化原DeviceAnnex模型；装配前复制/校验，并与ecs.dev.protocol/1一次合并到同一个service.annexes。历史键须为非空字符串二元组、值为DeviceAnnex，内置保留键冲突必须拒绝，不能覆盖内置模型或启动后补字典。新v3只选内置合同，原键仅供历史Result精确校验；不恢复actions/annexes旧参数别名、动作登记或v2发送。实际启动须分别验证无历史输入的自动路径、有历史输入时合法原结果及严格拒绝、缺输入时首次Result 503/已有重复证据返回原响应；详见[设计§10.3.1–10.3.2及§10.7](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。这些依赖不是Swagger/.env选项，已通过实际主lifespan回归。
+history_annexes仅来自可信启动模块的版本化原DeviceAnnex模型；装配前复制/校验，并与ecs.dev.protocol/1一次合并到同一个service.annexes。历史键须为非空字符串二元组、值为DeviceAnnex，内置保留键冲突必须拒绝，不能覆盖内置模型或启动后补字典。通用调试v3只选内置合同，其余键仅供该调试路径的历史Result精确校验；组合装配的正式角色仍使用各自严格附录；不恢复actions/annexes旧参数别名、动作登记或v2发送。实际启动须分别验证无历史输入的自动路径、有历史输入时合法原结果及严格拒绝、缺输入时首次Result 503/已有重复证据返回原响应；详见[设计§10.3.1–10.3.2及§10.7](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。这些依赖不是Swagger/.env选项，已通过实际主lifespan回归。
 
 enterprise_admin已批准统一最低合同：W=300秒，从本方首次创建命令起算并冻结expires_at；D=对端ECS持久确认确定终态后至少24小时（86400秒），活动/未决命令去重依据不按TTL清理。W不是执行timeout或结果截止，重启不重算；原退避/Retry-After、原next_attempt_at前零发送/到期且窗口有效才重试、超期停止新尝试及合法迟到结果规则不变。数值是本项目规范选择，不是测试值推导或供应商既有证明，完整依据见[设计§10.4](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。在contracts.py定义共享PROTOCOL_RETRY_WINDOW=timedelta(seconds=300)，不新增请求/.env/逐动作窗口参数，已完成隔离验证。
 
