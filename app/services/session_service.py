@@ -8,6 +8,7 @@ from app.models import User
 _ISSUE_TOKENS = """
 local sessions, token = KEYS[1], KEYS[2]
 local sub, ttl, jti, old, multi = ARGV[1], ARGV[2], ARGV[3], ARGV[4], ARGV[5]
+local remaining = redis.call('PTTL', sessions)
 if old ~= '' then
   if redis.call('GET', 'refresh:' .. old) ~= sub then return 0 end
   redis.call('DEL', 'refresh:' .. old)
@@ -21,7 +22,9 @@ for _, member in ipairs(redis.call('SMEMBERS', sessions)) do
 end
 redis.call('SET', token, sub, 'EX', ttl)
 redis.call('SADD', sessions, jti)
-redis.call('EXPIRE', sessions, ttl)
+if remaining ~= -1 then
+  redis.call('PEXPIRE', sessions, math.max(remaining, tonumber(ttl) * 1000))
+end
 return 1
 """
 

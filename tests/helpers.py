@@ -12,6 +12,28 @@ from app.core.security import create_access_token
 PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
 
 
+LOGIN = {"username": "root", "password": "password123"}
+
+
+async def login(client, creds=LOGIN):
+    """登录并返回 (access_token, refresh cookie 值)。"""
+    r = await client.post("/api/v1/auth/login", json=creds)
+    assert "refresh_token" not in r.json()  # refresh 只在 HttpOnly cookie 里
+    return r.json()["access_token"], client.cookies.get("refresh_token")
+
+
+def use_refresh(client, token):
+    """让 client 之后只带指定的 refresh cookie(模拟另一台设备/旧 token)。"""
+    client.cookies.clear()
+    if token:
+        client.cookies.set("refresh_token", token, path="/api/v1/auth")
+
+
+async def refresh(client, token):
+    use_refresh(client, token)
+    return await client.post("/api/v1/auth/refresh")
+
+
 def bearer(user_id: int | str) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(str(user_id))}"}
 

@@ -7,9 +7,11 @@ from app.core.redis import get_redis
 from app.core.security import ALGORITHM, create_access_token
 from app.main import app
 from app.models import User
-from tests.helpers import PAYLOAD
+from tests.helpers import LOGIN, PAYLOAD
+from tests.helpers import login as _login
+from tests.helpers import refresh as _refresh
+from tests.helpers import use_refresh as _use
 
-LOGIN = {"username": "root", "password": "password123"}
 KAI = {"username": "kai", "password": "password123"}
 
 
@@ -96,25 +98,6 @@ async def test_expired_token_message(client):
 
 
 # ---- refresh / logout ----
-
-
-async def _login(client, creds=LOGIN):
-    """登录并返回 (access_token, refresh cookie 值)。"""
-    r = await client.post("/api/v1/auth/login", json=creds)
-    assert "refresh_token" not in r.json()  # refresh 只在 HttpOnly cookie 里
-    return r.json()["access_token"], client.cookies.get("refresh_token")
-
-
-def _use(client, token):
-    """让 client 之后只带指定的 refresh cookie(模拟另一台设备/旧 token)。"""
-    client.cookies.clear()
-    if token:
-        client.cookies.set("refresh_token", token, path="/api/v1/auth")
-
-
-async def _refresh(client, token):
-    _use(client, token)
-    return await client.post("/api/v1/auth/refresh")
 
 
 def _jti(token):
