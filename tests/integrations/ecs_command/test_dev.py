@@ -70,6 +70,7 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
     loopback_server,
     monkeypatch,
     real_redis,
+    ecs_simulators,
     device_result,
 ):
     import asyncio
@@ -84,7 +85,6 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
     from app.core.identifiers import uuid7
     from app.core.redis import get_redis
     from app.models import Permission, ReliableMessage, Role, User
-    from tests.ecs_swagger import create_app
 
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("Application Sender uses an independent PostgreSQL connection")
@@ -153,8 +153,6 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
             )
             monkeypatch.setattr(main, "settings", settings)
             monkeypatch.setattr(runtime, "get_settings", lambda: settings)
-            monkeypatch.setattr(app.router, "lifespan_context", app.router.lifespan_context)
-            assert create_app() is app
             assert getattr(app.state, "ecs_commands", None) is None
             assert getattr(app.state, "reliable_client_provider", None) is None
             from httpcore._backends.auto import AutoBackend
@@ -169,6 +167,7 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
 
             monkeypatch.setattr(AutoBackend, "connect_tcp", observe_tcp)
             async with (
+                ecs_simulators() as peers,
                 app.router.lifespan_context(app),
                 httpx.AsyncClient(base_url=origin, trust_env=False) as client,
             ):
@@ -182,7 +181,7 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
                 headers = {"Authorization": "Bearer " + login.json()["access_token"]}
                 body = {
                     "client_request_id": username,
-                    "ecs_url": app.state.ecs_simulator_origins[0],
+                    "ecs_url": peers.origins[0],
                     "device_code": "D1",
                     "task_type": "MOVE",
                     "timeout_ms": 30000,
@@ -223,12 +222,12 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
                         "device_code": "D2",
                         "task_type": "LIFT",
                         "params": {"level": 2, "nested": [None, True, {"label": "sample"}]},
-                        "ecs_url": app.state.ecs_simulator_origins[1],
+                        "ecs_url": peers.origins[1],
                     },
                 )
                 assert second.status_code == 200, second.text
                 await wait_for_ack(second.json()["command_code"])
-                assert {hit["device_code"] for hit in app.state.ecs_simulator_hits} == {"D1", "D2"}
+                assert {hit["device_code"] for hit in peers.hits} == {"D1", "D2"}
                 blocked = await client.post(
                     "/api/v1/dev/ecs/commands",
                     headers=headers,
@@ -252,8 +251,8 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
                                 break
                         await asyncio.sleep(0.5)
                 assert not any(port == 1 for _, port in connections)
-                assert len(app.state.ecs_simulator_hits) == 2
-                assert {hit["task_type"] for hit in app.state.ecs_simulator_hits} == {
+                assert len(peers.hits) == 2
+                assert {hit["task_type"] for hit in peers.hits} == {
                     "MOVE",
                     "LIFT",
                 }
@@ -262,7 +261,7 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
                 from app.models import EcsCommand, EcsSendEvidence
 
                 async with ecs.factory() as session:
-                    for sent_code, raw in app.state.ecs_simulator_raw.items():
+                    for sent_code, raw in peers.raw_requests.items():
                         assert (await session.get(EcsCommand, sent_code)).request_raw == raw
                     assert (
                         await session.scalar(
@@ -661,7 +660,9 @@ def test_history_annexes_cannot_override_builtin_contract(history):
 
 
 @pytest.mark.parametrize("outcome", ["ACK", "UNKNOWN"])
-async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypatch, outcome):
+async def test_startup_merges_history_annexes_for_original_results(
+    ecs, monkeypatch, ecs_simulators, outcome
+):
     from datetime import UTC, datetime, timedelta
 
     import httpx
@@ -670,7 +671,6 @@ async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypa
     import app.main as main
     import app.reliable_runtime as runtime
     from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, ReliableMessage
-    from tests.ecs_swagger import create_app
 
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("Application Sender uses an independent PostgreSQL connection")
@@ -737,7 +737,6 @@ async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypa
     )
     monkeypatch.setattr(main, "settings", settings)
     monkeypatch.setattr(runtime, "get_settings", lambda: settings)
-    monkeypatch.setattr(main.app.router, "lifespan_context", main.app.router.lifespan_context)
     monkeypatch.setattr(main.app.state, "callback_session_factory", ecs.factory, raising=False)
     original_history = ecs_history_annexes()
     applied = {
@@ -750,8 +749,9 @@ async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypa
     for include_history in (True, False):
         # A distinct application startup, not clearing a conflict within one boot.
         reset_ecs_assembly(main.app, monkeypatch)
-        application = create_app(history_annexes=original_history if include_history else None)
+        application = main.app
         async with (
+            ecs_simulators(history_annexes=original_history if include_history else None) as peers,
             application.router.lifespan_context(application),
             httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=application),
@@ -815,7 +815,7 @@ async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypa
             duplicate = await client.post("/api/v1/callback/result", json=applied)
             assert duplicate.status_code == 200
             assert duplicate.json() == {"code": 200, "message": "ACK"}
-            assert not application.state.ecs_simulator_hits
+            assert not peers.hits
         assert application.state.reliable_client_provider.closed
     assert list(original_history) == [("trial", "1")]
 

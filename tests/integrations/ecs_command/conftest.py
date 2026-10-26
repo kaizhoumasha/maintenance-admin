@@ -1,3 +1,4 @@
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -397,3 +398,43 @@ async def loopback_server():
     from tests.helpers import loopback_app
 
     return loopback_app
+
+
+@pytest.fixture
+def ecs_simulators(monkeypatch, loopback_server):
+    from fastapi import FastAPI, Request
+
+    import app.main as main
+    from app.integrations.ecs_command.contracts import CommandEnvelope
+    from tests.helpers import simulator_client_factory
+
+    @asynccontextmanager
+    async def peers(*, history_annexes=None):
+        origins, hits, raw_requests = [], [], {}
+        async with AsyncExitStack() as stack:
+            for _ in range(2):
+                peer = FastAPI()
+
+                @peer.post("/api/v1/device/command")
+                async def acknowledge(body: CommandEnvelope, request: Request):
+                    hits.append(body.model_dump())
+                    raw_requests[body.command_code] = await request.body()
+                    return {"code": 200, "message": "ACK"}
+
+                origins.append(await stack.enter_async_context(loopback_server(peer)))
+            factory = simulator_client_factory(origins)
+            configure = main.configure_local_ecs
+
+            def assemble(application, *, environment):
+                return configure(
+                    application,
+                    environment=environment,
+                    history_annexes=history_annexes,
+                    client_factory=factory,
+                )
+
+            with monkeypatch.context() as patch:
+                patch.setattr(main, "configure_local_ecs", assemble)
+                yield SimpleNamespace(origins=origins, hits=hits, raw_requests=raw_requests)
+
+    return peers
