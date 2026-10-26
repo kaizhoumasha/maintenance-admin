@@ -70,8 +70,15 @@ def _submit_router(items: list[DevScenario]):
 
 
 def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
+    settings = get_settings()
+    targets = parse_reliable_config(settings).targets
     if environment != "local":
         return
+    from app.controllers.dev_ecs_command import mock_router
+    from app.controllers.dev_ecs_command import router as ecs_command_router
+
+    app.include_router(ecs_command_router, prefix=prefix)
+    app.include_router(mock_router, prefix=prefix)
     _load_dev_modules()
     items = scenarios()
     if items:
@@ -82,7 +89,6 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     app.include_router(registry_router, prefix=prefix)
     if operations():
         app.include_router(wms_request_router(), prefix=prefix)
-    targets = parse_reliable_config(get_settings()).targets
     missing = {FACTS_PROTOCOL, DECISIONS_PROTOCOL} - {t.protocol for t in targets.values()}
     for protocol in sorted(missing):
         logger.warning(

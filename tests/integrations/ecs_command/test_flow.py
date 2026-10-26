@@ -741,7 +741,7 @@ async def test_loopback_command_result_and_reference_consumption(
             async with loopback_server(peer) as origin:
                 async with ecs.factory.begin() as session:
                     await session.execute(update(reference.routes).values(origin=origin))
-                    command = await reference.register(session)
+                    command = await reference.register(session, action_id=1)
                 store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
                 sender = Sender(store, ecs.targets, ecs.adapters, {}, provider=DynamicClients())
                 try:
@@ -757,24 +757,26 @@ async def test_loopback_command_result_and_reference_consumption(
                         assert view.ack_received and view.delivery_status == "DONE"
                         if result_timing == "after_ack":
                             assert view.result is None and view.status == "WAITING_RESULT"
-                            assert not await reference.consume(session, command.command_code)
-                            assert (await reference.state(session))["state"] == "READY"
+                            assert not await reference.consume(session, action_id=1)
+                            assert (await reference.state(session))["state"] == "WAITING_RESULT"
                     await report(command.command_code)
                     async with ecs.factory.begin() as session:
-                        assert await reference.consume(session, command.command_code)
+                        assert await reference.consume(session, action_id=1)
                     async with ecs.factory.begin() as session:
-                        assert not await reference.consume(session, command.command_code)
+                        assert not await reference.consume(session, action_id=1)
                         state = await reference.state(session)
                         assert state["state"] == (
                             "SUCCEEDED" if device_result == "SUCCESS" else "FAILED"
                         )
                         view = await ecs.service.get_by_call(
-                            session, owner=ecs.owner, call_key="call"
+                            session, owner=ecs.owner, call_key="action:1"
                         )
                         assert view.result["result"] == device_result
                         assert (
                             await session.scalar(
-                                select(func.count()).select_from(reference.consumptions)
+                                select(func.count())
+                                .select_from(reference.actions)
+                                .where(reference.actions.c.state.in_(("SUCCEEDED", "FAILED")))
                             )
                             == 1
                         )

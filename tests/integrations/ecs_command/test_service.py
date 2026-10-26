@@ -88,11 +88,11 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
 
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
-        first = await reference.register(session)
+        first = await reference.register(session, action_id=1)
     async with ecs.factory.begin() as session:
         await reference.add_route(session, "B", effective=False)
     async with ecs.factory.begin() as session:
-        pending = await reference.register(session, key="pending")
+        pending = await reference.register(session, action_id=2)
         assert (await session.get(EcsCommand, pending.command_code)).route["route_id"] == "A"
     async with ecs.factory.begin() as session:
         await reference.switch_route(session)
@@ -100,8 +100,8 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
             update(reference.routes).where(reference.routes.c.id == "A").values(revoked=revoked)
         )
     async with ecs.factory.begin() as session:
-        again = await reference.register(session)
-        second = await reference.register(session, key="new")
+        again = await reference.register(session, action_id=1)
+        second = await reference.register(session, action_id=3)
         assert again.command_code == first.command_code
         old = await session.get(EcsCommand, first.command_code)
         new = await session.get(EcsCommand, second.command_code)
@@ -118,7 +118,7 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
     assert permitted[pending.command_code] is (not revoked)
     assert permitted[second.command_code]
     async with ecs.factory.begin() as session:
-        assert (await reference.register(session)).command_code == first.command_code
+        assert (await reference.register(session, action_id=1)).command_code == first.command_code
         assert (await session.get(EcsCommand, first.command_code)).request_raw == frozen
 
 
@@ -138,14 +138,14 @@ async def test_reference_registration_and_outbox_rollback_together(reference, mo
 
             monkeypatch.setattr(ecs.outbox, "enqueue", fail)
         if failure == "outer_rollback":
-            await reference.register(session)
+            await reference.register(session, action_id=1)
         else:
             with pytest.raises(RuntimeError if failure == "enqueue" else IntegrityError):
-                await reference.register(session)
-                await session.execute(update(reference.business).values(state="INVALID"))
+                await reference.register(session, action_id=1)
+                await session.execute(update(reference.actions).values(state="INVALID"))
         await session.rollback()
     async with ecs.factory() as session:
-        for table in (reference.calls, EcsCommand, ReliableMessage):
+        for table in (EcsCommand, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
         assert (await reference.state(session))["state"] == "READY"
 
@@ -173,7 +173,7 @@ async def test_no_single_authorized_route_or_action_has_no_side_effects(referenc
                 timeout_ms=30000,
                 params={"qty": 1},
             )
-        for table in (reference.calls, EcsCommand, ReliableMessage):
+        for table in (EcsCommand, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
 
 
@@ -188,15 +188,15 @@ async def test_concurrent_reference_registration_preserves_original_mapping(refe
 
     async def register():
         async with ecs.factory.begin() as session:
-            return (await reference.register(session)).command_code
+            return (await reference.register(session, action_id=1)).command_code
 
     codes = await asyncio.gather(register(), register())
     assert codes[0] == codes[1]
     async with ecs.factory() as session:
-        for table in (reference.calls, EcsCommand, ReliableMessage):
+        for table in (EcsCommand, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 1
-        call = (await session.execute(select(reference.calls))).mappings().one()
-        assert call["binding"] == "D1" and call["version"] == 1
+        call = (await session.execute(select(reference.actions))).mappings().one()
+        assert call["intent_device_code"] == "D1" and call["intent_version"] == 1
 
 
 @pytest.mark.parametrize("change", ["cancel", "rebind", "SUCCESS", "FAILED"])
@@ -208,33 +208,185 @@ async def test_new_reference_intent_requires_current_permission_but_replay_keeps
 
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
-        original = await reference.register(session)
+        original = await reference.register(session, action_id=1)
     if change in ("SUCCESS", "FAILED"):
         await reference.apply_result(original.command_code, change)
         async with ecs.factory.begin() as session:
-            assert await reference.consume(session, original.command_code)
+            assert await reference.consume(session, action_id=1)
     else:
         async with ecs.factory.begin() as session:
-            await reference.change(session, change)
+            await reference.change(session, action_id=1, kind=change)
+    async with ecs.factory() as session:
+        state = await reference.state(session)
+    reference.facts["B1"] = {
+        "can_register": change == "rebind",
+        "device_code": state["device_code"],
+        "version": state["version"],
+    }
     async with ecs.factory.begin() as session:
-        assert (await reference.register(session)).command_code == original.command_code
+        reads = len(reference.fact_reads)
+        assert (
+            await reference.register(session, action_id=1)
+        ).command_code == original.command_code
+        assert len(reference.fact_reads) == reads
         with pytest.raises(ValueError, match="current reference permission"):
-            await reference.register(session, key="new-independent-intent")
-        for table in (reference.calls, EcsCommand, ReliableMessage):
+            await reference.register(session, action_id=2)
+        assert len(reference.fact_reads) == reads + 1
+        assert await reference.state(session, action_id=2) is None
+        for table in (EcsCommand, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 1
-        mapping = (await session.execute(select(reference.calls))).mappings().one()
-        assert mapping["binding"] == "D1" and mapping["version"] == 1
+        mapping = (await session.execute(select(reference.actions))).mappings().one()
+        assert mapping["intent_device_code"] == "D1" and mapping["intent_version"] == 1
 
 
 async def test_new_authorized_reference_intent_uses_current_version(reference):
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
-        original = await reference.register(session)
-        await reference.change(session, "version")
-        current = await reference.register(session, key="new-independent-intent")
+        original = await reference.register(session, action_id=1)
+        await reference.change(session, action_id=1, kind="version")
+    reference.facts["B1"] = {"can_register": True, "device_code": "D1", "version": 2}
+    async with ecs.factory.begin() as session:
+        current = await reference.register(session, action_id=2)
         assert current.command_code != original.command_code
-        mappings = (await session.execute(select(reference.calls))).mappings().all()
-        assert {m["call_key"]: m["version"] for m in mappings} == {
-            "call": 1,
-            "new-independent-intent": 2,
-        }
+        rows = (await session.execute(select(reference.actions))).mappings().all()
+        assert {r["id"]: r["intent_version"] for r in rows} == {1: 1, 2: 2}
+        assert {r["business_key"] for r in rows} == {"B1"}
+        assert (
+            await reference.register(session, action_id=1)
+        ).command_code == original.command_code
+
+
+@pytest.mark.parametrize("fact", [None, {"can_register": False, "device_code": "D1", "version": 7}])
+async def test_new_action_requires_current_business_fact(reference, fact):
+    from app.models import EcsCommand
+
+    async def current_business(session, *, business_key):
+        assert business_key == "B1"
+        return fact
+
+    reference.current_business = current_business
+    async with reference.ecs.factory.begin() as session:
+        with pytest.raises(ValueError, match="current reference permission"):
+            await reference.register(session, action_id=1, business_key="B1")
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 0
+
+
+async def test_action_freezes_authoritative_version_and_replay_ignores_new_permission(reference):
+    reference.facts["B1"] = {"can_register": True, "device_code": "D1", "version": 7}
+    async with reference.ecs.factory.begin() as session:
+        first = await reference.register(session, action_id=1)
+    reference.facts["B1"] = {"can_register": False, "device_code": "D2", "version": 9}
+    async with reference.ecs.factory.begin() as session:
+        reads = len(reference.fact_reads)
+        again = await reference.register(session, action_id=1)
+        assert again.command_code == first.command_code
+        assert len(reference.fact_reads) == reads
+        row = await reference.state(session)
+        assert row["intent_version"] == 7 and row["intent_device_code"] == "D1"
+        with pytest.raises(ValueError, match="different input"):
+            await reference.register(session, action_id=1, params={"qty": True})
+        with pytest.raises(ValueError, match="different input"):
+            await reference.register(session, action_id=1, business_key="B2")
+
+
+async def test_independent_authorized_business_is_not_blocked_by_device_history(reference):
+    async with reference.ecs.factory.begin() as session:
+        first = await reference.register(session, action_id=1)
+    await reference.apply_result(first.command_code, "FAILED")
+    async with reference.ecs.factory.begin() as session:
+        assert await reference.consume(session, action_id=1)
+    reference.facts["B1"] = {"can_register": False, "device_code": "D1", "version": 1}
+    reference.facts["B2"] = {"can_register": True, "device_code": "D1", "version": 8}
+    async with reference.ecs.factory.begin() as session:
+        second = await reference.register(session, action_id=2, business_key="B2")
+        assert second.command_code != first.command_code
+        row = await reference.state(session, action_id=2)
+        assert row["intent_version"] == 8 and row["device_code"] == "D1"
+        assert (await reference.state(session))["state"] == "FAILED"
+
+
+async def test_cancelled_draft_does_not_create_a_command(reference):
+    from app.models import EcsCommand
+
+    async with reference.ecs.factory.begin() as session:
+        assert await reference.change(session, action_id=1, kind="cancel")
+    async with reference.ecs.factory.begin() as session:
+        with pytest.raises(ValueError, match="current reference permission"):
+            await reference.register(session, action_id=1)
+        assert (await reference.state(session))["state"] == "CANCELLED"
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+
+
+@pytest.mark.parametrize("seconds", [None, "300", True, 0, -1, 60, 600, 299.999, 300.001, 300])
+async def test_new_commands_require_protocol_retry_window(ecs, monkeypatch, seconds):
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from app.core.errors import AppError, ErrorCode
+    from app.models import EcsCommand
+
+    resolve = ecs.routes.resolve
+
+    async def route(*args):
+        window = timedelta(seconds=seconds) if type(seconds) in (int, float) else seconds
+        return replace(await resolve(*args), retry_window=window)
+
+    monkeypatch.setattr(ecs.routes, "resolve", route)
+    async with ecs.factory.begin() as session:
+        if seconds != 300:
+            with pytest.raises(AppError) as error:
+                await create(ecs, session)
+            assert error.value.code == ErrorCode.DATABASE_UNAVAILABLE
+            assert "PROTOCOL_RETRY_WINDOW" in error.value.message
+            for table in (EcsCommand, ReliableMessage):
+                assert await session.scalar(select(func.count()).select_from(table)) == 0
+        else:
+            await create(ecs, session)
+            command = await session.scalar(select(EcsCommand))
+            message = await session.scalar(select(ReliableMessage))
+            assert command.route["retry_window"] == 300
+            assert command.expires_at == message.expires_at
+            assert command.expires_at - command.created_at == timedelta(seconds=300)
+
+
+@pytest.mark.parametrize("seconds", [60, 600])
+@pytest.mark.parametrize("policy", ["invalid", "unavailable"])
+async def test_existing_calls_preserve_frozen_retry_window(ecs, monkeypatch, seconds, policy):
+    from datetime import timedelta
+
+    from app.models import EcsCommand
+
+    async with ecs.factory.begin() as session:
+        original = await create(ecs, session)
+        row = await session.get(EcsCommand, original.command_code)
+        # Persisted pre-upgrade fixture, not a new command through an obsolete policy.
+        row.route = {**row.route, "retry_window": seconds}
+        row.expires_at = row.created_at + timedelta(seconds=seconds)
+        message = await session.scalar(select(ReliableMessage))
+        message.expires_at = row.expires_at
+        frozen = (dict(row.route), row.expires_at, row.request_raw)
+
+    async def unavailable(*args):
+        raise AssertionError("old call must not resolve current routing")
+
+    if policy == "invalid":
+        from dataclasses import replace
+
+        resolve = ecs.routes.resolve
+
+        async def invalid(*args):
+            return replace(await resolve(*args), retry_window=timedelta(seconds=12))
+
+        monkeypatch.setattr(ecs.routes, "resolve", invalid)
+    else:
+        monkeypatch.setattr(ecs.routes, "resolve", unavailable)
+    calls = ecs.routes.calls
+    async with ecs.factory.begin() as session:
+        assert (await create(ecs, session)).command_code == original.command_code
+        with pytest.raises(ValueError, match="different input"):
+            await create(ecs, session, qty=2)
+        row = await session.get(EcsCommand, original.command_code)
+        assert (row.route, row.expires_at, row.request_raw) == frozen
+        assert (await session.scalar(select(ReliableMessage))).expires_at == frozen[1]
+        assert ecs.routes.calls == calls

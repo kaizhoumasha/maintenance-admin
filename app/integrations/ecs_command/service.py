@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -15,9 +15,9 @@ from app.reliable import MessageDraft
 from app.reliable.lifecycle import ensure_savepoint_transaction
 from app.reliable.types import DeliverySnapshot
 
-from .contracts import CommandEnvelope, CommandView
+from .contracts import PROTOCOL_RETRY_WINDOW, CommandEnvelope, CommandView
 from .protocol import OPERATION, PROTOCOL
-from .routing import UnconfiguredRoutes
+from .routing import UnconfiguredRoutes, retry_window_error
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,11 @@ class EcsCommands:
         route = await self.routes.resolve(session, device_code, task_type)
         if route.device_code != device_code or task_type not in route.commands:
             raise ValueError("route/device/action mismatch")
+        if (
+            not isinstance(route.retry_window, timedelta)
+            or route.retry_window != PROTOCOL_RETRY_WINDOW
+        ):
+            raise retry_window_error()
         models = self.annexes.get((route.annex_id, route.annex_version))
         if models is None:
             raise ValueError("confirmed annex required")

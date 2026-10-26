@@ -232,7 +232,7 @@ async def test_persistent_route_revocation_serializes_with_send_gate(
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("PostgreSQL original authorization row locking")
     async with ecs.factory.begin() as session:
-        command = await reference.register(session)
+        command = await reference.register(session, action_id=1)
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
     claim = (await store.claim(1, ecs.targets))[0]
     if first == "revoke":
@@ -289,7 +289,7 @@ async def test_missing_original_authorization_does_not_allow_dispatch(reference)
 
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
-        command = await reference.register(session)
+        command = await reference.register(session, action_id=1)
         await session.execute(delete(reference.routes))
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
     claim = (await store.claim(1, ecs.targets))[0]

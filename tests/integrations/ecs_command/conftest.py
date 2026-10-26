@@ -1,4 +1,3 @@
-from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import create_database_engine
+from app.integrations.ecs_command import PROTOCOL_RETRY_WINDOW
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
 from app.models import Base
 
@@ -25,7 +25,7 @@ class Routes:
     async def resolve(self, session, device_code, task_type):
         self.calls += 1
         return RouteSnapshot(
-            device_code, self.origin, "route-1", "v1", "test", "1", ("MOVE",), timedelta(minutes=5)
+            device_code, self.origin, "route-1", "v1", "test", "1", ("MOVE",), PROTOCOL_RETRY_WINDOW
         )
 
     async def authorize_frozen(self, session, route):
@@ -95,7 +95,9 @@ async def ecs(request):
                 for model in (EcsSendEvidence, EcsResultEvidence, EcsCommand):
                     await session.execute(delete(model))
                 await session.execute(
-                    delete(ReliableMessage).where(ReliableMessage.target.in_(("ecs", "old-static")))
+                    delete(ReliableMessage).where(
+                        ReliableMessage.target.in_(("ecs", "old-static", "ecs-local"))
+                    )
                 )
                 await session.execute(
                     delete(CallbackReceipt).where(CallbackReceipt.operation == "ecs.result")
@@ -106,9 +108,10 @@ async def ecs(request):
 class Reference:
     """Test-only caller transactions; no production device directory or business model."""
 
-    def __init__(self, ecs, tables):
-        self.ecs = ecs
-        self.routes, self.business, self.calls, self.consumptions = tables
+    def __init__(self, ecs, routes, actions, current_business):
+        self.ecs, self.owner = ecs, ecs.owner
+        self.routes, self.actions = routes, actions
+        self.current_business = current_business
 
     async def resolve(self, session, device_code, task_type):
         result = await session.execute(
@@ -132,7 +135,7 @@ class Reference:
             "test",
             "1",
             ("MOVE",),
-            timedelta(minutes=5),
+            PROTOCOL_RETRY_WINDOW,
         )
 
     async def authorize_frozen(self, session, route):
@@ -163,98 +166,134 @@ class Reference:
             update(self.routes).where(self.routes.c.id == "B").values(effective=True)
         )
 
-    async def state(self, session, *, lock=False):
-        query = select(self.business).where(self.business.c.id == 1)
+    async def state(self, session, *, action_id=1, lock=False):
+        query = select(self.actions).where(self.actions.c.id == action_id)
         if lock:
             query = query.with_for_update()
-        return (await session.execute(query)).mappings().one()
+        return (await session.execute(query)).mappings().one_or_none()
 
-    async def register(self, session, *, key="call"):
-        state = await self.state(session, lock=True)
-        prior = (
-            (await session.execute(select(self.calls).where(self.calls.c.call_key == key)))
-            .mappings()
-            .one_or_none()
-        )
-        if prior is None and (state["state"] != "READY" or state["binding"] != "D1"):
-            raise ValueError("current reference permission required")
-        command = await self.ecs.service.create(
-            session,
-            owner=self.ecs.owner,
-            call_key=key,
-            device_code="D1",
-            task_type="MOVE",
-            timeout_ms=30000,
-            params={"qty": 1},
-        )
-        if prior is None:
-            await session.execute(
-                self.calls.insert().values(
-                    call_key=key,
-                    command_code=command.command_code,
-                    binding=state["binding"],
-                    version=state["version"],
-                )
-            )
-        return command
-
-    async def consume(self, session, code, *, owner=None):
+    async def register(
+        self,
+        session,
+        *,
+        action_id,
+        business_key="B1",
+        device_code="D1",
+        task_type="MOVE",
+        timeout_ms=30000,
+        params=None,
+    ):
         from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-        state = await self.state(session, lock=True)
-        view = await self.ecs.service.get_command(
-            session,
-            owner=owner or self.ecs.owner,
-            command_code=code,
-        )
-        call = (
-            (await session.execute(select(self.calls).where(self.calls.c.command_code == code)))
-            .mappings()
-            .one_or_none()
-        )
+        from app.reliable.lifecycle import ensure_savepoint_transaction
+
+        params = {"qty": 1} if params is None else params
+        row = await self.state(session, action_id=action_id)
+        if row is None or row["command_code"] is None:
+            fact = await self.current_business(session, business_key=business_key)
+            if not fact or fact["can_register"] is not True or fact["device_code"] != device_code:
+                raise ValueError("current reference permission required")
+        else:
+            fact = None
+        await ensure_savepoint_transaction(session)
+        async with session.begin_nested():
+            if row is None:
+                insert = pg_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
+                await session.execute(
+                    insert(self.actions)
+                    .values(
+                        id=action_id,
+                        owner_domain=self.owner.domain,
+                        business_key=business_key,
+                        device_code=fact["device_code"],
+                        version=fact["version"],
+                        state="READY",
+                    )
+                    .on_conflict_do_nothing(index_elements=["id"])
+                )
+            row = await self.state(session, action_id=action_id, lock=True)
+            if row["owner_domain"] != self.owner.domain or row["business_key"] != business_key:
+                raise ValueError("business identity has different input")
+            if row["command_code"] is None:
+                if row["state"] != "READY":
+                    raise ValueError("current reference permission required")
+            command = await self.ecs.service.create(
+                session,
+                owner=self.owner,
+                call_key=f"action:{action_id}",
+                device_code=device_code,
+                task_type=task_type,
+                timeout_ms=timeout_ms,
+                params=params,
+            )
+            if row["command_code"] is None:
+                await session.execute(
+                    update(self.actions)
+                    .where(self.actions.c.id == action_id)
+                    .values(
+                        device_code=fact["device_code"],
+                        version=fact["version"],
+                        intent_device_code=fact["device_code"],
+                        intent_version=fact["version"],
+                        task_type=task_type,
+                        timeout_ms=timeout_ms,
+                        params=params,
+                        command_code=command.command_code,
+                        state="WAITING_RESULT",
+                    )
+                )
+        return command
+
+    async def consume(self, session, *, action_id):
+        row = await self.state(session, action_id=action_id)
+        if row is None or row["owner_domain"] != self.owner.domain:
+            return False
+        fact = await self.current_business(session, business_key=row["business_key"])
+        row = await self.state(session, action_id=action_id, lock=True)
+        if not fact or fact["can_register"] is not True or row["state"] != "WAITING_RESULT":
+            return False
         if (
-            view is None
-            or not view.result
-            or view.needs_reconciliation
-            or view.hold_reason
-            or call is None
-            or state["state"] != "READY"
-            or state["binding"] != call["binding"]
-            or state["version"] != call["version"]
+            row["device_code"] != row["intent_device_code"]
+            or row["version"] != row["intent_version"]
+            or fact["device_code"] != row["intent_device_code"]
+            or fact["version"] != row["intent_version"]
         ):
             return False
-        insert = pg_insert if session.bind.dialect.name == "postgresql" else sqlite_insert
-        winner = await session.scalar(
-            insert(self.consumptions)
-            .values(
-                consumer="reference",
-                command_code=code,
-            )
-            .on_conflict_do_nothing()
-            .returning(self.consumptions.c.command_code)
+        view = await self.ecs.service.get_command(
+            session,
+            owner=self.owner,
+            command_code=row["command_code"],
         )
-        if winner is None:
+        if view is None or not view.result or view.hold_reason or view.needs_reconciliation:
             return False
         await session.execute(
-            update(self.business)
-            .where(self.business.c.id == 1)
+            update(self.actions)
+            .where(self.actions.c.id == action_id)
             .values(
                 state="SUCCEEDED" if view.result["result"] == "SUCCESS" else "FAILED",
             )
         )
         return True
 
-    async def change(self, session, kind):
-        state = await self.state(session, lock=True)
-        if state["state"] != "READY":
+    async def change(self, session, *, action_id, kind):
+        row = await self.state(session, action_id=action_id)
+        if row is None or row["owner_domain"] != self.owner.domain:
             return False
-        values = {"version": state["version"] + 1}
+        fact = await self.current_business(session, business_key=row["business_key"])
+        row = await self.state(session, action_id=action_id, lock=True)
+        if fact is None or row["state"] not in ("READY", "WAITING_RESULT"):
+            return False
+        values = {"version": row["version"] + 1}
         if kind == "cancel":
             values["state"] = "CANCELLED"
         elif kind == "rebind":
-            values["binding"] = "D2"
-        await session.execute(update(self.business).where(self.business.c.id == 1).values(**values))
+            values["device_code"] = "D2"
+        elif kind != "version":
+            raise ValueError("unknown business change")
+        await session.execute(
+            update(self.actions).where(self.actions.c.id == action_id).values(**values)
+        )
         return True
 
     @staticmethod
@@ -303,37 +342,48 @@ async def reference(ecs):
         Column("effective", Boolean, nullable=False),
         Column("revoked", Boolean, nullable=False),
     )
-    business = Table(
-        "ecs_reference_business",
+    from sqlalchemy import JSON
+
+    actions = Table(
+        "ecs_reference_action",
         metadata,
         Column("id", Integer, primary_key=True),
+        Column("owner_domain", String, nullable=False),
+        Column("business_key", String, nullable=False),
+        Column("device_code", String, nullable=False),
+        Column("version", Integer, nullable=False),
+        Column("task_type", String),
+        Column("timeout_ms", Integer),
+        Column("params", JSON),
+        Column("command_code", String, unique=True),
+        Column("intent_device_code", String),
+        Column("intent_version", Integer),
         Column("state", String, nullable=False),
-        Column("binding", String, nullable=False),
-        Column("version", Integer, nullable=False),
-        CheckConstraint("state IN ('READY','CANCELLED','SUCCEEDED','FAILED')"),
+        CheckConstraint("state IN ('READY','WAITING_RESULT','CANCELLED','SUCCEEDED','FAILED')"),
     )
-    calls = Table(
-        "ecs_reference_call",
-        metadata,
-        Column("call_key", String, primary_key=True),
-        Column("command_code", String, nullable=False, unique=True),
-        Column("binding", String, nullable=False),
-        Column("version", Integer, nullable=False),
-    )
-    consumptions = Table(
-        "ecs_reference_consumption",
-        metadata,
-        Column("consumer", String, primary_key=True),
-        Column("command_code", String, primary_key=True),
-    )
+    facts = {"B1": {"can_register": True, "device_code": "D1", "version": 1}}
+    reads = []
+
+    async def current_business(session, *, business_key):
+        reads.append(business_key)
+        return facts.get(business_key)
+
     async with ecs.engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
-    ref = Reference(ecs, (routes, business, calls, consumptions))
+    ref = Reference(ecs, routes, actions, current_business)
+    ref.facts, ref.fact_reads = facts, reads
     try:
         async with ecs.factory.begin() as session:
             await ref.add_route(session, "A", effective=True)
             await session.execute(
-                business.insert().values(id=1, state="READY", binding="D1", version=1)
+                actions.insert().values(
+                    id=1,
+                    owner_domain=ecs.owner.domain,
+                    business_key="B1",
+                    state="READY",
+                    device_code="D1",
+                    version=1,
+                )
             )
         ecs.service.routes = ref
         yield ref
@@ -344,42 +394,6 @@ async def reference(ecs):
 
 @pytest.fixture
 async def loopback_server():
-    import asyncio
-    import socket
-    from contextlib import asynccontextmanager
+    from tests.helpers import loopback_app
 
-    import uvicorn
-
-    @asynccontextmanager
-    async def serve(app):
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        sock.listen()
-        port = sock.getsockname()[1]
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app,
-                loop="asyncio",
-                lifespan="off",
-                log_level="critical",
-                access_log=False,
-                ws="none",
-            )
-        )
-        task = asyncio.create_task(server.serve(sockets=[sock]))
-        try:
-            async with asyncio.timeout(5):
-                while not server.started:
-                    if task.done():
-                        await task
-                        raise RuntimeError("loopback server exited before startup")
-                    await asyncio.sleep(0.01)
-            yield f"http://127.0.0.1:{port}"
-        finally:
-            server.should_exit = True
-            try:
-                await asyncio.wait_for(task, 5)
-            finally:
-                sock.close()
-
-    return serve
+    return loopback_app

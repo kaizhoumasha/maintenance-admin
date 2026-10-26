@@ -1,8 +1,11 @@
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+PROTOCOL_RETRY_WINDOW = timedelta(seconds=300)
 
 Millis = Annotated[int, Field(ge=0, le=2**63 - 1)]
 Text = Annotated[str, Field(min_length=1, pattern=r"^[^\x00]+$")]
