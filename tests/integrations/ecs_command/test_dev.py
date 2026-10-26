@@ -818,3 +818,23 @@ async def test_startup_merges_history_annexes_for_original_results(ecs, monkeypa
             assert not application.state.ecs_simulator_hits
         assert application.state.reliable_client_provider.closed
     assert list(original_history) == [("trial", "1")]
+
+
+@pytest.mark.parametrize("assembled", [False, True])
+def test_automatic_channel_rejects_parallel_ecs_target_configuration(runtime_settings, assembled):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from app.integrations.ecs_command.runtime import ecs_runtime_config
+
+    runtime_settings.RELIABLE_TARGETS["targets"]["parallel-ecs"] = {
+        "protocol": "ecs-command",
+        "base_url": None,
+        "address_mode": "SNAPSHOT",
+    }
+    original = deepcopy(runtime_settings.RELIABLE_TARGETS)
+    with pytest.raises(ValueError, match="remove ECS targets from RELIABLE_TARGETS"):
+        ecs_runtime_config(
+            runtime_settings, SimpleNamespace(target="ecs-local") if assembled else None
+        )
+    assert runtime_settings.RELIABLE_TARGETS == original

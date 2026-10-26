@@ -185,3 +185,39 @@ async def test_consumption_and_business_change_follow_lock_order(
             session, owner=ecs.owner, command_code=command.command_code
         )
         assert view.result["result"] == "SUCCESS"
+
+
+@pytest.mark.parametrize(
+    "fact",
+    [
+        None,
+        {"can_register": False, "device_code": "D1", "version": 1},
+        {"can_register": True, "device_code": "D2", "version": 1},
+        {"can_register": True, "device_code": "D1", "version": 2},
+    ],
+    ids=["missing", "revoked", "rebound", "new-version"],
+)
+async def test_consumer_requires_current_authority_even_when_action_is_unchanged(reference, fact):
+    ecs = reference.ecs
+    async with ecs.factory.begin() as session:
+        command = await reference.register(session, action_id=1)
+    assert (await reference.apply_result(command.command_code)).status_code == 200
+    async with ecs.factory() as session:
+        before = dict(await reference.state(session))
+    reference.facts["B1"] = fact
+    async with ecs.factory.begin() as session:
+        assert not await reference.consume(session, action_id=1)
+        assert dict(await reference.state(session)) == before
+        assert before["state"] == "WAITING_RESULT"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(reference.actions)
+                .where(reference.actions.c.state.in_(("SUCCEEDED", "FAILED")))
+            )
+            == 0
+        )
+        result = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert result.result["result"] == "SUCCESS"
