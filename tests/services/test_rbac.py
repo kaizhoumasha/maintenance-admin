@@ -2,11 +2,16 @@ import asyncio
 
 import pytest
 from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
+from sqlalchemy.schema import CreateSchema, DropSchema
 
+from app.core import AppError, ErrorCode
 from app.core.identifiers import uuid7
-from app.models import Permission, Role, User
-from app.services import rbac_service
+from app.database import SCHEMA
+from app.models import Base, Permission, Role, User, role_permission, user_role
+from app.schemas.user import UserUpdate
+from app.services import rbac_service, user_service
 from scripts.seed_admin import seed_admin
 
 
@@ -62,3 +67,155 @@ async def test_concurrent_replacements_do_not_merge_grants(pg_sessions, wait_for
             await session.execute(delete(child).where(child.id.in_([first.id, second.id])))
             await session.execute(delete(User).where(User.username == admin_name))
             await session.commit()
+
+
+@pytest.fixture
+async def admin_pair(pg_sessions):
+    # 独立 schema 保证恰好两位管理员,不被其他测试留下的种子管理员掩盖。
+    schema = "admin_guard_" + uuid7().hex
+    engine = pg_sessions.kw["bind"].execution_options(schema_translate_map={SCHEMA: schema})
+    async with engine.begin() as connection:
+        await connection.execute(CreateSchema(schema))
+        await connection.run_sync(
+            lambda sync: Base.metadata.create_all(
+                sync,
+                tables=[
+                    User.__table__,
+                    Role.__table__,
+                    Permission.__table__,
+                    user_role,
+                    role_permission,
+                ],
+            )
+        )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            permission = Permission(code="admin:role:set_permissions", name="manage")
+            roles = [Role(name=f"guard_{i}", permissions=[permission]) for i in range(2)]
+            users = [
+                User(
+                    username=f"guard_{i}",
+                    email=f"guard_{i}@example.test",
+                    hashed_password="x",
+                    roles=[role],
+                )
+                for i, role in enumerate(roles)
+            ]
+            session.add_all(users)
+            await session.commit()
+            yield factory, [u.id for u in users], [r.id for r in roles]
+    finally:
+        async with engine.begin() as connection:
+            await connection.execute(DropSchema(schema, cascade=True))
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [
+        ("roles", "roles"),
+        ("permissions", "permissions"),
+        ("disable", "roles"),
+        ("roles", "disable"),
+        ("disable", "permissions"),
+        ("permissions", "disable"),
+        ("disable", "disable"),
+    ],
+)
+async def test_different_admin_changes_preserve_one_admin(
+    admin_pair, wait_for_lock, redis, actions
+):
+    factory, users, roles = admin_pair
+    reached, resume = asyncio.Event(), asyncio.Event()
+    async with factory() as first, factory() as second:
+        commit = first.commit
+
+        async def paused_commit():
+            reached.set()
+            await asyncio.wait_for(resume.wait(), 5)
+            await commit()
+
+        first.commit = paused_commit
+
+        async def change(session, index, action):
+            try:
+                if action == "roles":
+                    await rbac_service.set_user_roles(session, users[index], [])
+                elif action == "permissions":
+                    await rbac_service.set_role_permissions(session, roles[index], [])
+                else:
+                    await user_service.update_user(
+                        session, redis, users[1 - index], users[index], UserUpdate(is_active=False)
+                    )
+                return "ok"
+            except AppError as error:
+                await session.rollback()
+                return error.code
+
+        pid = await second.scalar(text("SELECT pg_backend_pid()"))
+        pending = [asyncio.create_task(change(first, 0, actions[0]))]
+        try:
+            await asyncio.wait_for(reached.wait(), 5)
+            pending.append(asyncio.create_task(change(second, 1, actions[1])))
+            await wait_for_lock(pending[1], pid)
+            resume.set()
+            assert await asyncio.wait_for(asyncio.gather(*pending), 5) == ["ok", ErrorCode.CONFLICT]
+            # 冲突已回滚,同一会话的下一笔合法事务仍可取得保护锁并完成。
+            await rbac_service.set_user_roles(second, users[1], [roles[1]])
+        finally:
+            resume.set()
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+    async with factory() as session:
+        admins = list(
+            await session.scalars(
+                select(User.id)
+                .join(User.roles)
+                .join(Role.permissions)
+                .where(User.is_active.is_(True), Permission.code == "admin:role:set_permissions")
+            )
+        )
+        assert admins == [users[1]]
+
+
+async def test_disabling_reloads_current_user_state(admin_pair, redis):
+    factory, users, _ = admin_pair
+    async with factory() as stale, factory() as writer:
+        cached = await stale.get(User, users[1])
+        assert cached.email == "guard_1@example.test"
+        current = await writer.get(User, users[1])
+        current.email = "changed@example.test"
+        await writer.commit()
+        updated = await user_service.update_user(
+            stale, redis, users[0], users[1], UserUpdate(is_active=False)
+        )
+        assert updated.email == "changed@example.test" and not updated.is_active
+
+
+async def test_profile_edit_does_not_wait_for_admin_change(admin_pair, redis):
+    factory, users, _ = admin_pair
+    reached, resume = asyncio.Event(), asyncio.Event()
+    async with factory() as guarded, factory() as ordinary:
+        commit = guarded.commit
+
+        async def paused_commit():
+            reached.set()
+            await asyncio.wait_for(resume.wait(), 5)
+            await commit()
+
+        guarded.commit = paused_commit
+        pending = asyncio.create_task(rbac_service.set_user_roles(guarded, users[0], []))
+        try:
+            await asyncio.wait_for(reached.wait(), 5)
+            updated = await asyncio.wait_for(
+                user_service.update_user(
+                    ordinary, redis, users[0], users[1], UserUpdate(email="profile@example.test")
+                ),
+                2,
+            )
+            assert updated.email == "profile@example.test"
+        finally:
+            resume.set()
+            await asyncio.wait_for(pending, 5)
