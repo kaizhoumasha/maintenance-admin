@@ -92,7 +92,7 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),同一合法权限码可由多个路由独立声明。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
 
-用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。
+用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。并发保护、会话索引寿命及权限复用的稳定边界见[后台加固合同](docs/superpowers/specs/2026-10-26-repository-review-hardening-design.md)。
 
 ### 6. 认证
 
