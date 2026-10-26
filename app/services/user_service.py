@@ -102,12 +102,14 @@ async def create_user(session: AsyncSession, data: UserCreate) -> User:
 async def update_user(
     session: AsyncSession, redis: Redis, actor_id: int, user_id: int, data: UserUpdate
 ) -> User:
-    user = await get_user(session, user_id)
     changes = data.model_dump(exclude_none=True)
+    disabling = changes.get("is_active") is False
+    if disabling:
+        await rbac_service.lock_admin_changes(session)
+    user = await get_user(session, user_id, for_update=disabling)
     if "email" in changes and changes["email"] != user.email:
         if await session.scalar(select(User).where(User.email == changes["email"])):
             raise AppError(ErrorCode.CONFLICT, "邮箱已被注册")
-    disabling = changes.get("is_active") is False
     if disabling and user.id == actor_id:
         raise AppError(ErrorCode.INVALID_REQUEST, "不能停用自己")
     for field, value in changes.items():

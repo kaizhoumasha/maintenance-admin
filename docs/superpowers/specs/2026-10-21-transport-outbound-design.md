@@ -1,6 +1,6 @@
 # WMS Transport 出站:协议适配器与能力层开发说明书
 
-状态:**P0～P3 已实现并通过离线验证(P3 的本地可信状态校验已按 2026-10-22 决定取消,见下);生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、`2026-10-21-reliable-interaction-plan.md`
+状态:**P0～P3 已实现并通过离线验证(P3 的本地可信状态校验已按 2026-10-22 决定取消,见下);生产启用条件仍见 §9** · 合同依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md`(Approved,0.4.0,下称「合同」)· 承接:`2026-10-20-interop-framework-design.md`、[可靠投递参考](../../integrations/reliable-delivery.md)
 
 评审已确认范围(2026-10-21,D1 A):首轮交付 P0～P2;P3 只保留后续设计,其 DTO、规则、冻结及 `RackStateReader` 端口均延后,随可信位置投影或明确调用方推进。本文相关 P3 描述不属于首轮实施与验收。
 

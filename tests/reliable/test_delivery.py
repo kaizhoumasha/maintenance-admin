@@ -69,6 +69,9 @@ async def test_delivery_matrix_preserves_actual_evidence(
     assert client.requests[0].body == claim.message.request_raw
     assert len(rig.adapter.builds) == 2
     assert "actual" not in caplog.text
+    assert not any(
+        record.getMessage().startswith("reliable delivery failed ") for record in caplog.records
+    )
     if reason == "CONTRACT_VIOLATION":
         assert any(record.levelno >= logging.ERROR for record in caplog.records)
 
@@ -259,3 +262,57 @@ async def test_started_request_may_complete_after_ttl(rig):
     async with rig.factory() as session:
         row = await session.get(ReliableMessage, result.message_id)
         assert row.status == "DONE" and row.response_raw == b"ok"
+
+
+@pytest.mark.parametrize(
+    "phase", ["prepare", "build_request", "send", "classify_response", "apply_outcome"]
+)
+async def test_local_failure_reports_safe_phase_without_changing_evidence(rig, caplog, phase):
+    from app.reliable.delivery import send_one
+    from app.reliable.testing import ScriptedHttpClient
+
+    async with rig.factory.begin() as session:
+        message = await rig.outbox.enqueue(session, rig.draft())
+    (claim,) = await rig.store.claim(1, rig.targets)
+    error = RuntimeError("private_sql private_token private_password private_body")
+
+    def fail(*args):
+        raise error
+
+    response = HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"private_body")
+    client = ScriptedHttpClient(error if phase == "send" else response)
+
+    def uniform(low, high):
+        return high
+
+    if phase == "prepare":
+        rig.adapters.clear()
+    elif phase == "build_request":
+        rig.adapter.error = error
+    elif phase == "classify_response":
+        rig.adapter.classify_response = fail
+    elif phase == "apply_outcome":
+        client = ScriptedHttpClient(HttpResult(DeliveryState.NOT_SENT, None, None, (), None))
+        uniform = fail
+    with caplog.at_level(logging.ERROR):
+        await send_one(
+            claim,
+            store=rig.store,
+            targets=rig.targets,
+            adapters=rig.adapters,
+            clients={"peer": client},
+            clock=rig.clock,
+            uniform=uniform,
+        )
+    async with rig.factory() as session:
+        row = await session.get(ReliableMessage, message.message_id)
+        assert row.status == "FAILED" and row.fail_reason == "LOCAL_ERROR"
+        assert row.response_raw is None
+        assert row.last_response_raw == (b"private_body" if phase == "classify_response" else None)
+    records = [r for r in caplog.records if r.getMessage().startswith("reliable delivery failed ")]
+    assert len(records) == 1
+    record = records[0]
+    assert record.component == "reliable" and record.phase == phase
+    assert record.message_id == claim.message_id and record.target == "peer"
+    assert "origin=app/" in record.getMessage() and "Traceback" in record.getMessage()
+    assert "private_" not in caplog.text

@@ -6,13 +6,13 @@
 
 首次接入从[短教程](ecs-command-tutorial.md)选择业务调用或Swagger调试；两者均不要求先运行框架验收。本文提供接口/边界参考，开发回归使用[现有测试](../testing/ecs-command-verification.md)。
 
-PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca86`；[合并CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40275200539)为2322 passed、25 skipped，Ruff check及341文件格式检查通过。该数字为PR #23合并时验收证据；后续Task 20–22隔离收尾结果单独记录于教程PLAN，不并入合并CI。本轮验证见结项PLAN，合并时的历史CI数字不作为本轮运行结果。
+PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca86`；[合并CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40275200539)为2322 passed、25 skipped，Ruff check及341文件格式检查通过。该数字为PR #23合并时验收证据；后续开发者体验收尾已随 PR #24 合入 develop（1ef1725）；当前回归入口见[现有测试](../testing/ecs-command-verification.md)，上列数字保留为 PR #23 的历史 CI，不作为当前运行结果。
 
 ## 设备身份与地址来源
 
 DEVICE_CODE定义为全系统唯一，沿用wire字段device_code。地址由设备管理的ecs_origin或调试适配层提供，ECS通用模块只依赖DeviceRouteProvider；只有地址信息时不单建ECS配置表。正式设备表/全局唯一约束当前尚未实现，设备表是正式地址来源，不是通用模块的硬依赖。原命令地址快照、原授权及UNKNOWN/HELD边界保持不变。
 
-Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_url、device_code、task_type和params，不逐动作手工登记；稳定client_request_id及执行timeout_ms仍保留。状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING，Task 17设计已关闭，Task 18–19已实现并在一次性存储/本轮模拟端验收。新验证见实施计划，真实设备仍受真实接入验收独立门槛约束。
+Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_url、device_code、task_type和params，不逐动作手工登记；稳定client_request_id及执行timeout_ms仍保留。状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING，当前回归覆盖该合同和原冻结期限，入口见[现有测试](../testing/ecs-command-verification.md)；真实设备仍受真实接入验收独立门槛约束。
 
 ## 一次性装配
 
@@ -72,7 +72,7 @@ Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久
 
 新动作由受信任业务入口绑定business_key，登记事务通过`current_business(session, *, business_key)`读取当前许可、设备和业务版本；未知或不允许时拒绝，不从新行READY、客户端字段或路由版本推导许可。真实接入使用已有权威业务记录，不新建许可表，按“权威业务记录→动作行”统一锁序或等价版本条件保护；权威就在动作行时只锁该行。模板Reference仅注入测试事实替身，不将其当作生产业务聚合的事务证明。
 
-同business_key取消/换绑/终态后，原动作同输入重入仍返回原命令；未重新取得当前有效许可或请求设备不符时，新动作按当前事实拒绝；当前版本从1变2且明确获准时，新动作冻结2，原动作保留原命令与冻结1。两条当前许可回归见[结项PLAN的回归映射](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md#保留的回归入口)，不能给新行预置READY或更换business_key来弱化断言。不同业务的独立有效意图不因同设备历史失败永久受阻，UNKNOWN也不能借新id重发。
+同business_key取消/换绑/终态后，原动作同输入重入仍返回原命令；未重新取得当前有效许可或请求设备不符时，新动作按当前事实拒绝；当前版本从1变2且明确获准时，新动作冻结2，原动作保留原命令与冻结1。两条当前许可回归见[现有测试的回归映射](../testing/ecs-command-verification.md)，不能给新行预置READY或更换business_key来弱化断言。不同业务的独立有效意图不因同设备历史失败永久受阻，UNKNOWN也不能借新id重发。
 
 取消、换绑、版本变化与消费锁同一动作行或采用已证明等价的条件更新；变更先提交旧结果不推进，消费先提交终态不被覆盖。业务状态与框架投递、DEVICE Status分开；UNKNOWN/HELD不自动变成业务FAILED，不因换键、改址或设备空闲解封。详见[教程登记与安全消费](ecs-command-tutorial.md)和[设计§11](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
 
@@ -86,7 +86,7 @@ POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已�
 
 POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略顶层诊断扩展；成功提交后返回 200/ACK。未知命令/设备不匹配 404，提前/矛盾 409，非法输入 400，超限 413，事务或原附录不可用 503。结果证据、收据、命令投影及 settle 同事务。长期证据在短期收据/可靠消息清理后仍提供原响应，不重新创建发送义务。Event 接口保持原语义。
 
-参考目录、动作与安全消费只存在于tests，使用现有pytest验证，无需独立隔离设计或实施阶段；已有行为与证据见[结项记录](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。测试不代表供应商、生产路由或现场验收。
+参考目录、动作与安全消费只存在于tests，使用现有pytest验证，无需独立隔离设计或实施阶段；已有行为与回归入口见[现有测试说明](../testing/ecs-command-verification.md)。测试不代表供应商、生产路由或现场验收。
 
 ## 发布与验证边界
 

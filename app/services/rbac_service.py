@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,13 +9,19 @@ from app.models import Permission, Role, User, role_permission, user_role
 
 # 系统里至少要有一个活跃用户能设置角色权限,否则没人能再恢复权限
 ADMIN_GUARD_PERMISSION = "admin:role:set_permissions"
+_ADMIN_GUARD_LOCK = 0x41444D494E
+
+
+async def lock_admin_changes(session: AsyncSession) -> None:
+    """三个授权变更入口先互斥,再加目标行锁/修改;锁随事务结束释放。"""
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMIN_GUARD_LOCK}
+        )
 
 
 async def ensure_admin_remains(session: AsyncSession) -> None:
-    """在改动(未提交)之后调用;改动会使系统失去最后一个管理员时抛 409,事务不提交即回滚。
-
-    shortcut: 并发地各自移除对方的管理员身份时检查会同时通过;需要时给检查加咨询锁。
-    """
+    """持有管理员变更锁后检查未提交改动;失去最后管理员时抛 409,调用方回滚。"""
     stmt = (
         select(func.count(User.id.distinct()))
         .join(user_role, user_role.c.user_id == User.id)
@@ -108,6 +114,7 @@ async def delete_role(session: AsyncSession, role_id: int) -> None:
 
 
 async def set_role_permissions(session: AsyncSession, role_id: int, codes: Iterable[str]) -> Role:
+    await lock_admin_changes(session)
     stmt = (
         select(Role)
         .where(Role.id == role_id)
@@ -125,6 +132,7 @@ async def set_role_permissions(session: AsyncSession, role_id: int, codes: Itera
 
 
 async def set_user_roles(session: AsyncSession, user_id: int, role_ids: Iterable[int]) -> None:
+    await lock_admin_changes(session)
     stmt = (
         select(User)
         .where(User.id == user_id)

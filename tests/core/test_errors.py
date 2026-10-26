@@ -126,7 +126,8 @@ def test_error_responses_builds_openapi_responses():
 
 def test_openapi_error_responses_follow_route_rules():
     """规则而不是快照:只看 OpenAPI 输出,新增路由自动受约束。"""
-    from app.core.deps import registered_codes
+    from fastapi.routing import APIRoute
+
     from app.main import app
 
     schema = app.openapi()
@@ -157,8 +158,18 @@ def test_openapi_error_responses_follow_route_rules():
             if code[0] in "45":
                 ref = op["responses"][code]["content"]["application/json"]["schema"]["$ref"]
                 assert ref.endswith("/ErrorResponse"), (path, code)
-    # 一个权限码对应一个路由(导入时已强制),所以带 403 的操作数必须等于权限码数
-    assert sum("403" in op["responses"] for _, op in operations) == len(registered_codes)
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        nodes = [route.dependant]
+        protected = False
+        while nodes:
+            node = nodes.pop()
+            protected |= hasattr(node.call, "requires_permission")
+            nodes.extend(node.dependencies)
+        for method in route.methods:
+            operation = schema["paths"][route.path][method.lower()]
+            assert ("403" in operation["responses"]) is protected, (route.path, method)
     for method, path, code in (
         ("post", "/api/v1/auth/login", "401"),
         ("get", "/api/v1/users/{user_id}", "404"),

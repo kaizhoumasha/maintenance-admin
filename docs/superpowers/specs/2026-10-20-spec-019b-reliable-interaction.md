@@ -5,7 +5,7 @@
 > 本文自完整设计中摘出,自成一体。首版只做**出站可靠**:事务发件箱、原身份持久化退避重试、租约领取与崩溃恢复、消息行上的尝试记录。同步调用、去重窗口校验、调试 API 与逐次事件记录已设计完整但**后移**,条文保留在 §12。核心**不理解信封、operation、`code` 词表**,这些属于协议适配器(由各业务域对接时提供)。
 > HttpClient 合同：`send(HttpRequest) -> HttpResult`、`aclose()`；公开同步 `validate_request(config, request) -> None` 已实现，只依赖 `HttpClientConfig`，不需要客户端实例、事件循环或网络，与 `send` 复用请求校验。`HttpResult` 含 `delivery_state`(`NOT_SENT` / `DELIVERY_UNKNOWN` / `HTTP_RESPONSE_COMPLETE`)、`failure_kind`、HTTP 状态码、响应头、有界响应字节；一次 `send` 至多一次网络请求，不自动重试。
 
-> **实现状态**：§1.3 首版已实现，永久测试覆盖 SQLite 状态合同与真实 PostgreSQL 并发/骤停恢复；实施和验证记录见 `docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md`。§12、安全、出口限流、业务域接入仍未实施。离线脚本化对端不构成真实协议、对端去重或业务/物理完成验收。
+> **实现状态**：§1.3 首版已实现，永久测试覆盖 SQLite 状态合同与真实 PostgreSQL 并发/骤停恢复；配置与接入见[可靠投递参考](../../integrations/reliable-delivery.md)，验证入口见[开发测试](../../testing/README.md)。§12、安全、出口限流、业务域接入仍未实施。离线脚本化对端不构成真实协议、对端去重或业务/物理完成验收。
 
 ## 1. 范围
 

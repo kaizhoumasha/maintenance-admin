@@ -9,7 +9,9 @@ from app.core.security import decode_token
 from app.main import app
 from app.models import User
 from app.services import session_service
-from tests.controllers.test_auth import LOGIN, _login, _refresh
+from tests.helpers import LOGIN, PAYLOAD
+from tests.helpers import login as _login
+from tests.helpers import refresh as _refresh
 
 
 async def test_refresh_cannot_restore_session_after_logout_all(client, admin, real_redis):
@@ -96,3 +98,74 @@ async def test_concurrent_refresh_replay_succeeds_once(real_redis):
         assert not await real_redis.exists(f"refresh:{jti}")
     finally:
         await session_service.revoke_all(real_redis, str(user.id))
+
+
+@pytest.mark.parametrize("old_days,new_days", [(2, 1), (1, 2)])
+async def test_session_index_covers_old_and_new_tokens(real_redis, monkeypatch, old_days, new_days):
+    user = User(id=uuid7().int, allow_multi_login=True)
+    key = f"user_refresh:{user.id}"
+    settings = session_service.get_settings()
+    try:
+        monkeypatch.setattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", old_days)
+        _, old = await session_service.issue_tokens(real_redis, user)
+        old_jti = decode_token(old, "refresh")["jti"]
+        old_deadline = await real_redis.execute_command("PEXPIRETIME", key)
+        monkeypatch.setattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", new_days)
+        _, new = await session_service.issue_tokens(real_redis, user)
+        new_jti = decode_token(new, "refresh")["jti"]
+        deadline = await real_redis.execute_command("PEXPIRETIME", key)
+        assert deadline >= old_deadline
+        assert deadline >= await real_redis.execute_command("PEXPIRETIME", f"refresh:{new_jti}")
+        assert await real_redis.smembers(key) == {old_jti, new_jti}
+        await session_service.revoke_all(real_redis, str(user.id))
+        for jti in (old_jti, new_jti):
+            with pytest.raises(AppError) as error:
+                await session_service.issue_tokens(real_redis, user, jti)
+            assert error.value.code == ErrorCode.UNAUTHORIZED
+    finally:
+        await session_service.revoke_all(real_redis, str(user.id))
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_issuing_tokens_preserves_nonexpiring_index(real_redis, rotate):
+    user = User(id=uuid7().int, allow_multi_login=True)
+    key = f"user_refresh:{user.id}"
+    try:
+        assert await real_redis.pttl(key) == -2
+        _, old = await session_service.issue_tokens(real_redis, user)
+        assert await real_redis.pttl(key) > 0
+        jti = decode_token(old, "refresh")["jti"]
+        await real_redis.persist(key)
+        _, new = await session_service.issue_tokens(real_redis, user, jti if rotate else None)
+        assert await real_redis.pttl(key) == -1
+        assert decode_token(new, "refresh")["jti"] in await real_redis.smembers(key)
+        if rotate:
+            assert not await real_redis.exists(f"refresh:{jti}")
+    finally:
+        await session_service.revoke_all(real_redis, str(user.id))
+
+
+async def test_logout_all_revokes_sessions_across_lifetime_change(
+    client, admin, real_redis, monkeypatch
+):
+    response = await client.post(
+        "/api/v1/users", json={**PAYLOAD, "allow_multi_login": True}, headers=admin
+    )
+    user_id = str(response.json()["id"])
+    app.dependency_overrides[get_redis] = lambda: real_redis
+    settings = session_service.get_settings()
+    try:
+        monkeypatch.setattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", 2)
+        access, old = await _login(client, {"username": "kai", "password": "password123"})
+        monkeypatch.setattr(settings, "REFRESH_TOKEN_EXPIRE_DAYS", 1)
+        _, new = await _login(client, {"username": "kai", "password": "password123"})
+        assert await real_redis.pttl(f"user_refresh:{user_id}") > 86400 * 1000
+        assert (
+            await client.post(
+                "/api/v1/auth/logout-all", headers={"Authorization": f"Bearer {access}"}
+            )
+        ).status_code == 204
+        for token in (old, new):
+            assert (await _refresh(client, token)).status_code == 401
+    finally:
+        await session_service.revoke_all(real_redis, user_id)

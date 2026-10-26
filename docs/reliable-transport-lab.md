@@ -1,6 +1,6 @@
 # 第一个可靠投递实验
 
-本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。先跑通本实验，再按[接入指南](superpowers/specs/device-command-integration.md)的任务表做协议开发。
+本实验在内存 SQLite 中保存一条业务记录和一条出站消息，用 `ScriptedHttpClient` 返回 ACK，再验证消息进入 `DONE`。它不连接 ECS/WMS，不需要 PostgreSQL、Redis 或 `.env`，也不启动应用发送器。配置与事务边界见[可靠投递参考](integrations/reliable-delivery.md)，正式 Transport 协议见[Transport 参考](integrations/wms-transport.md)。
 
 ## 1. 准备文件与命令
 
@@ -8,7 +8,7 @@
 
 在业务项目创建第一个文件 `tests/reliable/test_transport_submit_example.py`，复制下面整段 Python。若文件已存在，先核对内容，不要覆盖其他人的测试。这里的业务模型只存在于测试内存库，不需要生产迁移。
 
-这个文件包含可供拆分的请求构建、ACK 分类、业务模型、事务写入和测试。它是一个离线学习切片，不是生产适配器：只使用带合法任务 ID 的 `RACK_MOVE` 请求；JSON 数值一律只接收整数（含冗余字段）。正式适配器已在 `app/integrations/wms_transport/adapter.py`，对冗余字段中的浮点数更宽松，且有请求侧 DTO/位置校验和更完整的测试；与完整合同的差异清单见指南 §5.3 的「合同待确认项」。
+这个文件包含可供拆分的请求构建、ACK 分类、业务模型、事务写入和测试。它是一个离线学习切片，不是生产适配器：只使用带合法任务 ID 的 `RACK_MOVE` 请求；JSON 数值一律只接收整数（含冗余字段）。正式适配器已在 `app/integrations/wms_transport/adapter.py`，对冗余字段中的浮点数更宽松，且有请求侧 DTO/位置校验和更完整的测试；差异清单见[Transport 参考](integrations/wms-transport.md)的 ACK 与合同边界。
 
 ```python
 import json
@@ -354,8 +354,8 @@ Transport 的正式实现已经落在仓库里，实验里的各部分对应如�
 | `TransportSubmitAdapter` | `app/integrations/wms_transport/adapter.py`，测试 `tests/integrations/wms_transport/test_adapter.py` | 同步纯函数，不导入数据库或网络客户端；已按协议名 `wms-transport` 在 `app/main.py` 注册 |
 | `REQUEST_RAW` 与请求构造 | `wire.py`、`types.py` | 由 `TransportService` 在冻结正文前校验并生成 |
 | `BusinessTransport` 与 `save_and_enqueue` | `app/models/transport.py` 的 `TransportTask`、`service.py` 的 `TransportService` | 同一事务保存任务并 `enqueue`；不要照搬 `BusinessTransport` 测试表 |
-| 应用入口与目标配置 | `RELIABLE_TARGETS` | 默认为空，不发任何请求；是否启用真实目标按指南 §5.3 的 T4 及联调确认项决定 |
+| 应用入口与目标配置 | `RELIABLE_TARGETS` | 默认为空，不发任何请求；是否启用真实目标按[Transport 参考](integrations/wms-transport.md)中的业务结果消费出口及合同确认项决定 |
 
 实验仍是学习用的自给自足切片，不会随正式实现自动更新。新增其他协议时，才需要按实验拆分出自己的适配器、模型和入队服务。不让初级开发者自行修改重试预算、租约围栏、结果消费或设备动态路由。ECS 不使用本实验的静态 `wms` target。
 
-本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发指南 §9](superpowers/specs/device-command-integration.md#9-环境准备与全量验证)。
+本实验验证单进程 SQLite 事务和协议分类，不验证 PostgreSQL 锁、进程崩溃恢复、真实对端去重、部署安全或物理完成。真实 PostgreSQL/Redis 的准备与全量命令见[开发测试](testing/README.md)。

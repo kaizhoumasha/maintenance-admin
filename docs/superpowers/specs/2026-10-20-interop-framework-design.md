@@ -60,7 +60,7 @@ HttpClient   app/http_client 一次 HTTP 请求(已实现)
 |---|---|---|
 | Q10 | 不具备去重能力的存量对端如何处理 | **开放**:现有设计要求对端必须去重;业务域接入如需接入不可改造对端,另定目标级策略 |
 
-- **实施记录**：分层/导入测试已改为禁止 `app.reliable` 反向依赖；公开校验、可靠首版与验证记录见 `docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md`。安全、限流与业务域接入仍未实施。
+- **实施记录**：分层/导入测试已改为禁止 `app.reliable` 反向依赖；公开校验与可靠首版的配置/接入见[可靠投递参考](../../integrations/reliable-delivery.md)。安全、限流与业务域接入仍未实施。
 
 ## 5. 评审记录(精简)
 

@@ -12,7 +12,7 @@ from app.models import Permission, User, role_permission, user_role
 
 # 权限码三段式 <module>:<resource>:<action>,如 admin:user:create;小写字母/数字/下划线
 PERMISSION_CODE_PATTERN = r"^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$"
-# 一个权限码只能对应一次 require_permission(即一个路由),在导入时就拦住重复
+# 使用过的权限码集合;同一权限可由多个路由独立声明。
 registered_codes: set[str] = set()
 
 # auto_error=False: 缺少凭证时由下面抛 AppError,保持统一的错误响应格式
@@ -42,12 +42,10 @@ async def get_current_user(
 def require_permission(perm: str):
     """路由依赖:当前用户的任一角色拥有 perm 才放行,否则 403。通过后返回当前用户。
 
-    perm 必须是三段式且全局只能用一次,否则导入时抛 ValueError。
+    perm 必须是三段式,否则导入时抛 ValueError;同码可重复声明。
     """
     if not re.fullmatch(PERMISSION_CODE_PATTERN, perm):
         raise ValueError(f"权限码格式错误,应为 <module>:<resource>:<action>: {perm!r}")
-    if perm in registered_codes:
-        raise ValueError(f"权限码重复使用: {perm!r}(一个权限码只能对应一个路由)")
     registered_codes.add(perm)
 
     async def check(

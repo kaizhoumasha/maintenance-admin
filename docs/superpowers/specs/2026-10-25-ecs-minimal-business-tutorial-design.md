@@ -1,6 +1,6 @@
 # ECS 通用接入与最小业务示例设计
 
-**状态：本方实现与开发测试已结项。** 维护当前合同，不再追加实施过程。普通开发者读[教程](../../integrations/ecs-command-tutorial.md)，开发回归复用[现有测试](../../testing/ecs-command-verification.md)，不作为业务/Swagger接入门槛，验证摘要见[PLAN](../plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。生产验证不纳入开发过程，另见[真实接入清单](../../integrations/ecs-acceptance-checklist.md)。
+**状态：本方实现与开发测试已结项，收尾随 PR #24 合入 develop（1ef1725）。** 维护当前合同，不再追加实施过程。普通开发者读[教程](../../integrations/ecs-command-tutorial.md)，开发回归复用[现有测试](../../testing/ecs-command-verification.md)，不作为业务/Swagger接入门槛，回归入口见[测试说明](../../testing/ecs-command-verification.md)。生产验证不纳入开发过程，另见[真实接入清单](../../integrations/ecs-acceptance-checklist.md)。
 
 ## 职责与范围
 
@@ -78,4 +78,4 @@ v1/v2、旧grant及未知策略保持围栏，不改版本/改址/补授权来�
 
 普通开发者直接在Swagger填写模拟ECS地址，或在业务事务内登记并消费；不需要额外隔离阶段。现有测试证明当前机制，不新增试验平台、生产表或测试调度器。
 
-已有通过且执行输入未变的范围复用证据；只改说明检查文档，行为缺陷用原公开入口复现后补最小回归。覆盖及历史执行事实见[结项PLAN](../plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。生产验证独立安排，不作为开发未完成项。
+已有通过且执行输入未变的范围复用证据；只改说明检查文档，行为缺陷用原公开入口复现后补最小回归。当前覆盖映射见[现有测试说明](../../testing/ecs-command-verification.md)。生产验证独立安排，不作为开发未完成项。
