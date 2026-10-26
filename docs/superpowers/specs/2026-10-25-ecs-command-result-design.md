@@ -1,5 +1,7 @@
 # ECS 命令与结果闭环：P0 设计及 P1 验收范围
 
+2026-10-27 独立角色框架补充：新增 RoleRoutes 按 `(device_role, task_type)` 选择附录并通过注入解析绑定／地址。该提供者按当前配置版本停止旧命令后续发送，并接收有可能交付依据的原结果；不保留历史发送授权。通用提供者接口及其他提供者原策略不改。 当前合同见[独立设计](2026-10-27-ecs-role-framework-design.md)和[接入说明](../../integrations/ecs-roles.md)。设备／工作线管理和 Status 不属于该框架前置。
+
 **真实接入边界：** [真实ECS接入验收清单](../../integrations/ecs-acceptance-checklist.md)未启动，不属于本批次开发任务；实际对端/环境确定后再制定联调或上线计划。历史Task 10编号仅用于追溯。
 
 日期：2026-10-25。P1历史交付状态：**P1 已实现并经 PR #22 合并到 develop，合并提交 `ed9005ff0c12e6b090cfcf6cb19ffa3df4a44eea`；隔离机制与合并 CI 验收通过，真实接入尚未验收**。合并 CI 为 2054 passed、11 skipped（SQLite 参数下不适用的 PostgreSQL 专项，对应 PostgreSQL 参数通过），Ruff 与格式检查通过。原 P1 外部双路评审超时，仍为缺失覆盖，不计通过。
