@@ -91,7 +91,7 @@ service已完成lifespan装配，session_factory和action_key由业务提供。�
 ## 6. 继续查阅
 
 - 业务调用、协议与排障：[ECS参考](ecs-command.md)。新命令W固定300秒，旧调用/存量原期限不重算。
-- 已完成范围与回归证据：[结项PLAN](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。本方开发及维护测试已结项，不是调用前置步骤。
+- 现有回归入口：[现有测试说明](../testing/ecs-command-verification.md)。本方开发及维护测试已结项，不是调用前置步骤。
 - 实际供应商/现场/生产：[独立接入清单](ecs-acceptance-checklist.md)，独立于开发，未启动。
 
 开发回归使用[已有pytest测试](../testing/ecs-command-verification.md)，Mock及测试库保护由夹具负责，不要求执行额外的隔离操作流程。调试前核对目标地址，真实ECS接入另行安排。

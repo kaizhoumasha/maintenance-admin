@@ -4,7 +4,7 @@
 
 日期：2026-10-25。P1历史交付状态：**P1 已实现并经 PR #22 合并到 develop，合并提交 `ed9005ff0c12e6b090cfcf6cb19ffa3df4a44eea`；隔离机制与合并 CI 验收通过，真实接入尚未验收**。合并 CI 为 2054 passed、11 skipped（SQLite 参数下不适用的 PostgreSQL 专项，对应 PostgreSQL 参数通过），Ruff 与格式检查通过。原 P1 外部双路评审超时，仍为缺失覆盖，不计通过。
 
-用户已选择并实施“复用现有HTTP客户端和可靠出站框架”。本文保留P0/P1协议与设计期记录；后续测试参考、单表教程及通用Swagger已经完成。PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca86`；[合并CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40275200539)为2322 passed、25 skipped，Ruff check及341文件格式检查通过。该数字为PR #23合并时验收证据；后续Task 20–22隔离收尾结果单独记录于教程PLAN，不并入合并CI。本轮验证见结项PLAN，合并时的历史CI数字不作为本轮运行结果。 当前能力及唯一入门入口见[ECS接入参考](../../integrations/ecs-command.md)；[教程计划Task 20–22](../plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)已完成本方隔离收尾，本批次关闭；没有自动新增的实施阶段。真实接入验收供应商/现场仍未验收。
+用户已选择并实施“复用现有HTTP客户端和可靠出站框架”。本文保留P0/P1协议与设计期记录；后续测试参考、单表教程及通用Swagger已经完成。PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca86`；[合并CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40275200539)为2322 passed、25 skipped，Ruff check及341文件格式检查通过。该数字为PR #23合并时验收证据；后续开发者体验收尾已随 PR #24 合入 develop（1ef1725）；上列 PR #23 数字仍是历史 CI，不作为当前运行结果。 当前能力及唯一入门入口见[ECS接入参考](../../integrations/ecs-command.md)；本方开发者体验收尾已完成，回归见[现有测试说明](../../testing/ecs-command-verification.md)；没有自动新增的实施阶段。真实接入验收供应商/现场仍未验收。
 
 ## 1. 目标、依据与现状
 
@@ -20,7 +20,7 @@
 |---|---|
 | [第三方设备统一接口白皮书 v1.1](../../../../wes_backend/docs/integration/third_party_integration_whitepaper.md) | 文件标记 Approved，生效日 2026-08-24；作为本设计拟采用的四接口 wire 基线。标记不证明当前供应商版本已符合合同 |
 | [ECS 事件接收设计](2026-10-24-ecs-event-callback-design.md)及当前包说明 | 已有事件机制与刻意延后的能力；本设计不改变事件入口行为 |
-| [原 ECS/Transport 接入指南](device-command-integration.md) | 动态路由、地址冻结与职责边界仍有参考价值；其中 2026-10-21 Swagger 的 `source` 示例不是本设计命令报文基线 |
+| [当前 ECS 接入参考](../../integrations/ecs-command.md) | 当前动态路由、地址冻结与职责边界；旧 Swagger 的 source 示例不构成本设计命令报文基线 |
 | 当前 `app/http_client/`、`app/reliable/` 与 `app/reliable_runtime.py` | 判断可复用能力和必要扩展；代码现状不反向覆盖批准的 wire 合同 |
 
 设计期核对快照（历史来源记录，不代表当前实现）：本仓库 HEAD 为 `c65c014536bfd85b3bc0704090b67e72d677b3b7`，工作区另有统一注册的已暂存改动；白皮书实际读取内容 SHA-256 为 `01915cb9721501c7184b9b0829f7ac0b8f25032e3afcb0cfa56547e9ac03a750`。哈希标识文件内容，不证明来源仓库已发布。白皮书由同级仓库提供，不成为本项目运行时依赖。
@@ -29,7 +29,7 @@
 
 ### 1.3 当前 develop 已完成的能力
 
-P1历史实现基线为develop @ `ed9005f`；当前集成基线为develop @ `479c48b`，具体文件与验收记录见[原实施计划](../plans/2026-10-25-ecs-command-result-implementation-plan.md)。
+P1历史实现基线为develop @ `ed9005f`；当前集成基线为 develop @ `1ef1725`（PR #24 已合并），当前接口见[当前接入参考](../../integrations/ecs-command.md)。
 
 - `app/integrations/ecs_command/` 已提供事务内命令创建、owner 限定查询、原请求/地址/附录冻结、响应分类及发送生命周期。
 - 可靠层已有逐消息 SNAPSHOT、HOLD/HELD、动态客户端提供者及事务端口；ECS 未知交付不自动重放，旧 STATIC/WMS 保留原策略。
@@ -394,4 +394,4 @@ Result   -> 限额/校验/摘要失败 -> 400/413 [A12]
 
 来源认证尚未实现时，持有有效command_code和device_code者可能伪造首个终态；实际开放Result前须落实来源控制，不能将UUID当认证。该风险与外部接入分开记录，不将未做生产验证当作开发缺陷。
 
-当前业务示例及Swagger设计见[当前设计](2026-10-25-ecs-minimal-business-tutorial-design.md)，完成证据见[结项PLAN](../plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。普通开发者从[短教程](../../integrations/ecs-command-tutorial.md)开始，无需通读本文的底层协议矩阵。
+当前业务示例及Swagger设计见[当前设计](2026-10-25-ecs-minimal-business-tutorial-design.md)，当前回归见[现有测试说明](../../testing/ecs-command-verification.md)。普通开发者从[短教程](../../integrations/ecs-command-tutorial.md)开始，无需通读本文的底层协议矩阵。

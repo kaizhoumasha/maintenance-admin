@@ -89,7 +89,7 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 
 初始化参数复用用户创建接口的用户名、邮箱和密码校验,非法输入在任何种子写入前拒绝,不会回显密码。重复执行也须提供合法参数;已有用户的邮箱和密码仍保持原值。
 
-权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),且一个权限码只能用于一个路由。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误或重复使用会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
+权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),同一合法权限码可由多个路由独立声明。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
 
 用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。
@@ -135,7 +135,7 @@ enterprise-backend/
 ```
 
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
-`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠交互实施计划](docs/superpowers/plans/2026-10-21-reliable-interaction-plan.md)。
+`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠投递参考](docs/integrations/reliable-delivery.md)。
 
 Transport 出站能力已提供 `app.integrations.wms_transport.TransportService.move_rack`，通过调用方 `AsyncSession` 同事务登记任务及可靠消息，支持 `Rack`、`Zone`、`RackPosition`。调用方保存并重用规范小写 UUIDv7 `client_request_id`；同号同输入返回原句柄，同号变更输入（含 caller 路由信息）抛 `IdempotencyConflict`。方法不提交外层事务；句柄只证明登记义务，不证明 WMS 接纳或物理完成。请求按最终 UTF-8 字节冻结，固定上限 256 KiB；迁移 `a019d20261022` 新增 `transport_task`，表非空时拒绝降级删除。装配及生产门槛见 [Transport 出站设计](docs/superpowers/specs/2026-10-21-transport-outbound-design.md)，没有自动注册真实目标。
 
@@ -143,7 +143,7 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。
 
-其他可靠投递接入可先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/superpowers/specs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；ECS P1 的快照路由、动态客户端和结果机制已实现，见 [ECS 接入说明](docs/integrations/ecs-command.md)；真实路由/附录装配、供应商验收和完整 Transport 结果消费仍是启用门槛。
+其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；当前业务还读不到 WMS 的响应，需要同步决定的 operation 在确认时再定调用方式。
 
@@ -239,7 +239,7 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 
 ## 列表筛选与分页（SPEC-018）
 
-完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，实施与验收记录见 [实现计划](docs/superpowers/plans/2026-10-17-list-query-plan.md)。
+完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，回归入口见[开发测试](docs/testing/README.md)。
 
 `GET /api/v1/users`、`/api/v1/audit-logs`、`/api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
 
