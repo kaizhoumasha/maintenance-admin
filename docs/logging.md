@@ -39,6 +39,7 @@ except Exception as error:
 - ECS Event、ECS Result、WMS 回调接收失败仍使用原协议的 503；后台快照写入失败不改变已提交 ACK。
 - 审计旁路失败仍不影响业务成功；限流连接/超时仍 fail-open，脚本错误仍暴露。
 - Sender、逐条快照维护与领取隔离错误附带阶段及可用的消息标识，不改变锁、事务、租约、投递或未知交付处理。
+- 单条 STATIC/SNAPSHOT 投递的原吞获异常记录固定消息 `reliable delivery failed`，`component=reliable`，上下文仅 message_id/target。阶段为 prepare、build_request、acquire_client（取得/释放）、before_send、send、classify_response、apply_outcome；仍生成原状态和证据。PoolUnavailable 不升格，取消继续传播，store.finish 失败仍由原 Sender 收口；不扩宽捕获范围，不叠加降噪。
 - Celery 通过 `task_failure` / `task_retry` 信号记录原始异常的安全诊断。预期异常仍为 INFO，非预期失败为 ERROR，重试为 INFO。框架默认含参数/原始异常的重复记录被过滤；worker 其他异常记录转换为安全诊断。任务结果、重试、ACK/requeue、result backend 和事件协议均不改写；日志脱敏不代表结果后端或事件数据也已脱敏。
 
 ## 降噪与恢复

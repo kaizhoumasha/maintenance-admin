@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 
+from app.diagnostics import log_exception
 from app.http_client import DeliveryState, HttpClient, HttpResult, validate_request
 
 from .config import TargetConfig
@@ -36,23 +37,28 @@ async def send_one(
         return
     result = verdict = None
     target = targets.get(claim.message.target)
+    phase = "prepare"
     try:
         if target is None:
             raise ValueError("missing target")
         adapter = adapters[target.protocol]
         client = clients[target.name]
+        phase = "build_request"
         request = adapter.build_request(claim.message, target)
         if request.body != claim.message.request_raw:
             raise ValueError("adapter changed frozen body")
         validate_request(target.http_config(), request)
+        phase = "apply_outcome"
         now = utc_datetime(clock())
         if claim.message.expires_at is not None and claim.message.expires_at <= now:
             outcome = AttemptOutcome(MessageStatus.EXPIRED)
         else:
+            phase = "send"
             result = await client.send(request)
             if not isinstance(result, HttpResult):
                 raise ValueError("invalid HTTP result")
             if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
+                phase = "classify_response"
                 if not isinstance(result.body, bytes) or len(result.body) > target.max_body_bytes:
                     raise ValueError("invalid complete response")
                 verdict = adapter.classify_response(claim.message, result)
@@ -60,6 +66,7 @@ async def send_one(
                     raise ValueError("invalid adapter verdict")
                 if verdict.kind == VerdictKind.DELIVERED and verdict.response != result.body:
                     raise ValueError("adapter changed response bytes")
+            phase = "apply_outcome"
             if verdict is not None and verdict.kind == VerdictKind.DELIVERED:
                 outcome = AttemptOutcome(MessageStatus.DONE, result=result, verdict=verdict)
             elif verdict is not None and verdict.kind == VerdictKind.PEER_TERMINAL:
@@ -91,7 +98,15 @@ async def send_one(
                         not_received_count=count,
                         delivery_uncertain=uncertain,
                     )
-    except Exception:
+    except Exception as error:
+        log_exception(
+            logger,
+            "reliable delivery failed",
+            error,
+            component="reliable",
+            phase=phase,
+            context={"message_id": claim.message_id, "target": claim.message.target},
+        )
         outcome = AttemptOutcome(
             MessageStatus.FAILED,
             FailReason.LOCAL_ERROR,
@@ -129,6 +144,7 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
     result = verdict = None
     gated = False
     pre_reason = "CONFIG_DRIFT"
+    phase = "prepare"
     try:
         target = targets[claim.message.target]
         effective = target.effective(claim.message.delivery_snapshot)
@@ -137,13 +153,17 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         if provider is None:
             raise ValueError("dynamic client provider unavailable")
         pre_reason = "PRE_GATE_VALIDATION"
+        phase = "build_request"
         request = adapter.build_request(claim.message, effective)
         if request.body != claim.message.request_raw:
             raise ValueError("adapter changed frozen bytes")
         validate_request(effective.http_config(), request)
+        phase = "acquire_client"
         async with provider.borrow(effective.http_config()) as client:
+            phase = "before_send"
             until = await store.before_send(claim, target)
             if not until:
+                phase = "acquire_client"
                 return
             gated = True
             now = utc_datetime(clock())
@@ -152,10 +172,12 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
             ):
                 result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
             else:
+                phase = "send"
                 result = await client.send(request)
             if not isinstance(result, HttpResult):
                 raise ValueError("invalid HTTP result")
             if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
+                phase = "classify_response"
                 if not isinstance(result.body, bytes) or len(result.body) > target.max_body_bytes:
                     raise ValueError("invalid complete response")
                 verdict = adapter.classify_response(claim.message, result)
@@ -163,6 +185,8 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                     raise ValueError("invalid verdict")
                 if verdict.kind == VerdictKind.DELIVERED and verdict.response != result.body:
                     raise ValueError("adapter changed response")
+            phase = "acquire_client"
+        phase = "apply_outcome"
         definite = result.delivery_state == DeliveryState.NOT_SENT or (
             verdict and verdict.kind == VerdictKind.NOT_RECEIVED
         )
@@ -214,7 +238,15 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         outcome = AttemptOutcome(
             MessageStatus.PENDING, next_attempt_at=utc_datetime(clock()) + timedelta(seconds=1)
         )
-    except Exception:
+    except Exception as error:
+        log_exception(
+            logger,
+            "reliable delivery failed",
+            error,
+            component="reliable",
+            phase=phase,
+            context={"message_id": claim.message_id, "target": claim.message.target},
+        )
         outcome = AttemptOutcome(
             MessageStatus.HELD,
             result=result if isinstance(result, HttpResult) else None,
