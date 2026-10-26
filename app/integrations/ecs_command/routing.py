@@ -6,6 +6,7 @@ from typing import Protocol
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import AppError, ErrorCode
 from app.http_client import HttpClientConfig
 
 
@@ -16,6 +17,14 @@ def normalize_origin(value: str) -> str:
     origin = str(url.copy_with(path="")).rstrip("/")
     HttpClientConfig(origin, "ecs")
     return origin
+
+
+def retry_window_error():
+    return AppError(
+        ErrorCode.DATABASE_UNAVAILABLE,
+        "ECS retry_window must be exactly 300 seconds; "
+        "route providers must use PROTOCOL_RETRY_WINDOW",
+    )
 
 
 class RouteAuthorization(StrEnum):
@@ -37,8 +46,8 @@ class RouteSnapshot:
 
     def __post_init__(self):
         object.__setattr__(self, "origin", normalize_origin(self.origin))
-        if self.retry_window <= timedelta(0):
-            raise ValueError("confirmed retry window required")
+        if not isinstance(self.retry_window, timedelta) or self.retry_window <= timedelta(0):
+            raise retry_window_error()
 
 
 class DeviceRouteProvider(Protocol):

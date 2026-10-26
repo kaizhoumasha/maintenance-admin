@@ -21,6 +21,7 @@ from app.schemas.user import UserCreate
 
 # 仅是初始数据;之后新权限走 POST /permissions,不必改这里
 INITIAL_PERMISSIONS = {
+    "dev:ecs:send_real": "真实 ECS 联调发送",
     "admin:user:create": "创建用户",
     "admin:user:list": "查看用户列表",
     "admin:user:read": "查看用户",

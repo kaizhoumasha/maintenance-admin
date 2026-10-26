@@ -688,3 +688,109 @@ async def test_missing_original_annex_returns_retryable_503_without_result_evide
             "/api/v1/callback/result", content=result_body(command.command_code)
         )
         assert retried.status_code == 200
+
+
+@pytest.mark.parametrize("device_result", ["SUCCESS", "FAILED"])
+@pytest.mark.parametrize("result_timing", ["before_ack", "after_ack"])
+async def test_loopback_command_result_and_reference_consumption(
+    reference,
+    loopback_server,
+    device_result,
+    result_timing,
+):
+    import asyncio
+
+    import httpx
+    from fastapi import FastAPI, Request
+    from sqlalchemy import func, update
+
+    from app.controllers.ecs_result import router
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.models import EcsResultEvidence
+    from app.reliable.sender import Sender
+    from app.reliable.store import MessageStore
+
+    ecs = reference.ecs
+    receiver = FastAPI()
+    receiver.include_router(router, prefix="/api/v1")
+    receiver.state.callback_session_factory = ecs.factory
+    receiver.state.ecs_commands = ecs.service
+    peer = FastAPI()
+    requests = []
+    received_results = []
+
+    async with loopback_server(receiver) as callback_origin:
+        async with httpx.AsyncClient(base_url=callback_origin, trust_env=False) as client:
+
+            async def report(code):
+                body = reference.result_body(code, device_result)
+                answer = await client.post("/api/v1/callback/result", json=body)
+                received_results.append(answer.json())
+                assert answer.status_code == 200
+
+            @peer.post("/api/v1/device/command")
+            async def command_endpoint(request: Request):
+                raw = await request.body()
+                requests.append(raw)
+                if result_timing == "before_ack":
+                    await report(json.loads(raw)["command_code"])
+                return {"code": 200, "message": "ACK"}
+
+            async with loopback_server(peer) as origin:
+                async with ecs.factory.begin() as session:
+                    await session.execute(update(reference.routes).values(origin=origin))
+                    command = await reference.register(session, action_id=1)
+                store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+                sender = Sender(store, ecs.targets, ecs.adapters, {}, provider=DynamicClients())
+                try:
+                    assert await sender.tick() == 1
+                    async with asyncio.timeout(10):
+                        await asyncio.gather(*list(sender.inflight))
+                    async with ecs.factory.begin() as session:
+                        view = await ecs.service.get_command(
+                            session,
+                            owner=ecs.owner,
+                            command_code=command.command_code,
+                        )
+                        assert view.ack_received and view.delivery_status == "DONE"
+                        if result_timing == "after_ack":
+                            assert view.result is None and view.status == "WAITING_RESULT"
+                            assert not await reference.consume(session, action_id=1)
+                            assert (await reference.state(session))["state"] == "WAITING_RESULT"
+                    await report(command.command_code)
+                    async with ecs.factory.begin() as session:
+                        assert await reference.consume(session, action_id=1)
+                    async with ecs.factory.begin() as session:
+                        assert not await reference.consume(session, action_id=1)
+                        state = await reference.state(session)
+                        assert state["state"] == (
+                            "SUCCEEDED" if device_result == "SUCCESS" else "FAILED"
+                        )
+                        view = await ecs.service.get_by_call(
+                            session, owner=ecs.owner, call_key="action:1"
+                        )
+                        assert view.result["result"] == device_result
+                        assert (
+                            await session.scalar(
+                                select(func.count())
+                                .select_from(reference.actions)
+                                .where(reference.actions.c.state.in_(("SUCCEEDED", "FAILED")))
+                            )
+                            == 1
+                        )
+                        assert (
+                            await session.scalar(
+                                select(func.count()).select_from(EcsResultEvidence)
+                            )
+                            == 1
+                        )
+                        row = await session.scalar(select(EcsCommand))
+                        assert requests == [row.request_raw]
+                        assert row.route["origin"] == origin
+                    assert received_results and all(
+                        r == {"code": 200, "message": "ACK"} for r in received_results
+                    )
+                finally:
+                    await sender.aclose()

@@ -21,10 +21,11 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
+from app.integrations.ecs_command.dev import configure_local_ecs
+from app.integrations.ecs_command.runtime import ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
-from app.reliable.config import parse_reliable_config
 from app.reliable_runtime import reliable_lifespan
 
 settings = get_settings()
@@ -33,14 +34,19 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     try:
+        ecs_commands = getattr(application.state, "ecs_commands", None)
+        if ecs_commands is None:
+            ecs_commands = configure_local_ecs(
+                application,
+                environment=settings.ENVIRONMENT,
+            )
         async with reliable_lifespan(
-            parse_reliable_config(settings),
+            ecs_runtime_config(settings, ecs_commands),
             getattr(application.state, "reliable_adapters", {}),
             lifecycles=getattr(application.state, "reliable_lifecycles", {}),
             client_provider=getattr(application.state, "reliable_client_provider", None),
         ) as outbox:
             application.state.outbox = outbox
-            ecs_commands = getattr(application.state, "ecs_commands", None)
             if ecs_commands is not None:
                 ecs_commands.outbox = outbox
             yield
@@ -71,7 +77,7 @@ app = FastAPI(
 app.middleware("http")(trace_id_middleware)
 app.add_middleware(AuditMiddleware)  # 后添加 = 最外层,能看到最终状态码
 app.state.audit_session_factory = session_factory
-# 协议适配器按协议名注册给可靠发送器;是否真正发送由 RELIABLE_TARGETS 是否配置对应目标决定。
+# WMS 目标由 RELIABLE_TARGETS 配置;local ECS 自动装配通用合同并加入同一发送器。
 app.state.reliable_adapters = {**WMS_TRANSPORT_ADAPTERS, **WMS_REQUEST_ADAPTERS}
 register_exception_handlers(app)
 setup_logging()

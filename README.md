@@ -279,4 +279,6 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 
 ECS 命令与结果闭环的显式装配、事务及启用门槛见 [ECS P1 接入说明](docs/integrations/ecs-command.md)。模板不包含真实设备路由或附录。
 
+普通开发者可先阅读 [ECS 最小业务接入教程](docs/integrations/ecs-command-tutorial.md)，复用现有参考实现在隔离环境学习命令登记、结果消费及回环验收，无需连接真实设备。
+
 HTTP、Sender、维护与 Celery 的统一安全诊断、字段规则及降噪边界见 [安全日志诊断](docs/logging.md)。
