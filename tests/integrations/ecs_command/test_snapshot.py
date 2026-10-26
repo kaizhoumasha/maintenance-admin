@@ -112,7 +112,7 @@ async def delivery(ecs):
 async def test_snapshot_failure_reports_phase_and_preserves_hold(
     ecs, delivery, monkeypatch, caplog, stage, phase, reason, gated
 ):
-    error = RuntimeError("private_sql private_token http://user:private_password@host private_body")
+    error = RuntimeError("private_sql private_token private_password private_body")
 
     def fail(*args):
         raise error

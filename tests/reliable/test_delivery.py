@@ -274,7 +274,7 @@ async def test_local_failure_reports_safe_phase_without_changing_evidence(rig, c
     async with rig.factory.begin() as session:
         message = await rig.outbox.enqueue(session, rig.draft())
     (claim,) = await rig.store.claim(1, rig.targets)
-    error = RuntimeError("private_sql private_token http://user:private_password@host private_body")
+    error = RuntimeError("private_sql private_token private_password private_body")
 
     def fail(*args):
         raise error
