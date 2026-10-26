@@ -46,11 +46,12 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
     class ScanCompletedData(CallbackPayload):   # 严格 JSON 类型,冗余字段忽略
         barcode: str
 
-    @ecs_event("SCAN_COMPLETED", data=ScanCompletedData)
+    @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=ScanCompletedData)
     async def scan_completed(ctx: EcsEventContext, data: ScanCompletedData) -> None:
         ...                                     # 在请求事务内写业务;返回 None 即 ACK
 
-`data=` 可省略,此时不校验 `data`,处理器收到原始 dict(缺省 `{}`)。
+device_role及data模型必须明确声明；同一事件按工作线逻辑角色分发。
+应用注入resolve_binding，在receipt查重后取得绑定上下文，处理器通过ctx.binding读取本线配置。
 完整接入步骤与注册清单排障见 docs/integrations/registration.md。
 注册表是模块级全局状态,同名重复注册会报错并指出双方来源及修复方法。
 测试里用 `monkeypatch` 换成空 dict。

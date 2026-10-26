@@ -10,10 +10,11 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import func, select
 
-from app.integrations.ecs_callback import registry
+from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_callback.receiver import ACK, receive_ecs_event
 from app.integrations.ecs_callback.registry import ecs_event
 from app.models import CallbackReceipt, CallbackSnapshot
+from tests.helpers import ecs_binding
 
 EVENT = json.dumps(
     {"device_code": "D1", "event_type": "SCAN_COMPLETED", "timestamp": 1, "data": {"b": 1}}
@@ -34,7 +35,7 @@ def pg_factory(callback_store):
 
 async def receive(factory):
     async with factory() as session, session.begin():
-        return await receive_ecs_event(session, EVENT)
+        return await receive_ecs_event(session, EVENT, resolve_binding=ecs_binding)
 
 
 def snapshot(request_id: str) -> CallbackSnapshot:
@@ -63,7 +64,7 @@ async def race(factory, wait_for_lock, handler_after_release):
         await release.wait()
         handler_after_release()
 
-    ecs_event("SCAN_COMPLETED")(handler)
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
     task_a = asyncio.create_task(receive(factory))
     task_b = None
     try:

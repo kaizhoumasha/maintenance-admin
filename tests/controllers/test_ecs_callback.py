@@ -10,7 +10,9 @@ from app.integrations.ecs_callback.receiver import MAX_BODY_BYTES
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback import snapshots
 from app.integrations.wms_callback.operation import CallbackPayload
+from app.main import app
 from app.models import CallbackReceipt, CallbackSnapshot
+from tests.helpers import ecs_binding
 
 PATH = "/api/v1/callback/event"
 WMS_PATH = "/api/v1/wms/events"
@@ -20,6 +22,7 @@ ACK = {"code": 200, "message": "ACK"}
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
     monkeypatch.setattr(registry, "_registry", {})
+    monkeypatch.setattr(app.state, "ecs_event_binding_resolver", ecs_binding)
 
 
 def body(**changes):
@@ -34,7 +37,7 @@ async def rows(factory, model):
 async def test_valid_event_is_acked(client, callback_store):
     calls = []
 
-    @ecs_event("SCAN_COMPLETED")
+    @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
     async def handler(ctx, data):
         calls.append(ctx.device_code)
 
@@ -49,7 +52,7 @@ async def test_validated_event_is_applied_once_on_replay(client, callback_store)
 
     applied = []
 
-    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    @ecs_event("SCAN_COMPLETED", data=ScanData, device_role="SCAN1")
     async def handler(ctx, data):
         applied.append(data)
         ctx.note("SCAN_APPLIED", barcode=data.barcode)
@@ -75,7 +78,7 @@ async def test_data_errors_keep_each_array_position_in_order(client, callback_st
     class ScanData(CallbackPayload):
         samples: list[float]
 
-    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    @ecs_event("SCAN_COMPLETED", data=ScanData, device_role="SCAN1")
     async def handler(ctx, data):
         pytest.fail("invalid event data must not reach the handler")
 
@@ -95,7 +98,7 @@ async def test_masked_data_errors_merge_only_identical_issues(client, callback_s
         readings: dict[str, int | float]
         barcode: str
 
-    @ecs_event("SCAN_COMPLETED", data=ScanData)
+    @ecs_event("SCAN_COMPLETED", data=ScanData, device_role="SCAN1")
     async def handler(ctx, data):
         pytest.fail("invalid event data must not reach the handler")
 
@@ -184,7 +187,7 @@ async def test_snapshot_is_recorded_with_ecs_source_and_wms_quota_unaffected(
 async def test_wms_events_endpoint_cannot_reach_ecs_handlers(client, callback_store):
     calls = []
 
-    @ecs_event("SCAN_COMPLETED")
+    @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
     async def handler(ctx, data):
         calls.append(1)
 
@@ -198,15 +201,25 @@ async def test_wms_events_endpoint_cannot_reach_ecs_handlers(client, callback_st
 async def test_local_scan_example_validates_data_and_persists_one_note(client, callback_store):
     from app.integrations.ecs_callback.dev_ecs_event import ExampleScan, example_scan
 
-    if registry.lookup("EXAMPLE_SCAN") is None:
-        ecs_event("EXAMPLE_SCAN", data=ExampleScan)(example_scan)
-    invalid = await client.post(PATH, json=body(event_type="EXAMPLE_SCAN", data={"barcode": ""}))
+    if registry.lookup("EXAMPLE_SCAN", "EXAMPLE_SCAN") is None:
+        ecs_event("EXAMPLE_SCAN", data=ExampleScan, device_role="EXAMPLE_SCAN")(example_scan)
+    invalid = await client.post(
+        PATH,
+        json=body(
+            device_code="LOCAL_EXAMPLE_SCAN", event_type="EXAMPLE_SCAN", data={"barcode": ""}
+        ),
+    )
     assert invalid.status_code == 400
     assert await rows(callback_store, CallbackReceipt) == []
 
     for _ in range(2):
         response = await client.post(
-            PATH, json=body(event_type="EXAMPLE_SCAN", data={"barcode": "BIN-1"})
+            PATH,
+            json=body(
+                device_code="LOCAL_EXAMPLE_SCAN",
+                event_type="EXAMPLE_SCAN",
+                data={"barcode": "BIN-1"},
+            ),
         )
         assert response.status_code == 200 and response.json() == ACK
     [receipt] = await rows(callback_store, CallbackReceipt)

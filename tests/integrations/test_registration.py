@@ -1,4 +1,5 @@
 from datetime import timedelta
+from functools import partial
 
 import pytest
 from pydantic import ConfigDict
@@ -63,7 +64,7 @@ def test_request_models_reuse_schema_example_and_ttl():
 def test_file_mismatch_explains_the_expected_name(kind):
     if kind == "ecs_event":
         name, target = "SCAN_DONE", async_handler
-        decorate = ecs.ecs_event(name, data=Payload)
+        decorate = ecs.ecs_event(name, data=Payload, device_role="SCAN1")
     elif kind == "callback":
         name, target = "example.done@v1", async_handler
         decorate = callbacks.callback_operation(name, data=Payload)
@@ -92,7 +93,7 @@ async def async_handler(ctx, payload):
 def test_invalid_names_and_duplicates_include_remedies(kind, invalid_name):
     def decorate(name, target):
         if kind == "ecs_event":
-            return ecs.ecs_event(name, data=Payload)(target)
+            return ecs.ecs_event(name, data=Payload, device_role="SCAN1")(target)
         if kind == "callback":
             return callbacks.callback_operation(name, data=Payload)(target)
         return requests.request_operation(name, requests.Endpoint.FACTS)(target)
@@ -109,7 +110,11 @@ def test_invalid_names_and_duplicates_include_remedies(kind, invalid_name):
 
 @pytest.mark.parametrize("kind", ["ecs_event", "callback"])
 def test_function_registrations_require_async_handlers_and_payload_models(kind):
-    decorate = ecs.ecs_event if kind == "ecs_event" else callbacks.callback_operation
+    decorate = (
+        partial(ecs.ecs_event, device_role="SCAN1")
+        if kind == "ecs_event"
+        else callbacks.callback_operation
+    )
     name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
     with pytest.raises(TypeError, match="async"):
         decorate(name, data=Payload)(lambda ctx, payload: None)
@@ -121,11 +126,11 @@ def test_local_discovery_scope_is_recorded_and_restored_after_failure():
     from app.integrations.registration import local_registration
 
     with pytest.raises(RuntimeError), local_registration():
-        ecs.ecs_event("LOCAL")(async_handler)
+        ecs.ecs_event("LOCAL", device_role="SCAN1", data=CallbackPayload)(async_handler)
         raise RuntimeError("import failed")
-    ecs.ecs_event("NORMAL")(async_handler)
-    assert ecs.lookup("LOCAL").registration_source.local_only is True
-    assert ecs.lookup("NORMAL").registration_source.local_only is False
+    ecs.ecs_event("NORMAL", device_role="SCAN1", data=CallbackPayload)(async_handler)
+    assert ecs.lookup("SCAN1", "LOCAL").registration_source.local_only is True
+    assert ecs.lookup("SCAN1", "NORMAL").registration_source.local_only is False
 
 
 def test_discovery_records_local_only_from_the_loading_entrypoint(monkeypatch):
@@ -138,8 +143,8 @@ def test_discovery_records_local_only_from_the_loading_entrypoint(monkeypatch):
 
     def import_module(name):
         event_type = f"LOAD_{len(seen)}"
-        ecs.ecs_event(event_type)(async_handler)
-        seen[name] = ecs.lookup(event_type).registration_source.local_only
+        ecs.ecs_event(event_type, device_role="SCAN1", data=CallbackPayload)(async_handler)
+        seen[name] = ecs.lookup("SCAN1", event_type).registration_source.local_only
 
     monkeypatch.setattr(registration, "import_module_tree", import_module)
     load_event_modules("local")
@@ -173,8 +178,12 @@ def test_handlers_with_uncallable_signatures_do_not_enter_the_registry(kind, sig
     namespace = {"__name__": __name__}
     exec(f"async def handler({signature}): pass", namespace)
     name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
-    decorate = ecs.ecs_event if kind == "ecs_event" else callbacks.callback_operation
-    lookup = ecs.lookup if kind == "ecs_event" else callbacks.lookup
+    decorate = (
+        partial(ecs.ecs_event, device_role="SCAN1")
+        if kind == "ecs_event"
+        else callbacks.callback_operation
+    )
+    lookup = partial(ecs.lookup, "SCAN1") if kind == "ecs_event" else callbacks.lookup
 
     with pytest.raises(TypeError, match="ctx, payload"):
         decorate(name, data=Payload)(namespace["handler"])

@@ -110,6 +110,11 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
         )
     )
     possible = any(a.outcome in ("OPEN_ATTEMPT", "UNKNOWN", "ACK") for a in attempts)
+    resolvable_pauses = {"DELIVERY_UNKNOWN", "LEASE_INTERRUPTED"}
+    if command.route["route_id"].startswith("device.route.") and command.route[
+        "version"
+    ].startswith("2:"):
+        resolvable_pauses.add("AUTHORIZATION_REVOKED")
     applied = False
     if command.applied_result_id:
         response = reply(409, "IDEMPOTENCY_CONFLICT")
@@ -117,10 +122,7 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
     elif command.blocked:
         response = reply(409, "IDEMPOTENCY_CONFLICT")
     elif message and (
-        (
-            message.status == "HELD"
-            and message.pause_reason not in ("DELIVERY_UNKNOWN", "LEASE_INTERRUPTED")
-        )
+        (message.status == "HELD" and message.pause_reason not in resolvable_pauses)
         or message.status in ("FAILED", "EXPIRED")
     ):
         response = reply(409, "IDEMPOTENCY_CONFLICT")
@@ -131,10 +133,7 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
     elif not possible or command.status == "REJECTED":
         response = reply(409, "IDEMPOTENCY_CONFLICT")
         _block_for_reconciliation(command, "IDENTITY_CONFLICT")
-    elif command.hold_reason and command.hold_reason not in (
-        "DELIVERY_UNKNOWN",
-        "LEASE_INTERRUPTED",
-    ):
+    elif command.hold_reason and command.hold_reason not in resolvable_pauses:
         response = reply(409, "IDEMPOTENCY_CONFLICT")
         command.needs_reconciliation = True
     else:

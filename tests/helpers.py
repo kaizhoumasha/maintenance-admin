@@ -15,6 +15,23 @@ PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123
 LOGIN = {"username": "root", "password": "password123"}
 
 
+async def ecs_binding(session, device_code):
+    """Explicit local binding DTO for receiver contract tests; no database lookup."""
+    from app.integrations.ecs_callback.binding import DeviceBinding
+
+    role = "EXAMPLE_SCAN" if device_code == "LOCAL_EXAMPLE_SCAN" else "SCAN1"
+    return DeviceBinding(
+        device_id=1,
+        device_code=device_code,
+        device_version=1,
+        work_line_id=1,
+        work_line_version=1,
+        device_role=role,
+        device_bindings={role: device_code},
+        position_bindings={},
+    )
+
+
 async def login(client, creds=LOGIN):
     """登录并返回 (access_token, refresh cookie 值)。"""
     r = await client.post("/api/v1/auth/login", json=creds)
