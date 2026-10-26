@@ -1,4 +1,4 @@
-"""ECS 事件处理器注册表:事件类型 → `async def handler(ctx, data) -> None`。
+"""ECS 事件处理器注册表:(逻辑角色,事件类型) → async handler(ctx, data)。
 
 与 WMS 回调同样的注册做法:重复注册报错并指出两个函数;注册表是模块级全局状态,
 测试用 `monkeypatch` 替换成空 dict 隔离。处理器是普通函数,不返回 Outcome。
@@ -17,6 +17,8 @@ from app.integrations.registration import (
 )
 from app.integrations.wms_callback.operation import CallbackPayload
 
+from .binding import DeviceBinding
+
 _EVENT_TYPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -29,7 +31,16 @@ class EcsEventContext:
     event_type: str
     timestamp: int
     is_debug: bool
+    binding: DeviceBinding
     notes: list[dict] = field(default_factory=list)
+
+    @property
+    def device_role(self) -> str:
+        return self.binding.device_role
+
+    @property
+    def work_line_id(self) -> int:
+        return self.binding.work_line_id
 
     def note(self, reason_code: str, **detail) -> None:
         """附上诊断:事件已接收但没有(完全)应用的事实,随收据同事务持久化。"""
@@ -43,10 +54,10 @@ class Registered:
     registration_source: RegistrationSource
 
 
-_registry: dict[str, Registered] = {}
+_registry: dict[tuple[str, str], Registered] = {}
 
 
-def ecs_event(event_type: str, data: type[CallbackPayload] | None = None):
+def ecs_event(event_type: str, *, device_role: str, data: type[CallbackPayload]):
     """注册 `async def handler(ctx: EcsEventContext, data) -> None`;返回原函数。"""
 
     def register(func):
@@ -57,22 +68,25 @@ def ecs_event(event_type: str, data: type[CallbackPayload] | None = None):
                 "修复: 使用大写字母开头的大写字母、数字或下划线，例如 SCAN_COMPLETED"
             )
         source = validate_registration_file(event_type, func)
-        if event_type in _registry:
+        if not isinstance(device_role, str) or not _EVENT_TYPE.fullmatch(device_role):
+            raise ValueError(f"{source.location}: invalid device role {device_role!r}")
+        key = (device_role, event_type)
+        if key in _registry:
             raise ValueError(
-                f"duplicate event type {event_type!r}: "
-                f"{_registry[event_type].registration_source.location} and {source.location}; "
-                "修复: 删除重复声明或更正 event_type，使每个名称只注册一次"
+                f"duplicate event binding {key!r}: "
+                f"{_registry[key].registration_source.location} and {source.location}; "
+                "修复: 每个(device_role, event_type)只注册一次"
             )
-        validate_function(func, data, optional_data=True)
-        _registry[event_type] = Registered(func, data, source)
+        validate_function(func, data)
+        _registry[key] = Registered(func, data, source)
         return func
 
     return register
 
 
-def lookup(event_type: str) -> Registered | None:
-    return _registry.get(event_type)
+def lookup(device_role: str, event_type: str) -> Registered | None:
+    return _registry.get((device_role, event_type))
 
 
-def events() -> dict[str, Registered]:
+def events() -> dict[tuple[str, str], Registered]:
     return dict(_registry)

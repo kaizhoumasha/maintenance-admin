@@ -141,13 +141,13 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
 
-ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。
+ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。同事件／任务的多角色接入见[角色注册与运行时注入](docs/integrations/ecs-roles.md)：角色由业务常量声明，运行时注入绑定及路由，不依赖设备／工作线管理或 Status。
 
 其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；当前业务还读不到 WMS 的响应，需要同步决定的 operation 在确认时再定调用方式。
 
-ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前没有具体事件处理器，未注册类型仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event` 注册到 `app/integrations/<业务>/ecs_event.py` 或同名包，处理器只写当前事务；先部署全部处理器再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
+ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前没有具体业务事件处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/integrations/<业务>/ecs_event.py` 或同名包，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
 
 下述投递、恢复和未知结果重试规则描述默认 STATIC 路径；ECS SNAPSHOT 的 UNKNOWN/租约中断进入 HELD，不自动重放，见 [ECS 接入说明](docs/integrations/ecs-command.md)。
 
@@ -182,8 +182,8 @@ WMS 请求直接装饰 `RequestPayload` 模型。旧类式注册已移除，迁�
 
 #### 联调控制台(仅 `ENVIRONMENT=local`)
 
-登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看 ECS 事件、WMS 回调和 WMS 请求的
-实际注册名称、来源文件/符号、local-only、请求端点和 Payload Schema。local-only 在发现入口记录；
+登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看 ECS 角色事件、已装配的角色命令合同、WMS 回调和 WMS 请求的
+实际注册名称、设备角色、来源文件/符号、local-only、请求端点和 Payload Schema；命令另含 Result Schema。local-only 在发现入口记录；
 清单存在不代表消息执行或物理完成。应用启动失败时按启动异常中的修复路标处理。
 
 Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:

@@ -11,6 +11,7 @@ from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.core.strict_json import json_object
 from app.diagnostics import log_exception
+from app.integrations.ecs_callback.binding import BindingResolver
 from app.integrations.ecs_callback.discovery import load_event_modules
 from app.integrations.ecs_callback.receiver import (
     MAX_BODY_BYTES,
@@ -18,6 +19,7 @@ from app.integrations.ecs_callback.receiver import (
     receive_ecs_event,
     render_untrusted,
 )
+from app.integrations.ecs_callback.registry import events
 from app.integrations.wms_callback.snapshots import (
     SNAPSHOT_PREVIEW_BYTES,
     allow_snapshot,
@@ -68,7 +70,11 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
             result = EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
         else:
             async with factory() as session, session.begin():
-                result = await receive_ecs_event(session, raw)
+                result = await receive_ecs_event(
+                    session,
+                    raw,
+                    resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
+                )
     except Exception as error:  # 含提交失败:整个事务已回滚
         log_exception(
             logger, "ecs callback receive failed", error, component="http", phase="ecs_event"
@@ -123,6 +129,21 @@ def _log_request(result: EcsResponse, started: float) -> None:
     logger.info("ecs callback %s", shown, extra=fields)
 
 
-def include_ecs_callback(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
+def include_ecs_callback(
+    app: FastAPI,
+    *,
+    environment: str,
+    prefix: str = "/api/v1",
+    resolve_binding: BindingResolver | None = None,
+) -> None:
     load_event_modules(environment)
+    if resolve_binding is None and any(
+        not item.registration_source.local_only for item in events().values()
+    ):
+        raise ValueError("Formal ECS event handlers require a binding resolver")
+    if environment == "local":
+        from app.integrations.ecs_callback.dev_ecs_event import local_bindings
+
+        resolve_binding = local_bindings(resolve_binding)
+    app.state.ecs_event_binding_resolver = resolve_binding
     app.include_router(router, prefix=prefix)

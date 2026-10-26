@@ -47,9 +47,9 @@ from app.integrations.ecs_command import configure_ecs
 service = configure_ecs(app, routes=routes, annexes=annexes)
 ```
 
-这是装配片段，app/routes/annexes由应用提供，不是独立程序。local Swagger已经自动装配，不重复装配正式服务。
+这是装配片段，app/routes/annexes由应用提供，不是独立程序。使用角色常量及注入绑定时按[角色接入](ecs-roles.md)构造 `RoleRoutes`；local 同时调试正式角色时，由可信启动模块调用一次 `configure_local_ecs(..., routes=routes, history_annexes=annexes)` 组合装配，共用原服务和 Sender，不再重复调用 `configure_ecs`。
 
-resolve在创建时读取有效设备地址/授权；authorize_frozen在发送门禁检查原授权。改址只影响新命令，旧命令冻结原地址，改址不等于撤销原授权。正式附录约束参数、结果、错误和timeout；它与Swagger通用JSON合同分工不同。端口定义、可信history_annexes及完整协议见[ECS参考](ecs-command.md)。
+resolve在创建时读取有效设备地址/授权；authorize_frozen在发送门禁检查原授权。通用路由端口由提供方决定原授权是否撤销；`RoleRoutes` 将绑定版本及地址变化视为旧配置失效，停止旧命令后续发送，保留执行记录及已可能交付命令的原身份迟到结果。正式附录约束参数、结果、错误和timeout；它与Swagger通用JSON合同分工不同。端口定义、可信history_annexes及完整协议见[ECS参考](ecs-command.md)。
 
 ## 4. 事务内登记
 

@@ -25,6 +25,9 @@ def check_assembly(app):
 
 def configure_ecs(app, *, routes, annexes, client_factory=AsyncHttpClient):
     check_assembly(app)
+    for entry in getattr(routes, "bindings", {}).values():
+        if (entry.annex_id, entry.annex_version) not in annexes:
+            raise ValueError(f"{entry.registration_source.location}: confirmed annex required")
     adapters = dict(getattr(app.state, "reliable_adapters", {}))
     lifecycles = dict(getattr(app.state, "reliable_lifecycles", {}))
     adapters[PROTOCOL] = EcsCommandAdapter()

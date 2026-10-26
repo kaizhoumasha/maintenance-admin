@@ -19,6 +19,7 @@ from app.integrations.callback_receipts import find_receipt, insert_receipt
 from app.integrations.wms_callback.receiver import CallbackResponse
 from app.models import CallbackReceipt
 
+from .binding import BindingResolver
 from .envelope import EcsEventEnvelope, issues_from
 from .registry import EcsEventContext, lookup
 
@@ -101,7 +102,9 @@ def _event(envelope: EcsEventEnvelope) -> dict:
     )
 
 
-async def receive_ecs_event(session: AsyncSession, raw: bytes) -> EcsResponse:
+async def receive_ecs_event(
+    session: AsyncSession, raw: bytes, *, resolve_binding: BindingResolver | None = None
+) -> EcsResponse:
     if len(raw) > MAX_BODY_BYTES:
         return EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
     parsed = json_object(raw)
@@ -126,7 +129,10 @@ async def receive_ecs_event(session: AsyncSession, raw: bytes) -> EcsResponse:
     existing = await find_receipt(session, OPERATION, identity)
     if existing is not None:  # 先查重:不再校验 data,处理器后来收紧校验也不影响原样重报
         return duplicate(existing)
-    registered = lookup(event_type)
+    binding = await resolve_binding(session, device_code) if resolve_binding else None
+    if binding is not None and binding.device_code != device_code:
+        raise RuntimeError("ECS binding does not match event device")
+    registered = lookup(binding.device_role, event_type) if binding else None
     data = envelope.data
     if registered is not None and registered.data_model is not None:
         try:
@@ -172,6 +178,7 @@ async def receive_ecs_event(session: AsyncSession, raw: bytes) -> EcsResponse:
             event_type=event_type,
             timestamp=envelope.timestamp,
             is_debug=envelope.is_debug,
+            binding=binding,
         )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
