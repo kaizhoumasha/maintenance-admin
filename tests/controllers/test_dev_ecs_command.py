@@ -237,7 +237,7 @@ def test_swagger_requires_request_origin():
         "http://127.0.0.1:0",
         "http://127.0.0.1:70000",
         "http://127.0.0.1/path",
-        "http://secret:password@127.0.0.1",
+        "http://USER:PASSWORD@127.0.0.1",
         "http://127.0.0.1?token=secret",
         "http://127.0.0.1/#x",
     ],
@@ -247,7 +247,7 @@ async def test_debug_rejects_invalid_origin_without_obligation(client, dev_ecs, 
         "/api/v1/dev/ecs/commands", headers=dev_ecs, json={**BODY, "ecs_url": url}
     )
     assert reply.status_code == 400, reply.text
-    assert "password" not in reply.text and "token=secret" not in reply.text
+    assert "password" not in reply.text.lower() and "token=secret" not in reply.text
     async with app.state.audit_session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 0
