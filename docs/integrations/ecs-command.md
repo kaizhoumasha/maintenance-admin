@@ -1,14 +1,18 @@
 # ECS 命令与结果闭环
 
+**真实接入边界：** [真实ECS接入验收清单](ecs-acceptance-checklist.md)未启动，不属于本批次开发任务；实际对端/环境确定后再制定联调或上线计划。历史Task 10编号仅用于追溯。
+
 本能力提供事务内命令登记、冻结投递、持久结果与授权查询。模板没有正式设备路由或附录，自动装配发送通道不等于授权真实设备发送。
 
-首次接入可从[最小业务示例与入门教程](ecs-command-tutorial.md)开始：最小业务示例统一采用单表状态机，Reference及调用测试已原地迁移；实际验证证据见实施计划。
+首次接入从[短教程](ecs-command-tutorial.md)选择业务调用或Swagger调试；两者均不要求先运行框架验收。本文提供接口/边界参考，开发回归使用[现有测试](../testing/ecs-command-verification.md)。
+
+PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca86`；[合并CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/40275200539)为2322 passed、25 skipped，Ruff check及341文件格式检查通过。该数字为PR #23合并时验收证据；后续Task 20–22隔离收尾结果单独记录于教程PLAN，不并入合并CI。本轮验证见结项PLAN，合并时的历史CI数字不作为本轮运行结果。
 
 ## 设备身份与地址来源
 
 DEVICE_CODE定义为全系统唯一，沿用wire字段device_code。地址由设备管理的ecs_origin或调试适配层提供，ECS通用模块只依赖DeviceRouteProvider；只有地址信息时不单建ECS配置表。正式设备表/全局唯一约束当前尚未实现，设备表是正式地址来源，不是通用模块的硬依赖。原命令地址快照、原授权及UNKNOWN/HELD边界保持不变。
 
-Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_url、device_code、task_type和params，不逐动作手工登记；稳定client_request_id及执行timeout_ms仍保留。状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING，Task 17设计已关闭，Task 18–19已实现并在一次性存储/本轮模拟端验收。新验证见实施计划，真实设备仍受Task 10独立门槛约束。
+Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_url、device_code、task_type和params，不逐动作手工登记；稳定client_request_id及执行timeout_ms仍保留。状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING，Task 17设计已关闭，Task 18–19已实现并在一次性存储/本轮模拟端验收。新验证见实施计划，真实设备仍受真实接入验收独立门槛约束。
 
 ## 一次性装配
 
@@ -22,7 +26,7 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。当前快照仅接受已实现的 HOLD，快照 RETRY 明确拒绝；STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
 
-正式发送前必须关闭设计稿 C1/C2/C3/C5，确认 params/source、错误矩阵、跨重启去重及保留期、窗口与路由授权。回调来源限制必须落实。本文不提供真实地址或开箱即用的设备命令。
+实际接入时按[真实ECS接入清单](ecs-acceptance-checklist.md)确认参数合同、错误矩阵、跨重启去重及保留期、窗口、路由授权和回调来源控制。本文不提供真实地址或开箱即用的设备命令。
 
 ## 事务内创建与读取
 
@@ -40,7 +44,7 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 ecs_url必填且沿用HTTP(S) IP origin规范化、固定路径、无凭据/query/fragment/DNS/重定向/环境代理及非法地址拒绝。DEVICE_CODE全系统唯一；不新建ECS表、逐地址/动作清单或联网开关。新增设备、动作或改址只改请求；client_request_id保持稳定，timeout_ms仍为现有非负int64执行毫秒值，不新增默认值或请求窗口字段。
 
-受限工厂及历史附录通过可信Python启动依赖传入，接口为configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient)。普通主lifespan只传environment，自动使用内置合同；隔离入口先持有本轮模拟端并绑定受限client_factory，再进入真实主lifespan。它须在服务/provider均未预装时调用原生产装配函数一次，先检查冲突、合并合同并构造DynamicClients(factory=client_factory)，再发布服务/provider、关联outbox、启动唯一Sender。不得提前占用app.state.reliable_client_provider、先手工造服务绕过自动分支或在冲突时重置状态。底层configure_ecs只增加同名可选工厂依赖，现有冲突保护不放宽。
+受限工厂及历史附录通过可信Python启动依赖传入，接口为configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient)。普通主lifespan只传environment，自动使用内置合同；测试夹具先持有本轮模拟端并绑定受限client_factory，再进入真实主lifespan。它须在服务/provider均未预装时调用原生产装配函数一次，先检查冲突、合并合同并构造DynamicClients(factory=client_factory)，再发布服务/provider、关联outbox、启动唯一Sender。不得提前占用app.state.reliable_client_provider、先手工造服务绕过自动分支或在冲突时重置状态。底层configure_ecs只增加同名可选工厂依赖，现有冲突保护不放宽。
 
 history_annexes仅来自可信启动模块的版本化原DeviceAnnex模型；装配前复制/校验，并与ecs.dev.protocol/1一次合并到同一个service.annexes。历史键须为非空字符串二元组、值为DeviceAnnex，内置保留键冲突必须拒绝，不能覆盖内置模型或启动后补字典。新v3只选内置合同，原键仅供历史Result精确校验；不恢复actions/annexes旧参数别名、动作登记或v2发送。实际启动须分别验证无历史输入的自动路径、有历史输入时合法原结果及严格拒绝、缺输入时首次Result 503/已有重复证据返回原响应；详见[设计§10.3.1–10.3.2及§10.7](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。这些依赖不是Swagger/.env选项，已通过实际主lifespan回归。
 
@@ -52,7 +56,7 @@ W=300秒同时约束调试及正式新命令，唯一来源迁至contracts.py并
 
 D从对端自身持久确认终态的terminal_at起算，不用载荷finish_time或本方回调到达时间替代；未知terminal_at不启动清理倒计时，重启/时间异常不能缩短期限。ECS须在ACK/物理派发前持久接纳，正常/异常进程退出、主机重启及断电恢复后同号同载荷仍返回原接纳事实、不产生第二份执行义务，同号异载荷仍409。执行事实不确定先核对，不能重做或伪造终态；存储丢失/旧备份回滚/恢复出厂不能以空状态直接恢复受影响接纳。合法503/429未接纳仍按原身份重试，不能把可能已接纳谎报未接纳。去重保证有界，不因D到期重发旧命令或换号重做UNKNOWN/HELD；原Result重报义务不缩短，回报未确认时不得因D到期清理原结果/去重依据。本方长期证据/保留配置不改成24小时。
 
-Task 17仅关闭设计决策；Task 10供应商版本/配置、持久保留、跨重启/断电及物理动作、来源/网络/许可仍未验收，只有单独授权并取证才可判符合。Task 18–19已完成本方实现/隔离验证，不自动获得真实发送许可。缺策略/非法策略503的防御仍只影响新登记，不阻断WMS/Result启动、原owner重入或改写/暂停既有v3快照。
+Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久保留、跨重启/断电及物理动作、来源/网络/许可仍未验收，只有单独授权并取证才可判符合。Task 18–19已完成本方实现/隔离验证，不自动获得真实发送许可。缺策略/非法策略503的防御仍只影响新登记，不阻断WMS/Result启动、原owner重入或改写/暂停既有v3快照。
 
 使用route_id=dev.ecs.network/version="3"及内置合同ecs.dev.protocol/1，复用既有快照字段与唯一Sender；不增加表或迁移。v1/v2、旧grant及未知策略保守围栏，不转换、补授权、改版本/改址或自动重放；正式路由版本不变。切换须先停止全部旧策略Sender并确认，不混跑，本轮不实际停服务。
 
@@ -60,7 +64,7 @@ Task 17仅关闭设计决策；Task 10供应商版本/配置、持久保留、�
 
 专用权限只管新登记，撤权不暂停既有可识别v3命令。停止后续发送须停止全部相关Sender并防止自动拉起；ECS/WMS共享主应用lifespan，停宿主影响两者出站及HTTP/Result。有界关闭、在途可能交付、shutdown unconfirmed、租约中断及合法迟到结果规则不变。恢复覆盖首次未发送、NOT_SENT及合法503/有效429判定NOT_RECEIVED后的PENDING，保留原退避、Retry-After、next_attempt_at、计数/证据和deadline；到期前不发，超期按原TTL，不重算或延长。UNKNOWN/HELD与无效/超限Retry-After不因重启、换址/换键或Status恢复而解封。
 
-隔离验收仅允许本轮自持模拟端；受限客户端工厂先于Sender装入，其他有效origin在TCP连接前拒绝并直接断言连接入口零调用。隔离沿用已批准的生产W=300秒，TEST ONLY仅指模拟目标和数据，不证明供应商已满足D或跨重启合同。允许端仍走真实HTTP，保留两条许可、两个P2、P3及消费竞争；实施步骤见[PLAN Task 17–19](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)，本轮已完成隔离验证，Task 10未执行。
+自动化测试通过现有夹具保护测试库和网络出口，直接断言非用例目标TCP零调用；这些不是Swagger或业务接入配置。新命令仍使用W=300秒，两条许可、两个P2、P3及消费竞争覆盖保留，测试通过不证明供应商D或跨重启保证。
 
 ## 最小业务单表状态机
 
@@ -68,9 +72,9 @@ Task 17仅关闭设计决策；Task 10供应商版本/配置、持久保留、�
 
 新动作由受信任业务入口绑定business_key，登记事务通过`current_business(session, *, business_key)`读取当前许可、设备和业务版本；未知或不允许时拒绝，不从新行READY、客户端字段或路由版本推导许可。真实接入使用已有权威业务记录，不新建许可表，按“权威业务记录→动作行”统一锁序或等价版本条件保护；权威就在动作行时只锁该行。模板Reference仅注入测试事实替身，不将其当作生产业务聚合的事务证明。
 
-同business_key取消/换绑/终态后，原动作同输入重入仍返回原命令；未重新取得当前有效许可或请求设备不符时，新动作按当前事实拒绝；当前版本从1变2且明确获准时，新动作冻结2，原动作保留原命令与冻结1。两条原回归的等价迁移见教程§4，不能给新行预置READY或更换business_key来弱化断言。不同业务的独立有效意图不因同设备历史失败永久受阻，UNKNOWN也不能借新id重发。
+同business_key取消/换绑/终态后，原动作同输入重入仍返回原命令；未重新取得当前有效许可或请求设备不符时，新动作按当前事实拒绝；当前版本从1变2且明确获准时，新动作冻结2，原动作保留原命令与冻结1。两条当前许可回归见[结项PLAN的回归映射](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md#保留的回归入口)，不能给新行预置READY或更换business_key来弱化断言。不同业务的独立有效意图不因同设备历史失败永久受阻，UNKNOWN也不能借新id重发。
 
-取消、换绑、版本变化与消费锁同一动作行或采用已证明等价的条件更新；变更先提交旧结果不推进，消费先提交终态不被覆盖。业务状态与框架投递、DEVICE Status分开；UNKNOWN/HELD不自动变成业务FAILED，不因换键、改址或设备空闲解封。详见[教程§4–5](ecs-command-tutorial.md)和[设计§11](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
+取消、换绑、版本变化与消费锁同一动作行或采用已证明等价的条件更新；变更先提交旧结果不推进，消费先提交终态不被覆盖。业务状态与框架投递、DEVICE Status分开；UNKNOWN/HELD不自动变成业务FAILED，不因换键、改址或设备空闲解封。详见[教程登记与安全消费](ecs-command-tutorial.md)和[设计§11](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
 
 单表仅适用于一动作一命令、一个消费者及同库业务副作用；多命令、多消费者或外部副作用另按需求设计。框架命令/outbox/发送证据/结果证据表保持不变。Reference及调用测试统一使用单表，被替代的调用/消费表及旧接口已删除；两个P2、P3及原子登记、消费、回滚和竞争保持回归覆盖。Swagger本地Mock继续不创建业务表。
 
@@ -82,7 +86,7 @@ POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已�
 
 POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略顶层诊断扩展；成功提交后返回 200/ACK。未知命令/设备不匹配 404，提前/矛盾 409，非法输入 400，超限 413，事务或原附录不可用 503。结果证据、收据、命令投影及 settle 同事务。长期证据在短期收据/可靠消息清理后仍提供原响应，不重新创建发送义务。Event 接口保持原语义。
 
-本项目内的通用能力隔离参考接入与端到端验收见[隔离设计](../superpowers/specs/2026-10-25-ecs-first-consumer-isolation-design.md)与[实施计划](../superpowers/plans/2026-10-25-ecs-first-consumer-isolation-plan.md)。参考目录、记录及消费只存在于 tests；通过不代表供应商、生产路由或现场验收，也不要求先指定外部业务项目。
+参考目录、动作与安全消费只存在于tests，使用现有pytest验证，无需独立隔离设计或实施阶段；已有行为与证据见[结项记录](../superpowers/plans/2026-10-25-ecs-minimal-business-tutorial-plan.md)。测试不代表供应商、生产路由或现场验收。
 
 ## 发布与验证边界
 
