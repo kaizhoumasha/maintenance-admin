@@ -141,7 +141,9 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
 
-真实业务接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/superpowers/specs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；ECS P1 的快照路由、动态客户端和结果机制已实现，见 [ECS 接入说明](docs/integrations/ecs-command.md)；真实路由/附录装配、供应商验收和完整 Transport 结果消费仍是启用门槛。
+ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。
+
+其他可靠投递接入可先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，再按 [ECS 与 Transport 接入开发指南](docs/superpowers/specs/device-command-integration.md)的任务表开发。实验给出完整业务模型、事务入队、假客户端发送、ACK 分类和终态测试，不需要真实对端。指南区分 ECS 动态选址与 Transport 静态 target，列明文件路径、负责人、验收条件及环境准备；ECS P1 的快照路由、动态客户端和结果机制已实现，见 [ECS 接入说明](docs/integrations/ecs-command.md)；真实路由/附录装配、供应商验收和完整 Transport 结果消费仍是启用门槛。
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；当前业务还读不到 WMS 的响应，需要同步决定的 operation 在确认时再定调用方式。
 
@@ -279,6 +281,6 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 
 ECS 命令与结果闭环的显式装配、事务及启用门槛见 [ECS P1 接入说明](docs/integrations/ecs-command.md)。模板不包含真实设备路由或附录。
 
-普通开发者可先阅读 [ECS 最小业务接入教程](docs/integrations/ecs-command-tutorial.md)，复用现有参考实现在隔离环境学习命令登记、结果消费及回环验收，无需连接真实设备。
+普通开发者使用[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)完成业务接入或Swagger调试；需要回归时使用[现有pytest测试](docs/testing/ecs-command-verification.md)，不另建ECS隔离阶段。
 
 HTTP、Sender、维护与 Celery 的统一安全诊断、字段规则及降噪边界见 [安全日志诊断](docs/logging.md)。
