@@ -1,6 +1,6 @@
 # ECS角色分发与配置失效停发 Implementation Plan
 
-> 使用superpowers:executing-plans在本任务逐项实施；用户已授权按更新SPEC开始开发。不提交、不推送，不为计划另设确认轮次。
+> **当前交付：** 角色分发已实施；独立RoleRoutes及路由校验已在develop落地，本分支保留DeviceRoutes数据库使用方。用户已授权提交、推送及创建PR，部署与真实ECS/WMS接入另行安排。下列实施步骤、原授权和验证数字为历史记录。
 
 **Goal:** 工作线逻辑角色驱动事件处理与命令附录选择，配置变化后停止旧命令后续发送，并继续查询记录和接收原结果。
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 当前feature分支包含必要的未提交设备管理实现；原地增量开发并保存整树基线，保持原暂存区、stash、配置和无关改动。不切换分支、不提交、不推送。
+- 当前交付在feature/ecs-status-query-ship，基于develop复用独立角色框架；保持原工作区、暂存区、stash、配置和无关改动。
 - 只用注入Mock/loopback HTTP与新建的一次性PostgreSQL/Redis；不连接真实ECS/WMS，不迁移现有数据库。
 - 角色键为(device_role,event_type/task_type)，不依data形态自动选合同、不增加业务命令处理器注册框架。
 - 配置门禁复用RouteSnapshot.version和现有管理版本；包括资料编辑的管理版本变化也停发，Status轮询不升版本。
@@ -65,7 +65,7 @@
 - [x] 运行一次性PostgreSQL/Redis迁移、相关集成与全量pytest、Ruff；只测试loopback Mock。
 - [x] 全量增量复核；保存未提交验证记录，核对配置/index/stash及无关文件哈希；仅清理本任务新建测试资源。
 
-## Execution record
+## Execution record（历史记录）
 
 - Baseline: 48 passed, 2 skipped, 38 deselected（相关SQLite测试；未运行PostgreSQL参数）。
 - Ruling: 复用当前feature工作区而不另建空worktree；本次依赖已有未提交设备管理代码，整树基线已备份到任务私有目录，避免丢失或重做无关改动。
@@ -88,6 +88,8 @@
 - Deferred minors: none. No additional independent re-review requested; fixes are verified by regression tests and the final full suite.
 
 ## 完成与验证
+
+以下为角色增量当时的验证；当前整体验证与交付边界见[按需查询计划§5](2026-10-27-device-workline-status.md#5-当前文档自检与交付边界)。
 
 2026-10-27，本次角色增量已完成，未提交/推送/部署。最终完整运行：2525 passed、27 skipped，160.58秒；27项均为SQLite参数下不适用的PostgreSQL专项，对应PG参数已通过。使用任务新建的loopback PostgreSQL 17、Redis 8和本地HTTP Mock，未连接真实ECS/WMS，未迁移现有业务库。
 

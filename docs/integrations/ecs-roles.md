@@ -53,11 +53,11 @@ service = configure_ecs(app, routes=routes, annexes=annexes)
 - `resolve_binding(session, device_code) -> DeviceBinding | None`：返回设备身份／版本、工作线身份／版本、逻辑角色及本线绑定上下文。稳定未绑定返回 None；并发变化和数据库故障抛出，不能伪装成永久未绑定。正式实现须保持绑定锁到当前事务完成。
 - `resolve_route(session, binding) -> tuple[str, str]`：对已保护的绑定返回 `(ecs_origin, route_id)`。沿用当前冻结格式，route_id 为 `device.route.<UUIDv7>`；身份在换址／删除重登记时不能复用。框架从同一角色任务声明选择附录并使用 binding.revision 冻结管理版本。
 
-工作线使用方在自己的服务模块实现这两个函数，查询并锁定自己的绑定和地址配置。正式调用先按工作线＋角色取得设备并核对期望上下文，再将 device_code 传入原 `service.create`。独立框架不提供或导入设备／工作线表、管理服务及其迁移；这些具体适配在单独的设备管理改动中接入。
+工作线使用方在自己的服务模块实现这两个函数，查询并锁定自己的绑定和地址配置。正式调用先按工作线＋角色取得设备并核对期望上下文，再将 device_code 传入原 `service.create`。本项目的 `DeviceRoutes` 复用独立 `RoleRoutes`，只提供工作线／数据库解析及地址适配，使用同一 UUIDv7 路由校验；装配示例见[设备管理指南](device-management.md#正式命令接缝)。独立框架不导入设备／工作线表、管理服务及其迁移。
 
 新事件按 `device_code → 当前绑定角色 → 处理器` 分发；命令由 `工作线＋角色 → device_code → 角色任务附录` 创建。原 receipt 始终先查重；已接收的重报不重新分发。未绑定或未注册的新事件仍持久 ACK，绑定后不自动回放。
 
-默认 app 只装配原 local 通用协议调试，不预装工作线实现。独立接入在自己的 FastAPI 应用中调用以上原装配入口，不需要导入 `app.main`、设备管理控制器或 Status。正式角色事件缺少解析器时启动失败，不能静默按未知事件处理。
+完整应用注入数据库绑定解析器；local 默认通过 `DeviceRoutes()` 组合原通用协议调试，但没有内置正式角色任务或附录，业务仍须显式声明并装配。独立接入在自己的 FastAPI 应用中调用以上原装配入口，不需要导入 `app.main`、设备管理控制器或 Status。正式角色事件缺少解析器时启动失败，不能静默按未知事件处理。
 
 ## 3. Mock、模拟器与真实 ECS 调试
 
@@ -86,7 +86,7 @@ service = configure_local_ecs(
 
 角色框架涉及 ECS callback 的注册／绑定 DTO／接收器，ECS command 的角色路由／合同／Result 适配，原调试入口、目录及角色字段。设备／工作线数据库适配、管理 API／迁移和 Status 属于使用方接入，不是定义注册或 Mock 测试的前置。
 
-统一目录从 `app.state.integration_capabilities` 读取应用显式提供的内置能力元数据；未装配 Status 时仍能查看业务事件和命令合同。本 PR 不装配 Status；后续使用方可显式提供内置能力描述，目录自身不查询外部系统。
+统一目录从 `app.state.integration_capabilities` 读取应用显式提供的内置能力元数据。完整应用在启动装配中提供 Status 描述；未装配 Status 的独立角色应用仍能查看业务事件和命令合同。目录自身不导入 Status 或查询外部系统。
 
 运行 `uv run pytest tests/integrations/ecs_command/test_roles.py tests/integrations/ecs_callback/test_roles.py` 验证常量声明、注入分发、配置停发、迟到结果与 loopback 命令。PostgreSQL 参数仍需显式独立测试库；SQLite 可以独立运行。使用方提供的数据库适配器须在其自己的独立测试库中验证真实行锁与管理一致性，不以 Mock 证明数据库并发。
 
