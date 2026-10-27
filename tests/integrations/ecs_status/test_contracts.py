@@ -78,7 +78,7 @@ def test_origin_normalization(value, expected):
         "http://0.0.0.0",
         "http://224.0.0.1",
         "http://[fe80::1%en0]",
-        "http://user:secret@127.0.0.1",
+        "http://user:PASSWORD@127.0.0.1",
         "http://127.0.0.1/api/v1/device/status",
         "http://127.0.0.1?x=1",
         "http://127.0.0.1#fragment",
