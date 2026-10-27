@@ -145,6 +145,34 @@ async def test_untrusted_response_is_rejected_atomically(status_document, http_f
     assert caught.value.error_kind == "INVALID_RESPONSE"
 
 
+@pytest.mark.parametrize(
+    "invalid", ["missing_type", "wrong_type", "duplicate_type", "wrong_device"]
+)
+async def test_query_rejects_ambiguous_media_type_or_wrong_requested_device(
+    status_document, http_factory, invalid
+):
+    headers = [("Content-Type", "application/json")]
+    if invalid == "missing_type":
+        headers = []
+    elif invalid == "wrong_type":
+        headers = [("Content-Type", "text/plain")]
+    elif invalid == "duplicate_type":
+        headers.append(("content-type", "application/json"))
+    document = status_document("ARM04" if invalid == "wrong_device" else "ARM03")
+
+    async def handle(request):
+        return httpx.Response(200, content=json.dumps(document).encode(), headers=headers)
+
+    factory, _, clients, requests = http_factory(handle)
+    with pytest.raises(StatusQueryError) as caught:
+        await query(ORIGIN, device_code="ARM03", client_factory=factory)
+    assert caught.value.error_kind == "INVALID_RESPONSE"
+    assert caught.value.requested_device_code == "ARM03"
+    assert len(requests) == 1
+    with pytest.raises(ClientClosedError):
+        await clients[0].send(HttpRequest("GET", "/"))
+
+
 async def test_size_limit_and_transport_failure_are_classified(http_factory):
     async def oversized(request):
         return httpx.Response(200, content=b" " * 262145)

@@ -52,17 +52,35 @@ async def read_workline(session, workline_id):
 async def list_worklines(session, params, filters=None):
     from app.services.filtering import FieldSpec, apply_filter
 
-    stmt = apply_filter(
-        select(WorkLine),
-        filters,
-        {
-            "line_code": FieldSpec(WorkLine.line_code, str, ("eq", "ilike", "in")),
-            "line_name": FieldSpec(WorkLine.line_name, str, ("eq", "ilike")),
-            "zone_name": FieldSpec(WorkLine.zone_name, str, ("eq", "ilike", "is_null")),
-        },
-    ).order_by(WorkLine.sort_order, WorkLine.id)
+    stmt = (
+        apply_filter(
+            select(WorkLine),
+            filters,
+            {
+                "line_code": FieldSpec(WorkLine.line_code, str, ("eq", "ilike", "in")),
+                "line_name": FieldSpec(WorkLine.line_name, str, ("eq", "ilike")),
+                "zone_name": FieldSpec(WorkLine.zone_name, str, ("eq", "ilike", "is_null")),
+            },
+        )
+        .order_by(WorkLine.sort_order, WorkLine.id)
+        .execution_options(populate_existing=True)
+    )
     page = await paginate(session, stmt, params)
-    page["items"] = [await read_workline(session, row.id) for row in page["items"]]
+    if not page["items"]:
+        return page
+    counts = dict(
+        (
+            await session.execute(
+                select(Device.work_line_id, func.count())
+                .where(Device.work_line_id.in_([row.id for row in page["items"]]))
+                .group_by(Device.work_line_id)
+            )
+        ).all()
+    )
+    page["items"] = [
+        WorkLineRead.model_validate(row).model_copy(update={"device_count": counts.get(row.id, 0)})
+        for row in page["items"]
+    ]
     return page
 
 

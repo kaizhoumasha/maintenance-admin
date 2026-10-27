@@ -567,3 +567,46 @@ async def test_device_list_preserves_selected_configuration_during_concurrent_ch
         else:
             assert current.current_route_id == new_route and current.version == 2
         assert await reader.get(DeviceRoute, old_route) is not None
+
+
+@pytest.mark.parametrize("change", ["delete", "update"])
+async def test_workline_list_preserves_selected_configuration_during_concurrent_change(
+    asset_pg, monkeypatch, change
+):
+    from app.models import WorkLine
+    from app.schemas.query import FilterGroup, UserListParams
+    from app.services import workline_service
+
+    factory, code = asset_pg
+    async with factory.begin() as session:
+        line = WorkLine(line_code=code, line_name="original")
+        session.add(line)
+        await session.flush()
+        line_id = line.id
+
+    paginate = workline_service.paginate
+
+    async def change_after_selection(*args, **kwargs):
+        page = await paginate(*args, **kwargs)
+        async with factory.begin() as writer:
+            row = await writer.get(WorkLine, line_id)
+            if change == "delete":
+                await writer.delete(row)
+            else:
+                row.line_name, row.version = "updated", 2
+        return page
+
+    monkeypatch.setattr(workline_service, "paginate", change_after_selection)
+    filters = FilterGroup.model_validate(
+        {"conditions": [{"field": "line_code", "op": "eq", "value": code}]}
+    )
+    async with factory() as reader:
+        page = await workline_service.list_worklines(reader, UserListParams(), filters)
+    assert page["total"] == len(page["items"]) == 1
+    selected = page["items"][0]
+    assert (selected.id, selected.line_name, selected.version, selected.device_count) == (
+        line_id,
+        "original",
+        1,
+        0,
+    )
