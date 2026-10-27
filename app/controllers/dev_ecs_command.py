@@ -14,13 +14,13 @@ from app.core.routing import new_router
 from app.integrations.ecs_command.contracts import CommandEnvelope, CommandView, Text
 from app.integrations.ecs_command.dev import (
     DevEcsRoutes,
+    LocalEcsRoutes,
     create_debug_command,
     get_debug_command,
 )
 from app.integrations.ecs_command.runtime import TARGET
 from app.integrations.ecs_command.service import CommandOwner
 from app.models import User
-from app.services.device_routes import DeviceCommandRoutes
 
 
 class DevCommandIn(BaseModel):
@@ -93,7 +93,7 @@ def _service(request):
         service is None
         or service.outbox is None
         or service.target != TARGET
-        or not isinstance(service.routes, (DevEcsRoutes, DeviceCommandRoutes))
+        or not isinstance(service.routes, (DevEcsRoutes, LocalEcsRoutes))
         or getattr(request.app.state, "outbox", None) is not service.outbox
     ):
         raise AppError(

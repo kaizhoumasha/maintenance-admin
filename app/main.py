@@ -11,6 +11,7 @@ from app.controllers.devices import router as devices_router
 from app.controllers.ecs_callback import include_ecs_callback
 from app.controllers.ecs_result import router as ecs_result_router
 from app.controllers.ecs_status import router as ecs_status_router
+from app.controllers.ecs_status import status_capability
 from app.controllers.health import router as health_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
@@ -24,14 +25,14 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
-from app.integrations.ecs_command.dev import DevEcsRoutes, configure_local_ecs
+from app.integrations.ecs_command.dev import configure_local_ecs
 from app.integrations.ecs_command.runtime import ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
 from app.services.device_bindings import resolve_binding
-from app.services.device_routes import DeviceCommandRoutes, DeviceRoutes
+from app.services.device_routes import DeviceRoutes
 from app.services.device_status_service import DeviceStatusService
 
 settings = get_settings()
@@ -45,7 +46,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             ecs_commands = configure_local_ecs(
                 application,
                 environment=settings.ENVIRONMENT,
-                routes=DeviceCommandRoutes(DeviceRoutes({}), DevEcsRoutes()),
+                routes=DeviceRoutes() if settings.ENVIRONMENT == "local" else None,
             )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
         async with reliable_lifespan(
@@ -85,6 +86,7 @@ app = FastAPI(
 app.middleware("http")(trace_id_middleware)
 app.add_middleware(AuditMiddleware)  # 后添加 = 最外层,能看到最终状态码
 app.state.audit_session_factory = session_factory
+app.state.integration_capabilities = [status_capability()]
 # WMS 目标由 RELIABLE_TARGETS 配置;local ECS 自动装配通用合同并加入同一发送器。
 app.state.reliable_adapters = {**WMS_TRANSPORT_ADAPTERS, **WMS_REQUEST_ADAPTERS}
 register_exception_handlers(app)

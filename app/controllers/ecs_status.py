@@ -2,6 +2,7 @@
 
 import json
 import math
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -11,13 +12,36 @@ from app.core import error_responses, require_permission
 from app.core.errors import AppError, ErrorCode
 from app.core.routing import new_router
 from app.http_client import AsyncHttpClient
-from app.integrations.ecs_status import StatusQueryError, StatusQueryIn, StatusQueryResult, query
+from app.integrations.ecs_status import (
+    CAPABILITY_NAME,
+    StatusQueryError,
+    StatusQueryIn,
+    StatusQueryResult,
+    query,
+)
+from app.integrations.ecs_status.client import STATUS_PATH
+from app.integrations.registration import registration_source
 
 router = new_router(
     prefix="/ecs/status",
     tags=["ecs-status"],
     dependencies=[Depends(require_permission("ecs:status:query"))],
 )
+
+
+def status_capability() -> dict:
+    return {
+        "kind": "ecs_status",
+        "name": CAPABILITY_NAME,
+        "entry_type": "builtin_capability",
+        **asdict(registration_source(query)),
+        "endpoint": None,
+        "payload_schema": None,
+        "method": "GET",
+        "path": STATUS_PATH,
+        "query_schema": StatusQueryIn.model_json_schema(),
+        "response_schema": StatusQueryResult.model_json_schema(),
+    }
 
 
 @router.get("", response_model=StatusQueryResult, responses=error_responses(502, 504))

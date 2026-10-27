@@ -549,6 +549,8 @@ async def scan_completed(ctx: EcsEventContext, data: Scan1CompletedData) -> None
 | R08 | 门禁与配置变更竞态 | PG验证配置先提交则门禁不放行；门禁先提交的尝试可在途，之后不得产生新尝试；A→B→A及角色改回不恢复旧许可，恢复配置/重启不解封HELD |
 | R09 | 失效分类与保守版本 | 明确失效REVOKED，旧布局/损坏UNKNOWN，DB故障不伪装成撤销；相关资料编辑升版本也停发，Status轮询不升版本；未知绑定ACK后再绑定，原事件重传不补做业务 |
 
+角色合同和发送校验复用develop已落地的独立RoleRoutes；DeviceRoutes仅提供工作线/数据库解析。Status能力由完整应用装配到目录，不成为角色框架或注册器的依赖。参见[角色框架设计](2026-10-27-ecs-role-framework-design.md)。
+
 ## 11. 模块组成及前向迁移边界
 
 ### 11.1 改动范围与复用

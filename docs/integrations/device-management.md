@@ -69,7 +69,7 @@ configure_ecs(app, routes=routes, annexes=annexes)
 
 执行记录、原请求/地址/附录版本及结果证据继续保留；不维护historical_bindings延续旧发送许可。仅因正式目录配置失效暂停且有可能交付/ACK证据的命令，合法迟到Result仍用原附录接收并结算，不要求当前设备存在、不驱动新角色业务。原附录模型应通过可信启动保留（可复用history_annexes）。无派发依据或原身份/提前结果封锁不因此放宽。停止本地发送不代表设备已取消。
 
-local 默认装配 `DeviceCommandRoutes`，正式目录与受保护的 dev v3 调试共用一个 ECS 通道、一个 Sender。正式项目仍可在启动前显式 `configure_ecs`；不覆盖已有装配，不从 dev 宽合同推断正式附录。阶段 B 没有增加发令 HTTP 接口。
+local 通过 `configure_local_ecs(routes=DeviceRoutes(...))` 装配，集成层 `LocalEcsRoutes` 组合正式目录与受保护的dev v3调试，共用一个ECS通道和Sender。`DeviceRoutes`只实现工作线/数据库适配，复用独立的`RoleRoutes`及其UUIDv7路由校验，接入见[角色框架](ecs-roles.md)。非local不传入本地调试路由；正式项目仍通过可信启动显式`configure_ecs`，不覆盖既有装配，不从dev宽合同推断正式附录。未新增发令HTTP接口。
 
 ## 本地验证与交付边界
 

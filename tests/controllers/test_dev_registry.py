@@ -161,18 +161,23 @@ async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
 ):
     from types import SimpleNamespace
 
-    from app.integrations.ecs_command import CommandBinding
+    from app.integrations.ecs_command import CommandBinding, RoleRoutes
     from app.main import app
-    from app.services.device_routes import DeviceRoutes
     from tests.helpers import TrialPayload, ecs_history_annexes
 
     annexes = ecs_history_annexes()
-    routes = DeviceRoutes(
+
+    async def forbidden(*args):
+        raise AssertionError("catalog must not resolve runtime devices")
+
+    routes = RoleRoutes(
         [
             CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload),
             CommandBinding("SCAN4", "MOVE", "trial", "1", TrialPayload),
         ],
         annexes=annexes,
+        resolve_binding=forbidden,
+        resolve_route=forbidden,
     )
     monkeypatch.setattr(
         app.state, "ecs_commands", SimpleNamespace(routes=routes, annexes=annexes), raising=False

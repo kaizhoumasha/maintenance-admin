@@ -7,9 +7,6 @@ from fastapi import Depends, Request
 from app.core import get_current_user
 from app.core.routing import new_router
 from app.integrations.ecs_callback.registry import events
-from app.integrations.ecs_status import CAPABILITY_NAME, StatusQueryIn, StatusQueryResult, query
-from app.integrations.ecs_status.client import STATUS_PATH
-from app.integrations.registration import registration_source
 from app.integrations.wms_callback.registry import operations as callbacks
 from app.integrations.wms_request.operation import operations as requests
 from app.schemas.dev_console import DevRegistrationOut
@@ -45,20 +42,7 @@ async def list_registrations(request: Request) -> list[dict]:
                     "payload_schema": model.model_json_schema() if model is not None else None,
                 }
             )
-    rows.append(
-        {
-            "kind": "ecs_status",
-            "name": CAPABILITY_NAME,
-            "entry_type": "builtin_capability",
-            **asdict(registration_source(query)),
-            "endpoint": None,
-            "payload_schema": None,
-            "method": "GET",
-            "path": STATUS_PATH,
-            "query_schema": StatusQueryIn.model_json_schema(),
-            "response_schema": StatusQueryResult.model_json_schema(),
-        }
-    )
+    rows.extend(getattr(request.app.state, "integration_capabilities", ()))
     service = getattr(request.app.state, "ecs_commands", None)
     routes = getattr(service, "routes", None)
     for entry in getattr(routes, "bindings", {}).values():

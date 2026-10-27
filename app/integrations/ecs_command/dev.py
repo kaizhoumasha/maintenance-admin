@@ -85,6 +85,26 @@ class DevEcsRoutes:
         return RouteAuthorization.ALLOW
 
 
+class LocalEcsRoutes:
+    def __init__(self, formal, debug):
+        self.formal, self.debug = formal, debug
+
+    @property
+    def bindings(self):
+        return self.formal.bindings
+
+    async def resolve(self, session, device_code, task_type):
+        return await self.formal.resolve(session, device_code, task_type)
+
+    def for_origin(self, origin):
+        return self.debug.for_origin(origin)
+
+    async def authorize_frozen(self, session, route):
+        if str(route.get("route_id", "")).startswith("device.route."):
+            return await self.formal.authorize_frozen(session, route)
+        return await self.debug.authorize_frozen(session, route)
+
+
 async def get_debug_command(session, *, service, owner, command_code):
     command = await service.get_command(session, owner=owner, command_code=command_code)
     if command is None:
@@ -148,7 +168,7 @@ def configure_local_ecs(
     app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None
 ):
     if environment != "local":
-        if history_annexes or client_factory is not AsyncHttpClient:
+        if history_annexes or client_factory is not AsyncHttpClient or routes is not None:
             raise ValueError("ECS debug configuration requires ENVIRONMENT=local")
         return
     check_assembly(app)
@@ -168,5 +188,8 @@ def configure_local_ecs(
             raise ValueError("Invalid history_annexes; ecs.dev.protocol/1 is reserved")
     annexes[PROTOCOL_ANNEX] = PROTOCOL_MODELS
     return configure_ecs(
-        app, routes=routes or DevEcsRoutes(), annexes=annexes, client_factory=client_factory
+        app,
+        routes=LocalEcsRoutes(routes, DevEcsRoutes()) if routes is not None else DevEcsRoutes(),
+        annexes=annexes,
+        client_factory=client_factory,
     )
