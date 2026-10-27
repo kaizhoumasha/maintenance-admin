@@ -38,8 +38,9 @@
 ## 要知道的限制
 
 - 搬运层不预查、不阻塞。同一货架上要不要等前序任务结束,由调用方按场景决定。
-- 目前没有公开的结果查询或发布接口,调用方只能直接读 `transport_task`。第一个消费方出现后再定,
-  见 `TODOS.md`。
+- 使用get_result按原任务／请求／caller读取已应用结果;使用list_unclosed_predecessors核对
+  明确ID及原cycle的货架／料箱前序。CLOSED不等于成功或执行许可,member_facts仅为历史。
+  统一快照、闭合矩阵及消费恢复见docs/integrations/outbound-results.md。
 - 创建前不校验货架的可信位置和当前面,由 WMS 在接纳时兜底。换面模板 `CK04` 是现场确认补入的,
   合同文本尚未同步。
 - 适配器要求所有应答回显 `transport_task_id`,包括 422。外发给 WMS 的接口说明书对此写法不同,
@@ -53,8 +54,10 @@ transport-callback-design。
 
 from .adapter import ADAPTERS, TransportSubmitAdapter
 from .bin_scenarios import BinScenarios, bin_scenarios
+from .predecessors import PredecessorItem, PredecessorQueryResult
 from .protocol import OPERATION, PROTOCOL
 from .rack_scenarios import RackCycle, RackDestination, RackRole, RackScenarios, rack_scenarios
+from .results import TransportTaskResult
 from .service import TransportService, transport_service
 from .types import (
     BinExchangePair,
@@ -71,6 +74,9 @@ from .types import (
 )
 
 __all__ = [
+    "TransportTaskResult",
+    "PredecessorItem",
+    "PredecessorQueryResult",
     "ADAPTERS",
     "OPERATION",
     "PROTOCOL",

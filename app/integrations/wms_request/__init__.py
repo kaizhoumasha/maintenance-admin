@@ -71,10 +71,10 @@ Mock WMS,演示 operation 在 `dev.py`。用法和配置见 README 的「联调�
   Payload 不同抛 `DuplicateMessage`。所以重入口可以放心重复调用,但仍应复用已保存的身份。
 - 默认不设 TTL,因为 facts 是已发生的事实,丢弃等于丢数据。Transport 提交的 1 小时 TTL
   是它自己的决定,不适用于这里。
-- 业务现在读不到 WMS 的响应。可靠层只把响应原文存在消息行里,没有公开的读取接口,
-  这和 Transport 的结果消费是同一个缺口。需要当场使用决定结果的 decisions operation,
-  在确认它时再决定调用方式(同步直调,或补读取接口),不要绕过可靠层去读表。
-- 失败反馈同理:消息进入 `FAILED` 或 `EXPIRED` 后,业务侧目前只能靠告警日志和运维排查发现。
+- 使用 `get_result(session, message_id=..., operation=..., operation_id=...)` 读取原消息的
+  投递状态和已验证终局响应;不会按当前目标改选,不返回重试响应或原始字节。
+  DONE不表示业务完成,DECIDED的data仍由具体业务严格解析。缺失／清理不默认成功或重发。
+  统一快照、消费恢复与保留边界见 docs/integrations/outbound-results.md。
 - 分类器抛异常时消息会进入 `FAILED(LOCAL_ERROR)`,而对端可能已经处理。这是可靠层现有的
   策略,不是这个包新增的。
 """
@@ -87,9 +87,11 @@ from .operation import (
     UnknownOperation,
     request_operation,
 )
+from .results import WmsRequestResult
 from .service import WmsRequests, wms_requests
 
 __all__ = [
+    "WmsRequestResult",
     "ADAPTERS",
     "DECISIONS_PROTOCOL",
     "FACTS_PROTOCOL",

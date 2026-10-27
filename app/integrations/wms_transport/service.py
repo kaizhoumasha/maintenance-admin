@@ -14,7 +14,9 @@ from app.reliable import MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
 from .adapter import ADAPTERS
+from .predecessors import PredecessorQueryResult, list_unclosed_predecessors
 from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL, SUBMIT_TTL
+from .results import TransportTaskResult, get_result
 from .types import (
     BinExchangePair,
     BinMove,
@@ -71,6 +73,40 @@ class TransportService:
                 raise RuntimeError(f"配置了多个 WMS Transport 目标 {names},请显式指定 target")
             self._target = names[0]
         return self._target
+
+    async def get_result(
+        self,
+        session: AsyncSession,
+        *,
+        transport_task_id: str,
+        client_request_id: str,
+        caller: TransportCaller,
+    ) -> TransportTaskResult:
+        return await get_result(
+            session,
+            transport_task_id=transport_task_id,
+            client_request_id=client_request_id,
+            caller=caller,
+        )
+
+    async def list_unclosed_predecessors(
+        self,
+        session: AsyncSession,
+        *,
+        caller: TransportCaller,
+        cycle_id: str,
+        predecessor_ids: tuple[str, ...],
+        rack_id: str | None = None,
+        container_id: str | None = None,
+    ) -> PredecessorQueryResult:
+        return await list_unclosed_predecessors(
+            session,
+            caller=caller,
+            cycle_id=cycle_id,
+            predecessor_ids=predecessor_ids,
+            rack_id=rack_id,
+            container_id=container_id,
+        )
 
     async def move_rack(
         self,
