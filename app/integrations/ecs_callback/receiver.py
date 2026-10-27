@@ -97,13 +97,15 @@ def _alert(operation_id: str, note: dict) -> dict:
 
 
 def _event(envelope: EcsEventEnvelope) -> dict:
-    return envelope.model_dump(
-        include={"device_code", "event_type", "timestamp", "is_debug", "data"}
-    )
+    return envelope.model_dump(include={"device_code", "event_type", "timestamp", "data"})
 
 
 async def receive_ecs_event(
-    session: AsyncSession, raw: bytes, *, resolve_binding: BindingResolver | None = None
+    session: AsyncSession,
+    raw: bytes,
+    *,
+    resolve_binding: BindingResolver | None = None,
+    runtime: object | None = None,
 ) -> EcsResponse:
     if len(raw) > MAX_BODY_BYTES:
         return EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
@@ -116,6 +118,9 @@ async def receive_ecs_event(
         return _invalid(issues_from(error, model=EcsEventEnvelope))
     try:
         identity = event_identity(envelope)
+        legacy_identities = [
+            canonical_digest({**_event(envelope), "is_debug": debug}) for debug in (False, True)
+        ]
         raw_digest = canonical_digest(parsed)
     except (ValueError, RecursionError):  # 如 1e400 解析成 inf,永远无法成功,不能让 ECS 重试
         return _invalid(_INVALID_JSON, envelope)
@@ -123,12 +128,25 @@ async def receive_ecs_event(
 
     def duplicate(existing: CallbackReceipt) -> EcsResponse:
         return EcsResponse(
-            existing.status_code, existing.body, "duplicate", event_type, device_code, identity
+            existing.status_code,
+            existing.body,
+            "duplicate",
+            event_type,
+            device_code,
+            existing.operation_id,
         )
 
     existing = await find_receipt(session, OPERATION, identity)
     if existing is not None:  # 先查重:不再校验 data,处理器后来收紧校验也不影响原样重报
         return duplicate(existing)
+    # 旧身份只用于查重,绝不重写原行或作为新消息身份。
+    historical = []
+    for legacy_identity in legacy_identities:
+        receipt = await find_receipt(session, OPERATION, legacy_identity)
+        if receipt is not None:
+            historical.append(receipt)
+    if historical:
+        return duplicate(min(historical, key=lambda receipt: (receipt.created_at, receipt.id)))
     binding = await resolve_binding(session, device_code) if resolve_binding else None
     if binding is not None and binding.device_code != device_code:
         raise RuntimeError("ECS binding does not match event device")
@@ -177,8 +195,8 @@ async def receive_ecs_event(
             device_code=device_code,
             event_type=event_type,
             timestamp=envelope.timestamp,
-            is_debug=envelope.is_debug,
             binding=binding,
+            runtime=runtime,
         )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)

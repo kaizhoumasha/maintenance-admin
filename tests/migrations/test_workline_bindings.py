@@ -48,12 +48,12 @@ async def test_existing_worklines_receive_empty_bindings_and_bound_data_blocks_d
             await conn.execute(
                 text("UPDATE work_lines SET device_bindings='{" + '"SCAN1":"D1"' + "}'")
             )
+        async with engine.connect() as conn:
+            head = await conn.scalar(text("SELECT version_num FROM alembic_version"))
         refused = await migrate("downgrade", "11e090516bf1")
         assert refused.returncode != 0
         async with engine.begin() as conn:
-            assert (
-                await conn.scalar(text("SELECT version_num FROM alembic_version")) == "c31f20261027"
-            )
+            assert await conn.scalar(text("SELECT version_num FROM alembic_version")) == head
             await conn.execute(text("UPDATE work_lines SET device_bindings='{}'"))
         down = await migrate("downgrade", "11e090516bf1")
         assert down.returncode == 0, down.stderr

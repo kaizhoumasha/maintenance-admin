@@ -6,11 +6,13 @@ from alembic.util import CommandError
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
+from app.businesses.catalog import load_business_models
 from app.core import get_settings
 from app.database import SCHEMA
 from app.database import create_database_engine as create_async_engine
 from app.models import Base
 
+load_business_models()
 target_metadata = Base.metadata
 url = get_settings().DATABASE_URL
 

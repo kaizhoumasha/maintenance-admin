@@ -9,8 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from app.core.module_tree import import_module_tree
-from app.core.operation_names import is_operation_name
+from app.operation_names import is_operation_name
 
 _local_only = ContextVar("integration_local_only", default=False)
 _root = Path(__file__).resolve().parents[2]
@@ -29,13 +28,27 @@ def local_registration():
         _local_only.reset(token)
 
 
+@contextmanager
+def formal_registration():
+    """受信正式发现显式清除 local 标记,并在成功或失败后还原调用方作用域。"""
+    token = _local_only.set(False)
+    try:
+        yield
+    finally:
+        _local_only.reset(token)
+
+
 def registration_filename(name: str) -> str:
     return name.lower().replace(".", "_").replace("@", "_") + ".py"
 
 
-def import_registration_module(name: str, *, local_only: bool = False) -> None:
+def import_registration_module(
+    name: str, *, local_only: bool = False, required: bool = False
+) -> None:
+    from app.core.module_tree import import_module_tree
+
     with local_registration() if local_only else nullcontext():
-        import_module_tree(name)
+        import_module_tree(name, required=required)
 
 
 @dataclass(frozen=True)
@@ -61,7 +74,11 @@ def registration_source(target) -> RegistrationSource:
     # 只拦实际注册，无论来自发现器还是普通 import；缓存或缺失模块不会触发误标。
     parts = module.split(".")
     in_dev_entry = len(parts) > 3 and parts[3] in DEV_MODULES
-    if local_only and parts[:2] == ["app", "integrations"] and not in_dev_entry:
+    if (
+        local_only
+        and parts[:2] in (["app", "integrations"], ["app", "businesses"])
+        and not in_dev_entry
+    ):
         raise RuntimeError(
             f"{module}.{target.__qualname__}: 首次注册发生在 local_registration() 作用域内, "
             "local_only 会被误标且无法恢复; 修复: dev 模块的导入链不要 import 生产注册模块"
@@ -73,7 +90,7 @@ def validate_registration_file(name: str, target) -> RegistrationSource:
     source = registration_source(target)
     parts = source.module.split(".")
     if (
-        parts[:2] == ["app", "integrations"]
+        parts[:2] in (["app", "integrations"], ["app", "businesses"])
         and len(parts) > 4
         and parts[3] in _entrypoints
         and parts[-1] + ".py" != registration_filename(name)

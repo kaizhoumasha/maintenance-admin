@@ -7,13 +7,21 @@ from app.schemas.device import DeviceAssignmentsIn
 from app.schemas.workline import WorkLineCreate, WorkLineUpdate
 from app.services import device_service, workline_service
 from app.services.asset_audit import AssetActor
+from tests.helpers import workline_definition_lookup
 
 ACTOR = AssetActor(1, "role-bindings", None, None)
 
 
 async def line_device(session, code="SCAN13", line_code="L4"):
     line = await workline_service.create_workline(
-        session, WorkLineCreate(line_code=line_code, line_name=line_code), actor=ACTOR
+        session,
+        WorkLineCreate(
+            line_code=line_code,
+            line_name=line_code,
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     route = DeviceRoute(id=str(uuid7()), device_code=code, ecs_origin="http://127.0.0.1:8080")
     session.add(route)
@@ -37,6 +45,7 @@ async def bind(session, line, bindings, positions=None):
             position_bindings=positions or {},
         ),
         actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
 
 
@@ -79,7 +88,14 @@ async def test_bound_device_requires_unbinding_before_removal(db):
 async def test_device_cannot_be_bound_to_another_workline(db):
     line, device = await line_device(db)
     other = await workline_service.create_workline(
-        db, WorkLineCreate(line_code="OTHER", line_name="其他"), actor=ACTOR
+        db,
+        WorkLineCreate(
+            line_code="OTHER",
+            line_name="其他",
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     with pytest.raises(AppError) as error:
         await bind(db, other, {"SCAN1": device.device_code})
@@ -104,10 +120,24 @@ async def test_cached_membership_cannot_bypass_a_new_role_binding(db):
 
     first, device = await line_device(db)
     second = await workline_service.create_workline(
-        db, WorkLineCreate(line_code="SECOND", line_name="Second"), actor=ACTOR
+        db,
+        WorkLineCreate(
+            line_code="SECOND",
+            line_name="Second",
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     third = await workline_service.create_workline(
-        db, WorkLineCreate(line_code="THIRD", line_name="Third"), actor=ACTOR
+        db,
+        WorkLineCreate(
+            line_code="THIRD",
+            line_name="Third",
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     cached_second = await db.get(WorkLine, second.id)
     assert cached_second.device_bindings == {}
@@ -141,7 +171,14 @@ async def test_deletion_rechecks_membership_after_workline_lock_wait(db, monkeyp
 
     first, device = await line_device(db)
     second = await workline_service.create_workline(
-        db, WorkLineCreate(line_code="SECOND", line_name="Second"), actor=ACTOR
+        db,
+        WorkLineCreate(
+            line_code="SECOND",
+            line_name="Second",
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     cached = await db.get(WorkLine, second.id)
     assert cached.device_bindings == {}

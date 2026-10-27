@@ -12,7 +12,6 @@ from app.core.request_context import get_trace_id
 from app.core.strict_json import json_object
 from app.diagnostics import log_exception
 from app.integrations.ecs_callback.binding import BindingResolver
-from app.integrations.ecs_callback.discovery import load_event_modules
 from app.integrations.ecs_callback.receiver import (
     MAX_BODY_BYTES,
     EcsResponse,
@@ -50,7 +49,6 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
                             "device_code": {"type": "string"},
                             "event_type": {"type": "string"},
                             "timestamp": {"type": "integer", "minimum": 0},
-                            "is_debug": {"type": "boolean"},
                             "data": {"type": "object"},
                         },
                     }
@@ -74,6 +72,7 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
                     session,
                     raw,
                     resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
+                    runtime=getattr(request.app.state, "business_runtime", None),
                 )
     except Exception as error:  # 含提交失败:整个事务已回滚
         log_exception(
@@ -135,8 +134,11 @@ def include_ecs_callback(
     environment: str,
     prefix: str = "/api/v1",
     resolve_binding: BindingResolver | None = None,
+    runtime: object | None = None,
 ) -> None:
-    load_event_modules(environment)
+    """Mount after the caller's formal loading, contract validation and local loading."""
+    if runtime is not None:
+        app.state.business_runtime = runtime
     if resolve_binding is None and any(
         not item.registration_source.local_only for item in events().values()
     ):

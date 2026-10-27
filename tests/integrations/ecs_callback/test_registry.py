@@ -48,7 +48,6 @@ def test_context_is_independent_kw_only_dataclass():
         device_code="D",
         event_type="X",
         timestamp=1,
-        is_debug=False,
         binding=None,
     )
     ctx.note("X", a=1)

@@ -135,21 +135,25 @@ def test_local_discovery_scope_is_recorded_and_restored_after_failure():
 
 def test_discovery_records_local_only_from_the_loading_entrypoint(monkeypatch):
     from app.controllers.dev import _load_dev_modules
-    from app.integrations import registration
+    from app.core import module_tree
     from app.integrations.ecs_callback.discovery import load_event_modules
     from app.integrations.wms_callback.discovery import load_operation_modules as load_callbacks
 
     seen = {}
 
-    def import_module(name):
+    from app.integrations import discovery
+
+    monkeypatch.setattr(discovery, "_loaded_formal", set())
+
+    def import_module(name, *, required=False):
         event_type = f"LOAD_{len(seen)}"
         ecs.ecs_event(event_type, device_role="SCAN1", data=CallbackPayload)(async_handler)
         seen[name] = ecs.lookup("SCAN1", event_type).registration_source.local_only
 
-    monkeypatch.setattr(registration, "import_module_tree", import_module)
+    monkeypatch.setattr(module_tree, "import_module_tree", import_module)
     load_event_modules("local")
     load_callbacks("local")
-    discover_requests.__wrapped__()
+    discover_requests()
     _load_dev_modules()
     assert seen
     assert all(

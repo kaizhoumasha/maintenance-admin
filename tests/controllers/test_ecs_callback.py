@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import event, select
@@ -12,7 +13,7 @@ from app.integrations.wms_callback import snapshots
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.main import app
 from app.models import CallbackReceipt, CallbackSnapshot
-from tests.helpers import ecs_binding
+from tests.helpers import ecs_binding, legacy_ecs_receipt
 
 PATH = "/api/v1/callback/event"
 WMS_PATH = "/api/v1/wms/events"
@@ -224,3 +225,53 @@ async def test_local_scan_example_validates_data_and_persists_one_note(client, c
         assert response.status_code == 200 and response.json() == ACK
     [receipt] = await rows(callback_store, CallbackReceipt)
     assert receipt.diagnostic == [{"reason_code": "LOCAL_EXAMPLE", "barcode": "BIN-1"}]
+
+
+@pytest.mark.parametrize("original_extra", [{}, {"is_debug": False}, {"is_debug": True}])
+async def test_legacy_unregistered_event_is_not_applied_after_upgrade(
+    client, callback_store, original_extra
+):
+    await legacy_ecs_receipt(callback_store, body(**original_extra))
+    [before] = await rows(callback_store, CallbackReceipt)
+    saved = {c.name: getattr(before, c.name) for c in CallbackReceipt.__table__.columns}
+
+    class ScanData(CallbackPayload):
+        barcode: str
+
+    @ecs_event("SCAN_COMPLETED", data=ScanData, device_role="SCAN1")
+    async def handler(ctx, data):
+        pytest.fail("historical unregistered receipt must never replay into a new handler")
+
+    for extra in ({}, {"is_debug": True}, {"is_debug": False}, {"is_debug": "extra"}):
+        response = await client.post(PATH, json=body(**extra))
+        assert response.status_code == 200 and response.json() == ACK
+    [after] = await rows(callback_store, CallbackReceipt)
+    assert {c.name: getattr(after, c.name) for c in CallbackReceipt.__table__.columns} == saved
+
+
+async def test_handler_failure_returns_503_without_receipt_or_business_write(
+    client, callback_store
+):
+    @ecs_event("SCAN_COMPLETED", data=CallbackPayload, device_role="SCAN1")
+    async def handler(ctx, data):
+        ctx.session.add(
+            CallbackSnapshot(
+                request_id="failed-business-write",
+                received_at=datetime.now(UTC),
+                body_b64="",
+                truncated=False,
+                http_status=200,
+                outcome="business",
+            )
+        )
+        await ctx.session.flush()
+        raise RuntimeError("temporary failure")
+
+    response = await client.post(PATH, json=body(is_debug=True))
+    assert response.status_code == 503
+    assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+    assert await rows(callback_store, CallbackReceipt) == []
+    assert all(
+        r.request_id != "failed-business-write"
+        for r in await rows(callback_store, CallbackSnapshot)
+    )

@@ -30,9 +30,9 @@ class EcsEventContext:
     device_code: str
     event_type: str
     timestamp: int
-    is_debug: bool
     binding: DeviceBinding
     notes: list[dict] = field(default_factory=list)
+    runtime: object | None = None
 
     @property
     def device_role(self) -> str:

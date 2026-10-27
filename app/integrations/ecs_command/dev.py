@@ -11,7 +11,12 @@ from sqlalchemy import select
 
 from app.core.errors import AppError, ErrorCode
 from app.http_client import AsyncHttpClient
-from app.integrations.ecs_command.contracts import PROTOCOL_RETRY_WINDOW, DeviceAnnex, ErrorDetail
+from app.integrations.ecs_command.contracts import (
+    PROTOCOL_RETRY_WINDOW,
+    DeviceAnnex,
+    ErrorDetail,
+    merge_annexes,
+)
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot, normalize_origin
 from app.integrations.ecs_command.runtime import check_assembly, configure_ecs
 from app.integrations.ecs_command.service import EcsCommands
@@ -165,17 +170,29 @@ async def create_debug_command(
 
 
 def configure_local_ecs(
-    app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None
+    app,
+    *,
+    environment,
+    history_annexes=None,
+    client_factory=AsyncHttpClient,
+    routes=None,
+    annexes=None,
 ):
     if environment != "local":
-        if history_annexes or client_factory is not AsyncHttpClient or routes is not None:
+        if (
+            history_annexes
+            or annexes
+            or client_factory is not AsyncHttpClient
+            or routes is not None
+        ):
             raise ValueError("ECS debug configuration requires ENVIRONMENT=local")
         return
     check_assembly(app)
     if history_annexes is not None and not isinstance(history_annexes, Mapping):
         raise ValueError("history_annexes must be a mapping of original contracts")
-    annexes = dict(history_annexes or {})
-    for key, models in annexes.items():
+    merged = merge_annexes({}, history_annexes or {}, source="history_annexes")
+    merged = merge_annexes(merged, annexes or {}, source="formal annexes")
+    for key, models in merged.items():
         if (
             not isinstance(key, tuple)
             or len(key) != 2
@@ -186,10 +203,10 @@ def configure_local_ecs(
             or key == PROTOCOL_ANNEX
         ):
             raise ValueError("Invalid history_annexes; ecs.dev.protocol/1 is reserved")
-    annexes[PROTOCOL_ANNEX] = PROTOCOL_MODELS
+    merged[PROTOCOL_ANNEX] = PROTOCOL_MODELS
     return configure_ecs(
         app,
         routes=LocalEcsRoutes(routes, DevEcsRoutes()) if routes is not None else DevEcsRoutes(),
-        annexes=annexes,
+        annexes=merged,
         client_factory=client_factory,
     )

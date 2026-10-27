@@ -496,9 +496,20 @@ async def test_request_contexts_send_frozen_bytes_to_independent_simulators(ecs,
                     assert row.delivery_status == "DONE" and row.status == "WAITING_RESULT"
 
 
-@pytest.fixture
-def runtime_settings():
+@pytest.fixture(
+    params=[
+        None,
+        '{"targets":{"ambient-wms":{"protocol":"wms-facts","base_url":"http://127.0.0.1:19000"}}}',
+    ],
+    ids=["inherited-env", "extra-target-env"],
+)
+def runtime_settings(request, monkeypatch):
     from app.core.config import Settings
+
+    if request.param is not None:
+        monkeypatch.setenv("RELIABLE_TARGETS", request.param)
+    # _env_file=None 仍读取进程变量；字典会与显式参数深度合并。
+    monkeypatch.delenv("RELIABLE_TARGETS", raising=False)
 
     return Settings(
         _env_file=None,

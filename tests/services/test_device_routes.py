@@ -11,7 +11,12 @@ from app.services.asset_audit import AssetActor
 from app.services.device_routes import DeviceRoutes
 from app.services.device_service import delete_device
 from app.services.workline_service import update_workline
-from tests.helpers import TrialPayload, add_bound_device, ecs_history_annexes
+from tests.helpers import (
+    TrialPayload,
+    add_bound_device,
+    ecs_history_annexes,
+    workline_definition_lookup,
+)
 
 
 def routes():
@@ -33,6 +38,7 @@ async def test_deleted_configuration_cannot_authorize_another_send(db):
         line.id,
         WorkLineUpdate(line_name=line.line_name, version=line.version, device_bindings={}),
         actor=AssetActor(1, "routes", None, None),
+        definition_lookup=workline_definition_lookup,
     )
     await delete_device(db, device.id, version=1, actor=AssetActor(1, "routes", None, None))
     assert await provider.authorize_frozen(db, wire) == RouteAuthorization.REVOKED
@@ -78,6 +84,7 @@ async def test_configuration_restoration_does_not_restore_original_permission(db
             line.id,
             WorkLineUpdate(line_name=name, version=line.version),
             actor=AssetActor(1, "change", None, None),
+            definition_lookup=workline_definition_lookup,
         )
         assert line.device_bindings == {"SCAN1": "D1"}
         assert await provider.authorize_frozen(db, wire) == RouteAuthorization.REVOKED

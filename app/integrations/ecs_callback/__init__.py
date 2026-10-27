@@ -1,6 +1,6 @@
 """接收 ECS 设备事件回调(ECS → 本项目),入口是 `POST /api/v1/callback/event`。
 
-wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 加可选的 `is_debug`、`data`,
+请求体核心字段是 `device_code`、`event_type`、`timestamp` 加可选的 `data`;其他顶层字段忽略,
 成功回 `{"code":200,"message":"ACK"}`。这个包只认识信封和 `event_type`,不认识任何具体事件;
 具体事件写在 `app/integrations/<业务>/ecs_event/` 里,启动时自动发现。
 设计见 docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md。
@@ -12,11 +12,12 @@ wire 按白皮书不变:请求体是 `device_code`、`event_type`、`timestamp` 
 - `receive_ecs_event`(receiver.py)按顺序:
   - 校验信封,失败回 400 `INVALID_ENVELOPE` 加 `error_detail.issues[]`(只含路径、码、期望类型,
     不回显值)。不写收据。
-  - 身份是核心字段 `device_code`、`event_type`、`timestamp`、`is_debug`(缺省 false)、
-    `data`(缺省 `{}`)的规范化摘要,其他顶层字段不进身份。摘要全长 64 位十六进制,
+  - 身份是核心字段 `device_code`、`event_type`、`timestamp`、`data`(缺省 `{}`)的规范化摘要,
+    其他顶层字段不进身份。摘要全长 64 位十六进制,
     作为 `callback_receipt` 的 `operation_id`,`operation` 恒为 `"ecs.event"`。
-  - 先按身份查重,再校验 `data`:已收过的事件原样重报直接回首次的 200 ACK,
-    处理器后来收紧校验也不会让它变成 400。
+  - 先按新身份查重,再兼容查旧算法含 `is_debug=false/true` 的两种摘要(原省略等于 false)。
+    旧摘要仅用于查重,历史行不重算、不合并、不删除;双命中按 `created_at`、`id` 选择原引用。
+    命中沿用原收据身份与 ACK,再新增或收紧 `data` 校验也不会重新执行。
   - 新身份才查处理器并校验 `data`(失败回 400,路径为 `data.<字段>`)。通过后写收据、
     在同一事务里执行处理器、ACK。
   - 处理器抛普通异常,或 PostgreSQL 行锁等待超过 5 秒:整个事务回滚,回 503,ECS 应原样重报。
@@ -68,6 +69,9 @@ device_role及data模型必须明确声明；同一事件按工作线逻辑角�
   处理器必须靠自己的业务行保证重入安全,不能依赖收据。
 
 ## 发布顺序
+
+清理调试字段的升级必须统一所有接收实例的身份算法后再恢复接收,保留 ECS 原消息重试能力。
+新旧算法不能混接受理同一设备事件;调试状态由 ECS 管理。
 
 新增事件类型时,先把处理器部署到所有接收实例,再让 ECS 侧启用该事件类型。否则尚未升级的实例
 会把它按未注册 ACK 并占住身份,升级后重报只会得到重复,业务效果补不上。

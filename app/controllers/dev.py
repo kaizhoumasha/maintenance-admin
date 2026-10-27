@@ -3,12 +3,10 @@
 场景由 app/integrations/<业务>/dev.py 里的 @dev_scenario 登记,启动时自动扫描,新增业务无需改这里。
 """
 
-import pkgutil
 from typing import Annotated, Union
 
 from fastapi import Body, Depends, FastAPI
 
-from app import integrations
 from app.controllers.dev_callback import router as callback_router
 from app.controllers.dev_mock_wms import router as mock_wms_router
 from app.controllers.dev_registry import router as registry_router
@@ -16,7 +14,7 @@ from app.controllers.dev_wms_request import wms_request_router
 from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
 from app.core.dev_scenarios import DevScenario, scenarios
 from app.core.routing import new_router
-from app.integrations.registration import import_registration_module
+from app.integrations.discovery import load_formal_modules, load_local_modules
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import operations
 from app.reliable.config import parse_reliable_config, target_config_hint
@@ -25,10 +23,8 @@ from app.services import dev_submit_service
 
 
 def _load_dev_modules() -> None:
-    for info in sorted(pkgutil.iter_modules(integrations.__path__), key=lambda i: i.name):
-        if not info.ispkg:
-            continue
-        import_registration_module(f"{integrations.__name__}.{info.name}.dev", local_only=True)
+    load_formal_modules()
+    load_local_modules(environment="local", kind="request")
 
 
 def _submit_router(items: list[DevScenario]):
@@ -74,12 +70,12 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     targets = parse_reliable_config(settings).targets
     if environment != "local":
         return
+    _load_dev_modules()
     from app.controllers.dev_ecs_command import mock_router
     from app.controllers.dev_ecs_command import router as ecs_command_router
 
     app.include_router(ecs_command_router, prefix=prefix)
     app.include_router(mock_router, prefix=prefix)
-    _load_dev_modules()
     items = scenarios()
     if items:
         app.include_router(_submit_router(items), prefix=prefix)

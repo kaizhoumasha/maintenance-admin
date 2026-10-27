@@ -198,7 +198,6 @@ def test_formal_event_registration_requires_an_injected_binding_resolver(monkeyp
     from app.controllers.ecs_callback import include_ecs_callback
 
     monkeypatch.setattr(ecs, "_registry", {})
-    monkeypatch.setattr("app.controllers.ecs_callback.load_event_modules", lambda environment: None)
 
     @ecs.ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
     async def scan(ctx, payload):

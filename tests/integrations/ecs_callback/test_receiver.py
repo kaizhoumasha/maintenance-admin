@@ -19,7 +19,7 @@ from app.integrations.ecs_callback.receiver import (
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.models import CallbackReceipt, CallbackSnapshot
-from tests.helpers import ecs_binding
+from tests.helpers import ecs_binding, legacy_ecs_receipt
 
 BASE = {"device_code": "D1", "event_type": "SCAN_COMPLETED", "timestamp": 1}
 
@@ -77,15 +77,96 @@ async def test_envelope_errors_are_400_without_receipt(callback_store):
     assert await receipt_count(callback_store) == 0
 
 
-def test_identity_ignores_extra_top_level_fields_and_default_is_debug():
-    def ident(**extra):
-        return event_identity(EcsEventEnvelope.model_validate({**BASE, **extra}))
+def test_extra_fields_do_not_change_identity():
+    expected = canonical_digest({**BASE, "data": {}})
+    for extra in (
+        {},
+        {"is_debug": False},
+        {"is_debug": True},
+        {"is_debug": "anything"},
+        {"junk": "x"},
+        {"data": {}},
+    ):
+        assert event_identity(EcsEventEnvelope.model_validate({**BASE, **extra})) == expected
 
-    base = ident()
-    assert ident(is_debug=False) == base
-    assert ident(data={}) == base
-    assert ident(junk="x") == base
-    assert ident(is_debug=True) != base
+
+async def test_extra_fields_do_not_split_event_identity(callback_store):
+    calls = []
+
+    async def handler(ctx, data):
+        calls.append(ctx.receipt_id)
+
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
+    for extra in (
+        {},
+        {"is_debug": False},
+        {"is_debug": True},
+        {"is_debug": None},
+        {"is_debug": "true", "extra": [1]},
+    ):
+        response = await receive(callback_store, json.dumps({**BASE, **extra}).encode())
+        assert (response.status_code, response.body) == (200, ACK)
+    assert len(calls) == 1
+    assert await receipt_count(callback_store) == 1
+
+
+def receipt_values(rows):
+    return [
+        {column.name: getattr(row, column.name) for column in CallbackReceipt.__table__.columns}
+        for row in rows
+    ]
+
+
+@pytest.mark.parametrize("original_extra", [{}, {"is_debug": False}, {"is_debug": True}])
+async def test_legacy_receipt_replay_never_invokes_handler(callback_store, original_extra):
+    original = {**BASE, **original_extra}
+    await legacy_ecs_receipt(callback_store, original)
+    before = receipt_values(await receipts(callback_store))
+    calls = []
+
+    async def handler(ctx, data):
+        calls.append(ctx.receipt_id)
+
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
+    for extra in (
+        original_extra,
+        {"is_debug": True},
+        {"is_debug": False},
+        {"is_debug": "ignored", "trace": 1},
+    ):
+        response = await receive(callback_store, json.dumps({**BASE, **extra}).encode())
+        assert (response.status_code, response.body, response.outcome) == (200, ACK, "duplicate")
+        assert response.digest == before[0]["operation_id"]
+    assert calls == []
+    assert receipt_values(await receipts(callback_store)) == before
+
+
+@pytest.mark.parametrize("older_debug,equal_time", [(False, False), (True, False), (True, True)])
+async def test_two_legacy_receipts_do_not_create_a_third_execution(
+    callback_store, older_debug, equal_time
+):
+    for debug in (True, False):
+        created_at = datetime(2026, 1, 1 if equal_time or debug == older_debug else 2, tzinfo=UTC)
+        await legacy_ecs_receipt(callback_store, {**BASE, "is_debug": debug}, created_at=created_at)
+    before = receipt_values(await receipts(callback_store))
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(unexpected_handler)
+    response = await receive(callback_store, json.dumps(BASE).encode())
+    assert (response.status_code, response.body, response.outcome) == (200, ACK, "duplicate")
+    expected = before[0 if equal_time or older_debug else 1]
+    assert response.digest == expected["operation_id"]
+    assert receipt_values(await receipts(callback_store)) == before
+
+
+async def test_legacy_receipt_precedes_new_handler_payload_validation(callback_store):
+    await legacy_ecs_receipt(callback_store, BASE)
+
+    class Model(CallbackPayload):
+        barcode: str
+
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=Model)(unexpected_handler)
+    response = await receive(callback_store, json.dumps({**BASE, "is_debug": True}).encode())
+    assert (response.status_code, response.body, response.outcome) == (200, ACK, "duplicate")
+    assert await receipt_count(callback_store) == 1
 
 
 async def test_registered_data_failure_is_400_with_data_path(callback_store):
@@ -130,7 +211,9 @@ EVENT = json.dumps({**BASE, "data": {"barcode": "B1"}}).encode()
 
 async def receipts(factory) -> list[CallbackReceipt]:
     async with factory() as session:
-        return list((await session.scalars(select(CallbackReceipt))).all())
+        return list(
+            (await session.scalars(select(CallbackReceipt).order_by(CallbackReceipt.id))).all()
+        )
 
 
 async def test_new_event_gets_ack_and_one_receipt(callback_store):
@@ -205,7 +288,6 @@ async def test_unregistered_event_is_acked_with_full_event_in_diagnostic(callbac
         "device_code": "D1",
         "event_type": "SCAN_COMPLETED",
         "timestamp": 1,
-        "is_debug": False,
         "data": {"barcode": "B1"},
     }
 
@@ -310,7 +392,6 @@ async def test_cap_applies_to_persisted_list_at_boundary(callback_store):
             "device_code": "D1",
             "event_type": "SCAN_COMPLETED",
             "timestamp": pad,
-            "is_debug": False,
             "data": {"p": "x" * pad},
         }
         note = {

@@ -71,6 +71,7 @@ class CallbackContext:
     timestamp: int
     parsed: dict
     notes: list = field(default_factory=list)
+    runtime: object | None = field(default=None, kw_only=True)
 
     def note(self, reason_code: str, **detail) -> None:
         """附上诊断:返回 202 但没有(完全)应用的事实(未知任务、事实矛盾等),随收据同事务持久化。"""

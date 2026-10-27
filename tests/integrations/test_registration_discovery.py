@@ -7,7 +7,6 @@ from app import integrations
 from app.integrations.ecs_callback import registry as ecs
 from app.integrations.registration import import_registration_module, local_registration
 from app.integrations.wms_callback import registry as callbacks
-from app.integrations.wms_request import discovery as request_discovery
 from app.integrations.wms_request import operation as requests
 
 
@@ -15,12 +14,9 @@ from app.integrations.wms_request import operation as requests
 def isolated_registries(monkeypatch):
     for registry in (ecs, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
-    # 执行真实发现，但不污染进程级发现缓存。
-    monkeypatch.setattr(
-        request_discovery,
-        "load_operation_modules",
-        request_discovery.load_operation_modules.__wrapped__,
-    )
+    from app.integrations import discovery
+
+    monkeypatch.setattr(discovery, "_loaded_formal", set())
 
 
 @pytest.fixture
@@ -156,3 +152,26 @@ def test_business_entrypoints_can_register_without_per_operation_files(
     import_registration_module(module.removesuffix(".__init__"))
     assert registered(kind, name).registration_source.module == f"app.integrations.{entry}"
     assert registered(kind, name).registration_source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+def test_business_source_keeps_filename_and_local_guards(monkeypatch, kind):
+    from app.integrations.registration import validate_registration_file
+
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+
+    async def handler(ctx, payload):
+        pass
+
+    handler.__module__ = f"app.businesses.probe.{kind}.wrong"
+    with pytest.raises(ValueError, match="filename mismatch"):
+        validate_registration_file(name, handler)
+    with pytest.raises(RuntimeError, match="local_registration"), local_registration():
+        validate_registration_file(name, handler)
+    handler.__module__ = (
+        f"app.businesses.probe.{kind}.{name.lower().replace('.', '_').replace('@', '_')}"
+    )
+    source = validate_registration_file(name, handler)
+    assert source.module == handler.__module__
+    assert source.symbol.endswith("handler")
+    assert source.local_only is False

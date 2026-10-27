@@ -13,6 +13,7 @@ class WorkLine(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     line_code: Mapped[str] = mapped_column(String(50), unique=True)
     line_name: Mapped[str] = mapped_column(String(100))
+    business_code: Mapped[str | None] = mapped_column(String(100))
     zone_name: Mapped[str | None] = mapped_column(String(100))
     description: Mapped[str | None] = mapped_column(String(500))
     sort_order: Mapped[int] = mapped_column(default=0, server_default="0")

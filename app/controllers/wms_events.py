@@ -10,7 +10,6 @@ from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.diagnostics import log_exception
 from app.integrations.wms_callback import MAX_BODY_BYTES, CallbackResponse, receive, unavailable
-from app.integrations.wms_callback.discovery import load_operation_modules
 from app.integrations.wms_callback.registry import operations
 from app.integrations.wms_callback.snapshots import (
     SNAPSHOT_PREVIEW_BYTES,
@@ -70,7 +69,9 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
             result = CallbackResponse(413, None, "too_large")
         else:
             async with factory() as session, session.begin():
-                result = await receive(session, body)
+                result = await receive(
+                    session, body, runtime=getattr(request.app.state, "business_runtime", None)
+                )
     except Exception as error:
         log_exception(
             logger, "callback receive failed", error, component="http", phase="wms_callback"
@@ -91,10 +92,12 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
     return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
 
 
-def include_wms_events(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
-    """发现并注册入站 operation,按它们的 `title`/`example` 生成 Swagger 请求体示例,再挂载路由。
-    新增 operation 只需在 `integrations/<业务>/callback.py` 里用 `@callback_operation` 注册。"""
-    load_operation_modules(environment)
+def include_wms_events(
+    app: FastAPI, *, environment: str, prefix: str = "/api/v1", runtime: object | None = None
+) -> None:
+    """挂载已完成正式加载、交叉校验及 local 加载的回调目录,并生成 Swagger 示例。"""
+    if runtime is not None:
+        app.state.business_runtime = runtime
     EXAMPLES.clear()
     for name, handler in operations().items():
         example = handler.example

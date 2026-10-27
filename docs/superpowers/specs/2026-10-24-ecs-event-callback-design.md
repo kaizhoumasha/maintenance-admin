@@ -1,12 +1,16 @@
 # ECS 事件回调接收设计
 
-2026-10-27 独立角色框架补充：事件注册已按 `(device_role, event_type)` 组合键和显式 Payload 演进，运行时绑定由应用注入；下文旧的单事件名声明仅保留作基线背景。wire、摘要、原 receipt、ACK 及事务规则不变。 当前合同见[独立设计](2026-10-27-ecs-role-framework-design.md)和[接入说明](../../integrations/ecs-roles.md)。设备／工作线管理和 Status 不属于该框架前置。
+2026-10-27 独立角色框架补充：事件注册已按 `(device_role, event_type)` 组合键和显式 Payload 演进，运行时绑定由应用注入；下文旧的单事件名声明仅保留作基线背景。该次角色补充未改变 wire、摘要、原 receipt、ACK 及事务规则；身份算法后续变更见下述现行合同。 当前合同见[独立设计](2026-10-27-ecs-role-framework-design.md)和[接入说明](../../integrations/ecs-roles.md)。设备／工作线管理和 Status 不属于该框架前置。
+
+2026-10-28 现行合同补充：调试状态由 ECS 管理。新信封、处理器上下文和 OpenAPI 不再声明 `is_debug`；来件中该键与其他额外顶层字段一样忽略。新身份只包含 `device_code`、`event_type`、`timestamp`、`data`（缺省 `{}`）。发布时须暂停混合版本受理，统一全部接收实例的算法后恢复，保留 ECS 原消息重试能力。
+
+历史决策轨迹：2026-10-24 版本曾校验可选严格布尔 `is_debug`，缺省为 false，并将其纳入摘要和处理器上下文。此次变更不是重写历史合同：旧收据、原身份和业务关联不重算、不合并、不删除。入口先查新摘要，再查同一规范化核心事件分别加入 `is_debug=false/true` 的两个旧摘要；原省略字段归入旧 false。旧摘要仅用于历史查重，绝不作为新行身份。命中任一旧行沿用原响应与原收据身份，双命中按 `created_at`、`id` 稳定选择诊断引用，不执行新处理器；原先未注册事件升级后仍不自动回放。详细依据见[工作线业务包设计 §9.3](2026-10-27-workline-business-packages-design.md#93-调试状态由-ecs-管理)。下文身份、校验和上下文说明已更新为现行合同。
 
 状态:**已实现(2026-10-24)。实施前工程评审两轮(均含外部独立意见),决定已并入正文;正文为设计时的表述,以代码和 `app/integrations/ecs_callback/` 包说明为准。验证:一次性本地 PostgreSQL 17 容器上全量 1781 通过、22 跳过(15 个 Redis 用例未运行)、0 失败;生产 PostgreSQL 与真实数据迁移、真实 ECS 联调未验证,详见 CHANGELOG「ECS 事件回调接收」。** · 依据:`wes_backend/docs/integration/third_party_integration_whitepaper.md`(v1.1,Approved)§1–2、§4.2、§5;[WMS 回调接收设计](2026-10-22-transport-callback-design.md);[ECS 接入指南](../../integrations/ecs-command.md) · 范围:`POST /api/v1/callback/event` 的接收机制。结果回调、命令出站、状态查询另行设计。
 
 ## 1. 意图
 
-2026-10-27后续设计补充：正式业务事件改按`(device_role, event_type)`注册，从设备所属工作线的`device_bindings`解析逻辑角色，再校验该注册项Payload并执行处理器。完整合同见[设备、工作线设计§10.1–§10.6](2026-10-27-device-workline-status-design.md#101-已选定的逻辑角色分发)。该增量已实现，本地验证见[角色增量计划](../plans/2026-10-27-ecs-role-dispatch.md#完成与验证)；本文下述仅event_type注册和示例描述已交付基线，后续角色分发以新合同为准。原wire、事件摘要、先查重、持久收据、ACK及事务规则继续复用。
+2026-10-27后续设计补充：正式业务事件改按`(device_role, event_type)`注册，从设备所属工作线的`device_bindings`解析逻辑角色，再校验该注册项Payload并执行处理器。完整合同见[设备、工作线设计§10.1–§10.6](2026-10-27-device-workline-status-design.md#101-已选定的逻辑角色分发)。该增量已实现，本地验证见[角色增量计划](../plans/2026-10-27-ecs-role-dispatch.md#完成与验证)；本文下述仅event_type注册和示例描述已交付基线，后续角色分发以新合同为准。该次角色增量继续复用当时的 wire、事件摘要、先查重、持久收据、ACK及事务规则；当前身份以本文现行合同补充为准。
 
 本次工程评审接缝已补入新合同：解析契约由ECS侧声明，设备/工作线服务实现并在装配期注入，receiver不反向导入app.services；事件与命令复用同一绑定解析实现及“工作线→设备”的锁序。绑定解析在receipt查重之后、Payload校验之前；锁后归属变化/基础设施失败回滚503，稳定未绑定或未注册组合才持久ACK。配置变化停止旧命令后续发送，但不阻止原身份的迟到Result接收；这不改变事件摘要或引入未知事件自动重放。以上已在角色增量中实现并用本地Mock及独立测试库验证，不代表真实ECS联调。
 
@@ -22,7 +26,7 @@ ECS 通过 `POST /api/v1/callback/event` 主动上报设备事件(例如 `SCAN_C
 - 对 ECS 可见的行为完全按白皮书。
 
 非目标
-- 不实现任何具体 `event_type`;不实现 `ESTOP_PRESSED` 的 `400`、`ECS_TEST_SOURCE_EXPLICIT_DEBUG` 的 `409`、`is_debug=true` 触发的联调命令(都是具体事件的业务规则,依赖出站命令)。
+- 不实现任何具体 `event_type`;不实现 `ESTOP_PRESSED` 的 `400` 等具体业务规则；WES 不按调试字段触发联调命令。
 - 不做结果回调、命令出站、状态查询、来源认证(白皮书不规定认证,与 WMS 回调同样靠网关限制来源)。
 
 反目标
@@ -33,8 +37,8 @@ ECS 通过 `POST /api/v1/callback/event` 主动上报设备事件(例如 `SCAN_C
 
 ## 3. 约束
 
-来自白皮书
-- 事件无身份字段。身份是核心字段 `device_code`、`event_type`、`timestamp`、`is_debug` 和 `data`;省略 `is_debug` 等同 `false`,省略 `data` 按空对象。其他顶层字段只作诊断,不进身份。
+现行约束（身份已按 2026-10-28 补充演进）
+- 事件无身份字段。新身份是核心字段 `device_code`、`event_type`、`timestamp` 和 `data`;省略 `data` 按空对象。其他顶层字段忽略、不进身份。历史摘要只按上述兼容规则查重。
 - ACK 只表示**持久接收**,不夹带下一条命令。
 - 最大 256 KiB。错误响应必须含整数 `code` 和字符串 `message`;`400` 必须含 `error_detail.issues[]`,不回显字段值。
 - 事件重报与「同毫秒同内容的两个真实事件」无法区分,白皮书 T0 登记为 UNKNOWN。本设计按白皮书的身份规则去重,接受这一已知限制。
@@ -92,7 +96,7 @@ DTO 校验放在写收据之前、查重之后,所以占位的 `ACK` 就是最�
 
 ### 5.3 核心字段校验与 `issues[]`
 
-`EcsEventEnvelope`:`device_code`、`event_type` 非空 `str`;`timestamp` 严格 `int` 且 `0 ≤ x ≤ 2^63−1`(排除 `bool`);`is_debug` 可选严格 `bool`(`null`、字符串、数字都拒绝);`data` 可选 `dict`(`null` 拒绝);其余顶层字段忽略。
+`EcsEventEnvelope`:`device_code`、`event_type` 非空 `str`;`timestamp` 严格 `int` 且 `0 ≤ x ≤ 2^63−1`(排除 `bool`);`data` 可选 `dict`(`null` 拒绝);其余顶层字段忽略。
 
 pydantic 错误按下表翻译,只写路径、码和期望类型,**不回显值**。处理器 `data` 模型的错误用同一个翻译函数,路径加 `data.` 前缀:
 
@@ -114,7 +118,7 @@ pydantic 错误按下表翻译,只写路径、码和期望类型,**不回显值*
 ### 5.4 收据身份
 
 - `operation` = 常量 `"ecs.event"`,只是收据上的来源标签,不进 `wms_callback` 的注册表,所以 `POST /wms/events` 不能触达。
-- `operation_id` = 规范化身份的 SHA-256 十六进制全长(64 位):`canonical_digest({device_code, event_type, timestamp, is_debug(默认 false), data(默认 {})})`。
+- `operation_id` = 规范化身份的 SHA-256 十六进制全长(64 位):`canonical_digest({device_code, event_type, timestamp, data(默认 {})})`。先查此摘要，未命中再兼容查两个旧摘要；只有全部未命中时才按新摘要插入。
 - `raw_digest` = 整个请求体的 `canonical_digest`;`compare_mode="RAW"`,`effective_digest` 为空(满足现有 CHECK 约束)。`resp_timestamp` 必填,取接收时的当前毫秒(不出现在 ECS 响应里)。
 - 为此把 `callback_receipt.operation_id` 从 `String(36)` 加宽到 `String(64)`,一个迁移。WMS 的 UUID 身份不受影响,与 64 位摘要也不会相撞。
 - 同一个迁移给 `callback_snapshot` 加可空的 `source` 列(第二轮评审决定):ECS 写 `'ecs'`,旧行与 WMS 写入的为空,视为 WMS。快照表原来没有任何字段能区分来源,而 ECS 与 WMS 的 `outcome` 取值重名;`record_snapshot` 相应加 `source` 参数,限额分组与此同一个来源取值。降级时若存在 `source` 非空的行或 64 位身份行,按现有迁移的做法拒绝而不是丢数据。
@@ -128,7 +132,7 @@ async def scan_completed(ctx: EcsEventContext, data: ScanCompletedData) -> None:
 ```
 
 - `data=Model` 可省略(白皮书里事件的 `data` 是可选字段):省略时不校验 `data`,处理器收到原始 `dict`(缺省为 `{}`),签名为 `async def handler(ctx, data: dict)`。
-- `EcsEventContext` 是独立的 `@dataclass(frozen=True, kw_only=True)`:`session`、`receipt_id`、`digest`、`device_code`、`event_type`、`timestamp`、`is_debug`、`notes`;`ctx.note(reason_code, **detail)` 与 WMS 一致,随收据同事务保存,提交后输出告警日志。
+- `EcsEventContext` 是独立的 `@dataclass(frozen=True, kw_only=True)`:`session`、`receipt_id`、`digest`、`device_code`、`event_type`、`timestamp`、`binding`、`notes`;`ctx.note(reason_code, **detail)` 与 WMS 一致,随收据同事务保存,提交后输出告警日志。
 - 处理器在接收器打开的外层事务里运行,不得自行 commit/rollback。**对已通过校验的消息不得抛异常**:冲突、未知设备这类业务情况用 `ctx.note` 记录并返回(仍 ACK);抛异常会让这条消息永远回 503,成为无法越过的毒消息。
 - **只写当前数据库事务**(评审决定):不得在处理器里直接调用设备、HTTP 或其他外部服务。外发意图用同事务的 `Outbox.enqueue` 登记,提交后由发送器执行。否则外部动作成功而数据库提交失败时,ECS 原样重报会再触发一次外部动作。
 - **业务幂等由处理器自己负责**(评审决定):收据按 `RELIABLE_RETENTION_DAYS`(90 天)清理,清理后同一身份再来会被当作新事件。处理器必须以自己的持久键(业务行)保证重入安全,不能依赖收据。ECS 的最大重报窗口登记为待确认项(TODOS.md)。
@@ -184,7 +188,7 @@ async def scan_completed(ctx: EcsEventContext, data: ScanCompletedData) -> None:
 
 - 迁移文件放在当前 Alembic 头之后,沿用 `migrations/versions/` 的命名;降级时若已有 64 位身份行,按现有迁移的做法拒绝而不是截断;迁移测试沿用 `tests/migrations/test_callback.py` 的 sqlite+PostgreSQL 双参数。
 - 测试只固化长期合同,不为填覆盖率加测试:
-  - 协议与身份:§5.6 响应表、§5.4 身份等价(省略与显式 `false` 的 `is_debug`、省略与空 `data`、多余顶层字段不改变身份)、`issues[]` 的字段路径、未注册类型的 ACK 与落库(含 32 KiB 上限的两种形态)、`/wms/events` 触达不到 ECS 处理器、迁移往返(sqlite+PostgreSQL)、文件名与注册名一致、重复注册报错。
+  - 协议与身份:§5.6 响应表、§5.4 身份等价(省略与空 `data`、任意额外顶层字段不改变身份，旧摘要兼容不产生新执行)、`issues[]` 的字段路径、未注册类型的 ACK 与落库(含 32 KiB 上限的两种形态)、`/wms/events` 触达不到 ECS 处理器、迁移往返(sqlite+PostgreSQL)、文件名与注册名一致、重复注册报错。
   - 摘要失败与诊断大小:`{"data":{"n":1e400}}` 回 `400` 且不写收据;「正文很小、设备编号很长」的未注册事件,落库诊断总大小受 32 KiB 上限约束;`issues[]` 对 `list[float]` 的嵌套数组错误给出 `data.samples[0]`、`number`,且不含客户端的值。
   - 先查重:事件先按未注册类型 ACK,随后注册要求某个 `data` 字段的处理器,同一事件原样重报仍得到相同 `200 ACK`。
   - 接收机制的幂等与原子性(PostgreSQL 参数化):并发同身份只执行一次;首请求回滚后等待者能接管;业务写入与收据一起回滚;提交失败不留下 ACK 收据;提交成功但响应丢失后的重报返回同一 ACK。

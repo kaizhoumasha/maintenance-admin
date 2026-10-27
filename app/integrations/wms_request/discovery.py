@@ -4,20 +4,21 @@
 """
 
 import pkgutil
-from functools import cache
 
 from app import integrations
-from app.integrations.registration import import_registration_module
 
 
-def candidate_modules() -> list[str]:
+def candidate_modules(environment: str = "production") -> list[str]:
     packages = sorted(
         info.name for info in pkgutil.iter_modules(integrations.__path__) if info.ispkg
     )
-    return [f"{integrations.__name__}.{package}.request" for package in packages]
+    suffixes = ["request"] + (["dev"] if environment == "local" else [])
+    return [
+        f"{integrations.__name__}.{package}.{suffix}" for package in packages for suffix in suffixes
+    ]
 
 
-@cache
 def load_operation_modules() -> None:
-    for name in candidate_modules():
-        import_registration_module(name)
+    from app.integrations.discovery import load_formal_modules
+
+    load_formal_modules(kind="request")

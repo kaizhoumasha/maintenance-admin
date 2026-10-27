@@ -34,3 +34,8 @@ def test_missing_module_is_skipped_but_inner_import_errors_surface(tree):
     (tree / "modtree_broken.py").write_text("import modtree_not_there\n")
     with pytest.raises(ModuleNotFoundError, match="modtree_not_there"):
         import_module_tree("modtree_broken")
+
+
+def test_required_module_cannot_be_skipped(tree):
+    with pytest.raises(ModuleNotFoundError, match="modtree_absent"):
+        import_module_tree("modtree_absent", required=True)
