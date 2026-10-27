@@ -102,7 +102,10 @@ uv run python scripts/release_bundle.py prepare \
 - `manifest.json`:应用版本、完整源码提交、dirty 标记、源码指纹、构建平台、应用 image ID、Alembic head、基础设施镜像引用和文件摘要。
 - `image.tar`、`image.env`:已构建应用镜像归档及固定标签。标签供选择,image ID 供核对;归档 SHA-256 是文件校验值,不是镜像仓库摘要。
 - `docker-compose.yml`、`docker-compose.release.yml`、`docker-compose.site.yml`、nginx 配置原件、恢复脚本、本工具和文档。生产叠加配置移除 build;基础设施引用在打包时固定为本地已取得的仓库摘要。站点覆盖文件挂载包外配置,原件继续参与制品校验。
+- 文档：从部署说明、README、CHANGELOG 出发，按 CommonMark 解析实际内联和引用式 Markdown 链接，忽略代码块、行内代码及注释中的示例。仓库内 Markdown 依赖递归随包交付，保留相对路径并纳入 manifest.json / SHA256SUMS；只能引用本次源码指纹文件集合中的依赖，不存在或被 Git 忽略的本地依赖会明确报错，`--allow-dirty` 不放宽此限制。外部 URL 不下载，跨仓库参考及源码/测试链接仍需对应源码，不随文档复制代码或真实配置。
 - `SHA256SUMS`:覆盖清单及所有交付文件。不包含真实 `.env`、密码、数据库备份或前端文件。校验只能检测传输损坏;接收时还应从可信渠道核对该校验文件的摘要。
+
+准备阶段通过 `uv run` 使用锁定的 Markdown 解析开发依赖；部署机运行 `verify`、`load`、`check` 仍只需 Python 标准库，无需安装该解析器。
 
 ```bash
 python3 scripts/release_bundle.py verify releases/0.2.0-<提交短SHA>

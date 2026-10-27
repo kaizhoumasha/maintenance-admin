@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,15 @@ def cli(*args):
 
 def test_verify_accepts_intact_bundle(tmp_path):
     result = cli("verify", bundle(tmp_path))
+    assert result.returncode == 0, result.stderr
+
+
+def test_verify_does_not_require_build_dependencies(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(SCRIPT), "verify", str(bundle(tmp_path))],
+        capture_output=True,
+        text=True,
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -159,6 +169,172 @@ def test_prepare_rejects_mutable_development_tag(tmp_path):
     result = cli("prepare", "--image", "enterprise-backend:latest", "--output", tmp_path / "new")
     assert result.returncode != 0
     assert "固定标签" in result.stderr
+
+
+@pytest.fixture
+def release_source(tmp_path, monkeypatch):
+    root = tmp_path / "source"
+    root.mkdir()
+    for name in release_bundle.PAYLOAD:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SCRIPT.parents[1] / name, target)
+    for name in ("README.md", "CHANGELOG.md", "docs/deploy.md"):
+        (root / name).write_text("# Documentation\n")
+    (root / ".gitignore").write_text("releases/\n")
+    (root / "pyproject.toml").write_text('[project]\nversion = "0.2.0"\n')
+    (root / "app").mkdir()
+    (root / "app/main.py").write_text('app = FastAPI(version="0.2.0")\n')
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)
+    monkeypatch.chdir(root)
+    real_run = subprocess.run
+    real_output = release_bundle.run
+
+    def execute(args, **kwargs):
+        if args[0] == "git":
+            return real_run(args, **kwargs)
+        if args[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(args, 0 if args[-1] != "app:docs-test" else 1)
+        if args[:2] == ["docker", "build"]:
+            return subprocess.CompletedProcess(args, 0)
+        assert args[:3] == ["docker", "image", "save"]
+        Path(args[args.index("-o") + 1]).write_bytes(b"image archive")
+        return subprocess.CompletedProcess(args, 0)
+
+    def output(*args, **kwargs):
+        if args == ("git", "rev-parse", "HEAD"):
+            return "a" * 40
+        if args[0] == "git":
+            return real_output(*args, **kwargs)
+        if args[:3] == ("docker", "image", "inspect"):
+            return json.dumps(
+                [
+                    {
+                        "Id": "image-id",
+                        "Os": "linux",
+                        "Architecture": "amd64",
+                        "RepoDigests": [f"{args[-1]}@sha256:abc"],
+                    }
+                ]
+            )
+        if args[:2] == ("uv", "run"):
+            return "revision (head)"
+        assert args[:2] == ("docker", "compose")
+        return json.dumps(
+            {"services": {name: {"image": name} for name in ("postgres", "redis", "nginx")}}
+        )
+
+    monkeypatch.setattr(subprocess, "run", execute)
+    monkeypatch.setattr(release_bundle, "run", output)
+    return root, tmp_path / "release"
+
+
+@pytest.mark.parametrize(
+    "markdown, filename",
+    [
+        ('[Guide](docs/guide.md "Guide title")', "guide.md"),
+        ("[Guide](<docs/install guide.md> 'Guide title')", "install guide.md"),
+        ("[Guide](docs/guide%20name.md#setup)", "guide name.md"),
+        ("[Guide](docs/guide(v1).md)", "guide(v1).md"),
+        ('[Guide][setup]\n\n[setup]: docs/guide.md "Title"', "guide.md"),
+        ("[Guide][]\n\n[Guide]: docs/guide.md", "guide.md"),
+        ("[Guide]\n\n[Guide]: docs/guide.md", "guide.md"),
+    ],
+)
+def test_prepare_resolves_markdown_document_links(release_source, markdown, filename):
+    root, release = release_source
+    (root / "README.md").write_text(markdown + "\n")
+    (root / "docs" / filename).write_text("# Guide\n")
+    subprocess.run(["git", "add", "README.md", "docs"], check=True)
+    release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    manifest = release_bundle.verify(release)
+    assert (release / "docs" / filename).read_text() == "# Guide\n"
+    assert "docs/" + filename in manifest["files"]
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "```markdown\n[Example](docs/missing.md)\n```",
+        "~~~~markdown\n```\n[Example](docs/missing.md)\n~~~~",
+        "    [Example](docs/missing.md)",
+        "`[Example](docs/missing.md)`",
+        "<!-- [Example](docs/missing.md) -->",
+        r"\[Example](docs/missing.md)",
+    ],
+)
+def test_prepare_ignores_markdown_examples(release_source, example):
+    root, release = release_source
+    (root / "README.md").write_text(example + "\n\n[Guide](docs/guide.md)\n")
+    (root / "docs/guide.md").write_text("# Guide\n")
+    subprocess.run(["git", "add", "README.md", "docs"], check=True)
+    release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    manifest = release_bundle.verify(release)
+    assert "docs/guide.md" in manifest["files"]
+    assert "docs/missing.md" not in manifest["files"]
+
+
+def test_prepare_delivers_transitive_documentation_with_verified_dependencies(release_source):
+    root, release = release_source
+    (root / "README.md").write_text('[Guide](docs/guide.md "Title")\n')
+    (root / "docs/guide.md").write_text("[Nested](nested.md#setup)\n")
+    (root / "docs/nested.md").write_text("[Back](guide.md)\n")
+    subprocess.run(["git", "add", "README.md", "docs"], check=True)
+    release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    manifest = release_bundle.verify(release)
+    assert {"docs/guide.md", "docs/nested.md"} <= manifest["files"].keys()
+
+    guide = release / "docs/guide.md"
+    guide.write_text(guide.read_text() + "\nchanged\n")
+    with pytest.raises(ValueError, match="制品校验失败"):
+        release_bundle.verify(release)
+
+
+def test_prepare_rejects_documentation_outside_the_source_fingerprint(release_source):
+    root, release = release_source
+    (root / "README.md").write_text("[Local report](releases/local-report.md)\n")
+    local = root / "releases/local-report.md"
+    local.parent.mkdir()
+    local.write_text("LOCAL ONLY\n")
+    fingerprint = release_bundle.source_hash()
+    local.write_text("CHANGED LOCAL ONLY\n")
+    assert release_bundle.source_hash() == fingerprint
+    with pytest.raises(ValueError, match="源码指纹"):
+        release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    assert not release.exists()
+
+
+def test_prepare_allows_untracked_documentation_covered_by_a_dirty_source(release_source):
+    root, release = release_source
+    (root / "README.md").write_text("[Draft](docs/draft.md)\n")
+    (root / "docs/draft.md").write_text("# Draft\n")
+    release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    manifest = release_bundle.verify(release)
+    assert manifest["source_dirty"] is True
+    assert "docs/draft.md" in manifest["files"]
+
+
+@pytest.mark.parametrize("drift", ["content", "source-files"])
+def test_prepare_rejects_source_drift_after_document_copy(release_source, monkeypatch, drift):
+    root, release = release_source
+    copy = shutil.copy2
+
+    def copy_and_change_source(source, target):
+        result = copy(source, target)
+        if source == "README.md":
+            if drift == "content":
+                (root / "README.md").write_text("# Changed after build\n")
+            else:
+                (root / "docs/added.md").write_text("# Added after build\n")
+        return result
+
+    monkeypatch.setattr(shutil, "copy2", copy_and_change_source)
+    with pytest.raises(ValueError, match="打包期间源码变化"):
+        release_bundle.prepare("app:docs-test", release, allow_dirty=True)
+    assert (release / "README.md").is_file()
+    assert not (release / "manifest.json").exists()
+    assert not (release / "SHA256SUMS").exists()
 
 
 def write_manifest(directory, **updates):
@@ -354,7 +530,7 @@ def test_prepare_rejects_unsafe_source_or_unpinned_infrastructure(
     monkeypatch.chdir(root)
     builds = []
     hashes = iter(["before", "after"] if failure == "source-drift" else ["before", "before"])
-    monkeypatch.setattr(release_bundle, "source_hash", lambda: next(hashes))
+    monkeypatch.setattr(release_bundle, "source_hash", lambda *args: next(hashes))
 
     def execute(args, **kwargs):
         if args[:3] == ["docker", "image", "inspect"]:
@@ -367,6 +543,8 @@ def test_prepare_rejects_unsafe_source_or_unpinned_infrastructure(
     def output(args, **kwargs):
         if args == ("git", "rev-parse", "--show-toplevel"):
             return str(tmp_path if failure == "root" else root)
+        if args[:2] == ("git", "ls-files"):
+            return "app/main.py\0pyproject.toml\0"
         if args[:2] == ("git", "status"):
             return " M app/main.py" if failure == "dirty" else ""
         if args == ("git", "rev-parse", "HEAD"):
