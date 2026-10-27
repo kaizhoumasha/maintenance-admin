@@ -197,7 +197,8 @@ class AsyncHttpClient:
         )
         return result
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, timeout_s: float | None = None) -> None:
+        """默认共享等待者不取消底层关闭；独占所有者可设期限并终止挂起的关闭。"""
         self._bind_loop()
         self._closed = True
         if self._close_task is None or (
@@ -208,7 +209,12 @@ class AsyncHttpClient:
             close = self._transport.aclose if self._client.is_closed else self._client.aclose
             self._close_task = asyncio.create_task(close())
             self._close_task.add_done_callback(_observe_close_failure)
-        await asyncio.shield(self._close_task)
+        if timeout_s is None:
+            await asyncio.shield(self._close_task)
+        else:
+            # 独占资源的有界关闭必须终止底层任务；默认共享等待者仍保持 shield 语义。
+            async with asyncio.timeout(timeout_s):
+                await self._close_task
 
 
 def _observe_close_failure(task: asyncio.Task[None]) -> None:

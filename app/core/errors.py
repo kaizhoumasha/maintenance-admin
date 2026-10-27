@@ -16,6 +16,8 @@ class ErrorCode(StrEnum):
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
     TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS"
+    UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    UPSTREAM_TIMEOUT = "UPSTREAM_TIMEOUT"
 
 
 # 错误码到 HTTP 状态码的映射表；handlers.py 按状态码反查，所以状态码必须唯一
@@ -29,6 +31,8 @@ HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.TOO_MANY_REQUESTS: 429,
     ErrorCode.DATABASE_UNAVAILABLE: 503,
     ErrorCode.INTERNAL_ERROR: 500,
+    ErrorCode.UPSTREAM_ERROR: 502,
+    ErrorCode.UPSTREAM_TIMEOUT: 504,
 }
 
 

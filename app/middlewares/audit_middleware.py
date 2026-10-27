@@ -86,7 +86,7 @@ class AuditMiddleware:
         await self.app(scope, receive_wrapper, send_wrapper)
 
         # 只记成功;没有 audit_action 说明没走 require_permission(未登录 / 被拒 / 无需权限的接口)
-        if 200 <= status < 300 and state.get("audit_action"):
+        if 200 <= status < 300 and state.get("audit_action") and not state.get("audit_recorded"):
             try:
                 await self._record(
                     scope, state, trace_id, bytes(body), None if req_too_big else bytes(req_body)

@@ -31,12 +31,15 @@ from app.models import (  # noqa: E402
     Base,
     CallbackReceipt,
     CallbackSnapshot,
+    Device,
+    DeviceRoute,
     Menu,
     Permission,
     ReliableMessage,
     Role,
     TransportTask,
     User,
+    WorkLine,
     role_permission,
 )
 from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E402
@@ -343,3 +346,29 @@ async def pg_client(pg_sessions, redis):
             assert await snapshot(session) == before
         assert app.dependency_overrides == overrides
         assert app.state.audit_session_factory is audit_factory
+
+
+@pytest.fixture
+async def asset_factory(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def asset_pg(pg_sessions):
+    prefix = "T" + uuid7().hex
+    try:
+        yield pg_sessions, prefix
+    finally:
+        async with pg_sessions.begin() as session:
+            await session.execute(delete(Device).where(Device.device_code.like(prefix + "%")))
+            await session.execute(
+                delete(DeviceRoute).where(DeviceRoute.device_code.like(prefix + "%"))
+            )
+            await session.execute(delete(WorkLine).where(WorkLine.line_code.like(prefix + "%")))
+            await session.execute(delete(AuditLog).where(AuditLog.trace_id == prefix))

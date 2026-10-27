@@ -32,6 +32,55 @@ async def ecs_binding(session, device_code):
     )
 
 
+async def add_bound_device(session, code, origin, *, role="SCAN1", line_code=None):
+    from app.core.identifiers import uuid7
+    from app.models import Device, DeviceRoute, WorkLine
+
+    line = WorkLine(
+        line_code=line_code or "T" + uuid7().hex,
+        line_name="Test line",
+        device_bindings={role: code},
+        position_bindings={"INLET": "P1"},
+    )
+    route = DeviceRoute(id=str(uuid7()), device_code=code, ecs_origin=origin)
+    session.add_all([line, route])
+    await session.flush()
+    device = Device(
+        device_code=code, display_name=code, current_route_id=route.id, work_line_id=line.id
+    )
+    session.add(device)
+    await session.flush()
+    return line, device, route
+
+
+def ecs_status_document(*codes):
+    """Fresh Status wire document shared by protocol and debug-HTTP tests."""
+    return {
+        "devices": [
+            {
+                "device": {
+                    "device_code": code,
+                    "device_name": "分拣机械臂",
+                    "device_type": "ROBOTIC_ARM",
+                    "role": "SORTER_ARM",
+                    "supported_commands": ["PICK_AND_PUT"],
+                    "supported_events": ["SCAN_COMPLETED"],
+                },
+                "state": {
+                    "device_code": code,
+                    "mode": "AUTO",
+                    "status": "OFFLINE",
+                    "is_online": False,
+                    "current_command_code": None,
+                    "scenario": "error",
+                    "updated_at": 1793029419104,
+                },
+            }
+            for code in codes or ("ARM03",)
+        ]
+    }
+
+
 async def login(client, creds=LOGIN):
     """登录并返回 (access_token, refresh cookie 值)。"""
     r = await client.post("/api/v1/auth/login", json=creds)

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.controllers.dev import include_dev_routers
 from app.integrations.ecs_callback import CallbackPayload
 from app.integrations.ecs_callback import registry as ecs
+from app.integrations.ecs_status import query
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_request import operation as requests
 
@@ -43,7 +44,18 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
     assert {
         key for key, row in rows.items() if row["entry_type"] == "business_registration"
     } == expected
-    assert set(rows) == expected
+    assert set(rows) == expected | {("ecs_status", "ecs.device.status@v1")}
+    builtin = rows["ecs_status", "ecs.device.status@v1"]
+    assert builtin["entry_type"] == "builtin_capability"
+    assert builtin["module"] == query.__module__
+    assert builtin["symbol"] == query.__qualname__
+    assert builtin["local_only"] is False
+    assert builtin["method"] == "GET"
+    assert builtin["path"] == "/api/v1/device/status"
+    assert builtin["payload_schema"] is None
+    assert builtin["endpoint"] is None
+    assert "devices" in builtin["response_schema"]["properties"]
+    assert "ecs_origin" in builtin["query_schema"]["properties"]
     assert rows["ecs_event", ("SCAN1", "REGISTRY_PROBE")]["symbol"].endswith("probe")
     assert rows["ecs_event", ("SCAN1", "REGISTRY_PROBE")]["local_only"] is False
     for key, row in rows.items():
@@ -60,10 +72,23 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
     assert rows["wms_callback", "transport.task.resulted@v1"]["local_only"] is False
 
 
-async def test_registry_remains_available_when_empty(client, admin, monkeypatch):
+async def test_builtin_remains_when_business_registries_are_empty(client, admin, monkeypatch):
     for registry in (ecs, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
-    assert (await client.get(PATH, headers=admin)).json() == []
+    rows = (await client.get(PATH, headers=admin)).json()
+    assert [(row["kind"], row["entry_type"]) for row in rows] == [
+        ("ecs_status", "builtin_capability")
+    ]
+
+
+async def test_catalog_does_not_query_ecs(client, admin, monkeypatch):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("catalog must not perform any outbound query")
+
+    monkeypatch.setattr("app.http_client.AsyncHttpClient.send", forbidden)
+    response = await client.get(PATH, headers=admin)
+    assert response.status_code == 200
+    assert sum(row["kind"] == "ecs_status" for row in response.json()) == 1
 
 
 @pytest.mark.parametrize("environment", ["production", "test"])

@@ -65,6 +65,49 @@ async def test_first_result_before_http_response_applies_once(ecs):
         assert row.status == "DONE" and row.response_raw is None
 
 
+async def test_config_revocation_stops_sending_but_accepts_original_attempt_result(ecs):
+    from sqlalchemy import delete
+
+    from app.integrations.ecs_command import CommandBinding
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import Device, DeviceRoute, WorkLine
+    from app.services.device_routes import DeviceRoutes
+    from tests.helpers import TrialPayload, add_bound_device
+
+    async with ecs.factory.begin() as session:
+        line, device, route = await add_bound_device(session, "D1", "http://127.0.0.1:8080")
+        line_id, device_id, route_id = line.id, device.id, route.id
+    ecs.service.routes = DeviceRoutes(
+        [CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload)],
+        annexes=ecs.service.annexes,
+    )
+    try:
+        command = await prepare(ecs)
+        store = await make_store(ecs)
+        claim = (await store.claim(1, ecs.targets))[0]
+        assert await store.before_send(claim, ecs.targets["ecs"])
+        async with ecs.factory.begin() as session:
+            await ecs.outbox.hold(
+                session,
+                "ecs",
+                "ecs.command",
+                command.command_code,
+                reason="AUTHORIZATION_REVOKED",
+            )
+        assert not await store.claim(1, ecs.targets)
+        async with ecs.factory.begin() as session:
+            reply = await receive_ecs_result(
+                session, result_body(command.command_code), ecs.service
+            )
+            assert reply.status_code == 200
+            assert (await session.get(EcsCommand, command.command_code)).status == "SUCCEEDED"
+    finally:
+        async with ecs.factory.begin() as session:
+            await session.execute(delete(Device).where(Device.id == device_id))
+            await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
+            await session.execute(delete(WorkLine).where(WorkLine.id == line_id))
+
+
 async def test_early_result_revokes_claim_before_network(ecs):
     from app.integrations.ecs_command.result import receive_ecs_result
 

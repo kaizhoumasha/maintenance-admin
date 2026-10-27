@@ -45,7 +45,7 @@ class DevOperationOut(BaseModel):
 
 # 注册清单的 kind 标签单一来源;控制器按此输出,超出集合会被响应校验拒绝
 REGISTRATION_KINDS = ("ecs_event", "wms_callback", "wms_request")
-INTEGRATION_KINDS = (*REGISTRATION_KINDS, "ecs_command")
+INTEGRATION_KINDS = (*REGISTRATION_KINDS, "ecs_status", "ecs_command")
 
 
 class DevRegistrationOut(BaseModel):
@@ -59,6 +59,9 @@ class DevRegistrationOut(BaseModel):
     local_only: bool
     endpoint: str | None
     payload_schema: dict[str, Any] | None
+    method: str | None = None
+    path: str | None = None
+    query_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
 
 
