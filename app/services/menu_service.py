@@ -5,6 +5,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import AppError, ErrorCode
+from app.core.deps import user_is_admin
 from app.models import Menu, Permission
 from app.schemas.menu import MenuIn, MenuRead
 from app.services import rbac_service
@@ -73,6 +74,8 @@ async def list_menu_tree(session: AsyncSession) -> list[dict[str, Any]]:
 
 async def get_user_routes(session: AsyncSession, user_id: int) -> list[dict[str, Any]]:
     codes = set(await rbac_service.get_user_permission_codes(session, user_id))
+    if not await user_is_admin(session, user_id):
+        codes -= {"asset:device:read", "asset:workline:read"}
     return _to_routes(_build(await _all_menus(session)), codes)
 
 

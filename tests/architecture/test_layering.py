@@ -7,6 +7,21 @@ APP = Path(__file__).parents[2] / "app"
 
 # 目录 → 它不能导入的包
 FORBIDDEN = {
+    "integrations/ecs_status": (
+        "app.core",
+        "app.integrations.registration",
+        "app.integrations.ecs_command",
+        "app.models",
+        "app.services",
+        "app.controllers",
+        "app.schemas",
+        "app.tasks",
+        "app.reliable",
+        "sqlalchemy",
+        "redis",
+        "fastapi",
+        "celery",
+    ),
     "http_client": (
         "app.core",
         "app.reliable",

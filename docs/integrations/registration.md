@@ -3,9 +3,12 @@
 三类接入都遵循：选目录 → 新建文件 → 用装饰器声明名称与 Payload → 接收入口再写处理函数。
 不需要修改控制器或 `main.py`。WMS 请求是发送数据声明，没有接收处理函数。
 
+[通用 ECS Status](ecs-status.md) 是内置查询能力，可独立调用、不落库，纳入同一接入目录及来源追踪，**不属于第四类业务注册表**，无需添加装饰器或逐 ECS/设备声明。
+正式查询接口 `GET /api/v1/ecs/status` 在所有环境可用，要求登录和 `ecs:status:query`；只有这里的接入目录仍限local挂载，二者不能混为一谈。
+
 | 场景 | 目录 | 声明 | 数据约束 |
 |---|---|---|---|
-| ECS → 本项目 | `app/integrations/<业务>/ecs_event/` | `@ecs_event(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
+| ECS → 本项目 | `app/integrations/<业务>/ecs_event/` | `@ecs_event(name, device_role="SCAN1", data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
 | WMS → 本项目 | `app/integrations/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
 | 本项目 → WMS | `app/integrations/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
 
@@ -14,7 +17,7 @@
 一个注册项一个文件，文件名为 `name.lower().replace('.', '_').replace('@', '_') + '.py'`。
 `SCAN_COMPLETED` → `scan_completed.py`；`transport.task.resulted@v1` → `transport_task_resulted_v1.py`。
 名称仍按协议校验：ECS 用大写字母开头的大写字母、数字、下划线；WMS 用小写点分名称加正整数版本，
-例如 `example.done@v1`，最长 256 字符。完整名称才是注册身份，文件名不是身份。
+例如 `example.done@v1`，最长 256 字符。ECS注册身份为(device_role,event_type)，WMS仍使用完整名称；文件名不是身份。相同事件可放在`ecs_event/scan1/scan_completed.py`、`ecs_event/scan4/scan_completed.py`，复用原递归发现。
 
 目录需有 `__init__.py`，业务根目录也需有 `__init__.py`。原来的单文件 `ecs_event.py`、
 `callback.py`、`request.py` 及对应入口包的 `__init__.py` 可用，不受逐项文件名约束；
@@ -23,7 +26,7 @@
 
 ## ECS：声明数据与处理函数
 
-文件：`app/integrations/example/ecs_event/scan_completed.py`。
+文件：`app/integrations/example/ecs_event/scan1/scan_completed.py`。
 
 ```python
 from app.integrations.ecs_callback import CallbackPayload, EcsEventContext, ecs_event
@@ -33,14 +36,14 @@ class ScanCompleted(CallbackPayload):
     barcode: str
 
 
-@ecs_event("SCAN_COMPLETED", data=ScanCompleted)
+@ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=ScanCompleted)
 async def scan_completed(ctx: EcsEventContext, payload: ScanCompleted) -> None:
     ctx.note("SCAN_OBSERVED", barcode=payload.barcode)
 ```
 
 处理函数只能写当前事务；返回 None 后由平台提交并 ACK。业务矛盾用 `ctx.note` 表达；普通异常会整体
-回滚并返回 503。不直接发 HTTP 或设备指令，外发意图同事务写 outbox。省略 `data=` 时仍允许原始 dict。
-未注册事件按现有协议 ACK 并留诊断，不会自动回放；先部署所有接收实例，再启用对端事件。
+回滚并返回 503。不直接发 HTTP 或设备指令，外发意图同事务写 outbox。角色和Payload必须明确声明；工作线`device_bindings`提供实际设备到逻辑角色的关系，Status中的role不参与选择。
+稳定未绑定/未注册组合按现有协议ACK留诊断，不自动回放；先部署处理器及完成绑定，再启用对端事件。重复receipt先于绑定解析；解析故障回滚503。默认应用装配共享解析器，自定义装配通过include_ecs_callback的resolve_binding注入；正式处理器无解析器会拒绝启动。处理器通过ctx.binding读取本线位置和绑定，通过ctx.device_role/ctx.work_line_id读取逻辑上下文。
 
 ## WMS 回调：相同的函数声明，保留业务结果
 
@@ -97,12 +100,14 @@ class Report(RequestPayload):
 ## 在一个地方检查全部注册项
 
 仅 `ENVIRONMENT=local`，登录 Swagger 后打开 `GET /api/v1/dev/integrations/registry`。
-每项包含 `kind`、`name`、`module`、`source_file`、`symbol`、`local_only`、`endpoint`、`payload_schema`。
-来源是原函数/原模型/原类，而不是适配器；清单按类型和名称排序，空注册表返回空列表。
+每项包含 `kind`、`entry_type`、`name`、`module`、`source_file`、`symbol`、`local_only`、`endpoint`、`payload_schema`；ECS事件另有`device_role`。
+三类业务条目的 `entry_type=business_registration`；内置 Status 条目为 `builtin_capability`，另提供
+`method/path/query_schema/response_schema`。这些补充字段不适用时为 null，原业务字段语义保持。
+命令合同为`kind=ecs_command`、`entry_type=command_contract`，读取正式路由提供者同一份角色任务声明，输出角色、task_type名称和params/result schema；不是第四个业务注册器。来源是声明指定的原函数/模型；清单按类型、角色和名称排序。三类业务注册表即使为空，已加载的内置 Status 能力仍展示一项。
 `local_only` 来自发现入口的加载作用域：`dev_ecs_event`、`dev_callback`、通用 `dev.py` 仅本地加载。
 三类可运行的本地示例分别见：
 
-- `app/integrations/ecs_callback/dev_ecs_event.py`：EXAMPLE_SCAN；
+- `app/integrations/ecs_callback/dev_ecs_event.py`：EXAMPLE_SCAN，设备编码固定为`LOCAL_EXAMPLE_SCAN`，使用本地显式绑定；
 - `app/integrations/wms_callback/dev_callback.py`：example.echo@v1；
 - `app/integrations/wms_request/dev.py`：example.fact.demo@v1、example.decision.demo@v1。
 

@@ -21,7 +21,20 @@ from app.schemas.user import UserCreate
 
 # 仅是初始数据;之后新权限走 POST /permissions,不必改这里
 INITIAL_PERMISSIONS = {
+    "asset:workline:read": "workline read",
+    "asset:workline:create": "workline create",
+    "asset:workline:update": "workline update",
+    "asset:workline:delete": "workline delete",
+    "asset:device:read": "device read",
+    "asset:device:update": "device update",
+    "asset:device:assign": "device assign",
+    "asset:device:discover": "device discover",
+    "asset:device:register": "device register",
+    "asset:device:migrate": "device migrate",
+    "asset:device:delete": "device delete",
+    "asset:device:refresh": "device refresh",
     "dev:ecs:send_real": "真实 ECS 联调发送",
+    "ecs:status:query": "查询 ECS 设备状态",
     "admin:user:create": "创建用户",
     "admin:user:list": "查看用户列表",
     "admin:user:read": "查看用户",
@@ -47,6 +60,25 @@ INITIAL_PERMISSIONS = {
 # 初始菜单:按 name 幂等写入,已存在的不覆盖(管理员可能改过);parent 引用上级的 name,须排在上级之后
 _SYSTEM = "System"
 INITIAL_MENUS = [
+    {"name": "Assets", "path": "/asset", "component": "Layout", "title": "设备资源", "sort": 20},
+    {
+        "name": "AssetDevice",
+        "parent": "Assets",
+        "path": "device",
+        "component": "asset/device/index",
+        "title": "设备管理",
+        "sort": 10,
+        "permission": "asset:device:read",
+    },
+    {
+        "name": "AssetWorkline",
+        "parent": "Assets",
+        "path": "workline",
+        "component": "asset/workline/index",
+        "title": "工作线管理",
+        "sort": 20,
+        "permission": "asset:workline:read",
+    },
     {
         "name": _SYSTEM,
         "path": "/system",

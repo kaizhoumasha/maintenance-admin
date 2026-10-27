@@ -52,8 +52,8 @@ def business_modules(tmp_path, monkeypatch):
 def declaration(kind, name="example.done@v1"):
     if kind == "ecs_event":
         return (
-            "from app.integrations.ecs_callback import ecs_event\n"
-            f"@ecs_event({name!r})\n"
+            "from app.integrations.ecs_callback import ecs_event, CallbackPayload\n"
+            f"@ecs_event({name!r}, device_role='SCAN1', data=CallbackPayload)\n"
             "async def handler(ctx, payload): pass\n"
         )
     if kind == "callback":
@@ -70,6 +70,8 @@ def declaration(kind, name="example.done@v1"):
 
 
 def registered(kind, name):
+    if kind == "ecs_event":
+        return ecs.lookup("SCAN1", name)
     return {"ecs_event": ecs.lookup, "callback": callbacks.lookup, "request": requests.lookup}[
         kind
     ](name)

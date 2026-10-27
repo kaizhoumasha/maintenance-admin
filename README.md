@@ -137,6 +137,8 @@ enterprise-backend/
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
 `app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠投递参考](docs/integrations/reliable-delivery.md)。
 
+[通用 ECS Status](docs/integrations/ecs-status.md) 可通过 Python 独立查询指定 ECS 的全部或单台设备，不依赖设备登记或存储；正式 `GET /api/v1/ecs/status` 在所有环境挂载，要求登录及独立权限 `ecs:status:query`，沿用API请求限流。只返回状态及来源，不落库、不登记、不发送命令；local Swagger展示同一个正式接口，生产文档可见性仍按原环境配置。它是内置能力，不是第四类业务注册表。
+
 Transport 出站能力已提供 `app.integrations.wms_transport.TransportService.move_rack`，通过调用方 `AsyncSession` 同事务登记任务及可靠消息，支持 `Rack`、`Zone`、`RackPosition`。调用方保存并重用规范小写 UUIDv7 `client_request_id`；同号同输入返回原句柄，同号变更输入（含 caller 路由信息）抛 `IdempotencyConflict`。方法不提交外层事务；句柄只证明登记义务，不证明 WMS 接纳或物理完成。请求按最终 UTF-8 字节冻结，固定上限 256 KiB；迁移 `a019d20261022` 新增 `transport_task`，表非空时拒绝降级删除。装配及生产门槛见 [Transport 出站设计](docs/superpowers/specs/2026-10-21-transport-outbound-design.md)，没有自动注册真实目标。
 
 货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
@@ -147,7 +149,7 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；当前业务还读不到 WMS 的响应，需要同步决定的 operation 在确认时再定调用方式。
 
-ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前没有具体事件处理器，未注册类型仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event` 注册到 `app/integrations/<业务>/ecs_event.py` 或同名包，处理器只写当前事务；先部署全部处理器再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
+ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前没有具体事件处理器，未注册类型仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=role, data=Payload)` 按逻辑角色和事件名注册到 `app/integrations/<业务>/ecs_event.py` 或同名包，处理器只写当前事务；先部署全部处理器并完成工作线角色绑定，再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
 
 下述投递、恢复和未知结果重试规则描述默认 STATIC 路径；ECS SNAPSHOT 的 UNKNOWN/租约中断进入 HELD，不自动重放，见 [ECS 接入说明](docs/integrations/ecs-command.md)。
 
@@ -182,8 +184,8 @@ WMS 请求直接装饰 `RequestPayload` 模型。旧类式注册已移除，迁�
 
 #### 联调控制台(仅 `ENVIRONMENT=local`)
 
-登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看 ECS 事件、WMS 回调和 WMS 请求的
-实际注册名称、来源文件/符号、local-only、请求端点和 Payload Schema。local-only 在发现入口记录；
+登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看三类业务注册项及内置 ECS Status 能力的
+名称、条目类型、来源文件/符号、local-only、端点和合同 Schema。业务 local-only 在发现入口记录；
 清单存在不代表消息执行或物理完成。应用启动失败时按启动异常中的修复路标处理。
 
 Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
@@ -284,3 +286,5 @@ ECS 命令与结果闭环的显式装配、事务及启用门槛见 [ECS P1 接�
 普通开发者使用[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)完成业务接入或Swagger调试；需要回归时使用[现有pytest测试](docs/testing/ecs-command-verification.md)，不另建ECS隔离阶段。
 
 HTTP、Sender、维护与 Celery 的统一安全诊断、字段规则及降噪边界见 [安全日志诊断](docs/logging.md)。
+
+设备目录、工作线逻辑分组/角色绑定与按需状态查询（列表仅配置，详情/手动刷新共用POST刷新，无后台同步或状态落库）见[设备管理指南](docs/integrations/device-management.md)，管理入口要求管理员身份和独立资产权限。

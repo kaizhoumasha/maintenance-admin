@@ -4,6 +4,10 @@
 
 ## 1. 意图
 
+2026-10-27后续设计补充：正式业务事件改按`(device_role, event_type)`注册，从设备所属工作线的`device_bindings`解析逻辑角色，再校验该注册项Payload并执行处理器。完整合同见[设备、工作线设计§10.1–§10.6](2026-10-27-device-workline-status-design.md#101-已选定的逻辑角色分发)。该增量已实现，本地验证见[角色增量计划](../plans/2026-10-27-ecs-role-dispatch.md#完成与验证)；本文下述仅event_type注册和示例描述已交付基线，后续角色分发以新合同为准。原wire、事件摘要、先查重、持久收据、ACK及事务规则继续复用。
+
+本次工程评审接缝已补入新合同：解析契约由ECS侧声明，设备/工作线服务实现并在装配期注入，receiver不反向导入app.services；事件与命令复用同一绑定解析实现及“工作线→设备”的锁序。绑定解析在receipt查重之后、Payload校验之前；锁后归属变化/基础设施失败回滚503，稳定未绑定或未注册组合才持久ACK。配置变化停止旧命令后续发送，但不阻止原身份的迟到Result接收；这不改变事件摘要或引入未知事件自动重放。以上已在角色增量中实现并用本地Mock及独立测试库验证，不代表真实ECS联调。
+
 ECS 通过 `POST /api/v1/callback/event` 主动上报设备事件(例如 `SCAN_COMPLETED`)。先把这个入口的**机制**建好:校验、幂等、持久接收、ACK、按 `event_type` 分发。具体事件类型等对照设备合同附录逐个确认后再加,与 `wms_request`、`wms_callback`「先机制、后逐个确认」的做法一致。
 
 **ECS 的 wire 和 payload 一个字节都不改**:路径、字段、`{"code":200,"message":"ACK"}`、`400 INVALID_ENVELOPE` + `issues[]` 都按白皮书。

@@ -19,6 +19,7 @@ from app.integrations.ecs_callback.receiver import (
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.models import CallbackReceipt, CallbackSnapshot
+from tests.helpers import ecs_binding
 
 BASE = {"device_code": "D1", "event_type": "SCAN_COMPLETED", "timestamp": 1}
 
@@ -34,7 +35,7 @@ async def unexpected_handler(ctx, payload):
 
 async def receive(factory, raw: bytes):
     async with factory() as session, session.begin():
-        return await receive_ecs_event(session, raw)
+        return await receive_ecs_event(session, raw, resolve_binding=ecs_binding)
 
 
 async def receipt_count(factory) -> int:
@@ -91,7 +92,7 @@ async def test_registered_data_failure_is_400_with_data_path(callback_store):
     class Model(CallbackPayload):
         bin_code: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
+    ecs_event("SCAN_COMPLETED", data=Model, device_role="SCAN1")(unexpected_handler)
     resp = await receive(callback_store, json.dumps({**BASE, "data": {}}).encode())
     assert resp.status_code == 400
     assert resp.body["error_detail"]["issues"] == [
@@ -104,7 +105,7 @@ async def test_existing_receipt_short_circuits_before_data_validation(callback_s
     class Model(CallbackPayload):
         bin_code: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
+    ecs_event("SCAN_COMPLETED", data=Model, device_role="SCAN1")(unexpected_handler)
     envelope = EcsEventEnvelope.model_validate(BASE)
     identity = event_identity(envelope)
     async with callback_store() as session, session.begin():
@@ -149,7 +150,7 @@ async def test_replay_returns_same_ack_and_handler_runs_once(callback_store):
     async def handler(ctx, data):
         calls.append(data)
 
-    ecs_event("SCAN_COMPLETED")(handler)
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
     first = await receive(callback_store, EVENT)
     second = await receive(callback_store, EVENT)
     assert (first.body, first.outcome) == (ACK, "received")
@@ -164,7 +165,7 @@ async def test_replay_after_handler_validation_tightened_still_acks(callback_sto
     class Model(CallbackPayload):
         barcode: str
 
-    ecs_event("SCAN_COMPLETED", data=Model)(unexpected_handler)
+    ecs_event("SCAN_COMPLETED", data=Model, device_role="SCAN1")(unexpected_handler)
     resp = await receive(callback_store, raw)
     assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
 
@@ -184,11 +185,11 @@ async def test_handler_exception_rolls_back_receipt_and_business_write(callback_
         await ctx.session.flush()
         raise RuntimeError("boom")
 
-    ecs_event("SCAN_COMPLETED")(handler)
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
     async with callback_store() as session:
         with pytest.raises(RuntimeError, match="boom"):
             async with session.begin():
-                await receive_ecs_event(session, EVENT)
+                await receive_ecs_event(session, EVENT, resolve_binding=ecs_binding)
     assert await receipt_count(callback_store) == 0
     async with callback_store() as session:
         assert await session.scalar(select(func.count()).select_from(CallbackSnapshot)) == 0
@@ -251,7 +252,7 @@ async def test_ctx_note_is_persisted_and_alert_follows_commit(callback_store, ca
         if fail:
             raise RuntimeError("boom")
 
-    ecs_event("SCAN_COMPLETED")(handler)
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
     caplog.set_level(logging.WARNING)
 
     def alerts():
@@ -260,7 +261,7 @@ async def test_ctx_note_is_persisted_and_alert_follows_commit(callback_store, ca
     async with callback_store() as session:
         try:
             async with session.begin():
-                await receive_ecs_event(session, EVENT)
+                await receive_ecs_event(session, EVENT, resolve_binding=ecs_binding)
                 assert alerts() == []  # 提交前不输出
         except RuntimeError:
             assert fail
@@ -291,7 +292,7 @@ async def test_alert_renders_every_string_value_of_handler_notes(callback_store,
     async def handler(ctx, data):
         ctx.note("X", detail="Z" * 5000, n=1)
 
-    ecs_event("SCAN_COMPLETED")(handler)
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(handler)
     caplog.set_level(logging.WARNING)
     await receive(callback_store, EVENT)
     [alert] = [r for r in caplog.records if hasattr(r, "diagnostic")]

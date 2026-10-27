@@ -144,7 +144,9 @@ async def create_debug_command(
     return command, row.route["origin"]
 
 
-def configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient):
+def configure_local_ecs(
+    app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None
+):
     if environment != "local":
         if history_annexes or client_factory is not AsyncHttpClient:
             raise ValueError("ECS debug configuration requires ENVIRONMENT=local")
@@ -165,4 +167,6 @@ def configure_local_ecs(app, *, environment, history_annexes=None, client_factor
         ):
             raise ValueError("Invalid history_annexes; ecs.dev.protocol/1 is reserved")
     annexes[PROTOCOL_ANNEX] = PROTOCOL_MODELS
-    return configure_ecs(app, routes=DevEcsRoutes(), annexes=annexes, client_factory=client_factory)
+    return configure_ecs(
+        app, routes=routes or DevEcsRoutes(), annexes=annexes, client_factory=client_factory
+    )

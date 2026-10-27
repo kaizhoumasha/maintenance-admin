@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 from typing import Protocol
@@ -8,6 +9,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError, ErrorCode
 from app.http_client import HttpClientConfig
+from app.integrations.registration import RegistrationSource, registration_source
+
+
+@dataclass(frozen=True)
+class CommandBinding:
+    device_role: str
+    task_type: str
+    annex_id: str
+    annex_version: str
+    source: object
+    registration_source: RegistrationSource = field(init=False)
+
+    def __post_init__(self):
+        source = registration_source(self.source)
+        for name in (self.device_role, self.task_type):
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                raise ValueError(f"{source.location}: invalid ECS role/task {name!r}")
+        if any(
+            not isinstance(v, str) or not v.strip() for v in (self.annex_id, self.annex_version)
+        ):
+            raise ValueError(f"{source.location}: explicit annex identity/version required")
+        object.__setattr__(self, "registration_source", source)
 
 
 def normalize_origin(value: str) -> str:

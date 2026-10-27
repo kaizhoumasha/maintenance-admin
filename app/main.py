@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
 from app.controllers.dev import include_dev_routers
+from app.controllers.devices import router as devices_router
 from app.controllers.ecs_callback import include_ecs_callback
 from app.controllers.ecs_result import router as ecs_result_router
+from app.controllers.ecs_status import router as ecs_status_router
 from app.controllers.health import router as health_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
@@ -16,17 +18,21 @@ from app.controllers.permissions import router as permissions_router
 from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
 from app.controllers.wms_events import include_wms_events
+from app.controllers.worklines import router as worklines_router
 from app.core import error_responses, get_settings, register_exception_handlers, setup_logging
 from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
-from app.integrations.ecs_command.dev import configure_local_ecs
+from app.integrations.ecs_command.dev import DevEcsRoutes, configure_local_ecs
 from app.integrations.ecs_command.runtime import ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
+from app.services.device_bindings import resolve_binding
+from app.services.device_routes import DeviceCommandRoutes, DeviceRoutes
+from app.services.device_status_service import DeviceStatusService
 
 settings = get_settings()
 
@@ -39,7 +45,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             ecs_commands = configure_local_ecs(
                 application,
                 environment=settings.ENVIRONMENT,
+                routes=DeviceCommandRoutes(DeviceRoutes({}), DevEcsRoutes()),
             )
+        application.state.device_status = DeviceStatusService(session_factory, get_redis())
         async with reliable_lifespan(
             ecs_runtime_config(settings, ecs_commands),
             getattr(application.state, "reliable_adapters", {}),
@@ -90,8 +98,11 @@ app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(menus_router, prefix="/api/v1")
 app.include_router(health_router)
 app.include_router(ecs_result_router, prefix="/api/v1")
+app.include_router(ecs_status_router, prefix="/api/v1")
+app.include_router(devices_router, prefix="/api/v1")
+app.include_router(worklines_router, prefix="/api/v1")
 include_wms_events(app, environment=settings.ENVIRONMENT)
-include_ecs_callback(app, environment=settings.ENVIRONMENT)
+include_ecs_callback(app, environment=settings.ENVIRONMENT, resolve_binding=resolve_binding)
 include_dev_routers(app, environment=settings.ENVIRONMENT)
 
 _openapi = app.openapi

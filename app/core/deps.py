@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.core.database import SessionDep
 from app.core.errors import AppError, ErrorCode
 from app.core.security import decode_token
-from app.models import Permission, User, role_permission, user_role
+from app.models import Permission, Role, User, role_permission, user_role
 
 # 权限码三段式 <module>:<resource>:<action>,如 admin:user:create;小写字母/数字/下划线
 PERMISSION_CODE_PATTERN = r"^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$"
@@ -17,6 +17,17 @@ registered_codes: set[str] = set()
 
 # auto_error=False: 缺少凭证时由下面抛 AppError,保持统一的错误响应格式
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def user_is_admin(session, user_id: int) -> bool:
+    return bool(
+        await session.scalar(
+            select(Role.id)
+            .join(user_role, user_role.c.role_id == Role.id)
+            .where(user_role.c.user_id == user_id, Role.name == "admin")
+            .limit(1)
+        )
+    )
 
 
 async def get_current_user(
@@ -36,6 +47,14 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
     request.state.audit_user_id = user.id  # 供审计中间件读取
+    return user
+
+
+async def require_admin(
+    session: SessionDep, user: Annotated[User, Depends(get_current_user)]
+) -> User:
+    if not await user_is_admin(session, user.id):
+        raise AppError(ErrorCode.FORBIDDEN, "仅管理员可管理设备和工作线", detail="ADMIN_ONLY")
     return user
 
 

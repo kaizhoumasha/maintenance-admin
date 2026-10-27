@@ -7,6 +7,7 @@
 | `wms_callback` | 机制 | 接收 WMS 主动发来的回调,不认识任何业务 |
 | `wms_request` | 机制 | 向 WMS 的 decisions、facts 端点发请求,目前没有具体 operation |
 | `wms_transport` | 业务 | 搬运任务:提交给 WMS,并处理 WMS 回传的位置和结果 |
+| `ecs_status` | 内置能力 | 查询指定 ECS 的设备描述和状态，无登记/存储前提，不是业务注册表 |
 
 机制包不使用仓储业务词命名。`inbound` 是入库,`outbound` 是出库,不能拿来表示通信方向。
 每个子包的 `__init__.py` docstring 写了它的职责和开发方式,改动前先读那一份。
