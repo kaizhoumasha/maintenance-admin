@@ -43,7 +43,8 @@ DEFINITION = BusinessDefinition(
 ## 2. 严格合同 contracts.py / command_contracts.py
 
 先确定入口、业务经过身份、每条请求/结果的完整字段和错误/超时边界，再定义严格模型。
-ECS/WMS 入站模型复用 `CallbackPayload`，WMS 出站模型复用 `RequestPayload`；两者严格校验类型并拒绝多余字段。
+ECS/WMS 入站模型复用 `CallbackPayload`，严格校验类型、默认忽略多余字段；WMS 出站模型复用
+`RequestPayload`，严格校验类型并拒绝多余字段。具体业务须按已确认合同确定是否收紧入站字段规则。
 ECS 命令参数/结果/错误模型应同样严格；每个 `DeviceAnnex` 明确版本和超时范围。
 `command_contracts.py` 通过同一个 `SCAN.role_key` 构造 `CommandBinding`，不复制角色字符串或合同模型。
 `from app.integrations.ecs_command import CommandBinding, DeviceAnnex` 只加载声明元数据；
@@ -136,7 +137,7 @@ async def scanned(ctx, payload):
     await require_runtime(ctx).services[DEFINITION.code].accept_scan(ctx, payload)
 ```
 
-ECS 先 ACK 并保存诊断，不从 ACK 推断业务推进；WMS 回调处理器返回原 Accepted/Rejected/Conflict。
+ECS 在受理事务提交后 ACK，诊断与受理依据同事务保存，不从 ACK 推断业务推进；WMS 回调处理器返回原 Accepted/Rejected/Conflict。
 两种上下文都由控制器可信注入同一 BusinessRuntime。入口不自行创建运行时，不从请求选择服务对象。
 同名 ECS 事件可由不同角色使用各自严格 Payload。包式入口按事件小写名/operation 规范化名分文件；
 完整规则见[注册指南](registration.md)。

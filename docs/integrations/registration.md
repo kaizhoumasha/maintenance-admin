@@ -98,7 +98,8 @@ class Report(RequestPayload):
 
 业务调用仍用 `await wms_requests.send(session, "example.report@v1", data, operation_id=...)`，
 与业务记录共用调用方事务；调用方保存并复用 operation_id。平台冻结信封、可靠入队，不提交、不直接
-发网。同身份重入、TTL、重试及 ACK 分类不变；没有新增 WMS 响应消费接口。真实 operation 先确认合同。
+发网。同身份重入、TTL、重试及 ACK 分类不变；用 `WmsRequests.get_result` 按原身份读取可信终局响应，
+读模型、消费事务与保留边界见[出站结果契约](outbound-results.md)。真实 operation 先确认合同。
 
 ## 在一个地方检查全部注册项
 
