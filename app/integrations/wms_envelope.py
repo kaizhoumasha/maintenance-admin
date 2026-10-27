@@ -2,7 +2,7 @@
 
 from app.core.strict_json import json_object
 from app.http_client import DeliveryState, HttpResult
-from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
+from app.reliable import FailReason, OutgoingMessage, ProtocolAdapter, Verdict, VerdictKind
 
 INT64_MAX = 2**63 - 1
 UNKNOWN = Verdict(VerdictKind.UNKNOWN)
@@ -34,3 +34,77 @@ def read_ack(message: OutgoingMessage, result: HttpResult) -> dict | Verdict:
     ):
         return UNKNOWN
     return ack
+
+
+RESPONSE_COLUMNS = (
+    "id",
+    "target",
+    "operation",
+    "operation_id",
+    "request_raw",
+    "response_raw",
+    "status",
+    "fail_reason",
+    "last_http_status",
+    "last_verdict",
+    "last_failure_kind",
+    "delivery_uncertain",
+    "business_key",
+    "trace_id",
+    "created_at",
+    "expires_at",
+)
+
+
+def outgoing_message(row: dict) -> OutgoingMessage:
+    return OutgoingMessage(
+        row["target"],
+        row["operation"],
+        row["operation_id"],
+        row["request_raw"],
+        row["business_key"],
+        row["trace_id"],
+        row["created_at"],
+        row["expires_at"],
+    )
+
+
+# Pure projection of a stored terminal response; never reads retry/last response bytes.
+def stored_response(message: OutgoingMessage, row: dict, adapter: ProtocolAdapter | None) -> dict:
+    fields = dict(
+        response_state="NONE",
+        http_status=None,
+        response_code=None,
+        response_timestamp=None,
+        response_data=None,
+    )
+    if row["status"] not in {"DONE", "FAILED"}:
+        return fields
+    if row["status"] == "FAILED" and row["fail_reason"] == "LOCAL_ERROR":
+        return fields
+    raw = row["response_raw"]
+    if raw is None or adapter is None:
+        return {**fields, "response_state": "UNAVAILABLE"}
+    result = HttpResult(
+        DeliveryState.HTTP_RESPONSE_COMPLETE, None, row["last_http_status"], (), raw
+    )
+    try:
+        verdict = adapter.classify_response(message, result)
+    except ValueError:
+        return {**fields, "response_state": "INVALID"}
+    expected = VerdictKind.DELIVERED if row["status"] == "DONE" else VerdictKind.PEER_TERMINAL
+    if (
+        verdict.kind != expected
+        or row["last_failure_kind"] is not None
+        or row["last_verdict"] != expected
+        or (expected == VerdictKind.PEER_TERMINAL and verdict.reason != row["fail_reason"])
+    ):
+        return {**fields, "response_state": "INVALID"}
+    ack = json_object(raw)
+    return dict(
+        response_state="VALID",
+        http_status=result.status_code,
+        response_code=ack["code"] if ack else None,
+        response_timestamp=ack["timestamp"] if ack else None,
+        response_data=ack["data"] if ack else None,
+    )

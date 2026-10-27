@@ -7,7 +7,6 @@
 import pkgutil
 
 from app import integrations
-from app.integrations.registration import DEV_MODULES, import_registration_module
 
 
 def candidate_modules(environment: str) -> list[str]:
@@ -21,5 +20,7 @@ def candidate_modules(environment: str) -> list[str]:
 
 
 def load_operation_modules(environment: str) -> None:
-    for name in candidate_modules(environment):
-        import_registration_module(name, local_only=name.rsplit(".", 1)[-1] in DEV_MODULES)
+    from app.integrations.discovery import load_formal_modules, load_local_modules
+
+    load_formal_modules()
+    load_local_modules(environment=environment, kind="callback")

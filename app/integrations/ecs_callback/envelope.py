@@ -24,7 +24,6 @@ class EcsEventEnvelope(BaseModel):
     device_code: Annotated[str, Field(min_length=1)]
     event_type: Annotated[str, Field(min_length=1)]
     timestamp: Annotated[int, Field(ge=0, le=2**63 - 1)]
-    is_debug: bool = False
     data: dict = {}
 
 

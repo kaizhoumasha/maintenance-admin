@@ -1,6 +1,6 @@
 # Transport 接入参考
 
-Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-command.md)处理快照路由和结果，两者不混用。正式能力、适配器和回调已实现；业务结果消费接口仍按第一个消费方定形态，见 [TODO](../../TODOS.md)。技术接纳不代表业务/物理完成。
+Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-command.md)处理快照路由和结果，两者不混用。正式能力、适配器和回调已实现；原身份结果读取与明确前序查询见[出站结果契约](outbound-results.md)。技术接纳不代表业务/物理完成。
 
 ## 请求与身份
 

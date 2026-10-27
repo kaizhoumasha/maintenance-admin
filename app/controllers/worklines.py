@@ -2,6 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends, Query, Request
 
+from app.businesses import catalog
 from app.controllers.asset_dependencies import actor
 from app.core import SessionDep, error_responses, require_permission
 from app.core.deps import require_admin
@@ -33,7 +34,9 @@ async def list_worklines(session: SessionDep, params: Annotated[UserListParams, 
     dependencies=[Depends(require_permission("asset:workline:create"))],
 )
 async def create_workline(request: Request, data: WorkLineCreate, session: SessionDep):
-    result = await service.create_workline(session, data, actor=actor(request))
+    result = await service.create_workline(
+        session, data, actor=actor(request), definition_lookup=catalog.get_definition
+    )
     request.state.audit_recorded = True
     return result
 
@@ -57,7 +60,9 @@ async def get_workline(workline_id: DatabaseId, session: SessionDep):
 async def update_workline(
     request: Request, workline_id: DatabaseId, data: WorkLineUpdate, session: SessionDep
 ):
-    result = await service.update_workline(session, workline_id, data, actor=actor(request))
+    result = await service.update_workline(
+        session, workline_id, data, actor=actor(request), definition_lookup=catalog.get_definition
+    )
     request.state.audit_recorded = True
     return result
 

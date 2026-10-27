@@ -12,6 +12,8 @@ from pydantic import (
 
 from app.schemas.base import DatabaseId
 
+BusinessCode = Annotated[str, StringConstraints(strict=True, pattern=r"^[a-z][a-z0-9_]{0,99}$")]
+
 BindingName = Annotated[
     str, StringConstraints(strict=True, strip_whitespace=False, pattern=r"^[A-Z][A-Z0-9_]{0,99}$")
 ]
@@ -42,16 +44,19 @@ class WorkLineEditable(BaseModel):
 
 
 class WorkLineCreate(WorkLineEditable):
+    business_code: BusinessCode
     line_code: str = Field(min_length=1, max_length=50)
 
 
 class WorkLineUpdate(WorkLineEditable):
+    business_code: BusinessCode | None = None
     version: Annotated[int, Field(strict=True, ge=1)]
 
 
 class WorkLineRead(WorkLineCreate):
     model_config = ConfigDict(from_attributes=True)
 
+    business_code: BusinessCode | None
     id: DatabaseId
     version: int
     created_at: datetime

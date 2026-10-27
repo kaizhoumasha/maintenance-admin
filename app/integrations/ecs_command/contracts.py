@@ -1,9 +1,34 @@
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.integrations.registration import RegistrationSource, registration_source
+
+
+@dataclass(frozen=True)
+class CommandBinding:
+    device_role: str
+    task_type: str
+    annex_id: str
+    annex_version: str
+    source: object
+    registration_source: RegistrationSource = field(init=False)
+
+    def __post_init__(self):
+        source = registration_source(self.source)
+        for name in (self.device_role, self.task_type):
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                raise ValueError(f"{source.location}: invalid ECS role/task {name!r}")
+        if any(
+            not isinstance(v, str) or not v.strip() for v in (self.annex_id, self.annex_version)
+        ):
+            raise ValueError(f"{source.location}: explicit annex identity/version required")
+        object.__setattr__(self, "registration_source", source)
+
 
 PROTOCOL_RETRY_WINDOW = timedelta(seconds=300)
 
@@ -70,6 +95,30 @@ class DeviceAnnex:
             or not (0 <= self.timeout_min_ms <= self.timeout_max_ms <= 2**63 - 1)
         ):
             raise ValueError("annex requires a confirmed timeout range")
+
+
+def merge_annexes(existing, declared, *, source):
+    """Merge original contracts without changing the meaning of a persisted annex key."""
+    result = dict(existing)
+    for key, annex in declared.items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or any(not isinstance(v, str) or not v.strip() or "\x00" in v for v in key)
+            or not isinstance(annex, DeviceAnnex)
+        ):
+            raise ValueError(f"{source}: invalid DeviceAnnex {key!r}")
+        previous = result.get(key)
+        if previous is not None and (
+            previous.params_model is not annex.params_model
+            or previous.result_model is not annex.result_model
+            or previous.error_model is not annex.error_model
+            or previous.timeout_min_ms != annex.timeout_min_ms
+            or previous.timeout_max_ms != annex.timeout_max_ms
+        ):
+            raise ValueError(f"{source}: conflicting annex {key!r}")
+        result[key] = annex
+    return result
 
 
 class PauseReason(StrEnum):

@@ -18,6 +18,7 @@ from sqlalchemy import delete, exists, func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app.businesses.catalog import load_business_models  # noqa: E402
 from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.core.identifiers import uuid7
@@ -44,6 +45,8 @@ from app.models import (  # noqa: E402
 )
 from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E402
 from scripts.seed_admin import seed_admin  # noqa: E402
+
+load_business_models()
 
 
 @pytest.fixture(scope="session")
@@ -372,3 +375,20 @@ async def asset_pg(pg_sessions):
             )
             await session.execute(delete(WorkLine).where(WorkLine.line_code.like(prefix + "%")))
             await session.execute(delete(AuditLog).where(AuditLog.trace_id == prefix))
+
+
+@pytest.fixture
+def workline_business_catalog(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.businesses import catalog
+    from tests.helpers import workline_business_definition
+
+    monkeypatch.setattr(
+        catalog,
+        "entries",
+        lambda: tuple(
+            SimpleNamespace(DEFINITION=workline_business_definition(code))
+            for code in ("test_sorting", "other_sorting")
+        ),
+    )

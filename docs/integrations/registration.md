@@ -98,7 +98,8 @@ class Report(RequestPayload):
 
 业务调用仍用 `await wms_requests.send(session, "example.report@v1", data, operation_id=...)`，
 与业务记录共用调用方事务；调用方保存并复用 operation_id。平台冻结信封、可靠入队，不提交、不直接
-发网。同身份重入、TTL、重试及 ACK 分类不变；没有新增 WMS 响应消费接口。真实 operation 先确认合同。
+发网。同身份重入、TTL、重试及 ACK 分类不变；用 `WmsRequests.get_result` 按原身份读取可信终局响应，
+读模型、消费事务与保留边界见[出站结果契约](outbound-results.md)。真实 operation 先确认合同。
 
 ## 在一个地方检查全部注册项
 
@@ -125,8 +126,8 @@ class Report(RequestPayload):
    不会再次运行函数。修复处理器不会改写已持久化的历史结果。
 
 清单无法在应用启动失败时提供 HTTP 服务，导入期错误必须靠启动日志自救。它不扫描未加载的源码，
-也不执行未知事件回放。WMS 请求模块沿用惰性发现：第一次读取请求注册表时才导入；因此相关错误
-在实际触发发现时暴露，不保证所有部署都会在启动阶段发现它们。
+也不执行未知事件回放。完整应用启动统一加载三类正式入口并交叉校验业务合同，然后才加载 local
+入口和装配运行时；独立请求注册表读取仍可触发正式发现，发现作用域退出或异常后都会还原。
 
 ## 从旧类式声明迁移
 
@@ -139,3 +140,15 @@ title、ttl 写在装饰器上。ECS 事件还须补充业务角色常量与显�
 例子只用于解释当时的设计，当前接入以本指南为准。
 
 设备管理完整应用通过app.state.integration_capabilities装配内置ECS Status能力，条目为kind=ecs_status、entry_type=builtin_capability，包含method/path/query_schema/response_schema及代码来源；运行时结果来源见[通用Status](ecs-status.md)。目录本身不导入Status，也不访问ECS；不装配该能力的独立角色应用可返回空目录，原三类业务注册身份不变。
+
+
+## 工作线业务包入口
+
+新增领域业务使用 `app/businesses/<业务>/`，固定 `ENTRY_MODULES` 由显式 composition/catalog 提供；
+原 `app/integrations/<业务>/` 入口仍支持。两者复用同一三类注册表、文件名/来源保护及唯一 Sender，
+不另建插件注册器。业务 definition 保持纯声明，服务和模型留在子包；入口通过控制器注入的
+`BusinessRuntime` 调用具体服务。全部正式合同在任何 local/资源/factory 装配前交叉校验。
+模型通过 composition 的 `MODEL_MODULES` 统一加载，不在应用启动建表。
+
+最小接入、独立推进事务和两线验收见[业务包开发指南](business-packages.md)。正式业务清单当前为空，
+测试接缝不代表完整真实业务交付；未确认协议不登记可发送 operation 或空占位业务。

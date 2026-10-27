@@ -9,9 +9,11 @@ async def test_asset_management_requires_login(client, path):
     assert (await client.get("/api/v1" + path)).status_code == 401
 
 
-async def test_admin_can_manage_empty_workline(client, admin):
+async def test_admin_can_manage_empty_workline(client, admin, workline_business_catalog):
     created = await client.post(
-        "/api/v1/work-lines", headers=admin, json={"line_code": "L1", "line_name": "分拣线"}
+        "/api/v1/work-lines",
+        headers=admin,
+        json={"line_code": "L1", "line_name": "分拣线", "business_code": "test_sorting"},
     )
     assert created.status_code == 201, created.text
     row = created.json()

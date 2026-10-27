@@ -8,6 +8,7 @@ from app.schemas.device import DeviceAssignmentsIn
 from app.schemas.workline import WorkLineCreate
 from app.services import device_service, workline_service
 from app.services.asset_audit import AssetActor
+from tests.helpers import workline_definition_lookup
 
 ACTOR = AssetActor(1, "asset-test", None, None)
 
@@ -32,7 +33,14 @@ async def test_delete_configuration_preserves_route_and_transaction_audit(db):
 
 async def test_assignments_are_atomic_and_nonempty_workline_cannot_be_deleted(db):
     line = await workline_service.create_workline(
-        db, WorkLineCreate(line_code="L1", line_name="一线"), actor=ACTOR
+        db,
+        WorkLineCreate(
+            line_code="L1",
+            line_name="一线",
+            business_code="test_sorting",
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
     )
     route = DeviceRoute(id=str(uuid7()), device_code="D1", ecs_origin="http://127.0.0.1")
     db.add(route)

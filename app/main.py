@@ -4,9 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.businesses import catalog
+from app.businesses.runtime import BusinessRuntime, build_runtime
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
-from app.controllers.dev import include_dev_routers
+from app.controllers.businesses import router as businesses_router
 from app.controllers.devices import router as devices_router
 from app.controllers.ecs_callback import include_ecs_callback
 from app.controllers.ecs_result import router as ecs_result_router
@@ -25,8 +27,8 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
-from app.integrations.ecs_command.dev import configure_local_ecs
-from app.integrations.ecs_command.runtime import ecs_runtime_config
+from app.integrations.discovery import load_formal_modules, load_local_modules
+from app.integrations.ecs_command.runtime import configure_ecs, ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
@@ -40,14 +42,23 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    owns_business_runtime = False
     try:
         ecs_commands = getattr(application.state, "ecs_commands", None)
         if ecs_commands is None:
-            ecs_commands = configure_local_ecs(
-                application,
-                environment=settings.ENVIRONMENT,
-                routes=DeviceRoutes() if settings.ENVIRONMENT == "local" else None,
-            )
+            if settings.ENVIRONMENT == "local":
+                ecs_commands = configure_local_ecs(
+                    application,
+                    environment=settings.ENVIRONMENT,
+                    routes=DeviceRoutes(command_bindings, annexes=command_annexes),
+                    annexes=command_annexes,
+                )
+            elif command_bindings or command_annexes:
+                ecs_commands = configure_ecs(
+                    application,
+                    routes=DeviceRoutes(command_bindings, annexes=command_annexes),
+                    annexes=command_annexes,
+                )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
         async with reliable_lifespan(
             ecs_runtime_config(settings, ecs_commands),
@@ -58,8 +69,23 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             application.state.outbox = outbox
             if ecs_commands is not None:
                 ecs_commands.outbox = outbox
+            runtime = getattr(application.state, "business_runtime", None)
+            if runtime is None:
+                runtime = build_runtime(outbox=outbox, ecs_commands=ecs_commands)
+                owns_business_runtime = True
+            expected = {definition.code: definition for definition in catalog.definitions()}
+            if (
+                not isinstance(runtime, BusinessRuntime)
+                or runtime.definitions != expected
+                or runtime.services.keys() != expected.keys()
+                or any(service is None for service in runtime.services.values())
+            ):
+                raise ValueError("Business runtime must contain complete definitions and services")
+            application.state.business_runtime = runtime
             yield
     finally:
+        if owns_business_runtime:
+            application.state.business_runtime = None
         application.state.outbox = None
         await engine.dispose()
         await get_redis().aclose()
@@ -103,6 +129,13 @@ app.include_router(ecs_result_router, prefix="/api/v1")
 app.include_router(ecs_status_router, prefix="/api/v1")
 app.include_router(devices_router, prefix="/api/v1")
 app.include_router(worklines_router, prefix="/api/v1")
+app.include_router(businesses_router, prefix="/api/v1")
+load_formal_modules()
+command_bindings, command_annexes = catalog.validate_business_contracts()
+load_local_modules(environment=settings.ENVIRONMENT)
+from app.controllers.dev import include_dev_routers  # noqa: E402
+from app.integrations.ecs_command.dev import configure_local_ecs  # noqa: E402
+
 include_wms_events(app, environment=settings.ENVIRONMENT)
 include_ecs_callback(app, environment=settings.ENVIRONMENT, resolve_binding=resolve_binding)
 include_dev_routers(app, environment=settings.ENVIRONMENT)

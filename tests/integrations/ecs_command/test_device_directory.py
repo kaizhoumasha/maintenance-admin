@@ -4,7 +4,7 @@ from app.models import Device, DeviceRoute, EcsCommand, WorkLine
 from app.services.asset_audit import AssetActor
 from app.services.device_routes import DeviceRoutes
 from app.services.device_service import delete_device
-from tests.helpers import TrialPayload, add_bound_device
+from tests.helpers import TrialPayload, add_bound_device, workline_definition_lookup
 
 
 async def test_role_switch_selects_new_contract_and_preserves_original_result_contract(ecs):
@@ -69,6 +69,7 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
                     device_bindings={"SCAN4": code},
                 ),
                 actor=AssetActor(1, "role-contract", None, None),
+                definition_lookup=workline_definition_lookup,
             )
         async with ecs.factory.begin() as session:
             with pytest.raises(ValueError):

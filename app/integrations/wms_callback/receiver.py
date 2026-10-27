@@ -95,10 +95,14 @@ async def _handle(
     operation_id: str,
     timestamp: int,
     parsed: dict,
+    *,
+    runtime: object | None = None,
 ) -> CallbackResponse:
     """保存点内执行处理器:Rejected 显式回滚其写入;先构造并校验响应,再写回收据(同一事务)。"""
     async with session.begin_nested() as savepoint:
-        context = CallbackContext(session, receipt_id, operation_id, timestamp, parsed)
+        context = CallbackContext(
+            session, receipt_id, operation_id, timestamp, parsed, runtime=runtime
+        )
         try:
             outcome = await handler.handle(context)
         except OUTCOMES as signal:  # 处理器 raise 的结果与 return 等价
@@ -134,7 +138,9 @@ async def _handle(
     return response
 
 
-async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
+async def receive(
+    session: AsyncSession, raw: bytes, *, runtime: object | None = None
+) -> CallbackResponse:
     if len(raw) > MAX_BODY_BYTES:
         return CallbackResponse(413, None, "too_large")
     payload = json_object(raw)
@@ -199,7 +205,14 @@ async def receive(session: AsyncSession, raw: bytes) -> CallbackResponse:
         if reason:
             return reply
         return await _handle(
-            session, handler, receipt_id, operation, operation_id, timestamp, parsed
+            session,
+            handler,
+            receipt_id,
+            operation,
+            operation_id,
+            timestamp,
+            parsed,
+            runtime=runtime,
         )
     existing = await find_receipt(session, operation, operation_id)
     if existing is None:

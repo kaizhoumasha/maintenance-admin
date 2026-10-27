@@ -12,6 +12,7 @@ from app.reliable.config import parse_reliable_config, target_config_hint, targe
 
 from .adapter import ADAPTERS, PROTOCOL_OF
 from .operation import InvalidRequestPayload, UnknownOperation, lookup
+from .results import WmsRequestResult, get_result
 
 
 class WmsRequests:
@@ -45,6 +46,13 @@ class WmsRequests:
                 + target_config_hint(self.outbox.targets, protocol)
             )
         return names[0]
+
+    async def get_result(
+        self, session: AsyncSession, *, message_id: int, operation: str, operation_id: str
+    ) -> WmsRequestResult:
+        return await get_result(
+            session, message_id=message_id, operation=operation, operation_id=operation_id
+        )
 
     async def send(
         self,

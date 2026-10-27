@@ -12,7 +12,6 @@ VALID = {"device_code": "D1", "event_type": "T", "timestamp": 1}
 
 def test_minimal_body_applies_defaults_and_ignores_extras():
     env = EcsEventEnvelope.model_validate({**VALID, "extra": 1})
-    assert env.is_debug is False
     assert env.data == {}
     assert not hasattr(env, "extra")
 
@@ -27,15 +26,6 @@ def test_minimal_body_applies_defaults_and_ignores_extras():
         ),
         ({"timestamp": -1}, [{"field": "timestamp", "code": "INVALID_VALUE"}]),
         ({"timestamp": 2**63}, [{"field": "timestamp", "code": "INVALID_VALUE"}]),
-        (
-            {"is_debug": "true"},
-            [{"field": "is_debug", "code": "INVALID_TYPE", "expected": "boolean"}],
-        ),
-        ({"is_debug": 1}, [{"field": "is_debug", "code": "INVALID_TYPE", "expected": "boolean"}]),
-        (
-            {"is_debug": None},
-            [{"field": "is_debug", "code": "INVALID_TYPE", "expected": "boolean"}],
-        ),
         ({"data": None}, [{"field": "data", "code": "INVALID_TYPE", "expected": "object"}]),
         ({"device_code": ""}, [{"field": "device_code", "code": "INVALID_VALUE"}]),
     ],

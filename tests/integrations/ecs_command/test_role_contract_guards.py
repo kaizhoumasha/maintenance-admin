@@ -174,7 +174,6 @@ async def test_injected_event_resolver_failure_returns_503_then_retries_original
     callback_store, monkeypatch
 ):
     monkeypatch.setattr(registry, "_registry", {})
-    monkeypatch.setattr("app.controllers.ecs_callback.load_event_modules", lambda environment: None)
     handled = []
 
     @registry.ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=TrialEvent)
@@ -216,7 +215,6 @@ async def test_local_event_example_does_not_replace_the_injected_formal_binding(
     from app.integrations.ecs_callback.dev_ecs_event import ExampleScan, example_scan
 
     monkeypatch.setattr(registry, "_registry", {})
-    monkeypatch.setattr("app.controllers.ecs_callback.load_event_modules", lambda environment: None)
     registry.ecs_event("EXAMPLE_SCAN", device_role="EXAMPLE_SCAN", data=ExampleScan)(example_scan)
     handled = []
 

@@ -13,7 +13,7 @@ from tests.helpers import ecs_status_document, loopback_app, simulator_client_fa
 
 
 async def test_preview_register_migrate_delete_reregister_with_two_local_ecs(
-    client, admin, real_redis, monkeypatch
+    client, admin, real_redis, monkeypatch, workline_business_catalog
 ):
     mock = FastAPI()
     calls = []
@@ -81,7 +81,7 @@ async def test_preview_register_migrate_delete_reregister_with_two_local_ecs(
                 await client.post(
                     "/api/v1/work-lines",
                     headers=admin,
-                    json={"line_code": "L1", "line_name": "线1"},
+                    json={"line_code": "L1", "line_name": "线1", "business_code": "test_sorting"},
                 )
             ).json()
             assigned = await client.post(
