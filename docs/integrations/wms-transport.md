@@ -30,6 +30,8 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 
 当前可靠层的示例映射是 `(target="wms-transport", operation="transport.task.submit@v1", operation_id=原 submit operation_id)`。它展示公开入队接口，不能沿用 DeviceCommand 的设备联合键。
 
+货架号、料箱号、槽位号和位置编码在请求与回调中均保留完整的非空 UTF-8 字符串，不截断或限制为 256 字符；仍拒绝 NUL，并受单次正文 256 KiB 上限约束。面值保持 1–10 个 Unicode code point，回调的任务身份仍有独立长度限制。
+
 ## 配置与正式适配器
 
 目标在 RELIABLE_TARGETS 中使用 protocol=wms-transport，目标名仅为标签；须匹配 `[a-z0-9][a-z0-9_.-]{0,63}`。base_url 不带尾部 `/`，提交路径保持大小写。适配器已经随 app 创建注册，不需要重复登记；默认空目标不发网，客户端在启动时装配，不在运行中修改注册表。
