@@ -11,6 +11,7 @@ from app.http_client import DeliveryState, HttpClientConfig, HttpResult
 from app.models import ReliableMessage
 from app.reliable import MessageDraft
 from app.reliable.types import DeliverySnapshot, DuplicateMessage
+from tests.helpers import EcsMove
 
 
 async def test_snapshot_is_part_of_identity_and_hold_is_not_resumable(ecs):
@@ -20,9 +21,8 @@ async def test_snapshot_is_part_of_identity_and_hold_is_not_resumable(ecs):
             owner=ecs.owner,
             call_key="call",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
     async with ecs.factory.begin() as session:
         row = await session.scalar(select(ReliableMessage))
@@ -64,9 +64,8 @@ async def delivery(ecs):
             owner=ecs.owner,
             call_key="call",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
     (claim,) = await store.claim(1, ecs.targets)

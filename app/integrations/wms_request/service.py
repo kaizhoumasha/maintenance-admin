@@ -13,10 +13,8 @@ from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
 from .adapter import ADAPTERS, PROTOCOL_OF
-from .operation import InvalidRequestPayload, UnknownOperation, lookup, operations
+from .operation import InvalidRequestPayload, UnknownOperation, operations
 from .results import WmsRequestResult, get_result
-
-_MISSING = object()
 
 
 class WmsRequests:
@@ -61,39 +59,26 @@ class WmsRequests:
     async def send(
         self,
         session: AsyncSession,
-        operation: str | BaseModel = _MISSING,
-        data: dict = _MISSING,
+        payload: BaseModel,
         *,
         operation_id: str,
     ) -> EnqueueResult:
-        model = operation if isinstance(operation, BaseModel) else None
-        if model is not None:
-            if data is not _MISSING:
-                raise TypeError("model send cannot include data")
-            matches = [item for item in operations().values() if item.data_model is type(model)]
-            if len(matches) > 1:
-                raise InvalidRequestPayload("payload model has multiple registered operations")
-            registered = matches[0] if matches else None
-            operation = registered.name if registered else type(model).__name__
-        elif isinstance(operation, str) and data is not _MISSING:
-            registered = lookup(operation)
-        else:
-            raise TypeError("send requires either operation and data or one payload model")
-        if registered is None:
-            raise UnknownOperation(f"operation {operation!r} is not registered")
+        matches = [item for item in operations().values() if item.data_model is type(payload)]
+        if len(matches) > 1:
+            raise InvalidRequestPayload("payload model has multiple registered operations")
+        if not matches:
+            raise UnknownOperation(f"payload model {type(payload).__name__!r} is not registered")
+        registered = matches[0]
+        operation = registered.name
         try:
             validate_uuid7(operation_id)
-            payload = (
-                validated_model_payload(model)
-                if model is not None
-                else registered.data_model.model_validate(data).model_dump(mode="json")
-            )
+            data = validated_model_payload(payload)
             raw = json.dumps(
                 {
                     "operation_id": operation_id,
                     "operation": operation,
                     "timestamp": unix_ms(self.clock()),
-                    "data": payload,
+                    "data": data,
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),

@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 
 import pytest
+from pydantic import Field, field_serializer
 from sqlalchemy import select
 
 from app.core.errors import AppError, ErrorCode
@@ -37,11 +38,31 @@ async def test_json_input_with_non_json_native_field_types_is_accepted(sessions,
     assert json.loads(row.request_raw)["data"] == {"at": "2026-01-01T00:00:00Z"}
 
 
+async def test_json_input_keeps_registered_aliases_defaults_and_serializers(sessions, clock):
+    @registry.request_operation("example.fact.aliased@v1", Endpoint.FACTS)
+    class Aliased(RequestPayload):
+        first: int = Field(alias="second")
+        second: int = Field(alias="first")
+        qty: int = 2
+
+        @field_serializer("qty")
+        def serialize_qty(self, value):
+            return f"Q{value}"
+
+    async with sessions() as session:
+        out = await dev_wms_request_service.send(
+            session, "example.fact.aliased@v1", str(uuid7(clock())), {"first": 11, "second": 22}
+        )
+        row = await session.get(ReliableMessage, out.message_id)
+    assert json.loads(row.request_raw)["data"] == {"first": 22, "second": 11, "qty": "Q2"}
+
+
 @pytest.mark.parametrize("data", [{"at": "not a date"}, {"at": "2026-01-01T00:00:00Z", "x": 1}])
 async def test_json_input_that_breaks_the_payload_is_a_400(sessions, clock, dated, data):
     async with sessions() as session:
         with pytest.raises(AppError) as error:
             await dev_wms_request_service.send(session, dated, str(uuid7(clock())), data)
+        assert await session.scalar(select(ReliableMessage)) is None
     assert error.value.code == ErrorCode.INVALID_REQUEST
 
 

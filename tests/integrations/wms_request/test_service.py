@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.core.identifiers import uuid7
 from app.integrations.wms_request import InvalidRequestPayload, UnknownOperation
+from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 from app.reliable import DuplicateMessage, MessageStatus
 
@@ -45,8 +46,8 @@ async def test_operation_is_routed_to_its_endpoint_target_in_the_callers_transac
 ):
     fact_id, decision_id = str(uuid7(clock())), str(uuid7(clock()))
     async with sessions() as session, session.begin():
-        reference = await wms.send(session, FACT, DATA, operation_id=fact_id)
-        await wms.send(session, DECISION, DATA, operation_id=decision_id)
+        reference = await wms.send(session, lookup(FACT).data_model(**DATA), operation_id=fact_id)
+        await wms.send(session, lookup(DECISION).data_model(**DATA), operation_id=decision_id)
     assert reference.status == MessageStatus.PENDING
     fact, decision = await rows(sessions)
     assert (fact.target, decision.target) == ("wms-facts", "wms-decisions")
@@ -59,14 +60,20 @@ async def test_operation_is_routed_to_its_endpoint_target_in_the_callers_transac
 async def test_rollback_leaves_no_message(sessions, wms, clock):
     with pytest.raises(RuntimeError):
         async with sessions() as session, session.begin():
-            await wms.send(session, FACT, DATA, operation_id=str(uuid7(clock())))
+            await wms.send(
+                session, lookup(FACT).data_model(**DATA), operation_id=str(uuid7(clock()))
+            )
             raise RuntimeError("business rejected")
     assert await rows(sessions) == []
 
 
 async def test_operation_declared_ttl_sets_expiry(sessions, wms, clock):
     async with sessions() as session, session.begin():
-        await wms.send(session, "example.fact.timed@v1", DATA, operation_id=str(uuid7(clock())))
+        await wms.send(
+            session,
+            lookup("example.fact.timed@v1").data_model(**DATA),
+            operation_id=str(uuid7(clock())),
+        )
     (row,) = await rows(sessions)
     assert row.expires_at is not None
 
@@ -74,9 +81,7 @@ async def test_operation_declared_ttl_sets_expiry(sessions, wms, clock):
 @pytest.mark.parametrize(
     "operation,data,operation_id,error",
     [
-        ("example.missing.op@v1", DATA, None, UnknownOperation),
         (FACT, {"task_id": "T-1"}, None, InvalidRequestPayload),  # 缺字段
-        (FACT, {**DATA, "extra": 1}, None, InvalidRequestPayload),  # 多余字段
         (FACT, {"task_id": "T-1", "qty": "2"}, None, InvalidRequestPayload),  # 类型不严格
         (FACT, {"task_id": "\ud800", "qty": 1}, None, InvalidRequestPayload),  # 非法 UTF-8
         (FACT, DATA, "not-a-uuid", InvalidRequestPayload),
@@ -88,7 +93,11 @@ async def test_invalid_requests_never_reach_the_outbox(
     operation_id = operation_id or str(uuid7(clock()))
     with pytest.raises(error):
         async with sessions() as session, session.begin():
-            await wms.send(session, operation, data, operation_id=operation_id)
+            await wms.send(
+                session,
+                lookup(operation).data_model.model_construct(**data),
+                operation_id=operation_id,
+            )
     assert await rows(sessions) == []
 
 
@@ -96,10 +105,10 @@ async def test_reentry_with_the_same_payload_returns_the_original_reference(sess
     """调用方重入时时间戳已变,但 Payload 相同,应当得到原消息而不是冲突。"""
     operation_id = str(uuid7(clock()))
     async with sessions() as session, session.begin():
-        first = await wms.send(session, FACT, DATA, operation_id=operation_id)
+        first = await wms.send(session, lookup(FACT).data_model(**DATA), operation_id=operation_id)
     clock.advance(30)
     async with sessions() as session, session.begin():
-        again = await wms.send(session, FACT, DATA, operation_id=operation_id)
+        again = await wms.send(session, lookup(FACT).data_model(**DATA), operation_id=operation_id)
     assert again.message_id == first.message_id
     (row,) = await rows(sessions)
     assert json.loads(row.request_raw)["data"] == DATA
@@ -108,24 +117,25 @@ async def test_reentry_with_the_same_payload_returns_the_original_reference(sess
 async def test_same_identity_with_changed_content_is_a_duplicate_message(sessions, wms, clock):
     operation_id = str(uuid7(clock()))
     async with sessions() as session, session.begin():
-        await wms.send(session, FACT, DATA, operation_id=operation_id)
+        await wms.send(session, lookup(FACT).data_model(**DATA), operation_id=operation_id)
     clock.advance(30)
     with pytest.raises(DuplicateMessage):
         async with sessions() as session, session.begin():
-            await wms.send(session, FACT, {**DATA, "qty": 3}, operation_id=operation_id)
+            await wms.send(
+                session, lookup(FACT).data_model(**{**DATA, "qty": 3}), operation_id=operation_id
+            )
 
 
 async def test_missing_endpoint_target_is_reported(sessions, wms, clock):
     wms.outbox.targets.pop("wms-facts")
     with pytest.raises(RuntimeError, match="wms-facts"):
         async with sessions() as session, session.begin():
-            await wms.send(session, FACT, DATA, operation_id=str(uuid7(clock())))
+            await wms.send(
+                session, lookup(FACT).data_model(**DATA), operation_id=str(uuid7(clock()))
+            )
 
 
-@pytest.mark.parametrize("keyword_first", [False, True])
-async def test_legacy_send_forms_preserve_canonical_payload_and_reference(
-    sessions, wms, clock, keyword_first
-):
+async def test_model_send_preserves_canonical_payload_and_reference(sessions, wms, clock):
     from datetime import timedelta
 
     from pydantic import Field
@@ -144,12 +154,9 @@ async def test_legacy_send_forms_preserve_canonical_payload_and_reference(
     data = {"taskId": "T-1", "note": None, "nested": {"items": [1, "中文", None]}}
     expected = {"task_id": "T-1", "qty": 2, "note": None, "nested": data["nested"]}
     async with sessions.begin() as session:
-        if keyword_first:
-            first = await wms.send(
-                session=session, operation=operation, data=data, operation_id=operation_id
-            )
-        else:
-            first = await wms.send(session, operation, data, operation_id=operation_id)
+        first = await wms.send(
+            session, CanonicalReport.model_validate(data), operation_id=operation_id
+        )
     (original,) = await rows(sessions)
     frozen = (original.request_raw, original.expires_at)
     assert original.target == "wms-facts"
@@ -170,39 +177,28 @@ async def test_legacy_send_forms_preserve_canonical_payload_and_reference(
     clock.advance(30)
     explicit_defaults = {**data, "qty": 2}
     async with sessions.begin() as session:
-        if keyword_first:
-            again = await wms.send(session, operation, explicit_defaults, operation_id=operation_id)
-        else:
-            again = await wms.send(
-                session=session,
-                operation=operation,
-                data=explicit_defaults,
-                operation_id=operation_id,
-            )
+        again = await wms.send(
+            session, CanonicalReport.model_validate(explicit_defaults), operation_id=operation_id
+        )
     (replayed,) = await rows(sessions)
     assert again.message_id == first.message_id
     assert replayed.target == original.target
     assert (replayed.request_raw, replayed.expires_at) == frozen
 
 
-@pytest.mark.parametrize("model_first", [False, True])
-async def test_model_and_string_sends_share_the_original_frozen_message(
-    sessions, wms, clock, model_first
+async def test_model_serialization_and_defaults_preserve_the_original_frozen_message(
+    sessions, wms, clock
 ):
     model = canonical_model()
     data = {"taskId": "t-1", "nested": [{"quantity": {"value": 3}}]}
     payload = model.model_validate(data)
     identity = str(uuid7(clock()))
 
-    async def send(session, use_model, value):
-        if use_model:
-            return await wms.send(session, model.model_validate(value), operation_id=identity)
-        return await wms.send(
-            session=session, operation="example.fact.model@v1", data=value, operation_id=identity
-        )
+    async def send(session, value):
+        return await wms.send(session, model.model_validate(value), operation_id=identity)
 
     async with sessions.begin() as session:
-        first = await send(session, model_first, data)
+        first = await send(session, data)
     (original,) = await rows(sessions)
     frozen = (original.request_raw, original.expires_at, original.target)
     assert json.loads(original.request_raw)["data"] == {
@@ -215,13 +211,13 @@ async def test_model_and_string_sends_share_the_original_frozen_message(
     assert original.expires_at is not None
     clock.advance(30)
     async with sessions.begin() as session:
-        again = await send(session, not model_first, {**data, "qty": 2, "note": None})
+        again = await send(session, {**data, "qty": 2, "note": None})
     (replayed,) = await rows(sessions)
     assert again.message_id == first.message_id
     assert (replayed.request_raw, replayed.expires_at, replayed.target) == frozen
     with pytest.raises(DuplicateMessage):
         async with sessions.begin() as session:
-            await send(session, not model_first, {**data, "qty": 4})
+            await send(session, {**data, "qty": 4})
     assert payload.model_config == {"strict": True, "extra": "forbid"}
 
 
@@ -234,10 +230,9 @@ async def test_model_send_rollback_leaves_no_message(sessions, wms, clock):
     assert await rows(sessions) == []
 
 
-@pytest.mark.parametrize("model_first", [False, True])
 @pytest.mark.parametrize("reciprocal", [False, True])
 async def test_model_send_preserves_actual_fields_when_aliases_overlap(
-    sessions, wms, clock, model_first, reciprocal
+    sessions, wms, clock, reciprocal
 ):
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
@@ -258,19 +253,14 @@ async def test_model_send_preserves_actual_fields_when_aliases_overlap(
     item = payload.item
     identity = str(uuid7(clock()))
 
-    async def send(session, use_model):
-        if use_model:
-            return await wms.send(session, payload, operation_id=identity)
-        return await wms.send(session, "example.fact.overlap@v1", data, operation_id=identity)
-
     async with sessions.begin() as session:
-        first = await send(session, model_first)
+        first = await wms.send(session, payload, operation_id=identity)
     (original,) = await rows(sessions)
     assert json.loads(original.request_raw)["data"] == expected
     frozen = (original.request_raw, original.expires_at, original.target)
     clock.advance(30)
     async with sessions.begin() as session:
-        again = await send(session, not model_first)
+        again = await wms.send(session, payload, operation_id=identity)
     (replayed,) = await rows(sessions)
     assert again.message_id == first.message_id
     assert (replayed.request_raw, replayed.expires_at, replayed.target) == frozen
@@ -278,10 +268,7 @@ async def test_model_send_preserves_actual_fields_when_aliases_overlap(
     assert payload.item is item and item.qty == 3
 
 
-@pytest.mark.parametrize("model_first", [False, True])
-async def test_model_send_preserves_nested_root_contract_and_frozen_message(
-    sessions, wms, clock, model_first
-):
+async def test_model_send_preserves_nested_root_contract_and_frozen_message(sessions, wms, clock):
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
     class Quantities(RootModel[list[int]]):
@@ -300,21 +287,14 @@ async def test_model_send_preserves_nested_root_contract_and_frozen_message(
     payload = Report(quantities=quantities)
     identity = str(uuid7(clock()))
 
-    async def send(session, use_model):
-        if use_model:
-            return await wms.send(session, payload, operation_id=identity)
-        return await wms.send(
-            session, "example.fact.root@v1", {"quantities": [1, 2]}, operation_id=identity
-        )
-
     async with sessions.begin() as session:
-        first = await send(session, model_first)
+        first = await wms.send(session, payload, operation_id=identity)
     (original,) = await rows(sessions)
     assert json.loads(original.request_raw)["data"] == {"quantities": [10, 20]}
     frozen = (original.request_raw, original.expires_at, original.target)
     clock.advance(30)
     async with sessions.begin() as session:
-        again = await send(session, not model_first)
+        again = await wms.send(session, payload, operation_id=identity)
     (replayed,) = await rows(sessions)
     assert again.message_id == first.message_id
     assert (replayed.request_raw, replayed.expires_at, replayed.target) == frozen
@@ -473,11 +453,7 @@ async def test_model_send_preserves_nested_model_serializers(sessions, wms, cloc
     identity = str(uuid7(clock()))
     payload = Report(data=[Item(value=2)])
     async with sessions.begin() as session:
-        old = await wms.send(
-            session, "example.fact.serialized@v1", {"data": payload.data}, operation_id=identity
-        )
-        new = await wms.send(session, payload, operation_id=identity)
-    assert old.message_id == new.message_id
+        await wms.send(session, payload, operation_id=identity)
     (row,) = await rows(sessions)
     assert json.loads(row.request_raw)["data"] == {"data": [{"value": "Q2"}]}
 
@@ -595,20 +571,21 @@ async def test_model_send_requires_an_unambiguous_original_dataclass_contract(
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=identity)
     else:
-        with pytest.raises(InvalidRequestPayload, match="ambiguous.*legacy operation/data"):
+        with pytest.raises(InvalidRequestPayload, match="ambiguous.*explicit nested models"):
             async with sessions.begin() as session:
                 await wms.send(session, payload, operation_id=identity)
         assert await rows(sessions) == []
         assert payload.items[0].value == 2
         assert payload.items[1].value == "two"
-        async with sessions.begin() as session:
-            await wms.send(session, "example.fact.generic@v1", data, operation_id=identity)
+        return
     (row,) = await rows(sessions)
     assert json.loads(row.request_raw)["data"] == expected
 
 
 @pytest.mark.parametrize("invalid", [False, True])
-async def test_field_frozen_dataclasses_keep_the_legacy_send_form(sessions, wms, clock, invalid):
+async def test_field_frozen_dataclasses_require_an_explicit_nested_model(
+    sessions, wms, clock, invalid
+):
     from pydantic.dataclasses import dataclass as pydantic_dataclass
 
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
@@ -628,24 +605,12 @@ async def test_field_frozen_dataclasses_keep_the_legacy_send_form(sessions, wms,
     if invalid:
         quantity.values.append("2")
     identity = str(uuid7(clock()))
-    with pytest.raises(InvalidRequestPayload, match=r"Field\(frozen=True\).*operation/data"):
+    with pytest.raises(InvalidRequestPayload, match=r"Field\(frozen=True\).*explicit nested model"):
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=identity)
     assert await rows(sessions) == []
     assert quantity.values == ([1, "2"] if invalid else [1])
     assert quantity.measured == 7
-
-    original_contract = Quantity(values=[1])
-    original_contract.measured = 7
-    async with sessions.begin() as session:
-        await wms.send(
-            session,
-            "example.fact.field_frozen@v1",
-            {"quantity": original_contract},
-            operation_id=identity,
-        )
-    (row,) = await rows(sessions)
-    assert json.loads(row.request_raw)["data"] == {"quantity": {"values": [1], "measured": 7}}
 
 
 @pytest.mark.parametrize("invalid", [False, True])
@@ -710,26 +675,4 @@ async def test_model_send_requires_one_exact_registered_type(sessions, wms, cloc
     with pytest.raises(error):
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=str(uuid7(clock())))
-    assert await rows(sessions) == []
-
-
-@pytest.mark.parametrize(
-    "form", ["missing", "missing_data", "model_data", "payload_operation", "payload_data"]
-)
-async def test_incomplete_or_mixed_send_forms_fail_without_enqueue(sessions, wms, clock, form):
-    model = canonical_model()
-    payload = model(taskId="T", nested=[])
-    kwargs = {"operation_id": str(uuid7(clock()))}
-    args = []
-    if form == "missing_data":
-        args = [FACT]
-    elif form == "model_data":
-        args = [payload, {}]
-    elif form == "payload_operation":
-        kwargs.update(payload=payload, operation=FACT)
-    elif form == "payload_data":
-        kwargs.update(payload=payload, data={})
-    with pytest.raises(TypeError):
-        async with sessions.begin() as session:
-            await wms.send(session, *args, **kwargs)
     assert await rows(sessions) == []

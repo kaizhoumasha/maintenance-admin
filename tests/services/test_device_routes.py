@@ -3,7 +3,8 @@ from dataclasses import asdict
 import pytest
 
 from app.core.identifiers import uuid7
-from app.integrations.ecs_command import CommandBinding
+from app.integrations.ecs_command import compile_commands
+from app.integrations.ecs_command.declaration import command_declaration
 from app.integrations.ecs_command.routing import RouteAuthorization
 from app.models import Device, DeviceRoute
 from app.schemas.workline import WorkLineUpdate
@@ -21,7 +22,7 @@ from tests.helpers import (
 
 def routes():
     return DeviceRoutes(
-        [CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload)],
+        compile_commands(TrialPayload)[0],
         annexes=ecs_history_annexes(),
     )
 
@@ -30,7 +31,7 @@ async def test_deleted_configuration_cannot_authorize_another_send(db):
     line, device, route = await add_bound_device(db, "D1", "http://127.0.0.1:12345")
     await db.commit()
     provider = routes()
-    frozen = await provider.resolve(db, "D1", "MOVE")
+    frozen = await provider.resolve_declared(db, "D1", command_declaration(TrialPayload))
     wire = {**asdict(frozen), "retry_window": frozen.retry_window.total_seconds()}
     assert await provider.authorize_frozen(db, wire) == RouteAuthorization.ALLOW
     await update_workline(
@@ -43,7 +44,7 @@ async def test_deleted_configuration_cannot_authorize_another_send(db):
     await delete_device(db, device.id, version=1, actor=AssetActor(1, "routes", None, None))
     assert await provider.authorize_frozen(db, wire) == RouteAuthorization.REVOKED
     with pytest.raises(ValueError):
-        await provider.resolve(db, "D1", "MOVE")
+        await provider.resolve_declared(db, "D1", command_declaration(TrialPayload))
     assert (
         await provider.authorize_frozen(db, {**wire, "version": "1"}) == RouteAuthorization.UNKNOWN
     )
@@ -66,7 +67,7 @@ async def test_new_route_resolution_refreshes_preloaded_configuration(asset_pg):
             current = await writer.get(Device, device_id, with_for_update=True)
             current.current_route_id = new_id
             current.version += 1
-        resolved = await routes().resolve(caller, code, "MOVE")
+        resolved = await routes().resolve_declared(caller, code, command_declaration(TrialPayload))
         assert resolved.origin == "http://127.0.0.1:45812"
         assert preloaded.version == 2
 
@@ -75,7 +76,7 @@ async def test_configuration_restoration_does_not_restore_original_permission(db
     line, device, _ = await add_bound_device(db, "D1", "http://127.0.0.1:12345")
     await db.commit()
     provider = routes()
-    frozen = await provider.resolve(db, "D1", "MOVE")
+    frozen = await provider.resolve_declared(db, "D1", command_declaration(TrialPayload))
     wire = {**asdict(frozen), "retry_window": frozen.retry_window.total_seconds()}
     original_name = line.line_name
     for name in ("changed", original_name):
@@ -91,7 +92,7 @@ async def test_configuration_restoration_does_not_restore_original_permission(db
 
 
 def test_role_task_declarations_reject_duplicates_and_missing_annexes():
-    entry = CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload)
+    entry = compile_commands(TrialPayload)[0][0]
     with pytest.raises(ValueError, match="duplicate.*TrialPayload"):
         DeviceRoutes([entry, entry], annexes=ecs_history_annexes())
     with pytest.raises(ValueError, match="confirmed annex"):
@@ -114,7 +115,7 @@ async def test_incomplete_frozen_route_is_unknown_without_authorizing(db, missin
     await add_bound_device(db, "D1", "http://127.0.0.1:12345")
     await db.commit()
     provider = routes()
-    frozen = await provider.resolve(db, "D1", "MOVE")
+    frozen = await provider.resolve_declared(db, "D1", command_declaration(TrialPayload))
     wire = {**asdict(frozen), "retry_window": frozen.retry_window.total_seconds()}
     del wire[missing]
     assert await provider.authorize_frozen(db, wire) == RouteAuthorization.UNKNOWN
@@ -127,6 +128,6 @@ async def test_damaged_origin_and_task_are_unknown_before_binding_resolution(db,
     await add_bound_device(db, "D1", "http://127.0.0.1:12345")
     await db.commit()
     provider = routes()
-    frozen = await provider.resolve(db, "D1", "MOVE")
+    frozen = await provider.resolve_declared(db, "D1", command_declaration(TrialPayload))
     wire = {**asdict(frozen), "retry_window": frozen.retry_window.total_seconds(), **corruption}
     assert await provider.authorize_frozen(db, wire) == RouteAuthorization.UNKNOWN

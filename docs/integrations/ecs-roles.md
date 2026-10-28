@@ -8,7 +8,9 @@
 
 ```python
 from app.integrations.ecs_callback import CallbackPayload, ecs_event
-from app.integrations.ecs_command import CommandBinding, DeviceAnnex
+from pydantic import BaseModel, ConfigDict
+
+from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
 SCAN1 = "SCAN1"
@@ -24,20 +26,43 @@ async def scan_completed(ctx, payload):
     ctx.note("SCAN_RECORDED", barcode=payload.barcode)
 
 
-annexes = {("scan", "1"): DeviceAnnex(ScanCompleted, ScanCompleted, ErrorDetail, 1, 60000)}
-bindings = [CommandBinding(SCAN1, "SCAN", "scan", "1", ScanCompleted)]
+class ScanResult(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    barcode: str
+
+
+@ecs_command(
+    "SCAN",
+    device_roles=(SCAN1,),
+    annex_id="example.scan",
+    annex_version="1",
+    result=ScanResult,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)
+class ScanCommand(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    barcode: str
+
+
+# composition.py 导入命令模型，并固定入口/模型清单。
+COMMANDS = (ScanCommand,)
 ```
 
-事件注册在原自动发现入口 `app/integrations/<business>/ecs_event.py` 或其包内；事件多时用 `ecs_event/scan1/scan_completed.py`。命令合同由可信启动模块提供。上例中的业务名称、Payload、task 和超时仅作说明，真实接入必须使用已确认合同。
+事件位于 `app/businesses/<business>/ecs_event.py` 或其包内；事件多时用 `ecs_event/scan1/scan_completed.py`。入口须加入所属 composition 的 `ENTRY_MODULES`，composition 由 catalog 列出。catalog 内部编译 COMMANDS，只激活本业务 definition 声明角色的交集。上例中的业务名称、Payload、task 和超时仅作说明，真实接入必须使用已确认合同。
 
 事件键为 `(device_role, event_type)`，命令键为 `(device_role, task_type)`。角色字符串常量可跨工作线复用；不根据 data 形状、设备编码后缀或 ECS 描述角色推断合同。重复键或缺失附录在注册／装配时失败，不查询外部系统。
 
 ## 2. 运行时注入
 
 ```python
+from app.businesses.catalog import validate_business_contracts
 from app.controllers.ecs_callback import include_ecs_callback
 from app.integrations.ecs_command import RoleRoutes, configure_ecs
 
+# 平台启动已加载全部正式入口；复用 catalog 的校验/编译结果。
+bindings, annexes = validate_business_contracts()
 routes = RoleRoutes(
     bindings,
     annexes=annexes,
@@ -53,7 +78,7 @@ service = configure_ecs(app, routes=routes, annexes=annexes)
 - `resolve_binding(session, device_code) -> DeviceBinding | None`：返回设备身份／版本、工作线身份／版本、逻辑角色及本线绑定上下文。稳定未绑定返回 None；并发变化和数据库故障抛出，不能伪装成永久未绑定。正式实现须保持绑定锁到当前事务完成。
 - `resolve_route(session, binding) -> tuple[str, str]`：对已保护的绑定返回 `(ecs_origin, route_id)`。沿用当前冻结格式，route_id 为 `device.route.<UUIDv7>`；身份在换址／删除重登记时不能复用。框架从同一角色任务声明选择附录并使用 binding.revision 冻结管理版本。
 
-工作线使用方在自己的服务模块实现这两个函数，查询并锁定自己的绑定和地址配置。正式调用先按工作线＋角色取得设备并核对期望上下文，再将 device_code 传入原 `service.create`。本项目的 `DeviceRoutes` 复用独立 `RoleRoutes`，只提供工作线／数据库解析及地址适配，使用同一 UUIDv7 路由校验；装配示例见[设备管理指南](device-management.md#正式命令接缝)。独立框架不导入设备／工作线表、管理服务及其迁移。
+这些函数属于可信平台装配；业务开发仅声明模型和 COMMANDS。工作线使用方在自己的服务模块实现这两个函数，查询并锁定自己的绑定和地址配置。正式调用先按工作线＋角色取得设备并核对期望上下文，再将 device_code 和精确命令模型传入 `service.create(..., command=ScanCommand(...))`。本项目的 `DeviceRoutes` 复用独立 `RoleRoutes`，只提供工作线／数据库解析及地址适配，使用同一 UUIDv7 路由校验；装配示例见[设备管理指南](device-management.md#正式命令接缝)。独立框架不导入设备／工作线表、管理服务及其迁移。
 
 新事件按 `device_code → 当前绑定角色 → 处理器` 分发；命令由 `工作线＋角色 → device_code → 角色任务附录` 创建。原 receipt 始终先查重；已接收的重报不重新分发。未绑定或未注册的新事件仍持久 ACK，绑定后不自动回放。
 
@@ -78,7 +103,7 @@ service = configure_local_ecs(
 )
 ```
 
-它将正式角色路由与 dev v3 调试路由组合到同一服务、同一 Sender。正式命令仍经角色附录校验；Swagger `/api/v1/dev/ecs/commands` 保持通用协议调试语义，填写 `ecs_url`、device_code、task_type、params，新登记仍需 `dev:ecs:send_real` 权限。Swagger 的宽 JSON 合同不代表某个角色的严格业务合同已通过；验证角色业务须走上面的正式路由并注入对应绑定。
+它将正式角色路由与 dev v3 调试路由组合到同一服务、同一 Sender。正式命令只走声明感知角色路由；Swagger `/api/v1/dev/ecs/commands` 保持通用协议调试语义，填写 `ecs_url`、device_code、task_type、params，新登记仍需 `dev:ecs:send_real` 权限。Swagger 的宽 JSON 合同不代表某个角色的严格业务合同已通过；验证角色业务须走上面的正式路由并注入对应绑定。
 
 配置变化后，原门禁阻止旧命令后续 HTTP，进入原配置撤销暂停；不取消设备、不恢复历史发送。已可能交付的原 Result 继续按冻结身份和附录接收，不按设备当前角色重新分发；UNKNOWN/HELD 的不自动重放规则保持。
 

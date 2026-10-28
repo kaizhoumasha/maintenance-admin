@@ -1,5 +1,8 @@
 # ECS角色分发与配置失效停发 Implementation Plan
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 > **当前交付：** 角色分发已实施；独立RoleRoutes及路由校验已在develop落地，本分支保留DeviceRoutes数据库使用方。用户已授权提交、推送及创建PR，部署与真实ECS/WMS接入另行安排。下列实施步骤、原授权和验证数字为历史记录。
 
 **Goal:** 工作线逻辑角色驱动事件处理与命令附录选择，配置变化后停止旧命令后续发送，并继续查询记录和接收原结果。

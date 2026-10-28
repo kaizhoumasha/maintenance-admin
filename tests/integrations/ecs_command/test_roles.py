@@ -13,8 +13,9 @@ from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.receiver import receive_ecs_event
-from app.integrations.ecs_command import CommandBinding, DeviceAnnex, RoleRoutes
+from app.integrations.ecs_command import RoleRoutes, compile_commands, ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
+from app.integrations.ecs_command.declaration import command_declaration
 from app.integrations.ecs_command.routing import RouteAuthorization
 from app.models import EcsCommand, ReliableMessage
 from tests.helpers import loopback_app, simulator_sender
@@ -25,6 +26,32 @@ SCAN4 = "SCAN4"
 
 class ScanData(CallbackPayload):
     qty: int
+
+
+ecs_command(
+    "MOVE",
+    device_roles=(SCAN1,),
+    annex_id="scan",
+    annex_version="1",
+    result=ScanData,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)(ScanData)
+
+
+@ecs_command(
+    "OTHER",
+    device_roles=(SCAN1,),
+    annex_id="other",
+    annex_version="1",
+    result=ScanData,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)
+class OtherCommand(ScanData):
+    pass
 
 
 @pytest.fixture
@@ -54,9 +81,9 @@ def role_runtime():
 
     state.resolve_binding = resolve_binding
     state.resolve_route = resolve_route
-    state.annexes = {("scan", "1"): DeviceAnnex(ScanData, ScanData, ErrorDetail, 1, 60000)}
+    bindings, state.annexes = compile_commands(ScanData)
     state.routes = RoleRoutes(
-        [CommandBinding(SCAN1, "MOVE", "scan", "1", ScanData)],
+        bindings,
         annexes=state.annexes,
         resolve_binding=resolve_binding,
         resolve_route=resolve_route,
@@ -70,18 +97,20 @@ def test_role_declaration_does_not_resolve_runtime_devices(role_runtime):
 
 
 async def test_role_route_selects_contract_only_after_runtime_resolution(role_runtime):
-    route = await role_runtime.routes.resolve(None, "D1", "MOVE")
+    route = await role_runtime.routes.resolve_declared(None, "D1", command_declaration(ScanData))
     assert role_runtime.calls == 1
     assert (route.device_code, route.annex_id, route.origin) == ("D1", "scan", role_runtime.origin)
     for device, task in (("UNKNOWN", "MOVE"), ("D1", "UNKNOWN")):
         with pytest.raises(ValueError):
-            await role_runtime.routes.resolve(None, device, task)
+            await role_runtime.routes.resolve_declared(
+                None, device, command_declaration(ScanData if task == "MOVE" else OtherCommand)
+            )
     role_runtime.binding = replace(role_runtime.binding, device_role=SCAN4)
-    with pytest.raises(ValueError, match="annex"):
-        await role_runtime.routes.resolve(None, "D1", "MOVE")
+    with pytest.raises(ValueError, match="role"):
+        await role_runtime.routes.resolve_declared(None, "D1", command_declaration(ScanData))
     role_runtime.binding = replace(role_runtime.binding, device_code="OTHER")
-    with pytest.raises(ValueError, match="binding.*device"):
-        await role_runtime.routes.resolve(None, "D1", "MOVE")
+    with pytest.raises(ValueError, match="device"):
+        await role_runtime.routes.resolve_declared(None, "D1", command_declaration(ScanData))
 
 
 @pytest.mark.parametrize(
@@ -105,9 +134,8 @@ async def test_invalid_role_routes_do_not_persist_commands(ecs, role_runtime, ro
         owner=ecs.owner,
         call_key="invalid-role-route",
         device_code="D1",
-        task_type="MOVE",
         timeout_ms=30000,
-        params={"qty": 1},
+        command=ScanData(qty=1),
     )
     async with ecs.factory.begin() as session:
         with pytest.raises(ValueError):
@@ -145,7 +173,7 @@ async def test_invalid_role_routes_do_not_persist_commands(ecs, role_runtime, ro
 
 async def test_role_route_revocation_and_damaged_snapshots(role_runtime):
     routes = role_runtime.routes
-    route = await routes.resolve(None, "D1", "MOVE")
+    route = await routes.resolve_declared(None, "D1", command_declaration(ScanData))
     frozen = {**asdict(route), "retry_window": route.retry_window.total_seconds()}
     assert await routes.authorize_frozen(None, frozen) == RouteAuthorization.ALLOW
     for change in ({"version": "1"}, {"origin": "invalid"}, {"commands": [""]}):
@@ -164,35 +192,39 @@ async def test_shared_task_uses_each_roles_strict_contract_without_a_directory(e
     class ExitData(CallbackPayload):
         exit_code: str
 
-    annexes = role_runtime.annexes | {
-        ("exit", "1"): DeviceAnnex(ExitData, ExitData, ErrorDetail, 1, 60000)
-    }
+    ecs_command(
+        "MOVE",
+        device_roles=(SCAN4,),
+        annex_id="exit",
+        annex_version="1",
+        result=ExitData,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )(ExitData)
+    bindings, annexes = compile_commands(ScanData, ExitData)
     ecs.service.annexes.update(annexes)
     ecs.service.routes = RoleRoutes(
-        [
-            CommandBinding(SCAN1, "MOVE", "scan", "1", ScanData),
-            CommandBinding(SCAN4, "MOVE", "exit", "1", ExitData),
-        ],
+        bindings,
         annexes=annexes,
         resolve_binding=role_runtime.resolve_binding,
         resolve_route=role_runtime.resolve_route,
     )
 
-    async def create(session, key, params):
+    async def create(session, key, command):
         return await ecs.service.create(
             session,
             owner=ecs.owner,
             call_key=key,
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params=params,
+            command=command,
         )
 
     async with ecs.factory.begin() as session:
         with pytest.raises(ValueError):
-            await create(session, "bad-entry", {"exit_code": "RETURN"})
-        entry = await create(session, "entry", {"qty": 1})
+            await create(session, "bad-entry", ExitData(exit_code="RETURN"))
+        entry = await create(session, "entry", ScanData(qty=1))
         role_runtime.binding = replace(
             role_runtime.binding,
             device_role=SCAN4,
@@ -200,8 +232,8 @@ async def test_shared_task_uses_each_roles_strict_contract_without_a_directory(e
             device_bindings={SCAN4: "D1"},
         )
         with pytest.raises(ValueError):
-            await create(session, "bad-exit", {"qty": 1})
-        exit_command = await create(session, "exit", {"exit_code": "RETURN"})
+            await create(session, "bad-exit", ScanData(qty=1))
+        exit_command = await create(session, "exit", ExitData(exit_code="RETURN"))
         assert entry.command_code != exit_command.command_code
         assert (
             await ecs.service.get_by_call(session, owner=ecs.owner, call_key="entry")
@@ -257,9 +289,8 @@ async def test_role_sender_uses_injected_origin_and_blocks_outdated_configuratio
                 owner=ecs.owner,
                 call_key=key,
                 device_code="D1",
-                task_type="MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=ScanData(qty=1),
             )
 
     async with loopback_app(peer) as origin:
@@ -300,9 +331,8 @@ async def test_role_configuration_revocation_retains_original_result(ecs, role_r
             owner=ecs.owner,
             call_key="late-role",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=ScanData(qty=1),
         )
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
     claim = (await store.claim(1, ecs.targets))[0]
@@ -338,7 +368,7 @@ async def test_local_protocol_and_formal_role_routes_share_one_service(role_runt
     )
     assert service is app.state.ecs_commands
     assert role_runtime.calls == 0
-    formal = await service.routes.resolve(None, "D1", "MOVE")
+    formal = await service.routes.resolve_declared(None, "D1", command_declaration(ScanData))
     debug = await service.routes.for_origin("http://127.0.0.1:45872").resolve(
         None, "D1", "UNREGISTERED_TASK"
     )
@@ -382,7 +412,8 @@ class NoDeviceServices(importlib.abc.MetaPathFinder):
             raise AssertionError('role/debug framework imported ' + fullname)
 
 sys.meta_path.insert(0, NoDeviceServices())
-from app.integrations.ecs_command import CommandBinding, RoleRoutes, configure_ecs
+from app.integrations.ecs_command import RoleRoutes, compile_commands, ecs_command
+from app.integrations.ecs_command import configure_ecs
 from app.controllers.ecs_callback import include_ecs_callback
 from app.controllers.dev_ecs_command import router
 from app.controllers.dev_registry import list_registrations

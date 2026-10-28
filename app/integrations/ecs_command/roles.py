@@ -11,11 +11,11 @@ from app.core.identifiers import validate_uuid7
 from app.integrations.ecs_callback.binding import BindingResolver, DeviceBinding
 from app.integrations.ecs_command.contracts import (
     PROTOCOL_RETRY_WINDOW,
+    CommandBinding,
     DeviceAnnex,
     merge_annexes,
 )
 from app.integrations.ecs_command.routing import (
-    CommandBinding,
     RouteAuthorization,
     RouteSnapshot,
     normalize_origin,
@@ -71,23 +71,15 @@ class RoleRoutes:
             PROTOCOL_RETRY_WINDOW,
         )
 
-    async def resolve(self, session, device_code, task_type):
-        binding = await self._resolve_binding(session, device_code)
-        if binding is None:
-            raise ValueError("Current device role is not configured")
-        if binding.device_code != device_code:
-            raise ValueError("ECS binding does not match command device")
-        entry = self.bindings.get((binding.device_role, task_type))
-        if entry is None:
-            raise ValueError("Role command annex is not configured")
-        return await self._snapshot(session, binding, entry)
-
     async def resolve_declared(self, session, device_code, declaration) -> RouteSnapshot:
         binding = await self._resolve_binding(session, device_code)
         if binding is None:
             raise ValueError("Current device role is not configured")
-        expected = declaration.binding
-        if binding.device_code != device_code or binding.device_role != expected.device_role:
+        expected = next(
+            (entry for entry in declaration.bindings if entry.device_role == binding.device_role),
+            None,
+        )
+        if binding.device_code != device_code or expected is None:
             raise ValueError("Declared command does not match current device role")
         entry = self.bindings.get((binding.device_role, expected.task_type))
         if entry is None or (entry.annex_id, entry.annex_version) != (

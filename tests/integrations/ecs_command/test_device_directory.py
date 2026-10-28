@@ -1,10 +1,10 @@
 from app.core.identifiers import uuid7
-from app.integrations.ecs_command import CommandBinding
+from app.integrations.ecs_command import compile_commands
 from app.models import Device, DeviceRoute, EcsCommand, WorkLine
 from app.services.asset_audit import AssetActor
 from app.services.device_routes import DeviceRoutes
 from app.services.device_service import delete_device
-from tests.helpers import TrialPayload, add_bound_device, workline_definition_lookup
+from tests.helpers import EcsMove, add_bound_device, workline_definition_lookup
 
 
 async def test_role_switch_selects_new_contract_and_preserves_original_result_contract(ecs):
@@ -14,7 +14,7 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
     from pydantic import BaseModel, ConfigDict
     from sqlalchemy import delete
 
-    from app.integrations.ecs_command import DeviceAnnex
+    from app.integrations.ecs_command import ecs_command
     from app.integrations.ecs_command.contracts import ErrorDetail
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
@@ -27,35 +27,37 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
         model_config = ConfigDict(strict=True, extra="forbid")
         exit_code: str
 
-    ecs.service.annexes[("exit", "1")] = DeviceAnnex(
-        ExitPayload, ExitPayload, ErrorDetail, 1, 60000
-    )
-    ecs.service.routes = DeviceRoutes(
-        [
-            CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload),
-            CommandBinding("SCAN4", "MOVE", "exit", "1", ExitPayload),
-        ],
-        annexes=ecs.service.annexes,
-    )
+    ecs_command(
+        "MOVE",
+        device_roles=("SCAN4",),
+        annex_id="exit",
+        annex_version="1",
+        result=ExitPayload,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )(ExitPayload)
+    bindings, annexes = compile_commands(EcsMove, ExitPayload)
+    ecs.service.annexes = annexes
+    ecs.service.routes = DeviceRoutes(bindings, annexes=annexes)
     code = "role-" + uuid7().hex
     async with ecs.factory.begin() as session:
         line, device, route = await add_bound_device(session, code, "http://127.0.0.1:45731")
         line_id, device_id, route_id = line.id, device.id, route.id
 
-    async def create(session, key, params):
+    async def create(session, key, command):
         return await ecs.service.create(
             session,
             owner=ecs.owner,
             call_key=key,
             device_code=code,
-            task_type="MOVE",
             timeout_ms=30000,
-            params=params,
+            command=command,
         )
 
     try:
         async with ecs.factory.begin() as session:
-            original = await create(session, "entry", {"qty": 1})
+            original = await create(session, "entry", EcsMove(qty=1))
         store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
         claim = (await store.claim(1, ecs.targets))[0]
         assert await store.before_send(claim, ecs.targets["ecs"])
@@ -73,11 +75,11 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
             )
         async with ecs.factory.begin() as session:
             with pytest.raises(ValueError):
-                await create(session, "invalid-exit", {"qty": 2})
-            new = await create(session, "exit", {"exit_code": "RETURN"})
+                await create(session, "invalid-exit", EcsMove(qty=2))
+            new = await create(session, "exit", ExitPayload(exit_code="RETURN"))
             assert (await session.get(EcsCommand, new.command_code)).route["annex_id"] == "exit"
             assert (
-                await create(session, "entry", {"qty": 1})
+                await create(session, "entry", EcsMove(qty=1))
             ).command_code == original.command_code
             old = await session.get(EcsCommand, original.command_code)
             assert (
@@ -108,9 +110,7 @@ async def test_new_directory_identity_preserves_frozen_command_and_independent_i
     from sqlalchemy import delete
 
     code = "directory-" + uuid7().hex
-    routes = DeviceRoutes(
-        [CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload)], annexes=ecs.service.annexes
-    )
+    routes = DeviceRoutes(compile_commands(EcsMove)[0], annexes=ecs.service.annexes)
     ecs.service.routes = routes
     route_ids = []
     device_ids = []
@@ -129,9 +129,8 @@ async def test_new_directory_identity_preserves_frozen_command_and_independent_i
             owner=ecs.owner,
             call_key=key,
             device_code=code,
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
 
     try:
@@ -182,9 +181,7 @@ async def test_late_original_result_survives_configuration_deletion(ecs):
 
     code = "late-directory-" + uuid7().hex
 
-    ecs.service.routes = DeviceRoutes(
-        [CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload)], annexes=ecs.service.annexes
-    )
+    ecs.service.routes = DeviceRoutes(compile_commands(EcsMove)[0], annexes=ecs.service.annexes)
     try:
         async with ecs.factory.begin() as session:
             line, device, route = await add_bound_device(session, code, "http://127.0.0.1:45721")
@@ -194,9 +191,8 @@ async def test_late_original_result_survives_configuration_deletion(ecs):
                 owner=ecs.owner,
                 call_key="late-result",
                 device_code=code,
-                task_type="MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=EcsMove.model_validate({"qty": 1}),
             )
         store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
         claim = (await store.claim(1, ecs.targets))[0]

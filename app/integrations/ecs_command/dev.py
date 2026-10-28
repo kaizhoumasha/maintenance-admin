@@ -10,6 +10,7 @@ from pydantic import ConfigDict, RootModel
 from sqlalchemy import select
 
 from app.core.errors import AppError, ErrorCode
+from app.core.strict_json import canonical_digest
 from app.http_client import AsyncHttpClient
 from app.integrations.ecs_command.contracts import (
     PROTOCOL_RETRY_WINDOW,
@@ -19,7 +20,7 @@ from app.integrations.ecs_command.contracts import (
 )
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot, normalize_origin
 from app.integrations.ecs_command.runtime import check_assembly, configure_ecs
-from app.integrations.ecs_command.service import EcsCommands
+from app.integrations.model_payload import validated_model_payload
 from app.models import EcsCommand
 
 
@@ -98,14 +99,8 @@ class LocalEcsRoutes:
     def bindings(self):
         return self.formal.bindings
 
-    async def resolve(self, session, device_code, task_type):
-        return await self.formal.resolve(session, device_code, task_type)
-
     async def resolve_declared(self, session, device_code, declaration):
-        resolve = getattr(self.formal, "resolve_declared", None)
-        if not callable(resolve):
-            raise ValueError("formal command model requires declaration-aware routing")
-        return await resolve(session, device_code, declaration)
+        return await self.formal.resolve_declared(session, device_code, declaration)
 
     def for_origin(self, origin):
         return self.debug.for_origin(origin)
@@ -141,23 +136,23 @@ async def create_debug_command(
         origin = debug_origin(ecs_url)
     except ValueError:
         raise AppError(ErrorCode.INVALID_REQUEST, "Invalid ecs_url IP origin") from None
-    existing = await service.get_by_call(session, owner=owner, call_key=client_request_id)
-    context = service
-    if existing is None:
-        routes = service.routes.for_origin(origin)
+
+    async def resolve_route():
         await authorize_send()
-        context = EcsCommands(
-            service.outbox, service.target, routes, service.annexes, clock=service.clock
-        )
+        return await service.routes.for_origin(origin).resolve(session, device_code, task_type)
+
     try:
-        command = await context.create(
+        canonical_digest(params)
+        payload = validated_model_payload(ProtocolObject.model_validate(params))
+        command = await service._enqueue(
             session,
             owner=owner,
             call_key=client_request_id,
             device_code=device_code,
             task_type=task_type,
             timeout_ms=timeout_ms,
-            params=params,
+            params=payload,
+            resolve_route=resolve_route,
         )
     except ValueError as error:
         if str(error) == "business identity has different input":

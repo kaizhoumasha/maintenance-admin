@@ -1,5 +1,8 @@
 # ECS 通用接入与最小业务示例设计
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 **状态：本方实现与开发测试已结项，收尾随 PR #24 合入 develop（1ef1725）。** 维护当前合同，不再追加实施过程。普通开发者读[教程](../../integrations/ecs-command-tutorial.md)，开发回归复用[现有测试](../../testing/ecs-command-verification.md)，不作为业务/Swagger接入门槛，回归入口见[测试说明](../../testing/ecs-command-verification.md)。生产验证不纳入开发过程，另见[真实接入清单](../../integrations/ecs-acceptance-checklist.md)。
 
 ## 职责与范围

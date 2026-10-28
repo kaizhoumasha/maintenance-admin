@@ -1,7 +1,9 @@
 """接收 WMS 主动发来的回调(WMS → 本项目),入口是 `POST /api/v1/wms/events`。
 
-这个包是通用机制,只认识信封和 operation 名,不认识任何业务。具体业务(例如 Transport 的
-位置事件)写在 `app/integrations/<业务>/callback/` 里,启动时自动发现。
+这个包是通用机制,只认识信封和 operation 名,不认识任何业务。
+领域业务事件写在 `app/businesses/<业务>/callback/` 里，
+由所属 composition.ENTRY_MODULES 显式列出，composition 由 catalog.entries() 拥有后启动导入。
+Transport 固定事件仍在 wms_transport.callback。
 方向相反的机制是 `wms_request`。
 
 ## 它负责什么
@@ -30,7 +32,8 @@
 
 ## 怎么新增一个 operation
 
-在 `app/integrations/<业务>/callback/` 新建文件，声明 Payload 和异步处理函数，不用改控制器或 main。
+在 `app/businesses/<业务>/callback/` 新建文件，声明 Payload 和异步处理函数，
+并在所属 composition.ENTRY_MODULES 中列出入口，composition 由 catalog.entries() 拥有。
 文件名统一为 name.lower().replace('.', '_').replace('@', '_') + '.py'，导入期校验。
 例如 `transport.task.resulted@v1` 对应 `transport_task_resulted_v1.py`：
 
@@ -54,7 +57,8 @@
 - Duplicate 和 Conflict 要在写业务行之前决定,因为它们的写入不会回滚。
 - Swagger 示例:给 Payload 加
   `model_config = ConfigDict(json_schema_extra={"examples": [...]})`。
-- 只有一两个很小的 operation 时,也可以用单个 `callback.py`,发现逻辑两种形式都认。
+- 只有一两个很小的 operation 时,也可以用单个 `callback.py`，
+  两种形式都须在所属 composition.ENTRY_MODULES 中显式列出。
 - `dev_callback.py` 只在 `ENVIRONMENT=local` 导入,放联调样例。
 
 注册表是模块级全局状态,同名重复注册会报错并指出双方来源与修复方法。

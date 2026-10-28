@@ -1,6 +1,7 @@
 """联调控制台:WMS 请求端点(decisions、facts)的 operation 目录、触发入口和状态查询。
 
-operation 由 `app/integrations/<业务>/request` 注册(演示 operation 在 `wms_request/dev.py`),
+operation 位于 `app/businesses/<业务>/request`，须列入 catalog 所属 composition.ENTRY_MODULES
+后加载注册(平台演示 operation 在 `wms_request/dev.py`),
 下拉和目录都来自注册表的 `describe()`,新增 operation 不需要改这里。
 """
 

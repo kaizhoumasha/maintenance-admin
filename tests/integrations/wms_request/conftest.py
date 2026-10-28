@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database import create_database_engine
+from app.integrations import discovery
 from app.integrations.wms_request import (
     ADAPTERS,
     DECISIONS_PROTOCOL,
@@ -12,7 +13,6 @@ from app.integrations.wms_request import (
     Endpoint,
     RequestPayload,
     WmsRequests,
-    discovery,
     request_operation,
 )
 from app.integrations.wms_request import operation as registry
@@ -27,15 +27,25 @@ class Report(RequestPayload):
     qty: int
 
 
+class Decision(Report):
+    pass
+
+
+class TimedReport(Report):
+    pass
+
+
 @pytest.fixture(autouse=True)
 def isolated_registry(monkeypatch):
     """注册表是模块级全局状态;每个测试从空表开始并登记自己的示例 operation。"""
     monkeypatch.setattr(registry, "_registry", {})
     # 发现函数带缓存且导入即注册:在被替换的注册表里首次调用会让真实 operation 永久丢失
-    monkeypatch.setattr(discovery, "load_operation_modules", lambda: None)
+    monkeypatch.setattr(discovery, "load_formal_modules", lambda **kwargs: None)
     request_operation("example.fact.report@v1", Endpoint.FACTS)(Report)
-    request_operation("example.decision.ask@v1", Endpoint.DECISIONS)(Report)
-    request_operation("example.fact.timed@v1", Endpoint.FACTS, ttl=timedelta(minutes=5))(Report)
+    request_operation("example.decision.ask@v1", Endpoint.DECISIONS)(Decision)
+    request_operation("example.fact.timed@v1", Endpoint.FACTS, ttl=timedelta(minutes=5))(
+        TimedReport
+    )
 
 
 @pytest.fixture

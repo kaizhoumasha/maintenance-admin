@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.http_client import DeliveryState, HttpResult
 from app.models import EcsCommand, ReliableMessage
+from tests.helpers import EcsMove
 
 
 async def prepare(ecs, key="call"):
@@ -14,9 +15,8 @@ async def prepare(ecs, key="call"):
             owner=ecs.owner,
             call_key=key,
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
 
 
@@ -68,17 +68,17 @@ async def test_first_result_before_http_response_applies_once(ecs):
 async def test_config_revocation_stops_sending_but_accepts_original_attempt_result(ecs):
     from sqlalchemy import delete
 
-    from app.integrations.ecs_command import CommandBinding
+    from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.result import receive_ecs_result
     from app.models import Device, DeviceRoute, WorkLine
     from app.services.device_routes import DeviceRoutes
-    from tests.helpers import TrialPayload, add_bound_device
+    from tests.helpers import add_bound_device
 
     async with ecs.factory.begin() as session:
         line, device, route = await add_bound_device(session, "D1", "http://127.0.0.1:8080")
         line_id, device_id, route_id = line.id, device.id, route.id
     ecs.service.routes = DeviceRoutes(
-        [CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload)],
+        compile_commands(EcsMove)[0],
         annexes=ecs.service.annexes,
     )
     try:
@@ -339,9 +339,8 @@ async def test_result_survives_receipt_and_delivery_cleanup(ecs):
                 owner=ecs.owner,
                 call_key="call",
                 device_code="D1",
-                task_type="MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=EcsMove.model_validate({"qty": 1}),
             )
         ).command_code == command.command_code
         assert await session.scalar(select(ReliableMessage)) is None

@@ -30,7 +30,7 @@ uv run ruff format --check .
 | 可靠投递 | `tests/reliable/`；原事务/身份/字节、PG 租约围栏、独立 TTL、双进程骤停、存储失败传播与保留期；[接入参考](../integrations/reliable-delivery.md) |
 | Transport 与 WMS 请求 | `tests/integrations/wms_transport/`、`tests/integrations/wms_request/`；完整 Outbox→claim→send_one 链与回调事务，恶意 ACK 留在未知/可重试而不误终止 |
 | 出站结果与消费恢复 | `tests/integrations/test_result_consumption.py`、WMS/Transport 的 `test_results.py` 与 `test_predecessors.py`；原身份和可信终局响应、拒绝与里程碑冲突、更新 UNKNOWN 优先、分批/逐个统一快照和读取后失败整组重读；[读接口契约](../integrations/outbound-results.md) |
-| 工作线业务公共接缝 | `tests/businesses/`、`tests/controllers/test_workline_business.py`、`tests/services/test_workline_business.py`；正式冷启动、合同交叉校验、两线绑定、受理/独立推进事务、消费与 Outbox 原子性；[业务包开发指南](../integrations/business-packages.md)。真实业务仍待独立确认 |
+| 工作线业务公共接缝 | `tests/businesses/`、`tests/controllers/test_workline_business.py`、`tests/services/test_workline_business.py`；模型 send/create、COMMANDS 角色交集、catalog/固定平台来源保护、正式冷启动、合同交叉校验、两线绑定、受理/独立推进事务、消费与 Outbox 原子性；[业务包开发指南](../integrations/business-packages.md)。真实业务仍待独立确认 |
 | ECS 命令与结果 | [ECS 测试说明](ecs-command-verification.md)，复用实际装配、原期限、当前许可和消费者锁序，不增加独立验收平台 |
 | 安全诊断 | `tests/core/test_global_diagnostics.py`、`tests/reliable/test_sender_logging.py`、delivery/snapshot 与 `tests/tasks/`；安全字段、取消/落库失败传播，各任务独立降噪/恢复；[日志说明](../logging.md) |
 

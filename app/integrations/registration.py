@@ -16,6 +16,16 @@ _root = Path(__file__).resolve().parents[2]
 _entrypoints = {"ecs_event", "callback", "request", "dev_ecs_event", "dev_callback"}
 # 仅 local 导入的模块名尾段;发现器与联调控制台据此标记 local_only
 DEV_MODULES = frozenset({"dev", "dev_callback", "dev_ecs_event"})
+PLATFORM_FORMAL_MODULES = {
+    "ecs_event": (),
+    "callback": ("app.integrations.wms_transport.callback",),
+    "request": (),
+}
+PLATFORM_LOCAL_MODULES = {
+    "ecs_event": ("app.integrations.ecs_callback.dev_ecs_event",),
+    "callback": ("app.integrations.wms_callback.dev_callback",),
+    "request": ("app.integrations.wms_request.dev", "app.integrations.wms_transport.dev"),
+}
 
 
 @contextmanager
@@ -86,8 +96,30 @@ def registration_source(target) -> RegistrationSource:
     return RegistrationSource(module, source_file, target.__qualname__, local_only)
 
 
-def validate_registration_file(name: str, target) -> RegistrationSource:
+def validate_registration_source(target) -> RegistrationSource:
     source = registration_source(target)
+    module, source_file = source.module, source.source_file
+    platform_entries = (
+        name
+        for manifest in (PLATFORM_FORMAL_MODULES, PLATFORM_LOCAL_MODULES)
+        for names in manifest.values()
+        for name in names
+    )
+    if module == "app" or module.startswith("app."):
+        if not (
+            module.startswith("app.businesses.")
+            and len(module.split(".")) >= 4
+            or any(module == name or module.startswith(name + ".") for name in platform_entries)
+        ):
+            raise ValueError(
+                f"{module}.{target.__qualname__} ({source_file}): invalid registration source; "
+                "修复: 业务声明放在 app.businesses.<business>，平台入口须在固定清单中"
+            )
+    return source
+
+
+def validate_registration_file(name: str, target) -> RegistrationSource:
+    source = validate_registration_source(target)
     parts = source.module.split(".")
     if (
         parts[:2] in (["app", "integrations"], ["app", "businesses"])

@@ -6,6 +6,7 @@ from sqlalchemy import delete, select, update
 
 from app.core.identifiers import uuid7
 from app.integrations.wms_request import WmsRequests
+from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 
 OP = "example.decision.ask@v1"
@@ -14,7 +15,9 @@ OP = "example.decision.ask@v1"
 async def registered(sessions, wms):
     identity = str(uuid7())
     async with sessions.begin() as session:
-        ref = await wms.send(session, OP, {"task_id": "T", "qty": 1}, operation_id=identity)
+        ref = await wms.send(
+            session, lookup(OP).data_model(task_id="T", qty=1), operation_id=identity
+        )
     return ref.message_id, identity
 
 
@@ -132,7 +135,7 @@ async def test_fact_receipt_is_a_protocol_response(sessions, wms, code):
     op = "example.fact.report@v1"
     oid = str(uuid7())
     async with sessions.begin() as session:
-        ref = await wms.send(session, op, {"task_id": "T", "qty": 1}, operation_id=oid)
+        ref = await wms.send(session, lookup(op).data_model(task_id="T", qty=1), operation_id=oid)
         await session.execute(
             update(ReliableMessage)
             .where(ReliableMessage.id == ref.message_id)

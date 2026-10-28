@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.models import CallbackReceipt, EcsCommand, EcsResultEvidence
+from tests.helpers import EcsMove
 
 
 @pytest.mark.parametrize(
@@ -57,9 +58,8 @@ async def test_result_transaction_rollback_removes_evidence_and_projection(ecs):
             owner=ecs.owner,
             call_key="call",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=1,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
     claim = (await store.claim(1, ecs.targets))[0]
@@ -88,26 +88,36 @@ async def test_nonfinite_result_extension_is_400_before_lookup(ecs):
 
 
 async def test_annex_error_validation_points_to_error_detail(ecs):
-    from dataclasses import replace
     from typing import Literal
 
+    from app.integrations.ecs_command import compile_commands, ecs_command
     from app.integrations.ecs_command.contracts import ErrorDetail
 
     class KnownError(ErrorDetail):
         code: Literal["ALLOWED"]
 
-    ecs.service.annexes["test", "1"] = replace(
-        ecs.service.annexes["test", "1"], error_model=KnownError
+    @ecs_command(
+        "MOVE",
+        device_roles=("SCAN1",),
+        annex_id="test",
+        annex_version="1",
+        result=EcsMove,
+        error=KnownError,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
     )
+    class Move(EcsMove):
+        pass
+
+    ecs.service.annexes = compile_commands(Move)[1]
     async with ecs.factory.begin() as session:
         command = await ecs.service.create(
             session,
             owner=ecs.owner,
             call_key="call",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=1,
-            params={"qty": 1},
+            command=Move(qty=1),
         )
     raw = json.dumps(
         dict(
@@ -133,11 +143,11 @@ async def test_storage_incompatible_identity_is_invalid_before_database_lookup(e
         assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 400
 
 
-async def test_shared_legacy_models_keep_original_result_contract(ecs):
+async def test_shared_permissive_models_keep_original_result_contract(ecs):
     from fastapi import FastAPI
 
     from app.integrations.ecs_callback import CallbackPayload
-    from app.integrations.ecs_command import DeviceAnnex
+    from app.integrations.ecs_command import compile_commands, ecs_command
     from app.integrations.ecs_command.contracts import ErrorDetail
     from app.integrations.ecs_command.dev import configure_local_ecs
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
@@ -147,7 +157,17 @@ async def test_shared_legacy_models_keep_original_result_contract(ecs):
     class LegacyData(CallbackPayload):
         qty: int
 
-    annex = DeviceAnnex(LegacyData, LegacyData, ErrorDetail, 1, 60000)
+    ecs_command(
+        "MOVE",
+        device_roles=("SCAN1",),
+        annex_id="test",
+        annex_version="1",
+        result=LegacyData,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )(LegacyData)
+    annex = compile_commands(LegacyData)[1]["test", "1"]
     ecs.service.annexes = {("test", "1"): annex}
     params = {"qty": 1, "vendor_extension": {"station": "旧站点"}}
     async with ecs.factory.begin() as session:
@@ -156,12 +176,11 @@ async def test_shared_legacy_models_keep_original_result_contract(ecs):
             owner=ecs.owner,
             call_key="legacy",
             device_code="D1",
-            task_type="MOVE",
             timeout_ms=30000,
-            params=params,
+            command=LegacyData.model_validate(params),
         )
         row = await session.get(EcsCommand, command.command_code)
-        assert json.loads(row.request_raw)["params"] == params
+        assert json.loads(row.request_raw)["params"] == {"qty": 1}
         frozen = (row.request_raw, dict(row.route), row.expires_at)
 
     store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})

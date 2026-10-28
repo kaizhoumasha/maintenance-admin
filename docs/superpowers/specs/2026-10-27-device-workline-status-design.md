@@ -1,5 +1,8 @@
 # 通用 ECS Status、设备管理与工作线管理设计
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 日期：2026-10-27（Asia/Shanghai）
 状态：阶段A已确认；首期已确认改为按需查询ECS状态，取消后台定期同步和device_observations。按需查询修订已实施，当前轮本地验证证据见实施计划。
 当前交付边界：修订B1–B8已完成本地Mock及独立PostgreSQL/Redis验证，用户已授权提交、推送feature分支并创建面向develop的PR；不连接真实ECS/WMS、不部署。此前对现有业务数据库只读核对迁移版本，未执行迁移。独立RoleRoutes及路由校验已在develop落地，本分支保留DeviceRoutes数据库使用方及Status目录元数据注入。原工作区并行暂存保持未提交，未直接纳入本PR。

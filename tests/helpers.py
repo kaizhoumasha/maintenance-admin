@@ -12,6 +12,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.core.security import create_access_token
+from app.integrations.ecs_command import ecs_command
+from app.integrations.ecs_command.contracts import ErrorDetail
 
 PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123"}
 
@@ -263,15 +265,60 @@ def raw_cursor(payload: Any) -> str:
     return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
 
+class EcsResultPayload(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    qty: int
+
+
+@ecs_command(
+    "MOVE",
+    device_roles=("SCAN1",),
+    annex_id="test",
+    annex_version="1",
+    result=EcsResultPayload,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)
+class EcsMove(EcsResultPayload):
+    pass
+
+
+@ecs_command(
+    "OTHER",
+    device_roles=("SCAN1",),
+    annex_id="other",
+    annex_version="1",
+    result=EcsResultPayload,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)
+class EcsOther(EcsResultPayload):
+    pass
+
+
 class TrialPayload(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     qty: int
 
 
-def ecs_history_annexes():
-    from app.integrations.ecs_command.contracts import DeviceAnnex, ErrorDetail
+ecs_command(
+    "MOVE",
+    device_roles=("SCAN1",),
+    annex_id="trial",
+    annex_version="1",
+    result=TrialPayload,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)(TrialPayload)
 
-    return {("trial", "1"): DeviceAnnex(TrialPayload, TrialPayload, ErrorDetail, 1, 60000)}
+
+def ecs_history_annexes():
+    from app.integrations.ecs_command import compile_commands
+
+    return compile_commands(TrialPayload)[1]
 
 
 def ecs_protocol_annexes():
@@ -511,8 +558,7 @@ def business_composition(code="test_sorting", role="TEST_SCAN"):
         initial_entries=(InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role=role),),
     )
     entry.ENTRY_MODULES = (f"app.businesses.{code}.ecs_event",)
-    entry.COMMAND_BINDINGS = ()
-    entry.ANNEXES = {}
+    entry.COMMANDS = ()
 
     def build_service(capabilities):
         raise AssertionError("listing must not call business factories")
@@ -830,9 +876,8 @@ class FlowService:
                         owner=CommandOwner("public-seam-test"),
                         call_key=execution_id,
                         device_code=binding.device_code,
-                        task_type="MOVE",
                         timeout_ms=100,
-                        params={"position": position},
+                        command=FlowMove(position=position),
                     )
                     await session.execute(
                         table.update()
@@ -859,6 +904,23 @@ class FlowService:
         return "retry_later"
 
 
+class FlowMove(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    position: str
+
+
+ecs_command(
+    "MOVE",
+    device_roles=("SEAM_A", "SEAM_B"),
+    annex_id="seam",
+    annex_version="1",
+    result=FlowMove,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=1000,
+)(FlowMove)
+
+
 @asynccontextmanager
 async def business_flow_fixture(factory, monkeypatch):
     """Own only this temporary table; production Base and Alembic stay untouched."""
@@ -876,8 +938,7 @@ async def business_flow_fixture(factory, monkeypatch):
     from app.businesses.runtime import build_runtime
     from app.database import SCHEMA
     from app.integrations.ecs_callback import registry as ecs
-    from app.integrations.ecs_command import CommandBinding, CommandOwner, DeviceAnnex, EcsCommands
-    from app.integrations.ecs_command.contracts import ErrorDetail
+    from app.integrations.ecs_command import CommandOwner, EcsCommands, compile_commands
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import EcsCommandAdapter
     from app.integrations.wms_callback import registry as callbacks
@@ -921,10 +982,6 @@ async def business_flow_fixture(factory, monkeypatch):
         await connection.run_sync(table.create)
     try:
 
-        class Move(BaseModel):
-            model_config = ConfigDict(strict=True, extra="forbid")
-            position: str
-
         class Decision(RequestPayload):
             execution_id: str
 
@@ -933,12 +990,12 @@ async def business_flow_fixture(factory, monkeypatch):
             "seam-wms": TargetConfig("seam-wms", "http://127.0.0.1:45873", "wms-decisions"),
         }
         outbox = Outbox(targets, {**ADAPTERS, "ecs-command": EcsCommandAdapter()})
-        annexes = {("seam", "1"): DeviceAnnex(Move, Move, ErrorDetail, 1, 1000)}
+        bindings, annexes = compile_commands(FlowMove)
         commands = EcsCommands(
             outbox,
             "seam-ecs",
             DeviceRoutes(
-                tuple(CommandBinding(r, "MOVE", "seam", "1", Move) for r in ("SEAM_A", "SEAM_B")),
+                bindings,
                 annexes=annexes,
             ),
             annexes,
@@ -992,8 +1049,7 @@ async def business_flow_fixture(factory, monkeypatch):
                     __name__=f"tests.{code}.composition",
                     DEFINITION=definition,
                     ENTRY_MODULES=(),
-                    COMMAND_BINDINGS=(commands.routes.bindings[(role, "MOVE")],),
-                    ANNEXES=annexes,
+                    COMMANDS=(FlowMove,),
                     build_service=factory_service,
                 )
             )
@@ -1134,6 +1190,7 @@ async def flow_decision(flow, identity):
 
     from app.core.identifiers import uuid7
     from app.http_client import AsyncHttpClient, HttpClientConfig
+    from app.integrations.wms_request.operation import lookup
     from app.reliable.sender import Sender
     from app.reliable.store import MessageStore
 
@@ -1152,7 +1209,9 @@ async def flow_decision(flow, identity):
         operation_id = str(uuid7())
         async with flow.factory.begin() as session:
             ref = await service.send(
-                session, "seam.decision@v1", {"execution_id": identity}, operation_id=operation_id
+                session,
+                lookup("seam.decision@v1").data_model(execution_id=identity),
+                operation_id=operation_id,
             )
         sender = Sender(
             MessageStore(flow.factory),

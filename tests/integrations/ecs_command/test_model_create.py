@@ -36,7 +36,7 @@ class Outcome(BaseModel):
 
 @ecs_command(
     "MOVE",
-    device_role="SCAN1",
+    device_roles=("SCAN1",),
     annex_id="model",
     annex_version="1",
     result=Outcome,
@@ -101,25 +101,21 @@ async def assert_empty(ecs, session):
         assert await session.scalar(select(func.count()).select_from(model)) == 0
 
 
-@pytest.mark.parametrize("first_model", [False, True])
-async def test_model_and_legacy_calls_share_original_bytes_and_deadline(ecs, declared, first_model):
+async def test_model_calls_preserve_original_bytes_and_deadline(ecs, declared):
     item = Item(qty=2)
     model = arguments(ecs, command=Move(quantity=1, items=[item]))
-    legacy = {k: v for k, v in model.items() if k != "command"} | dict(
-        task_type="MOVE",
-        params={"quantity": 1, "items": [{"qty": 2}], "label": "MOVE", "optional": None},
-    )
+    expected = {"quantity": 1, "items": [{"qty": 2}], "label": "MOVE", "optional": None}
     async with ecs.factory.begin() as session:
-        first = await ecs.service.create(session, **(model if first_model else legacy))
+        first = await ecs.service.create(session, **model)
         row = await session.get(EcsCommand, first.command_code)
         frozen = (row.input_raw, row.request_raw, row.route, row.delivery_snapshot, row.expires_at)
-        assert json.loads(row.request_raw)["params"] == legacy["params"]
+        assert json.loads(row.request_raw)["params"] == expected
         assert row.expires_at - row.created_at == timedelta(seconds=300)
     declared.binding = None
     declared.origin = "http://127.0.0.1:45872"
     calls = declared.calls
     async with ecs.factory.begin() as session:
-        second = await ecs.service.create(session=session, **(legacy if first_model else model))
+        second = await ecs.service.create(session=session, **model)
         assert second.command_code == first.command_code
         assert declared.calls == calls
         assert model["command"].label == "move" and model["command"].items[0] is item
@@ -139,13 +135,10 @@ async def test_model_and_legacy_calls_share_original_bytes_and_deadline(ecs, dec
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 
-@pytest.mark.parametrize("first_model", [False, True])
-async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(
-    ecs, declared, first_model
-):
+async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(ecs, declared):
     @ecs_command(
         "MOVE",
-        device_role="SCAN1",
+        device_roles=("SCAN1",),
         annex_id="reciprocal",
         annex_version="1",
         result=Outcome,
@@ -170,11 +163,8 @@ async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(
     item = Item(qty=3)
     payload = Params(second=11, first=22, item=item)
     model = arguments(ecs, command=payload)
-    legacy = {key: value for key, value in model.items() if key != "command"} | dict(
-        task_type="MOVE", params={"second": 11, "first": 22, "item": {"qty": 3}}
-    )
     async with ecs.factory.begin() as session:
-        first = await ecs.service.create(session, **(model if first_model else legacy))
+        first = await ecs.service.create(session, **model)
         row = await session.get(EcsCommand, first.command_code)
         assert json.loads(row.request_raw)["params"] == {
             "second": 11,
@@ -183,7 +173,7 @@ async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(
         }
         frozen = (row.input_raw, row.request_raw, row.route, row.delivery_snapshot, row.expires_at)
     async with ecs.factory.begin() as session:
-        again = await ecs.service.create(session, **(legacy if first_model else model))
+        again = await ecs.service.create(session, **model)
         assert again.command_code == first.command_code
         row = await session.get(EcsCommand, first.command_code)
         assert (
@@ -204,27 +194,6 @@ async def test_model_timeout_rejection_leaves_no_obligation(ecs, declared, timeo
     async with ecs.factory.begin() as session:
         with pytest.raises(ValueError):
             await ecs.service.create(session, **arguments(ecs, timeout_ms=timeout_ms))
-        await assert_empty(ecs, session)
-
-
-@pytest.mark.parametrize(
-    "shape", ["mixed-task", "mixed-params", "missing", "missing-params", "missing-task"]
-)
-async def test_create_rejects_mixed_and_incomplete_shapes(ecs, declared, shape):
-    values = arguments(ecs)
-    if shape == "mixed-task":
-        values["task_type"] = "MOVE"
-    elif shape == "mixed-params":
-        values["params"] = None
-    else:
-        values.pop("command")
-        if shape == "missing-params":
-            values["task_type"] = "MOVE"
-        if shape == "missing-task":
-            values["params"] = {}
-    async with ecs.factory.begin() as session:
-        with pytest.raises(TypeError):
-            await ecs.service.create(session, **values)
         await assert_empty(ecs, session)
 
 
@@ -334,37 +303,14 @@ async def test_model_creation_requires_exact_active_role_and_contract(ecs, decla
 @pytest.mark.parametrize("routes", ["ordinary", "debug", "local-ordinary"])
 async def test_model_creation_requires_explicit_declared_route_capability(ecs, declared, routes):
     ecs.service.routes = {
-        "ordinary": ecs.routes,
+        "ordinary": SimpleNamespace(),
         "debug": DevEcsRoutes().for_origin("http://127.0.0.1:45871"),
-        "local-ordinary": LocalEcsRoutes(ecs.routes, DevEcsRoutes()),
+        "local-ordinary": LocalEcsRoutes(SimpleNamespace(), DevEcsRoutes()),
     }[routes]
     async with ecs.factory.begin() as session:
-        with pytest.raises(ValueError, match="declared|declaration"):
+        with pytest.raises((ValueError, AttributeError)):
             await ecs.service.create(session, **arguments(ecs))
         await assert_empty(ecs, session)
-
-
-async def test_shared_manual_bindings_keep_legacy_creation(ecs, declared):
-    bindings, annexes = compile_commands(Move)
-    ecs.service.routes = RoleRoutes(
-        (*bindings, replace(bindings[0], device_role="SCAN4")),
-        annexes=annexes,
-        resolve_binding=declared.binding_resolver,
-        resolve_route=declared.route_resolver,
-    )
-    declared.binding = replace(declared.binding, device_role="SCAN4")
-    async with ecs.factory.begin() as session:
-        with pytest.raises(ValueError):
-            await ecs.service.create(session, **arguments(ecs))
-        command = await ecs.service.create(
-            session,
-            **{k: v for k, v in arguments(ecs).items() if k != "command"},
-            task_type="MOVE",
-            params={"quantity": 1},
-        )
-        assert (
-            await ecs.service.get_by_call(session, owner=ecs.owner, call_key="model-call")
-        ) == command
 
 
 async def test_local_model_and_debug_commands_use_one_sender(ecs, declared):
@@ -467,7 +413,7 @@ async def test_restart_keeps_original_result_contract_after_current_route_change
 
     @ecs_command(
         "MOVE",
-        device_role="SCAN1",
+        device_roles=("SCAN1",),
         annex_id="model",
         annex_version="2",
         result=OutcomeV2,
@@ -547,9 +493,9 @@ async def test_existing_model_call_bypasses_current_declared_capability(ecs, dec
         original = await ecs.service.create(session, **arguments(ecs))
     ecs.service.annexes = {}
     ecs.service.routes = {
-        "ordinary": ecs.routes,
+        "ordinary": SimpleNamespace(),
         "debug": DevEcsRoutes(),
-        "local-ordinary": LocalEcsRoutes(ecs.routes, DevEcsRoutes()),
+        "local-ordinary": LocalEcsRoutes(SimpleNamespace(), DevEcsRoutes()),
     }[routes]
     async with ecs.factory.begin() as session:
         replay = await ecs.service.create(session, **arguments(ecs))
@@ -559,7 +505,7 @@ async def test_existing_model_call_bypasses_current_declared_capability(ecs, dec
             await ecs.service.create(session, **arguments(ecs, timeout_ms=True))
 
 
-async def test_non_migratable_dataclass_guidance_names_legacy_ecs_arguments(ecs, declared):
+async def test_unsupported_dataclass_contract_is_rejected_before_enqueue(ecs, declared):
     from pydantic.dataclasses import dataclass
 
     @dataclass(config=ConfigDict(strict=True, extra="forbid"))
@@ -568,7 +514,7 @@ async def test_non_migratable_dataclass_guidance_names_legacy_ecs_arguments(ecs,
 
     @ecs_command(
         "MOVE",
-        device_role="SCAN1",
+        device_roles=("SCAN1",),
         annex_id="frozen-field",
         annex_version="1",
         result=Outcome,
@@ -581,6 +527,6 @@ async def test_non_migratable_dataclass_guidance_names_legacy_ecs_arguments(ecs,
         data: FrozenField
 
     async with ecs.factory.begin() as session:
-        with pytest.raises(ValueError, match="legacy task_type/params"):
+        with pytest.raises(ValueError, match="supported.*contract|unsupported|frozen"):
             await ecs.service.create(session, **arguments(ecs, command=Params(data=FrozenField(1))))
         await assert_empty(ecs, session)

@@ -1,4 +1,4 @@
-"""与外部系统对接的代码都放在这里:每个子包要么是一套通用机制,要么是一个业务的对接。
+"""本目录保存通用机制与固定平台能力，领域业务统一放在 app.businesses。
 
 ## 现有子包
 
@@ -6,31 +6,22 @@
 |---|---|---|
 | `wms_callback` | 机制 | 接收 WMS 主动发来的回调,不认识任何业务 |
 | `wms_request` | 机制 | 向 WMS 的 decisions、facts 端点发请求,目前没有具体 operation |
-| `wms_transport` | 业务 | 搬运任务:提交给 WMS,并处理 WMS 回传的位置和结果 |
+| `wms_transport` | 固定平台能力 | 搬运任务:提交给 WMS,并处理 WMS 回传的位置和结果 |
 | `ecs_status` | 内置能力 | 查询指定 ECS 的设备描述和状态，无登记/存储前提，不是业务注册表 |
 
 机制包不使用仓储业务词命名。`inbound` 是入库,`outbound` 是出库,不能拿来表示通信方向。
 每个子包的 `__init__.py` docstring 写了它的职责和开发方式,改动前先读那一份。
-跨子包共用的 WMS 合同检查放在本目录下的 `wms_envelope.py`,它不是子包,不参与自动发现。
+跨子包共用的 WMS 合同检查放在本目录下的 `wms_envelope.py`,它不是业务入口。
 
-## 业务包的约定
+## 显式入口
 
-业务包里这些文件名由框架自动发现,启动时导入,装饰器完成注册:
+领域业务只放在 `app/businesses/<业务>/`，由 `catalog.entries()` 返回 composition，
+其 `ENTRY_MODULES` 显式声明 callback、request、ecs_event 及 local 入口。
+统一加载器 `app.integrations.discovery` 合并 catalog 与固定平台清单，不扫描 integrations 根目录。
+声明的入口可以是模块或包；包内子模块仍逐个导入，一个 operation 一个文件时校验注册名对应文件名。
 
-- `callback/`:入站 operation,由 `wms_callback` 接收。operation 很少时也可以是单个 `callback.py`。
-- `request/`:出站 operation,由 `wms_request` 发送。同样可以是单个 `request.py`。
-- `dev_callback.py`、`dev.py`:联调样例和联调场景,只在 `ENVIRONMENT=local` 导入。
-
-名字写成目录时,一个 operation 一个文件,文件名是注册名把 `.` 和 `@` 换成 `_`,
-有测试检查两者一致。其余文件名没有强制规定,`wms_transport` 可以作参照:协议常量、适配器、
-请求构造与校验、入队服务、场景封装各一个文件。
-
-## 新增一个业务包
-
-1. 在这里建 `<业务>/`,`__init__.py` 先写 docstring:范围、对应的合同、调用入口、没有做的部分。
-2. 有自己的协议适配器时,在 `app/main.py` 里和现有的一起注册到 `app.state.reliable_adapters`。
-3. 在 `RELIABLE_TARGETS` 里配对应协议的目标才会真正发送,默认不发。
-4. 测试放在 `tests/integrations/<业务>/`。
+固定平台正式入口是 `wms_transport.callback`；local 固定加载 ECS/WMS 示例及 Transport 场景。
+所有正式入口与合同校验先于 local 入口和运行时资源装配。生产业务 catalog 当前为空。
 
 ## 依赖方向
 

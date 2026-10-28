@@ -1,10 +1,13 @@
 # ECS 事件回调接收设计
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 2026-10-27 独立角色框架补充：事件注册已按 `(device_role, event_type)` 组合键和显式 Payload 演进，运行时绑定由应用注入；下文旧的单事件名声明仅保留作基线背景。该次角色补充未改变 wire、摘要、原 receipt、ACK 及事务规则；身份算法后续变更见下述现行合同。 当前合同见[独立设计](2026-10-27-ecs-role-framework-design.md)和[接入说明](../../integrations/ecs-roles.md)。设备／工作线管理和 Status 不属于该框架前置。
 
 2026-10-28 现行合同补充：调试状态由 ECS 管理。新信封、处理器上下文和 OpenAPI 不再声明 `is_debug`；来件中该键与其他额外顶层字段一样忽略。新身份只包含 `device_code`、`event_type`、`timestamp`、`data`（缺省 `{}`）。发布时须暂停混合版本受理，统一全部接收实例的算法后恢复，保留 ECS 原消息重试能力。
 
-历史决策轨迹：2026-10-24 版本曾校验可选严格布尔 `is_debug`，缺省为 false，并将其纳入摘要和处理器上下文。此次变更不是重写历史合同：旧收据、原身份和业务关联不重算、不合并、不删除。入口先查新摘要，再查同一规范化核心事件分别加入 `is_debug=false/true` 的两个旧摘要；原省略字段归入旧 false。旧摘要仅用于历史查重，绝不作为新行身份。命中任一旧行沿用原响应与原收据身份，双命中按 `created_at`、`id` 稳定选择诊断引用，不执行新处理器；原先未注册事件升级后仍不自动回放。详细依据见[工作线业务包设计 §9.3](2026-10-27-workline-business-packages-design.md#93-调试状态由-ecs-管理)。下文身份、校验和上下文说明已更新为现行合同。
+历史决策轨迹：2026-10-24 版本曾校验可选严格布尔 `is_debug`，缺省为 false，并将其纳入摘要和处理器上下文。此次变更不是重写历史合同：旧收据、原身份和业务关联不重算、不合并、不删除。入口先查新摘要，再查同一规范化核心事件分别加入 `is_debug=false/true` 的两个旧摘要；原省略字段归入旧 false。旧摘要仅用于历史查重，绝不作为新行身份。命中任一旧行沿用原响应与原收据身份，双命中按 `created_at`、`id` 稳定选择诊断引用，不执行新处理器；原先未注册事件升级后仍不自动回放。当前接入步骤见[ECS Event 流程卡](../../integrations/business-development-quickstart.md#ecs-event-流程卡)。下文身份、校验和上下文说明已更新为现行合同。
 
 状态:**已实现(2026-10-24)。实施前工程评审两轮(均含外部独立意见),决定已并入正文;正文为设计时的表述,以代码和 `app/integrations/ecs_callback/` 包说明为准。验证:一次性本地 PostgreSQL 17 容器上全量 1781 通过、22 跳过(15 个 Redis 用例未运行)、0 失败;生产 PostgreSQL 与真实数据迁移、真实 ECS 联调未验证,详见 CHANGELOG「ECS 事件回调接收」。** · 依据:`wes_backend/docs/integration/third_party_integration_whitepaper.md`(v1.1,Approved)§1–2、§4.2、§5;[WMS 回调接收设计](2026-10-22-transport-callback-design.md);[ECS 接入指南](../../integrations/ecs-command.md) · 范围:`POST /api/v1/callback/event` 的接收机制。结果回调、命令出站、状态查询另行设计。
 

@@ -21,8 +21,6 @@ from .declaration import command_declaration
 from .protocol import OPERATION, PROTOCOL
 from .routing import UnconfiguredRoutes, retry_window_error
 
-_MISSING = object()
-
 
 @dataclass(frozen=True)
 class CommandOwner:
@@ -50,28 +48,48 @@ class EcsCommands:
         call_key,
         device_code,
         timeout_ms,
-        task_type=_MISSING,
-        params=_MISSING,
-        command=_MISSING,
+        command,
     ):
-        declaration = None
-        if command is not _MISSING:
-            if task_type is not _MISSING or params is not _MISSING:
-                raise TypeError("command cannot include task_type or params")
-            declaration = command_declaration(type(command))
-            task_type = declaration.binding.task_type
-            try:
-                params = validated_model_payload(command)
-            except ValueError as error:
-                if "legacy operation/data form" in str(error):
-                    raise ValueError(
-                        str(error).replace(
-                            "legacy operation/data form", "legacy task_type/params form"
-                        )
-                    ) from None
-                raise
-        elif task_type is _MISSING or params is _MISSING:
-            raise TypeError("create requires task_type and params or one command model")
+        declaration = command_declaration(type(command))
+        binding = declaration.bindings[0]
+        params = validated_model_payload(command)
+
+        async def resolve_route():
+            route = await self.routes.resolve_declared(session, device_code, declaration)
+            annex_key = (binding.annex_id, binding.annex_version)
+            if annex_key != (route.annex_id, route.annex_version):
+                raise ValueError("declared command does not match active route annex")
+            models = self.annexes.get(annex_key)
+            if models is None:
+                raise ValueError("confirmed annex required")
+            merge_annexes(
+                {annex_key: models}, {annex_key: declaration.annex}, source="declared command"
+            )
+            return route
+
+        return await self._enqueue(
+            session,
+            owner=owner,
+            call_key=call_key,
+            device_code=device_code,
+            task_type=binding.task_type,
+            timeout_ms=timeout_ms,
+            params=params,
+            resolve_route=resolve_route,
+        )
+
+    async def _enqueue(
+        self,
+        session,
+        *,
+        owner,
+        call_key,
+        device_code,
+        task_type,
+        timeout_ms,
+        params,
+        resolve_route,
+    ):
         if (
             not isinstance(owner, CommandOwner)
             or not isinstance(call_key, str)
@@ -98,13 +116,7 @@ class EcsCommands:
         if row is not None:
             compare(row)
             return await self._view(session, row)
-        if declaration is not None:
-            resolve = getattr(self.routes, "resolve_declared", None)
-            if not callable(resolve):
-                raise ValueError("command model requires declaration-aware routing")
-            route = await resolve(session, device_code, declaration)
-        else:
-            route = await self.routes.resolve(session, device_code, task_type)
+        route = await resolve_route()
         if route.device_code != device_code or task_type not in route.commands:
             raise ValueError("route/device/action mismatch")
         if (
@@ -115,13 +127,6 @@ class EcsCommands:
         models = self.annexes.get((route.annex_id, route.annex_version))
         if models is None:
             raise ValueError("confirmed annex required")
-        if declaration is not None:
-            annex_key = (declaration.binding.annex_id, declaration.binding.annex_version)
-            if annex_key != (route.annex_id, route.annex_version):
-                raise ValueError("declared command does not match active route annex")
-            merge_annexes(
-                {annex_key: models}, {annex_key: declaration.annex}, source="declared command"
-            )
         canonical_digest(params)
         models.params_model.model_validate(params)
         if (

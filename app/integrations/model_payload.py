@@ -43,7 +43,8 @@ def _dataclass_contract(value, context, scope):
     if len(candidates) != 1:
         reason = "ambiguous" if candidates else "unresolved"
         raise ValueError(
-            f"{reason} original dataclass contract; use the unchanged legacy operation/data form"
+            f"{reason} original dataclass contract; "
+            "use explicit nested models to disambiguate fields"
         )
     schema = candidates[0]
     # A prebuilt wrapper cannot validate assignments; reuse the exact class's original validator.
@@ -101,7 +102,7 @@ def _structured_input(value, active, context, scope):
         if any(field.frozen for field in getattr(type(value), "__pydantic_fields__", {}).values()):
             raise ValueError(
                 "dataclasses containing Field(frozen=True) are not eligible for model calls; "
-                "use the unchanged legacy operation/data form"
+                "use an explicit nested model for these fields"
             )
         # Strict dataclasses require instances; validate a copy without trusting its fields.
         validated = copy(value)

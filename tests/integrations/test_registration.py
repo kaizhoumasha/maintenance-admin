@@ -8,16 +8,17 @@ from app.integrations.ecs_callback import registry as ecs
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.integrations.wms_request import operation as requests
-from app.integrations.wms_request.discovery import load_operation_modules as discover_requests
 
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
     for registry in (ecs, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
-    monkeypatch.setattr(
-        "app.integrations.wms_request.discovery.load_operation_modules", lambda: None
-    )
+    monkeypatch.setattr("app.integrations.discovery._loaded_formal", {"request"})
+
+
+class Request(requests.RequestPayload):
+    pass
 
 
 class Payload(CallbackPayload):
@@ -73,7 +74,7 @@ def test_file_mismatch_explains_the_expected_name(kind):
         target = type("Fact", (requests.RequestPayload,), {})
         decorate = requests.request_operation(name, requests.Endpoint.FACTS)
     original = target.__module__
-    target.__module__ = f"app.integrations.biz.{kind}.wrong"
+    target.__module__ = f"app.businesses.biz.{kind}.wrong"
     try:
         with pytest.raises(ValueError) as error:
             decorate(target)
@@ -98,7 +99,7 @@ def test_invalid_names_and_duplicates_include_remedies(kind, invalid_name):
             return callbacks.callback_operation(name, data=Payload)(target)
         return requests.request_operation(name, requests.Endpoint.FACTS)(target)
 
-    target = requests.RequestPayload if kind == "request" else async_handler
+    target = Request if kind == "request" else async_handler
     with pytest.raises(ValueError, match="修复"):
         decorate(invalid_name, target)
     name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
@@ -131,35 +132,6 @@ def test_local_discovery_scope_is_recorded_and_restored_after_failure():
     ecs.ecs_event("NORMAL", device_role="SCAN1", data=CallbackPayload)(async_handler)
     assert ecs.lookup("SCAN1", "LOCAL").registration_source.local_only is True
     assert ecs.lookup("SCAN1", "NORMAL").registration_source.local_only is False
-
-
-def test_discovery_records_local_only_from_the_loading_entrypoint(monkeypatch):
-    from app.controllers.dev import _load_dev_modules
-    from app.core import module_tree
-    from app.integrations.ecs_callback.discovery import load_event_modules
-    from app.integrations.wms_callback.discovery import load_operation_modules as load_callbacks
-
-    seen = {}
-
-    from app.integrations import discovery
-
-    monkeypatch.setattr(discovery, "_loaded_formal", set())
-
-    def import_module(name, *, required=False):
-        event_type = f"LOAD_{len(seen)}"
-        ecs.ecs_event(event_type, device_role="SCAN1", data=CallbackPayload)(async_handler)
-        seen[name] = ecs.lookup("SCAN1", event_type).registration_source.local_only
-
-    monkeypatch.setattr(module_tree, "import_module_tree", import_module)
-    load_event_modules("local")
-    load_callbacks("local")
-    discover_requests()
-    _load_dev_modules()
-    assert seen
-    assert all(
-        local_only == (name.rsplit(".", 1)[-1] in {"dev", "dev_callback", "dev_ecs_event"})
-        for name, local_only in seen.items()
-    )
 
 
 def test_invalid_request_model_and_example_have_fix_instructions():
@@ -199,7 +171,7 @@ def test_handlers_with_uncallable_signatures_do_not_enter_the_registry(kind, sig
 def test_invalid_request_endpoint_does_not_reserve_the_operation_name():
     name = "example.endpoint@v1"
     with pytest.raises(TypeError, match="Endpoint"):
-        requests.request_operation(name, "facts")(requests.RequestPayload)
+        requests.request_operation(name, "facts")(Request)
     assert requests.lookup(name) is None
-    requests.request_operation(name, requests.Endpoint.FACTS)(requests.RequestPayload)
+    requests.request_operation(name, requests.Endpoint.FACTS)(Request)
     assert requests.lookup(name).endpoint is requests.Endpoint.FACTS

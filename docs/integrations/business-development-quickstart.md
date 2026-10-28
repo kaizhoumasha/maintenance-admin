@@ -1,119 +1,90 @@
 # 业务开发快速开始
 
-先确认一条业务怎样受理、等待、推进和恢复，再按下面路线落到现有接口。
-这里的示例名称与测试合同均是讨论示例，不代表已确认的 WMS/ECS 合同，也不自动注册。
+先确认业务怎样受理、等待、推进和恢复，再接入唯一的模型 API。
+示例名称、字段和测试合同不是已确认的 WMS/ECS 合同，也不会自动注册。
 正式 `catalog.entries()` 仍为空；只有合同、资源、实现与恢复完整且获准的真实业务才可加入。
-本文覆盖当前接入与检查能力；阶段 2–4 的能力、迁移资格及真实业务进入条件见[验收说明](business-development-phase2-4-acceptance.md)。
+当前不兼容变化、模型约束和验证证据见[单一 API 验收记录](business-development-single-api-acceptance.md)。
+旧阶段设计、计划与验收记录已移出仓库归档，当前调用形式与验证证据统一使用上述文档。
 
 ## 最短接入路线
 
 | 顺序 | 开发者写什么 | 本步检查 | 继续阅读 |
 | --- | --- | --- | --- |
-| 1. 确认业务经过 | 在业务计划写明入口、稳定 execution/cycle 身份、资源、当前许可、直接前序、成功条件、等待及恢复责任；逐项确认 WMS operation、ECS Event/Command/Result 合同 | 新经过有独立业务身份；重报、重启与等待复用原身份；ACK 不作为完成依据 | [业务 API 索引](workline-business-api.md)（区分参考合同与草案） |
-| 2. 写纯声明 | `app/businesses/<business>/definition.py` 定义角色、位置槽及已确认初始入口 | 标准库和声明类型依赖、不可变 tuple；不导入配置/服务/数据库 | [definition](business-packages.md#1-纯声明-definitionpy) |
-| 3. 写相邻合同和薄入口 | `contracts.py` 放共享模型；按需建 `ecs_event.py`、`callback.py`、`request.py` 或对应入口包；接收器用 `require_runtime(ctx).services[DEFINITION.code]` 调具体业务受理方法 | 原类型/扩展字段规则保持；文件名、来源和角色正确；未确认名称不登记 | [注册与命名](registration.md)、[薄入口](business-packages.md#5-薄入口) |
-| 4. 声明命令 | 单绑定且原合同已严格时，用 `@ecs_command` 在原参数类上声明，并在 composition 显式 `compile_commands(*models)`；共享/宽松合同仍手工写 `CommandBinding/DeviceAnnex` | 原模型、角色、附录身份/版本及超时不变；序列化与旧 params 合同逐项等价；历史附录只验证原 Result | [命令声明与调用](ecs-command.md#模型声明与显式编译)、[角色装配](ecs-roles.md) |
-| 5. 固定 composition | 列出 `ENTRY_MODULES`、`MODEL_MODULES`、`DEFINITION`、`COMMAND_BINDINGS`、`ANNEXES`；无状态工厂接收 Capabilities，并为具体推进服务注入 session factory | API/worker 用同一显式清单；全部正式入口 → 合同校验 → local 入口 → 资源/工厂 | [composition](business-packages.md#3-可信装配-compositionpy) |
-| 6. 实现持久业务 | `models.py/service.py` 保存执行、动作、原身份/资源、持久待办、等待原因和消费依据；分别实现受理与独立推进/待办发现 | 受理复用 ctx.session；推进新 session + RR；业务进度、消费依据与下一 Outbox 意图原子 | [事务配方 A/B 与恢复](business-transaction-recipes.md) |
-| 7. 验证后接入 | 用隔离两线/两业务及 PostgreSQL 恢复用例验证；完整真实业务获准后才加入 `catalog.entries()`，生产模型走单 head 迁移 | 正式目录不放测试/占位包；静态检查、隔离业务验证和供应商/现场验收分别记录 | [清单及模型加载](business-packages.md#6-显式-catalog)、[配方证据](business-transaction-recipes.md#可执行证据) |
+| 1. 确认业务经过 | 写明入口、稳定 execution/cycle 身份、资源、当前许可、直接前序、成功条件、等待和恢复责任；确认 WMS/ECS 合同 | 重报、重启和等待复用原身份；ACK 不作为完成依据 | [业务 API 索引](workline-business-api.md) |
+| 2. 写纯声明 | `app/businesses/<business>/definition.py` 定义角色、位置槽和初始入口 | 只依赖标准库和声明类型；不可变 tuple；不访问运行设施 | [definition](business-packages.md#1-纯声明-definitionpy) |
+| 3. 写合同和薄入口 | 在业务包放 `contracts.py` 及 `ecs_event` / `callback` / `request` 文件或入口包；处理器转交具体服务 | 类型、扩展字段、文件名和来源正确；未确认名称不登记 | [注册指南](registration.md) |
+| 4. 声明命令 | 用 `@ecs_command(..., device_roles=(ROLE, ...))` 装饰参数模型 | 严格参数/结果/错误类型及超时；一个模型可供多个角色共享 | [命令声明](ecs-command.md#模型声明与显式编译) |
+| 5. 固定 composition | 列出 `DEFINITION`、`ENTRY_MODULES`、`MODEL_MODULES`、`COMMANDS=(Model, ...)`；工厂注入能力和 session factory | catalog 内部编译，只激活本业务声明角色的交集；API/worker 共用清单 | [composition](business-packages.md#3-可信装配-compositionpy) |
+| 6. 实现持久业务 | 具体 `service.py/models.py` 保存执行、原身份、持久待办、等待原因和消费依据 | 原事务受理；新 session/RR 推进；进度、消费与下一 Outbox 意图原子 | [事务配方](business-transaction-recipes.md) |
+| 7. 验证后接入 | 隔离验证两线/两业务、并发和恢复；完整真实业务获准后才加入 catalog | 测试使用独立 MetaData 和 finally 清理；生产迁移保持单 head | [显式 catalog](business-packages.md#6-显式-catalog) |
 
-入口支持 `app/integrations/<business>` 与 `app/businesses/<business>` 两种来源和单文件/入口包。
-新增工作线业务优先使用后者，使合同、模型、服务相邻；沿用旧目录无需迁移身份或另建发现树。
-`accept`、`advance`、`scan_pending` 等均是具体业务自己命名的方法，平台不提供通用执行/事务 runner、
-业务 worker、第二 Sender、补偿器或脚手架生成器。
+业务只有 `app/businesses/<business>/` 这一目录来源。将入口文件或包显式加入所属
+`composition.ENTRY_MODULES`，并由 `catalog.entries()` 列出该 composition；仅新建文件不生效。
+平台固定 Transport/本地演示入口由共享 manifest 加载，不是新增业务的目录选项。
+`accept`、`advance`、`scan_pending` 是具体业务自己的方法，平台没有通用业务 worker、execute 或第二 Sender。
 
 ### WMS operation 流程卡
 
-1. 先确定方向：WMS → 本项目用 `callback`；本项目 → WMS 用 `request`，确认 FACTS 或 DECISIONS。
-2. 用现有 `@callback_operation(name, data=Payload)` 异步处理器或
-   `@request_operation(name, Endpoint)` Payload 模型注册；不要把请求 operation 当作初始回调入口。
-3. 回调在 `ctx.session` 受理；出站在调用方事务内用 `Capabilities.wms.send`，保存原
-   operation/operation_id/message_id；提交后由既有 Outbox/Sender 投递。
-4. 用 `Capabilities.wms.get_result` 读原终局响应，按已确认业务合同解析决定；RECORDED、
-   PREPARE_ACCEPTED 和 DONE 均不能单独判成功。详见[注册](registration.md)、[结果](outbound-results.md)。
+1. WMS → 本项目用 `callback`；本项目 → WMS 用 `request`，确认 FACTS 或 DECISIONS。
+2. 用 `@callback_operation(name, data=Payload)` 异步处理器或 `@request_operation(name, Endpoint)` 模型声明，加入显式入口清单。
+3. 回调在 `ctx.session` 受理；出站只用 `await capabilities.wms.send(session, Payload(...), operation_id=saved_id)`。
+   保存原 operation、operation_id、message_id；由既有 Outbox/Sender 投递。
+4. 用 `get_result` 读原终局响应并严格解析业务决定；RECORDED、PREPARE_ACCEPTED、DONE 不能单独判成功。
 
 ### ECS Event 流程卡
 
-1. 确认事件名、角色及 Payload，建 `ecs_event` 文件/包，使用
-   `@ecs_event(name, device_role=ROLE, data=Payload)` 异步处理器。
-2. 可信装配注入 BindingResolver；静态角色不查询设备或 Status。薄入口将 `ctx` 交给具体业务服务，
-   依据 `ctx.binding` 检查当前线、角色、许可和本次经过，在原事务内保存业务待办。
-3. 原收据提交后 ACK；提交后通知仅携带原 execution_id，丢通知靠业务持久待办恢复。
-   未绑定/未知事件沿原诊断规则处理，不自行补注册或回放。详见[角色](ecs-roles.md)及[配方 A](business-transaction-recipes.md#受理-a原接收事务)。
+1. 在业务包 `ecs_event` 文件/包使用 `@ecs_event(name, device_role=ROLE, data=Payload)`，列入 `ENTRY_MODULES`。
+2. 应用注入 BindingResolver；处理器依据 `ctx.binding` 核对线、角色、当前许可和本次经过，在原事务保存待办。
+3. 收据提交后 ACK；提交后通知只携带原 execution_id，丢通知靠持久待办恢复。未知事件不自动补注册或回放。
 
 ### ECS Command / Result 流程卡
 
-1. 确认 params、Result、error_detail 和超时范围；按迁移资格选择模型声明/显式编译或原手工合同，
-   由可信装配配置路由。新命令使用 `PROTOCOL_RETRY_WINDOW`（300 秒）。
-2. 在业务事务中用 `Capabilities.ecs.create`，保存原 owner/call_key/command_code 和输入；
-   相同身份重入复用原命令与冻结路由/字节/期限，当前改址只作用于新命令。
-3. Result 经原接收器校验并提交，再由具体业务用 `get_by_call` / `get_command` 读取核对；
-   ACK、投递完成和设备物理完成分别判断，UNKNOWN/HELD 不自动换号重发。
-   `@ecs_command` 已可用；没有 `@ecs_result`，Result 仍走原接收器。详见[命令与结果](ecs-command.md)及[配方 B](business-transaction-recipes.md#独立推进-b新事务)。
+1. 确认参数、Result、error_detail 及超时，在精确模型上声明 `device_roles`，将模型列入 `COMMANDS`。
+2. 业务事务中只用 `await capabilities.ecs.create(session, owner=owner, call_key=saved_key, device_code=device_code, timeout_ms=timeout_ms, command=Payload(...))`。
+   保存原 owner/call_key/command_code 和输入；新命令使用 `PROTOCOL_RETRY_WINDOW`（300 秒）。
+3. Result 经原接收器提交；业务通过 `get_by_call` / `get_command` 核对原命令后独立推进。
+   没有 `@ecs_result`；UNKNOWN/HELD 不自动换号、改址重发。
 
-新 Transport 场景通常复用 `Capabilities.transport` 现有创建/结果/前序能力，
-不重写 Transport 回调、结算、投递或另一套 Sender。先确认冻结资源与 caller/cycle 范围；
-具体创建参数见[Transport 请求](wms-transport.md)，结果消费见[结果接口](outbound-results.md)。
+Transport 复用 `Capabilities.transport` 的现有创建、结果和完整前序读取，不重写回调、结算或 Sender。
+具体合同见[Transport 请求](wms-transport.md)及[出站结果](outbound-results.md)。
 
-## 当前兼容清单
+## 当前接入清单
 
-以下固定当前已实现的入口和旧合同，供上述接入及后续语法简化复用。
-
-### 可用入口
-
-| 用途 | 当前形式 | 调用和装配边界 |
+| 用途 | 唯一业务形式 | 边界 |
 | --- | --- | --- |
-| WES → WMS 请求 | `@request_operation(name, Endpoint.FACTS/DECISIONS)` 声明 `RequestPayload` | 新调用 `await wms.send(session, Payload(...), operation_id=saved_id)`，精确原类只对应一个已加载 operation；旧 `send(session, operation, data, operation_id=saved_id)` 及原关键字形式保留，无 `payload=` 参数 |
-| WMS → WES 回调 | `@callback_operation(name, data=Payload)` 装饰 `async def handler(ctx, payload)` | 在原 `ctx.session` 内写业务和待办；`CallbackPayload` 保留严格类型及忽略扩展字段的原规则 |
-| ECS → WES 事件 | `@ecs_event(name, device_role=ROLE, data=Payload)` 装饰异步处理器 | 角色合同与运行时 BindingResolver 分开；持久收据和业务受理使用原 `ctx.session` |
-| WES → ECS 命令 | `@ecs_command(...)` + 显式 `compile_commands(*models)`，或原手工 `CommandBinding/DeviceAnnex` | 新 `create(session, owner=owner, call_key=saved_key, device_code=..., timeout_ms=..., command=Payload(...))` 与旧 `task_type=...` + `params=...` 互斥；当前声明感知路由只用于新模型命令 |
+| WES → WMS | `send(session, Payload(...), operation_id=...)` | 精确注册类唯一对应已加载 operation；实际字段重验后按模型 JSON 序列化 |
+| WMS → WES | `@callback_operation(name, data=Payload)` + 异步处理器 | 原 `ctx.session` 保存业务和待办；入站模型保留原扩展字段策略 |
+| ECS → WES | `@ecs_event(name, device_role=ROLE, data=Payload)` + 异步处理器 | 事件声明仍是单角色；绑定解析与静态声明分开 |
+| WES → ECS | `@ecs_command(..., device_roles=(...))` + `COMMANDS=(Model, ...)` + 模型 `create` | catalog 编译，正式路由只用 `resolve_declared`；业务不手写编译产物 |
 
-入口继续支持 `app/integrations/<business>` 与 `app/businesses/<business>`，均可使用单文件或入口包。
-入口包可在 `__init__.py` 注册；分文件登记时按 operation/event 名称匹配文件名。
-正式业务通过固定 `ENTRY_MODULES` 显式声明，
-local 入口保持环境限制。API/worker 共用显式清单，顺序为全部正式入口 → 合同交叉校验 →
-local 入口 → 资源/工厂。Celery 应用构造前执行相同声明检查；缺失正式入口或错误合同会阻止
-worker 启动，local 入口不能补齐正式缺项。该检查不执行业务工厂/处理器或装配业务运行时。
-正式 `catalog.entries()` 当前保持为空，直到完整真实业务获准接入；
-隔离示例不进入生产目录、生产 Base 或迁移。
+模型支持及不支持的 dataclass/泛型合同见[模型约束](ecs-command.md#模型声明与显式编译)。
+local Swagger 的 `operation/data`、`task_type/params` 是动态 HTTP 协议字段，经受信任适配器解析后进入同一核心；
+不能作为业务 SDK 调用模板。新字节遵循模型别名、默认值、序列化器及 extra 策略，`extra="ignore"` 丢弃字段不被暗藏或恢复。
+历史冻结数据和 Result 合同继续保留；表达不了原输入的存量动作按原引用读取、核对，不另换身份发送。
 
 ### 启动应用前检查声明
 
-使用项目 Python 3.13+ 和锁定应用依赖，在仓库根目录每次启动一个新进程：
+使用项目 Python 3.13+ 和锁定依赖，在仓库根目录每次运行一个新进程：
 
 ```sh
 rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment production
 rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment local
 ```
 
-`--environment` 必填，仅接受 `production` / `local`，参数决定声明范围，不读取继承的
-`ENVIRONMENT`。`production` 表示正式静态范围，其他非 local 部署也使用它，不表示连接生产。
-命令不要求数据库 URL、Redis URL、JWT 或 `.env`；只按现有发现器加载两种来源的正式声明，
-调用原 `validate_business_contracts()`，通过后才在 local 范围加载原 dev 三类入口。
-它不启动 API/worker，不调用处理器、业务工厂、运行时装配、模型加载、建表或消息回放。
+`--environment` 必填，只接受 `production` / `local`，不读取继承的 `ENVIRONMENT`。
+production 表示正式声明范围，不连接生产；无需数据库、Redis、JWT 或 `.env`。
+唯一加载器 `app.integrations.discovery.load_formal_modules/load_local_modules` 合并 catalog 显式入口与固定平台 manifest。
+顺序为全部正式入口 → 业务合同交叉校验 → local 入口 → 应用资源/工厂；CLI 不执行最后一步，也不执行 handler、建表或回放。
+声明缺失/内部 import 错误会失败，local 不能修补正式缺项；API/worker 使用同一声明来源。
 
-成功退出 `0`，stdout 仅输出一个 JSON；失败退出 `1`，stdout 不输出部分清单，stderr 提供
-固定失败阶段、错误类型、安全源码位置和修复指引，不回显原异常、配置或 Payload。
-参数缺失/非法退出 `2`，`--help` 退出 `0`；这些参数处理均先于应用导入。
+成功退出 0，stdout 为一个 JSON；失败退出 1，仅 stderr 提供固定阶段、错误类型和安全源码位置；
+参数错误退出 2，help 退出 0，参数处理先于应用导入。失败时先核对 catalog、ENTRY_MODULES、COMMANDS 和角色声明，不输出原异常或 Payload。
 
-失败诊断的 origin/安全堆栈可能指向公共校验器，而非出错业务的 composition 或原绑定。
-此时先按 phase 检查显式 catalog 和对应入口/绑定声明。当前工具不保证直接给出具体业务源项；
-不要通过输出原异常、Payload 或局部变量绕过这个边界。
-
-JSON 顶层固定为 `environment`、`businesses`、`entries`、`command_contracts`、`scope`：
-
-- `businesses` 是排序后的显式 catalog 业务 code 数组；当前为 `[]`，仍检查 Transport 等正式入口。
-- `entries` 保留三类公开注册表的 `kind/name/device_role` 及原 `module/source_file/symbol/local_only`，
-  按类型、角色、名称排序，不包含地址、Payload/schema 或业务记录。
-- `command_contracts` 按角色、动作、附录身份排序；每项含 `kind=ecs_command`、`name=task_type`、
-  `device_role`、`annex_id/annex_version`、原绑定来源字段、原附录的 `timeout_min_ms/timeout_max_ms`。
-  复用原校验结果，不增加旧 DeviceAnnex 的严格性要求，也不合成不存在的附录来源。
-- `scope.checked/excluded` 明示已检查和未检查范围。只覆盖已发现且导入的声明，正式业务来自显式
-  `catalog.entries()`；不承诺任意源码已加载。local 也不装配通用 v3 调试命令、ECS Status 或模型资源。
-
-检查覆盖以原注册器和业务合同交叉校验为准；成功不证明路由、迁移、网络、许可、业务或物理完成，
-也不证明某合同具备模型调用迁移资格。空命令合同数组不表示调试命令已经验证。无同进程清缓存/重扫接口。
-详细入口规则及 HTTP 目录见[注册排障指南](registration.md)。
+JSON 包含 `environment`、`businesses`、`entries`、`command_contracts`、`scope`。
+`entries` 保留 kind/name/device_role 与原 module/source_file/symbol/local_only；命令合同显示 task_type、角色、附录版本、超时和原模型来源。
+当前 `businesses=[]`、命令合同为空，仍检查两个正式 Transport 回调。local 保留 ECS/WMS 演示及六个 Transport 场景。
+通用 v3 调试命令、Status、模型资源、路由、迁移、网络、许可和物理完成不在静态检查范围。
+清单只证明实际加载的声明，不扫描任意源码；环境切换需新进程，不提供缓存清理/重扫接口。
 
 ### 原身份与结果读取
 
@@ -130,7 +101,7 @@ JSON 顶层固定为 `environment`、`businesses`、`entries`、`command_contrac
 
 两角色可共享原模型/附录；不能在同一 annex_id/version 下收紧原合法合同。
 可信装配保留的 `history_annexes` 仅用于原 Result 校验，不授予新角色命令权限。
-`CallbackPayload` 的 `strict=True, extra="ignore"` 及其他合法旧模型配置继续有效。
+`CallbackPayload` 的 `strict=True, extra="ignore"` 及其他合法模型配置继续有效；新请求内容按该模型策略序列化。
 
 结果消费只使用上述公开读接口，不直接读写框架表。ACK、投递 DONE、任务 CLOSED 均不替代
 业务成功、当前许可或物理完成。独立推进使用新 session，首条 SQL 前设置 REPEATABLE READ；
@@ -139,52 +110,9 @@ JSON 顶层固定为 `environment`、`businesses`、`entries`、`command_contrac
 在新 session 有界重跑整个事务，耗尽保留待办和原等待依据。见[结果读取约定](outbound-results.md)
 及[业务包事务边界](business-packages.md)。
 
-### 回归证据与补测范围
+### 回归证据与边界
 
-以下名称可直接交给 pytest 的 `-k` 定位；路径均相对仓库根目录。测试通过仅证明对应断言，
-不替代供应商合同确认、现场验证或生产验收。
-
-| 兼容项 | 可执行证据 | 本次处理 |
-| --- | --- | --- |
-| WMS 调用与规范 wire | `tests/integrations/wms_request/test_service.py::test_legacy_send_forms_preserve_canonical_payload_and_reference` | 补齐位置/关键字两种调用顺序、别名输入、默认值、显式 null、嵌套 JSON、原 target/message_id/字节/expires_at |
-| WMS 错误与调用方事务 | 同文件 `test_invalid_requests_never_reach_the_outbox`、`test_same_identity_with_changed_content_is_a_duplicate_message`、`test_rollback_leaves_no_message` | 复用未注册/字段/身份错误不入队、异输入原异常、回滚无残留；不复制 |
-| 原 ECS 重入及期限 | `tests/integrations/ecs_command/test_service.py::test_duplicate_preserves_route_identity_and_bytes`、`test_existing_calls_preserve_frozen_retry_window`、`test_new_commands_require_protocol_retry_window` | 复用当前路由不可用/期限变化时仍返回原命令，原 route/bytes/expires_at 不变、异输入拒绝；不另增重复用例 |
-| 共享及宽松旧附录 | `tests/businesses/test_contract_assembly.py::test_identical_annex_contract_can_be_shared`；`tests/integrations/ecs_command/test_result.py::test_shared_legacy_models_keep_original_result_contract` | 复用两角色共用模型/附录装配；补齐原宽松模型的扩展 params、保留历史附录后的迟到 Result、严格类型仍拒绝、原模型对象/版本及冻结内容不变 |
-| 历史附录权限边界 | `tests/businesses/test_contract_assembly.py::test_history_annex_does_not_grant_new_role_command_permission`、`test_history_annex_conflict_never_constructs_communication_resources` | 复用只保留原 Result 校验、不授权新命令、冲突在资源创建前失败 |
-| 两类来源、文件/包、正式/local 顺序及元数据 | `tests/integrations/test_registration_bootstrap.py::test_all_formal_kinds_load_before_any_local_entry`、`test_cold_application_loads_formal_before_local`；`tests/integrations/test_registration_discovery.py::test_business_entrypoints_can_register_without_per_operation_files` | 扩充现有冷启动用例的文件/包矩阵，实际导入两种目录的三类正式/local 入口；复用应用启动顺序与来源元数据断言 |
-| 缺项、内部错误、冲突失败 | bootstrap 的 `test_required_business_entry_missing_fails`、`test_internal_import_error_is_not_skipped`；contract_assembly 的 `test_initial_entry_requires_own_formal_registration`、`test_invalid_contract_never_constructs_routes_sender_or_factory`；`tests/integrations/test_registration.py::test_invalid_names_and_duplicates_include_remedies` | 复用错误必须失败且不创建资源/工厂的证据 |
-| WMS/Transport 结果身份和状态 | `tests/integrations/wms_request/test_results.py::test_request_result_uses_original_message_identity`、`test_delivery_terminal_is_not_business_completion`；`tests/integrations/wms_transport/test_results.py::test_identity_missing_frozen_pending_and_ambiguous_submission`、`test_transport_result_uses_applied_outcome_only`、`test_transport_closure_matrix` | 复用原任务/请求/caller 及 applied outcome；投递和业务结果分离 |
-| 完整前序、版本、成员和 UNKNOWN | `tests/integrations/wms_transport/test_predecessors.py::test_predecessors_use_explicit_ids_and_original_scope`、`test_historical_member_facts_do_not_override_newer_unknown`；`tests/businesses/test_result_consumption.py::test_runtime_snapshot_keeps_full_101_member_versions`、`test_serialization_failure_reopens_and_rereads_complete_business_group` | 复用固定范围、100 条分批同快照、版本/成员、40001 整事务重试和耗尽保留待办；不重新定义协议 |
-
-可重复运行的快速检查（未配置临时存储时，PostgreSQL/Redis 专用用例按既有规则跳过）：
-
-```sh
-rtk uv run --frozen --no-sync pytest -q tests/integrations/wms_request \
-  tests/integrations/ecs_command/test_service.py tests/integrations/ecs_command/test_result.py \
-  tests/integrations/test_registration.py tests/integrations/test_registration_bootstrap.py \
-  tests/integrations/test_registration_discovery.py tests/businesses/test_contract_assembly.py \
-  tests/integrations/wms_transport/test_results.py tests/integrations/wms_transport/test_predecessors.py \
-  tests/businesses/test_result_consumption.py
-```
-
-数据库专项需显式 `TEST_DATABASE_URL` / `TEST_REDIS_URL` 指向可丢弃的隔离存储；配置了但连接失败
-应视为失败。2026-10-28 本轮首次清单基线使用任务拥有的隔离 PostgreSQL/Redis：408 通过、7 跳过；
-补测后对应回归（另含注册错误和回调合同）452 通过、7 跳过：1 个 SQLite 并发引用登记用例及 6 个 SQLite 行锁用例跳过，
-相关 PostgreSQL 变体已运行；无测试存储全套为 2250 通过、749 跳过（主要为未配置专用 PostgreSQL/Redis）。
-跳过原因应与结果一起保留，不能按通过计算。
-上述为阶段 1 兼容基线的历史运行；阶段 2–4 新接口证据与最终验证状态见[验收说明](business-development-phase2-4-acceptance.md)，
-不同批次及重叠套件的数量不相加。
-
-### 模型调用迁移资格
-
-只有原入口、原身份、规范 wire、冻结路由/附录/期限、原异常和事务边界均能维持，才可把新语法
-作为同一语义的替代写法；已交付 `@ecs_command`、`compile_commands`、模型形式 send/create 和
-`RoleRoutes.resolve_declared`；没有 `@ecs_result`、自动命令发现、通用业务执行器或新建生成器。
-模型调用先按原上下文验证实际字段，再沿原模型 JSON 序列化，不以序列化掩盖非法字段。
-Pydantic dataclass 的字段级 `Field(frozen=True)`、无法解析或同运行时类多泛型分支不唯一的合同上下文
-会明确拒绝模型调用，继续使用原 operation/data 或 task_type/params。类级 frozen、可唯一定位及直接字段
-可区分的泛型上下文可用。没有改写 schema、修改原类配置或强制迁移的通道。
-ECS 新序列化还须通过原 params JSON 合同；别名、默认值、自定义校验器/序列化器须逐合同证明新旧等价。
-共享模型、多绑定或 `extra="ignore"` ECS 合同保留手工声明及旧 create；历史附录不授权新发送。
-目标改址、target 改名、角色/任务改标签、业务身份或附录版本变更均需各自的合同和
-数据迁移判断，不属于语法迁移，不能据此改写原请求、重算身份或重发 UNKNOWN/HELD。
+当前行为映射、任务专项实际结果及最终全仓状态统一见[单一 API 验收记录](business-development-single-api-acceptance.md)。
+旧阶段数字保存在仓库外归档中，不跨批次累加。隔离存储测试须显式配置可丢弃的
+`TEST_DATABASE_URL` / `TEST_REDIS_URL`，未配置时跳过，配置后连接失败必须失败。
+测试通过只证明本方断言，不替代供应商合同、真实物理结果、部署或现场验收。

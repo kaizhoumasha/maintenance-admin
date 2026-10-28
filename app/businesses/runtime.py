@@ -29,7 +29,7 @@ def build_runtime(*, outbox, ecs_commands) -> BusinessRuntime:
         return BusinessRuntime(definitions={}, services={})
     if outbox is None:
         raise ValueError("Business runtime requires the application outbox")
-    if ecs_commands is None and any(entry.COMMAND_BINDINGS for entry in entries):
+    if ecs_commands is None and any(entry.COMMANDS for entry in entries):
         raise ValueError("Business commands require the application ECS capability")
     capabilities = Capabilities(ecs_commands, WmsRequests(outbox), TransportService(outbox))
     services = {}

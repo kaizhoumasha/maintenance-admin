@@ -70,19 +70,29 @@ def test_business_factory_must_return_a_service(monkeypatch):
 
 
 def test_declared_commands_require_ecs_before_any_factory(monkeypatch):
-    from pydantic import BaseModel
+    from pydantic import BaseModel, ConfigDict
 
     from app.businesses.runtime import build_runtime
-    from app.integrations.ecs_command import CommandBinding, DeviceAnnex
+    from app.integrations.ecs_command import ecs_command
     from app.integrations.ecs_command.contracts import ErrorDetail
 
     class Params(BaseModel):
-        pass
+        model_config = ConfigDict(strict=True)
 
     entry = business_composition()
     entry.DEFINITION = replace(entry.DEFINITION, initial_entries=())
-    entry.COMMAND_BINDINGS = (CommandBinding("TEST_SCAN", "MOVE", "test", "1", Params),)
-    entry.ANNEXES = {("test", "1"): DeviceAnnex(Params, Params, ErrorDetail, 0, 10)}
+    entry.COMMANDS = (
+        ecs_command(
+            "MOVE",
+            device_roles=("TEST_SCAN",),
+            annex_id="test",
+            annex_version="1",
+            result=Params,
+            error=ErrorDetail,
+            timeout_min_ms=0,
+            timeout_max_ms=10,
+        )(Params),
+    )
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     catalog.validate_business_contracts()
     with pytest.raises(ValueError, match="ECS capability"):

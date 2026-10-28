@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from app import integrations
+from app import businesses
 from app.integrations.ecs_callback import registry as ecs
 from app.integrations.registration import import_registration_module, local_registration
 from app.integrations.wms_callback import registry as callbacks
@@ -21,14 +21,14 @@ def isolated_registries(monkeypatch):
 
 @pytest.fixture
 def business_modules(tmp_path, monkeypatch):
-    monkeypatch.setattr(integrations, "__path__", [str(tmp_path)])
+    monkeypatch.setattr(businesses, "__path__", [str(tmp_path)])
     prefixes = set()
 
     def write(path, source=""):
         parts = path.split(".")
-        prefix = f"app.integrations.{parts[0]}"
+        prefix = f"app.businesses.{parts[0]}"
         if prefix not in prefixes:
-            monkeypatch.setattr(integrations, parts[0], None, raising=False)
+            monkeypatch.setattr(businesses, parts[0], None, raising=False)
             prefixes.add(prefix)
         parent = tmp_path
         for part in parts[:-1]:
@@ -37,7 +37,7 @@ def business_modules(tmp_path, monkeypatch):
             (parent / "__init__.py").touch()
         (parent / f"{parts[-1]}.py").write_text(source)
         importlib.invalidate_caches()
-        return f"app.integrations.{path}"
+        return f"app.businesses.{path}"
 
     yield write
     for name in list(sys.modules):
@@ -150,7 +150,7 @@ def test_business_entrypoints_can_register_without_per_operation_files(
     entry = f"guard_probe.{kind}"
     module = business_modules(entry + (".__init__" if package else ""), declaration(kind, name))
     import_registration_module(module.removesuffix(".__init__"))
-    assert registered(kind, name).registration_source.module == f"app.integrations.{entry}"
+    assert registered(kind, name).registration_source.module == f"app.businesses.{entry}"
     assert registered(kind, name).registration_source.local_only is False
 
 
@@ -175,3 +175,20 @@ def test_business_source_keeps_filename_and_local_guards(monkeypatch, kind):
     assert source.module == handler.__module__
     assert source.symbol.endswith("handler")
     assert source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize(
+    "module",
+    [
+        "app.integrations.untrusted.request",
+        "app.controllers.probe",
+        "app.services.probe",
+        "app.businesses",
+    ],
+)
+def test_application_registration_requires_an_owned_business_or_platform_source(kind, module):
+    namespace = {"__name__": module}
+    with pytest.raises(ValueError, match="source.*修复"):
+        exec(declaration(kind, "DONE" if kind == "ecs_event" else "example.done@v1"), namespace)
+    assert not ecs.events() and not callbacks.operations() and not requests.operations()

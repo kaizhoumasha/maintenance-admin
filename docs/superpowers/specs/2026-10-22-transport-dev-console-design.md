@@ -1,5 +1,8 @@
 # 出站联调控制台(Swagger 统一入口)开发说明书
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 状态:**T1~T5 已实施并验证(2026-10-22,见 §10);T6 已补(README「联调控制台」小节)** · 依据:`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md`、AGENTS.md 分层约定 · 范围:仅 `ENVIRONMENT=local`
 
 ## 1. 目标与边界

@@ -7,7 +7,6 @@ from typing_extensions import TypedDict
 
 from app.integrations.ecs_command.contracts import ErrorDetail
 from app.integrations.registration import local_registration
-from app.integrations.wms_callback import CallbackPayload
 
 
 class StrictPayload(BaseModel):
@@ -23,7 +22,7 @@ def declare(model, **options):
     from app.integrations.ecs_command import ecs_command
 
     settings = {
-        "device_role": "ARM",
+        "device_roles": ("ARM",),
         "annex_id": "test.move",
         "annex_version": "1",
         "result": StrictPayload,
@@ -68,7 +67,11 @@ def test_declaration_preserves_original_models_and_source():
 @pytest.mark.parametrize(
     "options",
     [
-        {"device_role": "arm"},
+        {"device_roles": ("arm",)},
+        {"device_roles": ()},
+        {"device_roles": ("ARM", "ARM")},
+        {"device_roles": "ARM"},
+        {"device_roles": ["ARM"]},
         {"task_type": "move.to"},
         {"annex_id": ""},
         {"annex_version": " "},
@@ -95,10 +98,8 @@ def test_invalid_declaration_leaves_the_model_available_for_a_valid_declaration(
 
 
 @pytest.mark.parametrize("slot", ["params", "result", "error"])
-@pytest.mark.parametrize(
-    "config", [{"strict": False, "extra": "forbid"}, {"strict": True, "extra": "ignore"}]
-)
-def test_each_contract_model_requires_strict_types_and_forbidden_extra_fields(slot, config):
+@pytest.mark.parametrize("config", [{"strict": False, "extra": "forbid"}])
+def test_each_contract_model_requires_strict_types(slot, config):
     model = create_model("Loose", __base__=ErrorDetail, __config__=ConfigDict(**config))
     with pytest.raises(ValueError, match="strict|extra"):
         declare(
@@ -106,19 +107,9 @@ def test_each_contract_model_requires_strict_types_and_forbidden_extra_fields(sl
         )
 
 
-@pytest.mark.parametrize("slot", ["params", "result"])
-def test_permissive_callback_payload_is_not_eligible_for_declaration(slot):
-    with pytest.raises(ValueError, match="extra"):
-        declare(
-            CallbackPayload if slot == "params" else params(),
-            **({slot: CallbackPayload} if slot == "result" else {}),
-        )
-    assert CallbackPayload.model_config["extra"] == "ignore"
-
-
 @pytest.mark.parametrize("slot", ["params", "result", "error"])
-@pytest.mark.parametrize("nested", [BaseModel, CallbackPayload])
-def test_nested_contract_models_must_also_be_strict_and_forbid_extra(slot, nested):
+@pytest.mark.parametrize("nested", [BaseModel])
+def test_nested_contract_models_must_also_be_strict(slot, nested):
     base = ErrorDetail if slot == "error" else StrictPayload
     model = create_model("Nested", __base__=base, children=(list[nested], ...))
     with pytest.raises(ValueError, match="strict|extra"):
@@ -128,9 +119,7 @@ def test_nested_contract_models_must_also_be_strict_and_forbid_extra(slot, neste
 
 
 @pytest.mark.parametrize("kind", ["typed_dict", "dataclass"])
-@pytest.mark.parametrize(
-    "config", [{"strict": False, "extra": "forbid"}, {"strict": True, "extra": "ignore"}]
-)
+@pytest.mark.parametrize("config", [{"strict": False, "extra": "forbid"}])
 def test_lax_nested_structures_reject_declaration_without_poisoning_the_parameter_model(
     kind, config
 ):
@@ -287,3 +276,74 @@ def test_unresolved_model_annotations_fail_without_completing_the_model():
     with pytest.raises(ValueError, match="model|annotation"):
         declare(model)
     assert model.__pydantic_complete__ is False
+
+
+def test_one_model_compiles_each_declared_role_with_one_original_annex():
+    from app.integrations.ecs_command import compile_commands, ecs_command
+
+    model = ecs_command(
+        "MOVE",
+        device_roles=("ARM", "EXIT"),
+        annex_id="shared",
+        annex_version="1",
+        result=StrictPayload,
+        error=MoveError,
+        timeout_min_ms=1,
+        timeout_max_ms=100,
+    )(params())
+    bindings, annexes = compile_commands(model)
+    assert [binding.device_role for binding in bindings] == ["ARM", "EXIT"]
+    assert all(binding.source is model for binding in bindings)
+    assert list(annexes) == [("shared", "1")]
+    assert annexes["shared", "1"].params_model is model
+
+
+@pytest.mark.parametrize("extra", ["ignore", "allow"])
+def test_declaration_preserves_strict_model_extra_policy(extra):
+    from app.integrations.ecs_command import compile_commands, ecs_command
+
+    model = create_model(
+        "Permissive", __config__=ConfigDict(strict=True, extra=extra), qty=(int, ...)
+    )
+    ecs_command(
+        "MOVE",
+        device_roles=("ARM",),
+        annex_id="permissive",
+        annex_version="1",
+        result=model,
+        error=MoveError,
+        timeout_min_ms=1,
+        timeout_max_ms=100,
+    )(model)
+    _, annexes = compile_commands(model)
+    assert annexes["permissive", "1"].params_model is model
+    assert model.model_validate({"qty": 1, "custom": 2}).model_dump() == (
+        {"qty": 1, "custom": 2} if extra == "allow" else {"qty": 1}
+    )
+    with pytest.raises(ValidationError):
+        model(qty="1")
+
+
+def test_strict_root_object_keeps_its_original_contract():
+    from pydantic import RootModel
+
+    from app.integrations.ecs_command import compile_commands, ecs_command
+
+    class Object(RootModel[dict[str, int]]):
+        model_config = ConfigDict(strict=True)
+
+    ecs_command(
+        "MOVE",
+        device_roles=("ARM",),
+        annex_id="root",
+        annex_version="1",
+        result=Object,
+        error=MoveError,
+        timeout_min_ms=1,
+        timeout_max_ms=100,
+    )(Object)
+    _, annexes = compile_commands(Object)
+    assert annexes["root", "1"].params_model is Object
+    assert Object({"qty": 1}).model_dump() == {"qty": 1}
+    with pytest.raises(ValidationError):
+        Object({"qty": "1"})
