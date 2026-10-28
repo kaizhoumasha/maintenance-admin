@@ -125,7 +125,7 @@ enterprise-backend/
     http_client/         # 独立纯 HTTP 客户端：单次 bytes 收发、超时、连接池、大小限制
     reliable/            # 出站事务发件箱、租约、原身份重试、TTL；不含协议实现
     reliable_runtime.py  # lifespan 发送器与专用连接池装配
-    integrations/        # 业务接入层（wms_transport）；各包内 dev.py 登记联调场景，仅 local 挂载（见下方「联调控制台」）
+    integrations/        # WMS/ECS/Transport 平台协议接入；固定平台演示按共享清单仅在 local 加载
     businesses/          # 领域业务声明、合同、服务及模型；显式清单和简单工厂组装已有通信能力
     middlewares/         # trace_id（X-Trace-Id + 访问日志）、审计日志
     tasks/               # Celery，可单独部署 worker
