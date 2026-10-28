@@ -99,7 +99,7 @@ def validate_business_contracts() -> tuple[
     _validated_entries = None
     current = entries()
     definitions()  # Preserve definition/code/operation validation for every composition.
-    commands, annexes, owners = [], {}, {}
+    commands, annexes, owners, annex_sources = [], {}, {}, {}
     registered_events, callbacks = events(), operations()
     for entry in current:
         definition = entry.DEFINITION
@@ -107,6 +107,7 @@ def validate_business_contracts() -> tuple[
         roles = {role.role_key for role in definition.device_roles}
         declared = entry.ANNEXES
         location = f"{definition.code} ({entry.__name__})"
+        entry_annex_sources = {}
 
         def own_formal(item, prefix=prefix):
             source = item.registration_source
@@ -133,11 +134,21 @@ def validate_business_contracts() -> tuple[
             if command_key in owners:
                 raise ValueError(
                     f"duplicate command {command_key!r}: {owners[command_key]} "
-                    f"and {location}: {source}"
+                    f"and {location}: {source}; 修复: 每个角色/任务只声明一次"
                 )
             owners[command_key] = f"{location}: {source}"
+            entry_annex_sources[key] = f"{location}: {source}"
             commands.append(command)
-        annexes = merge_annexes(annexes, declared, source=location)
+        for key, annex in declared.items():
+            source = entry_annex_sources.get(key, location)
+            try:
+                annexes = merge_annexes(annexes, {key: annex}, source=source)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{exc}; original source: {annex_sources.get(key, location)}; "
+                    "修复: 同一附录身份保留精确原模型与超时合同"
+                ) from None
+            annex_sources.setdefault(key, source)
         for (role, name), item in registered_events.items():
             if own_formal(item) and role not in roles:
                 raise ValueError(

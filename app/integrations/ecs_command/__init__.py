@@ -4,6 +4,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING
 
 from .contracts import PROTOCOL_RETRY_WINDOW, CommandBinding, DeviceAnnex
+from .declaration import compile_commands, ecs_command
 
 if TYPE_CHECKING:
     from .roles import RoleRoutes
@@ -33,4 +34,6 @@ __all__ = [
     "EcsCommands",
     "RoleRoutes",
     "configure_ecs",
+    "compile_commands",
+    "ecs_command",
 ]

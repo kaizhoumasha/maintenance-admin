@@ -99,10 +99,29 @@ class Report(RequestPayload):
 字段定义在模型本身，无需外层 RequestOperation 和内嵌 Payload。示例按严格 JSON 模式在导入时校验。
 可选 `ttl=timedelta(...)`；默认 None，事实不自动过期。标题、TTL 与模型保存在同一个注册项中。
 
-业务调用仍用 `await wms_requests.send(session, "example.report@v1", data, operation_id=...)`，
-与业务记录共用调用方事务；调用方保存并复用 operation_id。平台冻结信封、可靠入队，不提交、不直接
+业务调用可用原精确注册类的位置参数模型形式：
+
+```python
+reference = await wms_requests.send(session, Report(task_id="T-1"), operation_id=saved_operation_id)
+```
+
+这是业务事务片段，`wms_requests`、`session`、原 UUIDv7 `saved_operation_id` 由调用方提供。
+旧 `send(session, "example.report@v1", data, operation_id=...)` 及原 session/operation/data 关键字形式保留；
+没有 `payload=` 参数，模型与 data 混用为 TypeError。精确原类型须只匹配一个已加载 operation，
+未注册/未声明子类拒绝，同模型多 operation 歧义拒绝；不以类名或可写属性猜 operation。
+与业务记录共用调用方事务；调用方保存并复用 operation_id、operation 和返回的 message_id。平台冻结信封、可靠入队，不提交、不直接
 发网。同身份重入、TTL、重试及 ACK 分类不变；用 `WmsRequests.get_result` 按原身份读取可信终局响应，
 读模型、消费事务与保留边界见[出站结果契约](outbound-results.md)。真实 operation 先确认合同。
+
+模型路径先按原字段上下文重验实际值，再保留原 JSON 序列化；别名、默认值、自定义校验/序列化行为须逐合同
+证明等价。字段级 frozen 的 Pydantic dataclass、无法解析/不唯一的同运行时类泛型上下文明确拒绝，继续用旧
+operation/data。类级 frozen、唯一上下文和可由直接字段区分的泛型合同可用，不修改原类或 schema。
+同 target 去重不跨 target；配置变化后存量动作按保存的原引用读结果，不重调 send 选新目标恢复。
+
+ECS 命令的 `@ecs_command` 和显式 `compile_commands` 见[命令声明](ecs-command.md#模型声明与显式编译)。
+它们不构成第四类业务注册表，也不增加命令自动发现树或 `@ecs_result`；原三类入口、来源、文件名规则、
+API/worker 加载范围、CLI 检查范围及 local HTTP 目录权限保持原样。验收与迁移资格见
+[阶段 2–4 说明](business-development-phase2-4-acceptance.md)。
 
 ## 在一个地方检查全部注册项
 

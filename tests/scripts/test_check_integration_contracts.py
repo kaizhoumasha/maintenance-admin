@@ -296,6 +296,78 @@ def test_check_does_not_invoke_runtime_or_business_handlers(tmp_path, environmen
         assert unverified in excluded
 
 
+@pytest.mark.parametrize("environment", ["production", "local"])
+def test_explicit_commands_join_the_existing_catalog_with_original_sources(tmp_path, environment):
+    bootstrap = contract_packages(tmp_path)
+    write_python_modules(
+        tmp_path,
+        {
+            "businesses/alpha/ecs_command/__init__.py": "",
+            "businesses/alpha/ecs_command/move.py": """
+from pydantic import BaseModel, ConfigDict, field_validator, field_serializer
+from app.integrations.ecs_command import ecs_command
+from app.integrations.ecs_command.contracts import ErrorDetail
+class Result(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    target: str
+@ecs_command('MOVE', device_role='ALPHA_SCAN', annex_id='alpha.move', annex_version='1',
+    result=Result, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=1000)
+class Move(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    target: str
+    @field_validator('target')
+    @classmethod
+    def validate_target(cls, value):
+        raise AssertionError('metadata must not validate payloads')
+    @field_serializer('target')
+    def serialize_target(self, value):
+        raise AssertionError('metadata must not serialize payloads')
+""",
+        },
+    )
+    composition = tmp_path / "businesses/alpha/composition.py"
+    composition.write_text(
+        composition.read_text() + "\nfrom app.integrations.ecs_command import compile_commands\n"
+        "from .ecs_command.move import Move\n"
+        "COMMAND_BINDINGS, ANNEXES = compile_commands(Move)\n"
+        "assert COMMAND_BINDINGS[0].source is Move\n"
+        "assert ANNEXES['alpha.move', '1'].params_model is Move\n"
+    )
+    result = check(tmp_path, environment, bootstrap=bootstrap)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    declared, manual = report["command_contracts"]
+    assert declared["device_role"] == "ALPHA_SCAN"
+    assert declared["module"] == "app.businesses.alpha.ecs_command.move"
+    assert declared["source_file"] == str(tmp_path / "businesses/alpha/ecs_command/move.py")
+    assert declared["symbol"] == "Move"
+    assert declared["local_only"] is False
+    assert (declared["annex_id"], declared["annex_version"]) == ("alpha.move", "1")
+    assert manual["device_role"] == "BETA_SCAN"
+    assert manual["symbol"] == "Payload"
+
+
+def test_explicit_command_compile_failure_precedes_resources_and_factories(tmp_path):
+    bootstrap = contract_packages(tmp_path)
+    composition = tmp_path / "businesses/alpha/composition.py"
+    composition.write_text(
+        composition.read_text()
+        + "\nfrom app.integrations.ecs_command import compile_commands, ecs_command\n"
+        "ecs_command('MOVE', device_role='ALPHA_SCAN', annex_id='alpha.move', annex_version='1',\n"
+        "    result=Payload, error=ANNEX.error_model,\n"
+        "    timeout_min_ms=0, timeout_max_ms=1000)(Payload)\n"
+        "COMMAND_BINDINGS, ANNEXES = compile_commands(Payload)\n"
+    )
+    result = check(tmp_path, bootstrap=bootstrap)
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    assert "phase=load_formal_modules" in result.stderr
+    assert "error_type=ValueError" in result.stderr
+    assert "runtime resource" not in result.stderr
+    assert "factory must not run" not in result.stderr
+
+
 @pytest.mark.parametrize(
     ("arguments", "status"),
     [(["--help"], 0), ([], 2), (["--environment", "staging"], 2)],

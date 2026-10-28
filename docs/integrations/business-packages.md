@@ -3,8 +3,9 @@
 业务流程与消息先看[工作线业务 API 索引](workline-business-api.md)：人工分拣为旧系统参考合同，粗分机为待确认草案；
 当前接入路线见[快速开始](business-development-quickstart.md)，原子受理、独立推进及恢复证据见[事务配方](business-transaction-recipes.md)。
 [重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md)保留为当时的目标设计；
-当前已实现无配置声明检查和现行接口配方，后续模型式 API 及真实业务验收不能据此视为完成。
-其中 @ecs_command、compile_commands、模型形式的 WMS send/ECS create 和声明感知角色解析尚不存在；下文仍是现行接入规则。
+当前已实现无配置声明检查、事务配方、`@ecs_command`、显式 `compile_commands`、模型形式的 WMS send/ECS create
+及声明感知角色解析；迁移资格和阶段 5–6 未决项见[阶段 2–4 验收说明](business-development-phase2-4-acceptance.md)。
+这些平台能力不表示真实业务或供应商/现场已验收。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单仍为空。
 隔离测试中的两份业务不进入生产清单。没有合同与资源完整的真实业务包前，整体接入交付未完成，
@@ -52,8 +53,10 @@ DEFINITION = BusinessDefinition(
 ECS/WMS 入站模型复用 `CallbackPayload`，严格校验类型、默认忽略多余字段；WMS 出站模型复用
 `RequestPayload`，严格校验类型并拒绝多余字段。具体业务须按已确认合同确定是否收紧入站字段规则。
 ECS 命令参数/结果/错误模型应同样严格；每个 `DeviceAnnex` 明确版本和超时范围。
-`command_contracts.py` 通过同一个 `SCAN.role_key` 构造 `CommandBinding`，不复制角色字符串或合同模型。
-`from app.integrations.ecs_command import CommandBinding, DeviceAnnex` 只加载声明元数据；
+共享/宽松合同的 `command_contracts.py` 继续通过同一个 `SCAN.role_key` 构造 `CommandBinding`，不复制角色字符串或合同模型。
+单绑定且原 params/result/error（包括嵌套合同）已为严格类型、禁止扩展字段时，可按
+[命令声明示例](ecs-command.md#模型声明与显式编译)在原参数类上使用 `@ecs_command`，由 composition 显式编译。
+`from app.integrations.ecs_command import CommandBinding, DeviceAnnex, ecs_command, compile_commands` 只加载声明能力；
 `RoleRoutes`、`EcsCommands` 和 `configure_ecs` 在显式引用时才加载运行设施。
 没有确认合同的命令和 operation 不注册。`history_annexes` 仅保留原结果解析能力，不扩大新命令权限。
 
@@ -84,6 +87,9 @@ def build_service(capabilities):
 ```
 
 按实际合同补充 `callback` / `request` 固定模块；不接受用户输入动态 import。目录读取不会调用工厂。
+符合资格的命令可将上例导入替换为 `from .ecs_command import MoveTo`，并在 composition 中显式写
+`COMMAND_BINDINGS, ANNEXES = compile_commands(MoveTo)`（另从 ECS 包导入 `compile_commands`）。
+这是编译已有清单，不是自动发现；每个角色/动作仅保留一份绑定。未迁移的手工合同照常保留并按原规则合并。
 应用先加载全部正式入口，再交叉校验全部合同，之后才加载 local 入口、构造资源和业务工厂，最后受理请求。
 错误业务包使整体启动失败。API 与 worker 读取同一显式清单；非 local 不加载 dev 入口。
 

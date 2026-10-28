@@ -156,25 +156,49 @@ async def test_registry_describes_each_event_role_and_payload(client, admin, mon
     assert row["endpoint"] is None
 
 
+@pytest.mark.parametrize("declared", [False, True])
 async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
-    client, admin, monkeypatch
+    client, admin, monkeypatch, declared
 ):
     from types import SimpleNamespace
 
-    from app.integrations.ecs_command import CommandBinding, RoleRoutes
+    from app.integrations.ecs_command import (
+        CommandBinding,
+        RoleRoutes,
+        compile_commands,
+        ecs_command,
+    )
+    from app.integrations.ecs_command.contracts import ErrorDetail
     from app.main import app
     from tests.helpers import TrialPayload, ecs_history_annexes
 
     annexes = ecs_history_annexes()
+    bindings = [
+        CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload),
+        CommandBinding("SCAN4", "MOVE", "trial", "1", TrialPayload),
+    ]
+    if declared:
+
+        class Move(TrialPayload):
+            pass
+
+        ecs_command(
+            "MOVE",
+            device_role="SCAN1",
+            annex_id="trial",
+            annex_version="1",
+            result=TrialPayload,
+            error=ErrorDetail,
+            timeout_min_ms=1,
+            timeout_max_ms=60000,
+        )(Move)
+        bindings, annexes = compile_commands(Move)
 
     async def forbidden(*args):
         raise AssertionError("catalog must not resolve runtime devices")
 
     routes = RoleRoutes(
-        [
-            CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload),
-            CommandBinding("SCAN4", "MOVE", "trial", "1", TrialPayload),
-        ],
+        bindings,
         annexes=annexes,
         resolve_binding=forbidden,
         resolve_route=forbidden,
@@ -185,12 +209,16 @@ async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
     response = await client.get(PATH, headers=admin)
     assert response.status_code == 200
     entries = [row for row in response.json() if row["kind"] == "ecs_command"]
-    assert {(row["device_role"], row["name"]) for row in entries} == {
-        ("SCAN1", "MOVE"),
-        ("SCAN4", "MOVE"),
-    }
+    assert {(row["device_role"], row["name"]) for row in entries} == (
+        {("SCAN1", "MOVE")} if declared else {("SCAN1", "MOVE"), ("SCAN4", "MOVE")}
+    )
     assert all(row["entry_type"] == "command_contract" for row in entries)
-    assert all(row["symbol"] == "TrialPayload" for row in entries)
+    assert all(row["symbol"].endswith("Move" if declared else "TrialPayload") for row in entries)
+    if declared:
+        assert len(entries) == 1
+        assert entries[0]["module"] == __name__
+        assert entries[0]["source_file"].endswith("test_dev_registry.py")
+        assert entries[0]["local_only"] is False
     assert all("qty" in row["payload_schema"]["properties"] for row in entries)
 
 

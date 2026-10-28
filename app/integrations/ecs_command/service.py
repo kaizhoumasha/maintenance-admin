@@ -10,14 +10,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest
+from app.integrations.model_payload import validated_model_payload
 from app.models import EcsCommand, EcsResultEvidence
 from app.reliable import MessageDraft
 from app.reliable.lifecycle import ensure_savepoint_transaction
 from app.reliable.types import DeliverySnapshot
 
-from .contracts import PROTOCOL_RETRY_WINDOW, CommandEnvelope, CommandView
+from .contracts import PROTOCOL_RETRY_WINDOW, CommandEnvelope, CommandView, merge_annexes
+from .declaration import command_declaration
 from .protocol import OPERATION, PROTOCOL
 from .routing import UnconfiguredRoutes, retry_window_error
+
+_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -38,7 +42,36 @@ class EcsCommands:
         self.annexes = annexes or {}
         self.clock = clock
 
-    async def create(self, session, *, owner, call_key, device_code, task_type, timeout_ms, params):
+    async def create(
+        self,
+        session,
+        *,
+        owner,
+        call_key,
+        device_code,
+        timeout_ms,
+        task_type=_MISSING,
+        params=_MISSING,
+        command=_MISSING,
+    ):
+        declaration = None
+        if command is not _MISSING:
+            if task_type is not _MISSING or params is not _MISSING:
+                raise TypeError("command cannot include task_type or params")
+            declaration = command_declaration(type(command))
+            task_type = declaration.binding.task_type
+            try:
+                params = validated_model_payload(command)
+            except ValueError as error:
+                if "legacy operation/data form" in str(error):
+                    raise ValueError(
+                        str(error).replace(
+                            "legacy operation/data form", "legacy task_type/params form"
+                        )
+                    ) from None
+                raise
+        elif task_type is _MISSING or params is _MISSING:
+            raise TypeError("create requires task_type and params or one command model")
         if (
             not isinstance(owner, CommandOwner)
             or not isinstance(call_key, str)
@@ -65,7 +98,13 @@ class EcsCommands:
         if row is not None:
             compare(row)
             return await self._view(session, row)
-        route = await self.routes.resolve(session, device_code, task_type)
+        if declaration is not None:
+            resolve = getattr(self.routes, "resolve_declared", None)
+            if not callable(resolve):
+                raise ValueError("command model requires declaration-aware routing")
+            route = await resolve(session, device_code, declaration)
+        else:
+            route = await self.routes.resolve(session, device_code, task_type)
         if route.device_code != device_code or task_type not in route.commands:
             raise ValueError("route/device/action mismatch")
         if (
@@ -76,6 +115,13 @@ class EcsCommands:
         models = self.annexes.get((route.annex_id, route.annex_version))
         if models is None:
             raise ValueError("confirmed annex required")
+        if declaration is not None:
+            annex_key = (declaration.binding.annex_id, declaration.binding.annex_version)
+            if annex_key != (route.annex_id, route.annex_version):
+                raise ValueError("declared command does not match active route annex")
+            merge_annexes(
+                {annex_key: models}, {annex_key: declaration.annex}, source="declared command"
+            )
         canonical_digest(params)
         models.params_model.model_validate(params)
         if (

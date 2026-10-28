@@ -74,6 +74,13 @@ async with session_factory.begin() as session:
 
 service已完成lifespan装配，session_factory和action_key由业务提供。不能在事务内直接HTTP下发；回滚必须同时撤销业务动作、命令和Outbox义务。新动作必须有当前权威许可，不能因新建READY行或换调用键而获得许可；业务版本从权威记录取得，不从路由版本、设备Status或动作计数推导。
 
+上例旧调用继续有效。原合同符合单绑定、严格类型及禁止扩展字段等迁移资格时，可用
+`command=MoveTo(qty=1)` 替换 `task_type="MOVE"` 和 `params={"qty": 1}`，二者互斥；
+`MoveTo` 必须是原精确声明类，并已在 composition 显式编译。新动作还要求声明感知的正式角色路由，
+通用 Swagger 路由不自动获得该能力。共享/宽松合同保留上例；完整声明、dataclass 限制及序列化资格见
+[模型声明与显式编译](ecs-command.md#模型声明与显式编译)。存量动作按原 owner/call_key/command_code
+恢复，不能为换语法或换目标创建新动作。
+
 ## 5. 单表安全消费
 
 完整参考在[Reference](../../tests/integrations/ecs_command/conftest.py)，只用于测试，不是生产SDK。适用于一动作一命令、一个消费者、同库业务副作用；已有业务表满足条件就复用，不为演示增加生产表。

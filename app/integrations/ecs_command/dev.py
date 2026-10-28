@@ -101,6 +101,12 @@ class LocalEcsRoutes:
     async def resolve(self, session, device_code, task_type):
         return await self.formal.resolve(session, device_code, task_type)
 
+    async def resolve_declared(self, session, device_code, declaration):
+        resolve = getattr(self.formal, "resolve_declared", None)
+        if not callable(resolve):
+            raise ValueError("formal command model requires declaration-aware routing")
+        return await resolve(session, device_code, declaration)
+
     def for_origin(self, origin):
         return self.debug.for_origin(origin)
 

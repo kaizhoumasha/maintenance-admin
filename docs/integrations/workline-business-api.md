@@ -6,9 +6,11 @@
 | --- | --- | --- |
 | [人工分拣](manual-picking-api.md) | 单据驱动，货架供料、人工处理、退箱、换面及离场 | 参考 wes_backend 已有合同与代码；迁入本系统仍有差异和门槛 |
 | [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 用户流程已明确；字段、operation 名和设备附录待对端确认 |
-| [接入开发简化重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md) | 目录/代码示例、现有与新增 API、兼容迁移、实施顺序及验收标准 | 正式设计稿，待评审、未实施 |
+| [接入开发简化重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md) | 目录/代码示例、API 目标、兼容迁移、实施顺序及验收标准 | 保留历史设计语境；阶段 2–4 当前能力及后续门槛见验收说明 |
 
-重构设计中的 @ecs_command、compile_commands、模型形式 send/create 和声明感知角色解析是拟新增接口；当前调用继续按[注册指南](registration.md)及[业务包指南](business-packages.md)。该设计不登记新的真实 operation 或业务。
+`@ecs_command`、显式 `compile_commands`、模型形式 send/create 和声明感知角色解析现已交付，旧调用继续有效。
+最短调用见[注册指南](registration.md)与[ECS 命令](ecs-command.md)，资格、可执行证据及阶段 5–6 阻断见
+[验收说明](business-development-phase2-4-acceptance.md)。这些能力不登记新的真实 operation 或业务。
 
 ## 1. 核对基线和“已存在”的含义
 
@@ -26,7 +28,7 @@
 | WES → WMS | `POST /api/v1/wes/facts` | 报告事实 | 明确何时形成事实、报告身份及收妥后的业务条件；同样入队 |
 | WES → WMS → RCS | 默认 `POST /api/v1/wes/transport-requests` | 共用 `transport.task.submit@v1` | 调用 Transport 能力，保存原任务/调用身份，读取结果；不另外实现 RCS sender |
 | ECS → WES | `POST /api/v1/callback/event` | 设备事实，例如扫码到位 | 按角色声明 Event 的 data，并决定是否产生业务执行 |
-| WES → ECS | `POST /api/v1/device/command` | 原命令、冻结路由/附录与参数 | 声明 `CommandBinding/DeviceAnnex`，创建稳定动作；由原发送器发送 |
+| WES → ECS | `POST /api/v1/device/command` | 原命令、冻结路由/附录与参数 | 显式编译合资格的 `@ecs_command` 或手工 `CommandBinding/DeviceAnnex`，创建稳定动作；由原发送器发送 |
 | ECS → WES | `POST /api/v1/callback/result` | 原命令执行结果 | 通用接收器按原冻结附录验证；业务读取原命令结果后推进 |
 
 WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合同配置。ECS 使用冻结的实际设备地址，WORKLINE 不保存另一份 HTTP 调用脚本。鉴权、来源校验与真实网络验收沿既有平台和对接要求，不在此创造新认证方案。

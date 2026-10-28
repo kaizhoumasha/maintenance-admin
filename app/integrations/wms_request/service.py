@@ -2,17 +2,21 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_settings
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
+from app.integrations.model_payload import validated_model_payload
 from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
 from .adapter import ADAPTERS, PROTOCOL_OF
-from .operation import InvalidRequestPayload, UnknownOperation, lookup
+from .operation import InvalidRequestPayload, UnknownOperation, lookup, operations
 from .results import WmsRequestResult, get_result
+
+_MISSING = object()
 
 
 class WmsRequests:
@@ -57,17 +61,33 @@ class WmsRequests:
     async def send(
         self,
         session: AsyncSession,
-        operation: str,
-        data: dict,
+        operation: str | BaseModel = _MISSING,
+        data: dict = _MISSING,
         *,
         operation_id: str,
     ) -> EnqueueResult:
-        registered = lookup(operation)
+        model = operation if isinstance(operation, BaseModel) else None
+        if model is not None:
+            if data is not _MISSING:
+                raise TypeError("model send cannot include data")
+            matches = [item for item in operations().values() if item.data_model is type(model)]
+            if len(matches) > 1:
+                raise InvalidRequestPayload("payload model has multiple registered operations")
+            registered = matches[0] if matches else None
+            operation = registered.name if registered else type(model).__name__
+        elif isinstance(operation, str) and data is not _MISSING:
+            registered = lookup(operation)
+        else:
+            raise TypeError("send requires either operation and data or one payload model")
         if registered is None:
             raise UnknownOperation(f"operation {operation!r} is not registered")
         try:
             validate_uuid7(operation_id)
-            payload = registered.data_model.model_validate(data).model_dump(mode="json")
+            payload = (
+                validated_model_payload(model)
+                if model is not None
+                else registered.data_model.model_validate(data).model_dump(mode="json")
+            )
             raw = json.dumps(
                 {
                     "operation_id": operation_id,

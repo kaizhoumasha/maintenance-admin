@@ -119,8 +119,11 @@ def test_duplicate_command_keys_fail_assembly(composition, monkeypatch):
         entry.COMMAND_BINDINGS = (command(),)
         entry.ANNEXES = {KEY: ANNEX}
     monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
-    with pytest.raises(ValueError, match="duplicate.*TEST_SCAN.*MOVE"):
+    with pytest.raises(ValueError, match="duplicate.*TEST_SCAN.*MOVE") as caught:
         catalog.validate_business_contracts()
+    assert composition.__name__ in str(caught.value)
+    assert other.__name__ in str(caught.value)
+    assert "修复: 每个角色/任务只声明一次" in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -137,8 +140,11 @@ def test_conflicting_annex_keys_fail_before_resource_creation(composition, monke
     )
     other.ANNEXES = {KEY: replace(ANNEX, **{field: value})}
     monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
-    with pytest.raises(ValueError, match="other.*test.move"):
+    with pytest.raises(ValueError, match="other.*test.move") as caught:
         catalog.validate_business_contracts()
+    assert composition.__name__ in str(caught.value)
+    assert other.__name__ in str(caught.value)
+    assert "修复" in str(caught.value)
 
 
 def test_identical_annex_contract_can_be_shared(composition, monkeypatch):

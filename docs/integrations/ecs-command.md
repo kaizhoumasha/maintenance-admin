@@ -32,11 +32,76 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 调用 `await service.create(session, owner=CommandOwner(domain), call_key=..., device_code=..., task_type=..., timeout_ms=..., params=...)`，由调用者提交。owner 来自受信任业务装配，不能从外部请求任意选择；没有生产 HTTP 发命令接口。
 
+也支持 `await service.create(session, owner=owner, call_key=saved_key, device_code=device_code,
+timeout_ms=timeout_ms, command=MoveTo(...))`。`command` 与旧 `task_type/params` 互斥，混用或缺项为
+`TypeError`；未声明/未声明子类及非法模型拒绝。两种形态共用原事务、命令/Outbox 和结果接口。
+
 同业务调用键、同原输入返回旧命令；不同输入冲突。创建先查旧命令，再解析路由并生成一次 UUIDv7、时间和原始请求。回滚不留下命令/出站消息。技术重试保持 command_code、时间、字节和冻结 origin，不按设备历史失败封锁新独立意图。
 
 `get_command(session, owner=..., command_code=...)` 和 `get_by_call(session, owner=..., call_key=...)` 返回只读 DTO，区分 command status、delivery status、实际 ACK、已应用结果、暂停原因和对账标记。查询不返回可靠层 ORM。消费方须在自己的事务中保证一次推进：一动作一命令、一个固定消费者、同库副作用时，可将原命令关联、冻结业务绑定/版本和消费标记合入业务动作行，通过受保护的WAITING_RESULT→SUCCEEDED/FAILED转换完成；多消费者等场景仍需按实际需求设计各自消费唯一性。不能凭 ACK/DONE 推断物理完成，也不自动撤销已应用业务。
 
 调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。通用 Status 查询已实现，所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，详见[通用 Status](ecs-status.md)；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
+
+## 模型声明与显式编译
+
+以下仅为合同形状示例，不是正式动作或供应商附录。真实字段、错误、超时及 SUCCESS/FAILED 含义须先确认。
+在原参数类上声明，不复制模型或更换原附录版本来迁语法：
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+from app.integrations.ecs_command import compile_commands, ecs_command
+from app.integrations.ecs_command.contracts import ErrorDetail
+
+
+class MoveResult(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    qty: int
+
+
+@ecs_command(
+    "MOVE",
+    device_role="ARM",
+    annex_id="example.arm.move",
+    annex_version="1",
+    result=MoveResult,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=30_000,
+)
+class MoveTo(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    qty: int
+
+
+# 实际 composition 显式导入原参数类后编译；不同时保留该角色/动作的手工绑定。
+COMMAND_BINDINGS, ANNEXES = compile_commands(MoveTo)
+```
+
+装饰器返回原类，保存该精确模型、原类来源的 `CommandBinding` 和保留原模型对象的 `DeviceAnnex`。
+`compile_commands(*command_models)` 每次只转换显式清单，返回 tuple 绑定及附录字典；重复角色/动作、
+同附录键不同模型/范围、非法合同和 local-only 来源失败，不累积全局注册表，不自动扫描命令目录。
+`CommandDeclaration(model, binding, annex)` 与 `command_declaration(model)` 位于 declaration 子模块，
+是内部声明元数据与精确原类读取器；业务使用包导出的装饰器/编译器，不手造或修改元数据。
+
+只有单参数类对应单角色/动作，原 params/result/error 及嵌套合同已严格且 `extra="forbid"`、错误模型继承
+`ErrorDetail`、超时范围明确时，才有声明资格。共享模型多绑定、`CallbackPayload` 的 `extra="ignore"`
+等旧合同继续用手工声明与旧 create；不收紧旧合同、不为语法迁移人为增版。原别名、默认值、校验器和
+序列化器须逐合同确认：新模型 JSON 必须仍是原 params 合同接受的形状，并与旧调用原输入等价。
+例如仅序列化别名输出能匹配新 wire，但旧 params 校验不接受该名字时，不能直接迁移。
+
+模型调用在序列化前重验实际字段（含构造绕过、嵌套可变值），不修改调用方实例。
+字段级 `Field(frozen=True)` 的 Pydantic dataclass，以及无法解析/无法唯一定位的同运行时类泛型
+dataclass 上下文会明确拒绝新模型调用；类级 frozen、唯一上下文及可由直接字段区分的泛型合同可用。
+不支持的合同继续原 `task_type/params`，不改写 schema 或修改原类校验配置来强制迁移。
+
+新模型动作要求路由提供 `resolve_declared(session, device_code, declaration)`。`RoleRoutes` 在同一次
+绑定解析中核对设备、精确角色、task_type、活动附录键、三种原模型及超时范围，服务还独立核对活动附录。
+普通/通用调试路由缺少能力时拒绝新建；local 组合只显式委托正式角色路由，共用原服务/唯一 Sender。
+已有同 owner/call_key/原输入先返回原命令，不受当前路由能力、换绑或活动附录变化影响；输入漂移仍冲突。
+新模型无法表达历史输入时，按原公开读接口/旧调用恢复原动作，不换调用键、设备或地址重发。
+历史附录只解析原 Result，不授权新动作；未增加 RouteSnapshot 字段、wire 字段、表或迁移。
+兼容证据及回退限制见[阶段 2–4 验收说明](business-development-phase2-4-acceptance.md)。
 
 ## 无设备表的ECS联调入口（内置协议合同）
 
