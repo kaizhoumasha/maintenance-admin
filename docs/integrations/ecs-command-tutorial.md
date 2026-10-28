@@ -96,4 +96,4 @@ service已完成lifespan装配，session_factory和action_key由业务提供。�
 
 开发回归使用[已有pytest测试](../testing/ecs-command-verification.md)，Mock及测试库保护由夹具负责，不要求执行额外的隔离操作流程。调试前核对目标地址，真实ECS接入另行安排。
 
-Status尚未实现；online/IDLE不能授权动作，也不能解封UNKNOWN/HELD。
+通用 Status 已实现：所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，见[通用 Status](ecs-status.md)；设备预览和手动刷新见[设备管理](device-management.md)。online/IDLE不能授权动作，也不能解封UNKNOWN/HELD。

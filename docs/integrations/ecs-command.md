@@ -36,7 +36,7 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 `get_command(session, owner=..., command_code=...)` 和 `get_by_call(session, owner=..., call_key=...)` 返回只读 DTO，区分 command status、delivery status、实际 ACK、已应用结果、暂停原因和对账标记。查询不返回可靠层 ORM。消费方须在自己的事务中保证一次推进：一动作一命令、一个固定消费者、同库副作用时，可将原命令关联、冻结业务绑定/版本和消费标记合入业务动作行，通过受保护的WAITING_RESULT→SUCCEEDED/FAILED转换完成；多消费者等场景仍需按实际需求设计各自消费唯一性。不能凭 ACK/DONE 推断物理完成，也不自动撤销已应用业务。
 
-调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。Status查询尚未实现，仅规划为诊断；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
+调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。通用 Status 查询已实现，所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，详见[通用 Status](ecs-status.md)；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
 
 ## 无设备表的ECS联调入口（内置协议合同）
 
@@ -92,7 +92,7 @@ POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略�
 
 迁移 `a025a20261025` 扩展可靠状态/快照并创建命令、发送依据和结果证据表。旧 STATIC 数据保持可读。存在快照、HELD 或 ECS 证据时拒绝破坏性 downgrade。停用所有旧 Sender/维护进程后，执行 `uv run alembic upgrade head`，再启用新版本；不支持旧二进制回退后解释新消息。本地 `--reload` 仅重载代码，不会自动迁移数据库。若 Sender 日志出现 SQLSTATE `42703`（缺列）或 `42P01`（缺表），先用 `uv run alembic current` 对照 `uv run alembic heads` 检查迁移状态，按上述停机顺序升级，勿通过捕获后忽略异常继续发送。
 
-本地快测使用 SQLite；并发、唯一键竞争、锁序、迁移与回滚必须使用显式一次性 PostgreSQL/Redis。测试与模拟对端不证明供应商去重、真实物理动作或业务现场验收。Status、具体 Event、结果纠正、人工重发与交互控制台不在 P1。
+本地快测使用 SQLite；并发、唯一键竞争、锁序、迁移与回滚必须使用显式一次性 PostgreSQL/Redis。测试与模拟对端不证明供应商去重、真实物理动作或业务现场验收。P1 原始范围不含 Status；当前[通用 Status](ecs-status.md)及[设备管理](device-management.md)已独立提供，不改变命令许可与原 Result 规则；具体业务 Event、结果纠正和人工重发仍需各自确认合同与实施范围。
 
 
 ## 后台日志排障

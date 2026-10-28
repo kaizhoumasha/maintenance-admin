@@ -73,4 +73,4 @@ Retry-After 支持非负整数秒及带时区的未来 HTTP 日期，不截短�
 rtk uv run pytest tests/integrations/ecs_status tests/http_client tests/architecture tests/controllers/test_dev_registry.py tests/controllers/test_ecs_status.py tests/integrations/test_registration.py tests/integrations/test_registration_discovery.py -q
 ```
 
-测试使用注入 HTTP 传输、两个持有的 loopback Mock 和新进程导入隔离；不连接真实 ECS/WMS，不需要迁移，不发送设备命令。设备管理、工作线及后台状态同步属于阶段 B，尚未在本阶段实现。
+通用查询测试使用注入 HTTP 传输、两个持有的 loopback Mock 和新进程导入隔离；不连接真实 ECS/WMS，查询能力本身不需要迁移，不发送设备命令。当前设备目录、工作线绑定及手动刷新已独立实现，入口和配置表迁移见[设备管理](device-management.md)；没有后台状态同步或周期性设备查询。
