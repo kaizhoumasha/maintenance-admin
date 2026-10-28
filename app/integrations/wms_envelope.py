@@ -1,6 +1,6 @@
 """WMS 合同 §4 所有 operation 通用的响应前置检查,decisions、facts 与搬运提交共用。"""
 
-from app.core.strict_json import json_object
+from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpResult
 from app.reliable import FailReason, OutgoingMessage, ProtocolAdapter, Verdict, VerdictKind
 
@@ -24,6 +24,11 @@ def read_ack(message: OutgoingMessage, result: HttpResult) -> dict | Verdict:
         return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
     ack = json_object(result.body)
     if ack is None:
+        return UNKNOWN
+    try:
+        # JSON 大指数可能解码为 inf;不能把失真的数值作为有效响应暴露。
+        canonical_digest(ack)
+    except (ValueError, RecursionError):
         return UNKNOWN
     timestamp = ack.get("timestamp")
     if (
