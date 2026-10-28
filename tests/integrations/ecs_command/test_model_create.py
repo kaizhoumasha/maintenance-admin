@@ -3,7 +3,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -530,3 +530,64 @@ async def test_unsupported_dataclass_contract_is_rejected_before_enqueue(ecs, de
         with pytest.raises(ValueError, match="supported.*contract|unsupported|frozen"):
             await ecs.service.create(session, **arguments(ecs, command=Params(data=FrozenField(1))))
         await assert_empty(ecs, session)
+
+
+@pytest.mark.parametrize("kind", ["alias", "json-types", "serializer"])
+async def test_model_creation_preserves_declared_json_output(ecs, declared, kind):
+    class AliasParams(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        qty: int = Field(alias="quantity")
+
+    class JsonParams(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        moment: datetime
+        values: tuple[int, ...]
+
+    class SerializedParams(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        qty: int
+
+        @field_serializer("qty")
+        def serialize_qty(self, value):
+            return f"qty:{value}"
+
+    payload, expected = {
+        "alias": (AliasParams(quantity=7), {"qty": 7}),
+        "json-types": (
+            JsonParams(moment=datetime(2026, 10, 28, 1, 2, 3, tzinfo=UTC), values=(1, 2)),
+            {"moment": "2026-10-28T01:02:03Z", "values": [1, 2]},
+        ),
+        "serializer": (SerializedParams(qty=7), {"qty": "qty:7"}),
+    }[kind]
+    model = ecs_command(
+        "MOVE",
+        device_roles=("SCAN1",),
+        annex_id="json-output",
+        annex_version="1",
+        result=Outcome,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )(type(payload))
+    bindings, annexes = compile_commands(model)
+    ecs.service.routes = RoleRoutes(
+        bindings,
+        annexes=annexes,
+        resolve_binding=declared.binding_resolver,
+        resolve_route=declared.route_resolver,
+    )
+    ecs.service.annexes = annexes
+    async with ecs.factory.begin() as session:
+        first = await ecs.service.create(session, **arguments(ecs, command=payload))
+        row = await session.get(EcsCommand, first.command_code)
+        assert json.loads(row.request_raw)["params"] == expected
+        assert json.loads(row.input_raw)["params"] == expected
+        frozen = row.request_raw
+    declared.binding = None
+    async with ecs.factory.begin() as session:
+        again = await ecs.service.create(session, **arguments(ecs, command=payload))
+        assert again.command_code == first.command_code
+        row = await session.get(EcsCommand, first.command_code)
+        assert row.request_raw == frozen
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1

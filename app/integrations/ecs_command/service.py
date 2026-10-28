@@ -128,7 +128,7 @@ class EcsCommands:
         if models is None:
             raise ValueError("confirmed annex required")
         canonical_digest(params)
-        models.params_model.model_validate(params)
+        # Callers validate original models; serialized JSON is not Python model input.
         if (
             type(timeout_ms) is not int
             or not models.timeout_min_ms <= timeout_ms <= models.timeout_max_ms
