@@ -31,7 +31,7 @@ Transport task_id/client_request_id/caller。完整直接前序及各自 caller/
    或另开推进事务。Rejected 沿原 WMS 保存点回滚处理器写入并保留拒绝收据；普通存储异常向外抛出，
    由接收器整体回滚并返回 503。ECS 沿原 ACK/诊断语义，不套用 WMS Rejected 的响应规则。
 
-薄入口的现行调用形状如下（`accept_scan` 是业务方法，模型/合同须先确认）：
+ECS Event 薄入口等待业务受理，ACK/诊断仍由原接收器负责（`accept_scan` 是业务方法，模型/合同须先确认）：
 
 ```python
 from app.businesses.runtime import require_runtime
@@ -39,6 +39,18 @@ from app.businesses.runtime import require_runtime
 
 async def scanned(ctx, payload):
     await require_runtime(ctx).services[DEFINITION.code].accept_scan(ctx, payload)
+```
+
+WMS callback 薄入口须把具体业务方法的原 Outcome 返回给接收器；`accept_callback` 是业务方法，
+返回 Accepted/Duplicate/Conflict/Rejected。不能只 await 后丢弃结果，否则返回的业务拒绝/冲突或响应数据会丢失。
+直接处理器原有 None/dict 转 Accepted 的规则仍保留，这里展示的是转交已有业务 Outcome 的适配入口：
+
+```python
+from app.businesses.runtime import require_runtime
+
+
+async def callback(ctx, payload):
+    return await require_runtime(ctx).services[DEFINITION.code].accept_callback(ctx, payload)
 ```
 
 原接收器返回 ACK/Accepted 只证明该受理事务的结果。测试受理异常后断言收据、业务行与 pending 均无残留，
