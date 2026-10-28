@@ -93,6 +93,11 @@ rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --en
 成功退出 `0`，stdout 仅输出一个 JSON；失败退出 `1`，stdout 不输出部分清单，stderr 提供
 固定失败阶段、错误类型、安全源码位置和修复指引，不回显原异常、配置或 Payload。
 参数缺失/非法退出 `2`，`--help` 退出 `0`；这些参数处理均先于应用导入。
+
+失败诊断的 origin/安全堆栈可能指向公共校验器，而非出错业务的 composition 或原绑定。
+此时先按 phase 检查显式 catalog 和对应入口/绑定声明。当前工具不保证直接给出具体业务源项；
+不要通过输出原异常、Payload 或局部变量绕过这个边界。
+
 JSON 顶层固定为 `environment`、`businesses`、`entries`、`command_contracts`、`scope`：
 
 - `businesses` 是排序后的显式 catalog 业务 code 数组；当前为 `[]`，仍检查 Transport 等正式入口。
