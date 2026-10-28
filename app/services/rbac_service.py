@@ -13,7 +13,7 @@ _ADMIN_GUARD_LOCK = 0x41444D494E
 
 
 async def lock_admin_changes(session: AsyncSession) -> None:
-    """三个授权变更入口先互斥,再加目标行锁/修改;锁随事务结束释放。"""
+    """授权变更入口先互斥,再加目标行锁/修改;锁随事务结束释放。"""
     if session.get_bind().dialect.name == "postgresql":
         await session.execute(
             text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMIN_GUARD_LOCK}
@@ -104,8 +104,8 @@ async def update_role(session: AsyncSession, role_id: int, name: str) -> Role:
 
 
 async def delete_role(session: AsyncSession, role_id: int) -> None:
+    await lock_admin_changes(session)
     role = await _get_role(session, role_id)
-    # shortcut: 检查与删除之间被并发分配的用户会被外键级联静默解绑;需要时对角色行加锁。
     in_use = select(func.count()).select_from(user_role).where(user_role.c.role_id == role_id)
     if await session.scalar(in_use):
         raise AppError(ErrorCode.CONFLICT, "角色仍有关联用户,请先解除")
