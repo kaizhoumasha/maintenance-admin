@@ -138,7 +138,10 @@ rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --en
 ```python
 result = subprocess.run(
     [sys.executable, "-m", "scripts.check_integration_contracts", "--environment", "production"],
-    cwd=project_root, env=clean_env, capture_output=True, text=True,
+    cwd=project_root,
+    env=clean_env,
+    capture_output=True,
+    text=True,
 )
 assert result.returncode == 0, result.stderr
 report = json.loads(result.stdout)

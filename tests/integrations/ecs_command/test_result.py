@@ -131,3 +131,75 @@ async def test_storage_incompatible_identity_is_invalid_before_database_lookup(e
     ).encode()
     async with ecs.factory.begin() as session:
         assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 400
+
+
+async def test_shared_legacy_models_keep_original_result_contract(ecs):
+    from fastapi import FastAPI
+
+    from app.integrations.ecs_callback import CallbackPayload
+    from app.integrations.ecs_command import DeviceAnnex
+    from app.integrations.ecs_command.contracts import ErrorDetail
+    from app.integrations.ecs_command.dev import configure_local_ecs
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.reliable.store import MessageStore
+
+    class LegacyData(CallbackPayload):
+        qty: int
+
+    annex = DeviceAnnex(LegacyData, LegacyData, ErrorDetail, 1, 60000)
+    ecs.service.annexes = {("test", "1"): annex}
+    params = {"qty": 1, "vendor_extension": {"station": "旧站点"}}
+    async with ecs.factory.begin() as session:
+        command = await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="legacy",
+            device_code="D1",
+            task_type="MOVE",
+            timeout_ms=30000,
+            params=params,
+        )
+        row = await session.get(EcsCommand, command.command_code)
+        assert json.loads(row.request_raw)["params"] == params
+        frozen = (row.request_raw, dict(row.route), row.expires_at)
+
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    retained = configure_local_ecs(
+        FastAPI(), environment="local", history_annexes={("test", "1"): annex}
+    )
+    assert retained.annexes["test", "1"] is annex
+    assert annex.params_model is annex.result_model is LegacyData
+    assert LegacyData.model_config["strict"] is True
+    assert LegacyData.model_config["extra"] == "ignore"
+    result = dict(
+        command_code=command.command_code,
+        device_code="D1",
+        result="SUCCESS",
+        finish_time=1,
+        data={"qty": 1, "vendor_extension": ["accepted", None]},
+        extension="ignored",
+    )
+    async with ecs.factory.begin() as session:
+        invalid = {**result, "data": {"qty": "1"}}
+        assert (
+            await receive_ecs_result(session, json.dumps(invalid).encode(), retained)
+        ).status_code == 400
+        assert (
+            await retained.get_command(session, owner=ecs.owner, command_code=command.command_code)
+        ).result is None
+    async with ecs.factory.begin() as session:
+        assert (
+            await receive_ecs_result(session, json.dumps(result).encode(), retained)
+        ).status_code == 200
+    async with ecs.factory() as session:
+        view = await retained.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and view.result["data"] == result["data"]
+        assert "extension" not in view.result
+        row = await session.get(EcsCommand, command.command_code)
+        assert (row.request_raw, row.route, row.expires_at) == frozen
+        assert row.route["annex_version"] == "1"
