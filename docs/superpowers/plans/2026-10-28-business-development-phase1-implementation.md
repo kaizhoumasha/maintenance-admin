@@ -10,7 +10,7 @@
 
 **Spec:** [已合并重构设计](../specs/2026-10-27-business-development-simplification-design.md)，主要落实第 6.3、7、9 节阶段 1，以及 A2、A7–A9 的现行行为基线；A3–A6 只固定旧接口行为，不提前实现新接口。
 
-状态：**阶段 1 任务 1–5 已实施并完成本地验收，待控制器综合评审。** 日期：2026-10-28。用户已授权 subagent-driven-development 和分任务本地提交；代码基线为 `6371ab7`（PR #30 合并后，包含 PR #29），最终受验代码为 `d006a0c`。实际结果见第 6.3 节。本文保留原任务步骤与设计范围，以下“新增/拟新增”描述的是原计划动作；阶段 2–4 的目标 API、真实业务接入、推送、PR、合并和部署均未实施。
+状态：**阶段 1 任务 1–5 已实施并完成本地验收及控制器综合评审。** 日期：2026-10-28。用户已授权 subagent-driven-development 和分任务本地提交；代码基线为 `6371ab7`（PR #30 合并后，包含 PR #29），最终受验代码为 `d006a0c`。实际结果见第 6.3 节。本文保留原任务步骤与设计范围，以下“新增/拟新增”描述的是原计划动作；阶段 2–4 的目标 API 和真实业务接入尚未实施，推送、PR、合并及部署不属于第 6.3 节的阶段 1 本地验收。
 
 ## Global Constraints
 
@@ -228,7 +228,7 @@ rtk git diff --check
 
 ### 6.3 实际执行与本地验收记录（2026-10-28）
 
-受验代码为 `d006a0c`，在隔离工作区 `feature/business-development-phase1` 完成以下检查；任务 5 只更新本文，不增加应用能力。任务 1–4 的本地实现提交依次为 `179e956`、`2e2750d`、`a31aa2f`、`d9c13a8`；文档修正 `d006a0c` 已关闭 WMS 薄入口未转交业务 Outcome/data 的问题。各任务评审已完成，控制器对整个分支的最终综合评审另行进行。
+受验代码为 `d006a0c`，在隔离工作区 `feature/business-development-phase1` 完成以下检查；任务 5 只更新本文，不增加应用能力。任务 1–4 的本地实现提交依次为 `179e956`、`2e2750d`、`a31aa2f`、`d9c13a8`；文档修正 `d006a0c` 已关闭 WMS 薄入口未转交业务 Outcome/data 的问题。各任务评审及控制器对整个分支的最终综合评审均已完成，无 Critical/Important 遗留；安全诊断可能只定位公共校验器的非阻断限制已由 `e78669d` 补充说明，并通过限定范围复审。
 
 - [x] G1：兼容清单、补测与原用例均有执行证据。
 - [x] G2：独立冷进程和资源边界证据齐全。
@@ -260,12 +260,12 @@ rtk python3 .superpowers/sdd/2026-10-28-business-development-phase1-implementati
 | 快速完整套件 | 2286 passed、749 skipped，109.59 秒，退出 0 | 706 项需要 TEST_DATABASE_URL，28 项需要 TEST_REDIS_URL，1 项需要显式 worker Redis；12 项为 PostgreSQL 专属语义/SQLite 分支；另 2 项需要独立 DEVICE_MIGRATION_DATABASE_URL / BINDING_MIGRATION_DATABASE_URL。未配置存储的跳过不能作为事务验收。 |
 | 专属存储完整套件 | 3005 passed、30 skipped，201.24 秒，退出 0 | 28 项是 PostgreSQL 并发/锁/独立 Sender 语义的 SQLite 分支，实际 PostgreSQL 对照已执行；另 2 项仍需要上述单独迁移库，本次未创建或使用这些库。没有 business flow/result consumption、101 项、40001 或恢复场景跳过。 |
 
-`ruff check .` 通过；`ruff format --check .` 为 436 files already formatted；`git diff --check` 通过。任务 5 仅修改验收文档，未在文档记录更新后重复完整套件。完整原始摘要、逐项跳过和一次性检查命令保存在本地 `.superpowers/sdd/2026-10-28-business-development-phase1-implementation/task-5-report.md` 及相邻日志；这些本地流程证据不进入正式业务目录。
+`ruff check .` 通过；`ruff format --check .` 为 436 files already formatted；`git diff --check` 通过。任务 5 仅修改验收文档，未在文档记录更新后重复完整套件。控制器已核对完整原始摘要、逐项跳过和一次性检查命令。原 `.superpowers/sdd/2026-10-28-business-development-phase1-implementation/` 临时报告及日志已按子代理流程在最终评审后清理；本节保留持久验收摘要，Git 历史保留实现，不将已清理路径作为可用交付文件。
 
-本记录证明阶段 1 的实现和本地/隔离验收，不证明 CI、完整真实业务、供应商、现场、生产或开发耗时指标。正式 `catalog.entries()` 仍为空；未新增模型形式 send/create、`@ecs_command`、`compile_commands`、`resolve_declared` 或 `@ecs_result`，未开始阶段 2–4 实施。未推送、创建 PR、合并、部署或向真实 WMS/ECS 发送请求；专属临时存储保留给控制器最终评审后处理。
+本记录证明阶段 1 的实现和本地/隔离验收，不证明 CI、完整真实业务、供应商、现场、生产或开发耗时指标。正式 `catalog.entries()` 仍为空；未新增模型形式 send/create、`@ecs_command`、`compile_commands`、`resolve_declared` 或 `@ecs_result`，未开始阶段 2–4 实施。阶段 1 收尾时未推送、创建 PR、合并、部署或向真实 WMS/ECS 发送请求；专属临时存储已在最终评审后清理。后续发布前验证和 PR/合并状态另行记录。
 
 ## 7. 回退与本轮交付边界
 
 后续代码回退按任务保留独立、可审查的修改；CLI 和指南可移除，兼容行为测试建议保留。若回退 core 导入接缝，须同时移除依赖其无副作用保证的 CLI，不能留下表面可运行却偷偷初始化设施的工具。无数据库迁移、无数据重写，不触碰原消息、Evidence、UNKNOWN/HELD 或旧附录。
 
-**原规划轮次只完成本文；本轮经另行授权已实施阶段 1 任务 1–5，并取得第 6.3 节的本地/隔离证据。** 独立 CLI、导入隔离、兼容基线和当前 API 配方已交付到隔离分支及本地提交，控制器综合评审尚待完成。阶段 2–4 的新 API、真实业务/合同接入及供应商/现场验收未实施；推送、PR、合并、部署和真实请求未执行。本文复选框只记录上述任务进度，不构成后续接入或发布授权。
+**原规划轮次只完成本文；本轮经另行授权已实施阶段 1 任务 1–5，并取得第 6.3 节的本地/隔离证据。** 独立 CLI、导入隔离、兼容基线和当前 API 配方已交付到隔离分支及本地提交，控制器综合评审及最终文档修正复审已完成。阶段 2–4 的新 API、真实业务/合同接入及供应商/现场验收未实施；上述阶段 1 验收不包含后续推送、PR、合并、部署或真实请求。本文复选框只记录上述任务进度，不构成后续接入或发布授权。
