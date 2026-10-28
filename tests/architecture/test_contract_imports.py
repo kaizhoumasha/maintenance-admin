@@ -153,9 +153,20 @@ def test_contract_discovery_does_not_initialize_runtime_resources(tmp_path):
         tmp_path,
         METADATA_ONLY_GUARD
         + """
+import app.core as core
 from app.businesses import catalog
 from app.integrations.discovery import load_formal_modules
 from app.integrations.wms_callback.registry import operations
+
+assert not hasattr(core, "missing_export")
+fallback = object()
+assert getattr(core, "missing_export", fallback) is fallback
+try:
+    core.missing_export
+except AttributeError as error:
+    assert "missing_export" in str(error)
+else:
+    raise AssertionError("unknown core export must raise AttributeError")
 
 load_formal_modules()
 assert catalog.validate_business_contracts() == ((), {})
