@@ -70,6 +70,11 @@ API/worker 和无配置 CLI 共用编译结果。底层 CommandBinding/DeviceAnn
 该来源约束覆盖仓库内 `app.*` 的实际注册，不能挪到 controllers/services 等其他应用目录绕过。
 非 app 测试模块仍可在隔离夹具中显式装配；它们不会被生产发现器自动导入，也不能冒充 catalog 的业务初始入口。
 
+正式合同交叉校验还须反查三类注册表中的实际来源：`app.businesses.*` 的正式注册必须属于
+当前 catalog 所属的正式 `ENTRY_MODULES` 模块或其包内子模块。间接 import 不能启用未列业务，
+也不能启用同业务未声明的入口；相似业务名前缀不等于归属。固定平台入口和隔离非 app 夹具沿用原边界。
+校验失败不保留已验证 catalog，API/worker 在 local/资源/工厂前失败，CLI 不输出部分成功目录。
+
 原 HTTP 路径、operation/Event 名称、权限与目录可见性不改变。正式 catalog 保持空，不放入模拟业务。
 
 ## 4. 迁移与删除范围
