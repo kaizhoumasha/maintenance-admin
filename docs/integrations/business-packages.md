@@ -1,7 +1,9 @@
 # 新增工作线业务包
 
 业务流程与消息先看[工作线业务 API 索引](workline-business-api.md)：人工分拣为旧系统参考合同，粗分机为待确认草案；
-降低新增接入开发门槛的[正式重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md)为待评审、未实施的目标方案，列明现有/新增接口、声明与调用示例、兼容迁移、分步顺序及验收。
+当前接入路线见[快速开始](business-development-quickstart.md)，原子受理、独立推进及恢复证据见[事务配方](business-transaction-recipes.md)。
+[重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md)保留为当时的目标设计；
+当前已实现无配置声明检查和现行接口配方，后续模型式 API 及真实业务验收不能据此视为完成。
 其中 @ecs_command、compile_commands、模型形式的 WMS send/ECS create 和声明感知角色解析尚不存在；下文仍是现行接入规则。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单仍为空。
