@@ -1,5 +1,7 @@
 # 出站结果读取与前序闭合
 
+业务首次接入见[快速开始](business-development-quickstart.md)；受理 A、推进 B、失败恢复与对应 PostgreSQL 断言见[事务配方](business-transaction-recipes.md)。
+
 本文是正式读接口参考。WMS／Transport的发送、回调、重试、TTL和终态清理保持原行为。读接口不发HTTP、不修改行、不加框架写锁、不提交／回滚／flush；调用方未提交的修改不会被隐式flush。返回冻结的数据对象外壳及独立数据副本，不返回ORM、原始响应字节或pending结果内容。数据库临时错误原样抛出，不能当作未找到或全部闭合。
 
 ## 原身份查询

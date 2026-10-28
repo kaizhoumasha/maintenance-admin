@@ -150,7 +150,7 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，在 `app/integrations/<业务>/request.py` 自动发现）、信封冻结和公共响应分类，`WmsRequests.send` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；业务用 `WmsRequests.get_result` 按原消息身份读取可信终局响应，用 `TransportService.get_result` / `list_unclosed_predecessors` 读取已应用搬运结果及明确前序，具体字段和闭合规则见[出站结果契约](docs/integrations/outbound-results.md)。
 
-工作线业务按[业务包开发指南](docs/integrations/business-packages.md)在 `app/businesses/<业务>/` 声明角色、位置和初始入口，由显式清单及简单工厂复用 WMS、Transport、ECS 和 Outbox。启动先加载正式入口并交叉校验合同，再加载 local 入口和构造服务；受理使用原收据事务，需要结果消费的推进另开 REPEATABLE READ 事务，整组重读并原子提交消费依据与下一意图。
+首次接入先看[业务开发快速开始](docs/integrations/business-development-quickstart.md)，其中包括启动应用前的独立合同检查命令；受理、推进及恢复见[事务配方](docs/integrations/business-transaction-recipes.md)。工作线业务按[业务包开发指南](docs/integrations/business-packages.md)在 `app/businesses/<业务>/` 声明角色、位置和初始入口，由显式清单及简单工厂复用 WMS、Transport、ECS 和 Outbox。启动先加载正式入口并交叉校验合同，再加载 local 入口和构造服务；受理使用原收据事务，需要结果消费的推进另开 REPEATABLE READ 事务，整组重读并原子提交消费依据与下一意图。
 
 管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单为空，完整真实业务登记前不能新建业务工作线；人工分拣、粗分流程和真实业务启用门槛尚未完成，公共接缝测试不代表现场业务验收。
 

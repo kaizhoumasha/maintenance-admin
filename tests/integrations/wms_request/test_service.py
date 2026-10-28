@@ -97,3 +97,66 @@ async def test_missing_endpoint_target_is_reported(sessions, wms, clock):
     with pytest.raises(RuntimeError, match="wms-facts"):
         async with sessions() as session, session.begin():
             await wms.send(session, FACT, DATA, operation_id=str(uuid7(clock())))
+
+
+@pytest.mark.parametrize("keyword_first", [False, True])
+async def test_legacy_send_forms_preserve_canonical_payload_and_reference(
+    sessions, wms, clock, keyword_first
+):
+    from datetime import timedelta
+
+    from pydantic import Field
+
+    from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
+
+    @request_operation("example.fact.canonical@v1", Endpoint.FACTS, ttl=timedelta(minutes=5))
+    class CanonicalReport(RequestPayload):
+        task_id: str = Field(alias="taskId")
+        qty: int = 2
+        note: str | None = None
+        nested: dict[str, list[int | str | None]]
+
+    operation = "example.fact.canonical@v1"
+    operation_id = str(uuid7(clock()))
+    data = {"taskId": "T-1", "note": None, "nested": {"items": [1, "中文", None]}}
+    expected = {"task_id": "T-1", "qty": 2, "note": None, "nested": data["nested"]}
+    async with sessions.begin() as session:
+        if keyword_first:
+            first = await wms.send(
+                session=session, operation=operation, data=data, operation_id=operation_id
+            )
+        else:
+            first = await wms.send(session, operation, data, operation_id=operation_id)
+    (original,) = await rows(sessions)
+    frozen = (original.request_raw, original.expires_at)
+    assert original.target == "wms-facts"
+    assert original.expires_at is not None
+    assert json.loads(original.request_raw)["data"] == expected
+    assert original.request_raw == json.dumps(
+        dict(
+            operation_id=operation_id,
+            operation=operation,
+            timestamp=int(clock().timestamp() * 1000),
+            data=expected,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+    clock.advance(30)
+    explicit_defaults = {**data, "qty": 2}
+    async with sessions.begin() as session:
+        if keyword_first:
+            again = await wms.send(session, operation, explicit_defaults, operation_id=operation_id)
+        else:
+            again = await wms.send(
+                session=session,
+                operation=operation,
+                data=explicit_defaults,
+                operation_id=operation_id,
+            )
+    (replayed,) = await rows(sessions)
+    assert again.message_id == first.message_id
+    assert replayed.target == original.target
+    assert (replayed.request_raw, replayed.expires_at) == frozen

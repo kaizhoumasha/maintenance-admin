@@ -98,7 +98,8 @@ assert 'app.main' not in sys.modules
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
-def test_all_formal_kinds_load_before_any_local_entry(tmp_path, environment):
+@pytest.mark.parametrize("package", [False, True])
+def test_all_formal_kinds_load_before_any_local_entry(tmp_path, environment, package):
     for root in ("businesses", "integrations"):
         for kind in ("ecs_event", "callback", "request"):
             name = f"{root}.done@v1"
@@ -120,14 +121,14 @@ def test_all_formal_kinds_load_before_any_local_entry(tmp_path, environment):
             write_module(
                 tmp_path,
                 root,
-                f"probe.{kind}",
+                f"probe.{kind}" + (".__init__" if package else ""),
                 declaration + f"import builtins\nbuiltins.loaded_entries.append('{root}.{kind}')\n",
             )
         for kind in ("dev_ecs_event", "dev_callback", "dev"):
             write_module(
                 tmp_path,
                 root,
-                f"probe.{kind}",
+                f"probe.{kind}" + (".__init__" if package else ""),
                 "import builtins\n"
                 "assert len([x for x in builtins.loaded_entries if '.dev' not in x]) == 6\n"
                 f"builtins.loaded_entries.append('{root}.{kind}')\n",

@@ -2,7 +2,11 @@
 
 import base64
 import json
+import os
+import subprocess
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -13,6 +17,107 @@ PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123
 
 
 LOGIN = {"username": "root", "password": "password123"}
+
+
+METADATA_ONLY_GUARD = """
+import importlib.abc
+import socket
+import httpx
+import redis
+import redis.asyncio
+import sqlalchemy
+import sqlalchemy.ext.asyncio
+from unittest.mock import patch
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("runtime resource construction or network connection")
+
+class BlockRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith((
+            "app.core.database", "app.core.redis", "app.core.deps",
+            "app.core.logger", "app.main", "app.controllers", "app.tasks",
+            "app.reliable_runtime", "app.businesses.runtime",
+        )):
+            raise AssertionError("runtime import: " + fullname)
+        if not globals().get("allow_ecs_definition_imports", False) and fullname.startswith((
+            "app.integrations.ecs_command.runtime", "app.integrations.ecs_command.roles",
+            "app.integrations.ecs_command.dev",
+        )):
+            raise AssertionError("runtime import: " + fullname)
+
+sys.meta_path.insert(0, BlockRuntime())
+def block_execution(frame, event, arg):
+    if event != "call":
+        return
+    module = frame.f_globals.get("__name__") or ""
+    name = frame.f_code.co_name
+    if (module, name) in {
+        ("app.integrations.ecs_command.runtime", "configure_ecs"),
+        ("app.integrations.ecs_command.dev", "configure_local_ecs"),
+        ("app.integrations.ecs_command.roles", "__init__"),
+        ("app.integrations.ecs_command.service", "__init__"),
+        ("app.integrations.ecs_command.dev", "__init__"),
+    } or (module.startswith(("app.businesses.", "app.integrations.legacy."))
+          and name in {"build_service", "handle"}) or (
+        module.startswith("app.") and name.startswith("replay")
+    ):
+        forbidden()
+sys.setprofile(block_execution)
+for target, name in (
+    (sqlalchemy, "create_engine"),
+    (sqlalchemy.engine, "create_engine"),
+    (sqlalchemy.ext.asyncio, "create_async_engine"),
+    (sqlalchemy.engine.Engine, "__init__"),
+    (sqlalchemy.MetaData, "create_all"),
+    (sqlalchemy.Table, "create"),
+    (httpx.Client, "__init__"),
+    (httpx.AsyncClient, "__init__"),
+    (redis.Redis, "__init__"),
+    (redis.asyncio.Redis, "__init__"),
+    (socket.socket, "connect"),
+    (socket.socket, "connect_ex"),
+    (socket, "create_connection"),
+):
+    patch.object(target, name, forbidden).start()
+
+import app.database
+app.database.create_database_engine = forbidden
+from app.core import config
+config.get_settings = forbidden
+from app.businesses import catalog
+catalog.load_business_models = forbidden
+"""
+
+
+def write_python_modules(root, modules):
+    """Write real temporary package files for isolated import/discovery tests."""
+    for relative, source in modules.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+
+
+def run_isolated_module(module, arguments, *, cwd, bootstrap="", environment=None):
+    """Run a module once with an explicit project path and no inherited app settings."""
+    project_root = Path(__file__).resolve().parents[1]
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys\n"
+            f"sys.path.insert(0, {str(project_root)!r})\n"
+            + bootstrap
+            + f"\nsys.argv = {[module, *arguments]!r}\n"
+            + f"import runpy\nrunpy.run_module({module!r}, run_name='__main__')\n",
+        ],
+        cwd=cwd,
+        env={"PATH": os.environ["PATH"], **(environment or {})},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 async def ecs_binding(session, device_code):
