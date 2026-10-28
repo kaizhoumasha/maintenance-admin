@@ -1,11 +1,16 @@
 from celery import Celery
 from celery.schedules import crontab
 
+from app.businesses import catalog
 from app.core import get_settings
+from app.integrations.discovery import load_formal_modules, load_local_modules
 from app.tasks.diagnostics import install_celery_diagnostics
 
 install_celery_diagnostics()
 settings = get_settings()
+load_formal_modules()
+catalog.validate_business_contracts()
+load_local_modules(environment=settings.ENVIRONMENT)
 
 celery_app = Celery(
     settings.APP_NAME,

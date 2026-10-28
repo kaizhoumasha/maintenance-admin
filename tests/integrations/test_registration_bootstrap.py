@@ -269,7 +269,8 @@ else:
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
-def test_cold_application_loads_formal_before_local(tmp_path, environment):
+@pytest.mark.parametrize("application", ["app.main", "app.tasks.celery_app"])
+def test_cold_application_loads_formal_before_local(tmp_path, environment, application):
     for kind in ("ecs_event", "callback", "request"):
         write_module(
             tmp_path,
@@ -282,6 +283,7 @@ def test_cold_application_loads_formal_before_local(tmp_path, environment):
         "businesses",
         "probe.dev_callback",
         "import builtins\nassert len(builtins.loaded_entries) == 3\n"
+        "from app.businesses import catalog\nassert len(catalog.validated_entries()) == 1\n"
         "builtins.loaded_entries.append('local')\n",
     )
     run_cold(
@@ -295,9 +297,57 @@ entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
 entry.COMMAND_BINDINGS = ()
 entry.ANNEXES = {{}}
 entry.ENTRY_MODULES += ('app.businesses.probe.dev_callback',)
-from app.main import app
+import importlib
+importlib.import_module({application!r})
+assert catalog.validated_entries() == (entry,)
 assert len(builtins.loaded_entries) == {4 if environment == "local" else 3}
 assert ('app.businesses.probe.dev_callback' in sys.modules) == {environment == "local"!r}
+""",
+    )
+
+
+@pytest.mark.parametrize("environment", ["local", "production"])
+@pytest.mark.parametrize("problem", ["missing_module", "missing_initial_entry"])
+def test_invalid_formal_business_prevents_worker_initialization(tmp_path, environment, problem):
+    for kind in ("ecs_event", "callback", "request"):
+        if problem == "missing_module" and kind == "request":
+            continue
+        write_module(tmp_path, "businesses", f"probe.{kind}")
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.dev_callback",
+        "raise AssertionError('local entry loaded before formal validation')\n",
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+import os
+os.environ['ENVIRONMENT'] = {environment!r}
+import celery
+from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
+entry.DEFINITION = BusinessDefinition(
+    code='probe', display_name='Probe',
+    device_roles=(DeviceRole(role_key='PROBE_SCAN', display_name='Scan'),),
+    initial_entries=(InitialEntry(kind='ecs_event', name='DONE', device_role='PROBE_SCAN'),),
+)
+entry.COMMAND_BINDINGS, entry.ANNEXES = (), {{}}
+entry.ENTRY_MODULES += ('app.businesses.probe.dev_callback',)
+original_celery = celery.Celery
+def construct_celery(*args, **kwargs):
+    builtins.loaded_entries.append('resources:celery')
+    return original_celery(*args, **kwargs)
+celery.Celery = construct_celery
+try:
+    from app.tasks.celery_app import celery_app
+    celery_app.loader.import_default_modules()
+except {"ModuleNotFoundError" if problem == "missing_module" else "ValueError"}:
+    pass
+else:
+    raise AssertionError('worker accepted an invalid formal business')
+assert 'resources:celery' not in builtins.loaded_entries
+assert 'app.businesses.probe.dev_callback' not in sys.modules
 """,
     )
 
