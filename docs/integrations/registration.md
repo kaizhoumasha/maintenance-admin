@@ -103,6 +103,29 @@ class Report(RequestPayload):
 
 ## 在一个地方检查全部注册项
 
+应用启动前可用独立静态检查命令；它与下面的 HTTP local 目录分别使用，HTTP 行为和权限不变：
+
+```sh
+rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment production
+rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment local
+```
+
+在项目根目录、Python 3.13+ 和锁定依赖下每次运行新进程。`--environment` 必填且仅接受这两个值，
+不使用继承的 `ENVIRONMENT`；production 是正式声明范围，其他非 local 部署也用它，不连接生产。
+无需数据库/Redis/JWT 配置或 `.env`。顺序是全部正式入口 → 原业务合同交叉校验 → 仅 local 的 dev 入口；
+正式缺项不能由 local 声明修补。命令不装配资源/路由，不执行 handler、factory、建表或回放。
+
+成功退出 `0` 并输出一个 JSON；声明/导入错误退出 `1`，只在 stderr 输出固定阶段、错误类型、安全
+源码位置及固定修复指引，不回显原异常、配置或 Payload，不输出部分成功清单。参数错误退出 `2`；
+`--help` 退出 `0`。参数处理先于应用导入。
+
+JSON 包含 `environment`、排序的业务 code 数组 `businesses`、三类原来源元数据 `entries`、
+原 `CommandBinding/DeviceAnnex` 校验结果 `command_contracts` 和 `scope.checked/excluded`。
+仅检查现有发现器已加载的声明，正式业务来自显式 catalog；当前业务为空仍检查 Transport 正式回调。
+不扫描任意源码，不收紧合法旧附录，不验证未来新声明的迁移资格。local 只列原 dev 三类入口，
+通用 v3 调试命令、Status runtime、模型资源，以及路由、迁移、网络、许可和物理/业务完成均不在范围。
+字段与排序约定见[快速开始](business-development-quickstart.md#启动应用前检查声明)。
+
 仅 `ENVIRONMENT=local`，登录 Swagger 后打开 `GET /api/v1/dev/integrations/registry`。
 每项包含 `kind`、`entry_type`、`name`、`device_role`、`module`、`source_file`、`symbol`、`local_only`、`endpoint`、`payload_schema`；命令合同另含 `response_schema`。三类业务项为 `business_registration`，角色命令合同为 `command_contract`，目录读取同一份可信声明，不新增业务注册器。
 来源是原函数/原模型/原类，而不是适配器；清单按类型、角色和名称排序；未装配额外能力且无注册项时返回空列表。目录不依赖 Status，不做外部查询。

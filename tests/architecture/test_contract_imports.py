@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import METADATA_ONLY_GUARD
+
 SETTINGS = {
     "APP_NAME": "contract-import-probe",
     "ENVIRONMENT": "production",
@@ -149,53 +151,15 @@ else:
 def test_contract_discovery_does_not_initialize_runtime_resources(tmp_path):
     _cold_process(
         tmp_path,
-        """
-import importlib.abc
-import socket
+        METADATA_ONLY_GUARD
+        + """
+from app.businesses import catalog
+from app.integrations.discovery import load_formal_modules
+from app.integrations.wms_callback.registry import operations
 
-import httpx
-import redis
-import redis.asyncio
-import sqlalchemy
-import sqlalchemy.ext.asyncio
-from unittest.mock import patch
-
-def forbidden(*args, **kwargs):
-    raise AssertionError("runtime resource construction or network connection")
-
-class BlockRuntime(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith((
-            "app.core.database", "app.core.redis", "app.core.deps",
-            "app.core.logger", "app.main", "app.controllers", "app.tasks",
-            "app.reliable_runtime", "app.businesses.runtime",
-            "app.integrations.ecs_command.runtime",
-        )):
-            raise AssertionError("runtime import: " + fullname)
-
-sys.meta_path.insert(0, BlockRuntime())
-with (
-    patch.object(sqlalchemy, "create_engine", forbidden),
-    patch.object(sqlalchemy.engine, "create_engine", forbidden),
-    patch.object(sqlalchemy.ext.asyncio, "create_async_engine", forbidden),
-    patch.object(sqlalchemy.engine.Engine, "__init__", forbidden),
-    patch.object(httpx.Client, "__init__", forbidden),
-    patch.object(httpx.AsyncClient, "__init__", forbidden),
-    patch.object(redis.Redis, "__init__", forbidden),
-    patch.object(redis.asyncio.Redis, "__init__", forbidden),
-    patch.object(socket.socket, "connect", forbidden),
-    patch.object(socket.socket, "connect_ex", forbidden),
-    patch.object(socket, "create_connection", forbidden),
-):
-    import app.database
-    app.database.create_database_engine = forbidden
-    from app.businesses import catalog
-    from app.integrations.discovery import load_formal_modules
-    from app.integrations.wms_callback.registry import operations
-
-    load_formal_modules()
-    assert catalog.validate_business_contracts() == ((), {})
-    assert catalog.definitions() == ()
-    assert "transport.task.resulted@v1" in operations()
+load_formal_modules()
+assert catalog.validate_business_contracts() == ((), {})
+assert catalog.definitions() == ()
+assert "transport.task.resulted@v1" in operations()
 """,
     )

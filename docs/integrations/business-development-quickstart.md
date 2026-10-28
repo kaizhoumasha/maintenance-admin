@@ -21,6 +21,39 @@ local 入口保持环境限制。API/worker 共用显式清单，顺序为全部
 local 入口 → 资源/工厂。正式 `catalog.entries()` 当前保持为空，直到完整真实业务获准接入；
 隔离示例不进入生产目录、生产 Base 或迁移。
 
+### 启动应用前检查声明
+
+使用项目 Python 3.13+ 和锁定应用依赖，在仓库根目录每次启动一个新进程：
+
+```sh
+rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment production
+rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --environment local
+```
+
+`--environment` 必填，仅接受 `production` / `local`，参数决定声明范围，不读取继承的
+`ENVIRONMENT`。`production` 表示正式静态范围，其他非 local 部署也使用它，不表示连接生产。
+命令不要求数据库 URL、Redis URL、JWT 或 `.env`；只按现有发现器加载两种来源的正式声明，
+调用原 `validate_business_contracts()`，通过后才在 local 范围加载原 dev 三类入口。
+它不启动 API/worker，不调用处理器、业务工厂、运行时装配、模型加载、建表或消息回放。
+
+成功退出 `0`，stdout 仅输出一个 JSON；失败退出 `1`，stdout 不输出部分清单，stderr 提供
+固定失败阶段、错误类型、安全源码位置和修复指引，不回显原异常、配置或 Payload。
+参数缺失/非法退出 `2`，`--help` 退出 `0`；这些参数处理均先于应用导入。
+JSON 顶层固定为 `environment`、`businesses`、`entries`、`command_contracts`、`scope`：
+
+- `businesses` 是排序后的显式 catalog 业务 code 数组；当前为 `[]`，仍检查 Transport 等正式入口。
+- `entries` 保留三类公开注册表的 `kind/name/device_role` 及原 `module/source_file/symbol/local_only`，
+  按类型、角色、名称排序，不包含地址、Payload/schema 或业务记录。
+- `command_contracts` 按角色、动作、附录身份排序；每项含 `kind=ecs_command`、`name=task_type`、
+  `device_role`、`annex_id/annex_version`、原绑定来源字段、原附录的 `timeout_min_ms/timeout_max_ms`。
+  复用原校验结果，不增加旧 DeviceAnnex 的严格性要求，也不合成不存在的附录来源。
+- `scope.checked/excluded` 明示已检查和未检查范围。只覆盖已发现且导入的声明，正式业务来自显式
+  `catalog.entries()`；不承诺任意源码已加载。local 也不装配通用 v3 调试命令、ECS Status 或模型资源。
+
+检查覆盖以原注册器和业务合同交叉校验为准；成功不证明路由、迁移、网络、许可、业务或物理完成，
+也不证明未来新语法具备迁移资格。空命令合同数组不表示调试命令已经验证。无同进程清缓存/重扫接口。
+详细入口规则及 HTTP 目录见[注册排障指南](registration.md)。
+
 ### 原身份与结果读取
 
 | 对象 | 业务必须保存并复用的依据 | 当前公开读取方式 |
