@@ -30,6 +30,8 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 
 当前可靠层的示例映射是 `(target="wms-transport", operation="transport.task.submit@v1", operation_id=原 submit operation_id)`。它展示公开入队接口，不能沿用 DeviceCommand 的设备联合键。
 
+货架号、料箱号、槽位号和位置编码在请求与回调中均保留完整的非空 UTF-8 字符串，不截断或限制为 256 字符；仍拒绝 NUL，并受单次正文 256 KiB 上限约束。面值保持 1–10 个 Unicode code point，回调的任务身份仍有独立长度限制。
+
 ## 配置与正式适配器
 
 目标在 RELIABLE_TARGETS 中使用 protocol=wms-transport，目标名仅为标签；须匹配 `[a-z0-9][a-z0-9_.-]{0,63}`。base_url 不带尾部 `/`，提交路径保持大小写。适配器已经随 app 创建注册，不需要重复登记；默认空目标不发网，客户端在启动时装配，不在运行中修改注册表。
@@ -66,7 +68,7 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 - 换面模板 `CK04` 由现场确认补入，合同 0.4.0 只列 `CTU01/CTU02/CTU03/F01`，合同文本尚未同步；WMS 若不接受会以 `422 REJECTED` 返回。
 - 创建前不做可信位置/当前面校验，是有意偏离，由 WMS 在接纳时兜底（回调接收设计决定 14）。
 - 适配器对所有 ACK（含 `422`）一律要求回显同一 `transport_task_id`，请求在冻结前已校验，因此没有实现「非法原请求的 `422` 可不带任务 ID」的分支；若 WMS 对非法请求返回不带任务 ID 的 `422`，当前会判为 `UNKNOWN` 并按退避重试到 TTL。合同是否要求该分支待确认：Transport 合同写合法请求的拒绝须回显任务 ID，而外发给 WMS 的接口说明书（`wes_backend/docs/integration/wes-wms-interface-development-specification.md` REQ-SUB-02）写拒绝响应不得携带 `transport_task_id`，两份文档互相矛盾，联调前必须与 WMS 确认；若 WMS 按后者实现，合法的 `422` 当前会被判为 `UNKNOWN`。
-- 正式适配器忽略冗余字段中的浮点数，只要求已定义字段为整数，与离线实验一律拒绝浮点不同。
+- 正式适配器允许冗余字段中的有限浮点数，已定义字段仍按整数合同校验，与离线实验一律拒绝浮点不同；任意层 JSON 数字解码为非有限数时，公共信封分类为 `UNKNOWN`。
 - 拒绝码以精确字面量集合匹配，含中英文拼接原文；集合有测试固定，变更须同步合同。
 
 已有 `wes_backend` TransportTask/Worker 不叠加本模板发送器。这里不授权迁移。分类器抛异常时消息进入 `FAILED(LOCAL_ERROR)`，而对端此时可能已执行，这条既有策略未变，接入真实对端前须单独评审。寻址与恢复按本页及基础合同处理，不由适配器副作用绕过。

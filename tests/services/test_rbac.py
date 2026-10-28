@@ -219,3 +219,44 @@ async def test_profile_edit_does_not_wait_for_admin_change(admin_pair, redis):
         finally:
             resume.set()
             await asyncio.wait_for(pending, 5)
+
+
+async def test_role_delete_cannot_remove_a_concurrently_assigned_last_admin(
+    admin_pair, wait_for_lock
+):
+    factory, users, roles = admin_pair
+    async with factory.begin() as session:
+        await session.execute(delete(User).where(User.id == users[0]))
+    reached, resume = asyncio.Event(), asyncio.Event()
+    async with factory() as writer, factory() as deleter:
+        commit = writer.commit
+
+        async def paused_commit():
+            reached.set()
+            await asyncio.wait_for(resume.wait(), 5)
+            await commit()
+
+        writer.commit = paused_commit
+        pid = await deleter.scalar(text("SELECT pg_backend_pid()"))
+        assigning = asyncio.create_task(rbac_service.set_user_roles(writer, users[1], [roles[0]]))
+        deleting = None
+        try:
+            await asyncio.wait_for(reached.wait(), 5)
+            deleting = asyncio.create_task(rbac_service.delete_role(deleter, roles[0]))
+            await wait_for_lock(deleting, pid)
+            resume.set()
+            await asyncio.wait_for(assigning, 5)
+            with pytest.raises(AppError) as caught:
+                await asyncio.wait_for(deleting, 5)
+            assert caught.value.code == ErrorCode.CONFLICT
+        finally:
+            resume.set()
+            tasks = [task for task in (assigning, deleting) if task is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    async with factory() as session:
+        assert await rbac_service.get_user_permission_codes(session, users[1]) == [
+            "admin:role:set_permissions"
+        ]

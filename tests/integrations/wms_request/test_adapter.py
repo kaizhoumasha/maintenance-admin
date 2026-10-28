@@ -132,10 +132,18 @@ def test_unknown_response_envelope_fields_remain_unknown(protocol, code):
     assert classify(protocol, replace(result, body=json.dumps(body).encode())).kind == "UNKNOWN"
 
 
-def test_decision_success_preserves_business_data_without_interpreting_it():
-    result = ack(200, "DECIDED", decision="ready")
+@pytest.mark.parametrize("data", [{"decision": "ready"}, {"amount": 1e300, "nested": [-2.5, None]}])
+def test_decision_success_preserves_business_data_without_interpreting_it(data):
+    result = ack(200, "DECIDED", **data)
     verdict = classify(DECISIONS_PROTOCOL, result)
     assert verdict.kind == "DELIVERED" and verdict.response == result.body
+
+
+@pytest.mark.parametrize("data", [b'{"amount":1e400}', b'{"amount":-1e400}', b'{"nested":[1e400]}'])
+def test_overflowed_decision_numbers_remain_unknown(data):
+    result = ack(200, "DECIDED")
+    raw = result.body.replace(b'"data": {}', b'"data": ' + data)
+    assert classify(DECISIONS_PROTOCOL, replace(result, body=raw)).kind == "UNKNOWN"
 
 
 def test_response_must_echo_the_request_identity_with_an_int64_timestamp():

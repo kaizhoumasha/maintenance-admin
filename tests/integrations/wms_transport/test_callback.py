@@ -163,6 +163,60 @@ async def test_rack_result_is_applied_with_the_frozen_target_face(client, callba
     assert row.applied_outcome["final_position"]["location_code"] == "CTU01"
 
 
+async def test_long_rack_and_position_codes_are_preserved_in_applied_results(
+    client, callback_store
+):
+    rack, position = "架" * 257, "位" * 257
+    task_id = await add_task(
+        callback_store, move_rack_data(rack, RackPosition("source"), RackPosition(position))
+    )
+    data = rack_result(
+        task_id, rack_id=rack, final_position={"kind": "RACK_POSITION", "location_code": position}
+    )
+    assert (await send(client, RESULTED, data)).status_code == 202
+    row = await task_row(callback_store, task_id)
+    assert row.outcome_status == "SUCCEEDED"
+    assert row.applied_outcome["rack_id"] == rack
+    assert row.applied_outcome["final_position"]["location_code"] == position
+    assert (await send(client, RESULTED, data)).status_code == 200
+
+
+@pytest.mark.parametrize("target_kind", ["rack", "handoff"])
+async def test_long_bin_resource_codes_preserve_position_evidence_and_results(
+    client, callback_store, target_kind
+):
+    container, rack, slot_id, handoff = (letter * 257 for letter in ("箱", "架", "格", "站"))
+    target = RackBinSlot(rack, "90", slot_id) if target_kind == "rack" else HandoffPosition(handoff)
+    source = (
+        HandoffPosition("source") if target_kind == "rack" else RackBinSlot(rack, "90", slot_id)
+    )
+    data = bin_move_data([BinMove(container, source, target)])
+    task_id = await add_task(callback_store, data)
+    final_position = data["moves"][0]["target"]
+    result = bin_result(
+        task_id,
+        results=[
+            {"container_id": container, "status": "SUCCEEDED", "final_position": final_position}
+        ],
+    )
+    assert (await send(client, RESULTED, result)).status_code == 202
+    if target_kind == "rack":
+        assert (await task_row(callback_store, task_id)).pending_outcome is not None
+    event_data = dict(
+        transport_task_id=task_id,
+        container_id=container,
+        milestone="TARGET_PLACED",
+        final_position=final_position,
+    )
+    assert (await send(client, POSITION, event_data)).status_code == 202
+    row = await task_row(callback_store, task_id)
+    assert row.outcome_status == "SUCCEEDED" and row.pending_outcome is None
+    assert row.applied_outcome["results"][0]["container_id"] == container
+    assert row.applied_outcome["results"][0]["final_position"] == final_position
+    assert row.member_positions[container]["TARGET_PLACED"] == final_position
+    assert (await send(client, RESULTED, result)).status_code == 200
+
+
 async def test_unknown_result_converges_to_a_later_determined_result(client, callback_store):
     task_id = await add_task(callback_store, rack_data())
     unknown = rack_result(task_id, 1, status="FAILED", failure_code="POSITION_UNKNOWN")
@@ -429,17 +483,18 @@ async def test_invalid_payload_is_rejected_and_still_echoes_a_legal_task_id(clie
     assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE", **ack(task_id)}
 
 
-@pytest.mark.parametrize("task_id", ["x" * 300, "bad-\ud800-id"])
+@pytest.mark.parametrize("operation", [POSITION, RESULTED])
+@pytest.mark.parametrize("task_id", ["x" * 257, "x" * 300, "bad-\ud800-id"])
 async def test_unusable_task_ids_are_rejected_without_echo_or_server_error(
-    client, callback_store, task_id
+    client, callback_store, operation, task_id
 ):
     """无认证入口:超长或无法渲染的编号按非法证据拒绝,不回显、不写进收据,也不 500。"""
-    body = dict(
-        operation_id=str(uuid7()),
-        operation=RESULTED,
-        timestamp=1,
-        data=rack_result(task_id),
+    data = (
+        rack_result(task_id)
+        if operation == RESULTED
+        else dict(transport_task_id=task_id, container_id="C1", milestone="SOURCE_PICKED")
     )
+    body = dict(operation_id=str(uuid7()), operation=operation, timestamp=1, data=data)
     # 用 ASCII 转义的原始字节发送:孤立代理字符只能这样出现在线上
     raw = json.dumps(body).encode()
     headers = {"content-type": "application/json"}
@@ -448,6 +503,50 @@ async def test_unusable_task_ids_are_rejected_without_echo_or_server_error(
     assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE"}
     replay = await client.post(PATH, content=raw, headers=headers)  # 同身份重放仍可渲染
     assert (replay.status_code, replay.json()["data"]) == (422, {"reason_code": "INVALID_EVIDENCE"})
+
+
+@pytest.mark.parametrize("operation", [POSITION, RESULTED])
+async def test_task_ids_at_the_length_limit_are_preserved(client, callback_store, operation):
+    task_id = "t" * 256
+    data = (
+        rack_result(task_id)
+        if operation == RESULTED
+        else dict(transport_task_id=task_id, container_id="C1", milestone="SOURCE_PICKED")
+    )
+    response = await send(client, operation, data)
+    assert response.status_code == 202 and response.json()["data"] == ack(task_id)
+
+
+@pytest.mark.parametrize("rack_id", ["", "bad\x00", "\ud800", None, 123])
+async def test_invalid_resource_codes_are_rejected_without_applying_a_result(
+    client, callback_store, rack_id
+):
+    task_id = await add_task(callback_store, rack_data())
+    body = dict(
+        operation_id=str(uuid7()),
+        operation=RESULTED,
+        timestamp=1,
+        data=rack_result(task_id, rack_id=rack_id),
+    )
+    response = await client.post(PATH, content=json.dumps(body).encode())
+    assert response.status_code == 422
+    assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE", **ack(task_id)}
+    assert (await task_row(callback_store, task_id)).outcome_status is None
+
+
+@pytest.mark.parametrize("length", [10, 11])
+async def test_callback_faces_keep_the_unicode_code_point_limit(client, callback_store, length):
+    task_id = await add_task(
+        callback_store, move_rack_data("R1", RackPosition("S1"), RackPosition("CTU01"))
+    )
+    face = "🧭" * length
+    response = await send(client, RESULTED, rack_result(task_id, arrival_face=face))
+    assert response.status_code == (202 if length == 10 else 422)
+    row = await task_row(callback_store, task_id)
+    if length == 10:
+        assert row.applied_outcome["arrival_face"] == face
+    else:
+        assert row.outcome_status is None
 
 
 async def test_identity_conflict_echoes_the_first_messages_task_id(client, callback_store):

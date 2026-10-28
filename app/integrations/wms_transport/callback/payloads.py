@@ -20,7 +20,8 @@ def _no_nul(value: str) -> str:
     return value
 
 
-Text = Annotated[str, Field(min_length=1, max_length=256), AfterValidator(_no_nul)]
+Text = Annotated[str, Field(min_length=1), AfterValidator(_no_nul)]
+TaskId = Annotated[Text, Field(max_length=256)]
 Face = Annotated[str, Field(min_length=1, max_length=10), AfterValidator(_no_nul)]
 FailureCode = Literal[
     "RCS_TASK_REJECTED", "RCS_EXECUTION_FAILED", "POSITION_UNKNOWN", "MANUAL_ABORTED"
@@ -66,7 +67,7 @@ class PositionChanged(CallbackPayload):
         }
     )
 
-    transport_task_id: Text
+    transport_task_id: TaskId
     container_id: Text
     milestone: Literal["SOURCE_PICKED", "TARGET_PLACED", "POSITION_UNKNOWN"]
     final_position: BinPosition | None = None
@@ -124,7 +125,7 @@ class Resulted(CallbackPayload):
         }
     )
 
-    transport_task_id: Text
+    transport_task_id: TaskId
     kind: Literal["RACK_MOVE", "RACK_ROTATE", "BIN_MOVE", "BIN_EXCHANGE"]
     outcome_revision: Annotated[int, Field(ge=1, le=2**63 - 1)]
     rack_id: Text | None = None

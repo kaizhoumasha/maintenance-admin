@@ -187,3 +187,27 @@ async def test_local_error_never_exposes_stale_response(sessions, wms):
         r = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
         assert r.delivery_terminal and r.fail_reason == "LOCAL_ERROR"
         assert r.response_state == "NONE" and r.response_data is None
+
+
+@pytest.mark.parametrize("number", ["1e400", "-1e400"])
+async def test_overflowed_terminal_response_is_invalid_and_keeps_original_bytes(
+    sessions, wms, number
+):
+    mid, oid = await registered(sessions, wms)
+    raw = json.dumps(dict(operation_id=oid, code="DECIDED", timestamp=1, data={})).encode()
+    raw = raw.replace(b'"data": {}', b'"data": {"nested": [' + number.encode() + b"]}")
+    async with sessions.begin() as session:
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id == mid)
+            .values(status="DONE", last_verdict="DELIVERED", last_http_status=200, response_raw=raw)
+        )
+    async with sessions() as session:
+        result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
+        assert result.response_state == "INVALID" and result.response_data is None
+        assert (
+            await session.scalar(
+                select(ReliableMessage.response_raw).where(ReliableMessage.id == mid)
+            )
+            == raw
+        )
