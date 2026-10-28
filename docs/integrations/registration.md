@@ -11,9 +11,9 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 
 | 场景 | 目录 | 声明 | 数据约束 |
 |---|---|---|---|
-| ECS → 本项目 | `app/integrations/<业务>/ecs_event/` | `@ecs_event(name, device_role=ROLE, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
-| WMS → 本项目 | `app/integrations/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
-| 本项目 → WMS | `app/integrations/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
+| ECS → 本项目 | `app/businesses/<业务>/ecs_event/` | `@ecs_event(name, device_role=ROLE, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
+| WMS → 本项目 | `app/businesses/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
+| 本项目 → WMS | `app/businesses/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
 
 ## 文件名只有一条规则
 
@@ -27,9 +27,17 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 入口模块不受逐项文件名约束；业务优先在目录中逐项建文件。
 包内用于共享逻辑的文件可以自由命名，只要它本身不声明注册项。
 
+业务入口须在所属 `composition.ENTRY_MODULES` 显式列出，composition 由 `app.businesses.catalog.entries()`
+明确拥有。入口模块/包导入后装饰器完成注册；仅把文件放进目录不会被发现。
+唯一共享加载器位于 `app.integrations.discovery`，把 catalog 入口与 `app.integrations.registration` 的
+`PLATFORM_FORMAL_MODULES/PLATFORM_LOCAL_MODULES` 固定平台清单合并。业务不往平台清单添加领域入口。
+正式平台清单只有 `wms_transport.callback`（两个操作）；local 保留 ECS/WMS 演示、WMS 请求演示及
+`wms_transport.dev` 的六个 Transport 场景。三类旧 discovery 包装模块已删除。
+实际 `app.*` 注册来源只允许所属业务子模块或固定平台入口树，普通 import 同样执行来源校验。
+
 ## ECS：声明数据与处理函数
 
-文件：`app/integrations/example/ecs_event/scan1/scan_completed.py`。
+文件：`app/businesses/example/ecs_event/scan1/scan_completed.py`。
 
 ```python
 from app.integrations.ecs_callback import CallbackPayload, EcsEventContext, ecs_event
@@ -53,7 +61,7 @@ async def scan_completed(ctx: EcsEventContext, payload: ScanCompleted) -> None:
 
 ## WMS 回调：相同的函数声明，保留业务结果
 
-文件：`app/integrations/example/callback/example_done_v1.py`。
+文件：`app/businesses/example/callback/example_done_v1.py`。
 
 ```python
 from app.integrations.wms_callback import (
@@ -82,7 +90,7 @@ Duplicate、Conflict 必须在写业务行之前决定。不自行 commit/rollba
 
 ## WMS 请求：直接注册数据模型
 
-文件：`app/integrations/example/request/example_report_v1.py`。
+文件：`app/businesses/example/request/example_report_v1.py`。
 
 ```python
 from pydantic import ConfigDict
@@ -99,10 +107,28 @@ class Report(RequestPayload):
 字段定义在模型本身，无需外层 RequestOperation 和内嵌 Payload。示例按严格 JSON 模式在导入时校验。
 可选 `ttl=timedelta(...)`；默认 None，事实不自动过期。标题、TTL 与模型保存在同一个注册项中。
 
-业务调用仍用 `await wms_requests.send(session, "example.report@v1", data, operation_id=...)`，
-与业务记录共用调用方事务；调用方保存并复用 operation_id。平台冻结信封、可靠入队，不提交、不直接
+业务调用可用原精确注册类的位置参数模型形式：
+
+```python
+reference = await wms_requests.send(session, Report(task_id="T-1"), operation_id=saved_operation_id)
+```
+
+这是业务事务片段，`wms_requests`、`session`、原 UUIDv7 `saved_operation_id` 由调用方提供。
+`payload` 是唯一的位置参数模型入口，也可用同名关键字；精确原类型须只匹配一个已加载 operation。
+未注册/未声明子类拒绝，同模型多 operation 歧义拒绝；不以类名或可写属性猜 operation。
+与业务记录共用调用方事务；调用方保存并复用 operation_id、operation 和返回的 message_id。平台冻结信封、可靠入队，不提交、不直接
 发网。同身份重入、TTL、重试及 ACK 分类不变；用 `WmsRequests.get_result` 按原身份读取可信终局响应，
 读模型、消费事务与保留边界见[出站结果契约](outbound-results.md)。真实 operation 先确认合同。
+
+模型路径先按原字段上下文重验实际值，再保留原 JSON 序列化；别名、默认值、自定义校验/序列化行为须逐合同
+核对业务合同。字段级 frozen 的 Pydantic dataclass、无法解析/不唯一的同运行时类泛型上下文明确拒绝，
+应改用明确嵌套模型表达合同。类级 frozen、唯一上下文和可由直接字段区分的泛型合同可用，不修改原类或 schema。
+同 target 去重不跨 target；配置变化后存量动作按保存的原引用读结果，不重调 send 选新目标恢复。
+
+ECS 命令在精确模型用 `@ecs_command(..., device_roles=(...))` 声明，composition 只列
+`COMMANDS=(Model, ...)`；catalog 内部编译及角色交集规则见[命令声明](ecs-command.md#模型声明与显式编译)。
+没有第四类注册表、命令自动发现树或 `@ecs_result`。当前调用和支持模型以
+[单一 API 验收](business-development-single-api-acceptance.md)为准。
 
 ## 在一个地方检查全部注册项
 
@@ -123,9 +149,9 @@ rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --en
 `--help` 退出 `0`。参数处理先于应用导入。
 
 JSON 包含 `environment`、排序的业务 code 数组 `businesses`、三类原来源元数据 `entries`、
-原 `CommandBinding/DeviceAnnex` 校验结果 `command_contracts` 和 `scope.checked/excluded`。
-仅检查现有发现器已加载的声明，正式业务来自显式 catalog；当前业务为空仍检查 Transport 正式回调。
-不扫描任意源码，不收紧合法旧附录，不验证未来新声明的迁移资格。local 只列原 dev 三类入口，
+catalog 从 COMMANDS 编译并校验的 `command_contracts` 和 `scope.checked/excluded`。
+仅检查共享加载器已加载的显式声明，正式业务来自 catalog；当前业务为空仍检查 Transport 正式回调。
+不扫描任意源码；历史 Result 附录不授予新命令权限。local 只列原 dev 三类入口，
 通用 v3 调试命令、Status runtime、模型资源，以及路由、迁移、网络、许可和物理/业务完成均不在范围。
 字段与排序约定见[快速开始](business-development-quickstart.md#启动应用前检查声明)。
 
@@ -146,8 +172,8 @@ JSON 包含 `environment`、排序的业务 code 数组 `businesses`、三类原
 
 1. 启动失败：读异常中的双方来源或目标文件名。重名时删除重复声明或更正名称；格式错误按示例修正；
    文件名错误按报错给出的名字重命名。非法函数必须改成异步双参数函数，data 必须指定 Pydantic 模型。
-2. 启动成功但清单缺项：检查是否放进对应入口目录、目录是否有 `__init__.py`，以及是否误放进 local-only
-   入口。普通模块内部的依赖导入错误会阻止启动，不会被静默跳过。
+2. 启动成功但清单缺项：检查 composition 是否由 catalog 列出、入口是否在所属 `ENTRY_MODULES`、
+   目录是否有 `__init__.py`，以及是否误放进 local-only 入口。普通模块内部的依赖导入错误会阻止启动，不会被静默跳过。
 3. 清单存在但未执行：核对收到的完整名称、请求数据、历史收据和诊断；同身份重报可能直接重放首次响应，
    不会再次运行函数。修复处理器不会改写已持久化的历史结果。
 
@@ -170,8 +196,8 @@ title、ttl 写在装饰器上。ECS 事件还须补充业务角色常量与显�
 
 ## 工作线业务包入口
 
-新增领域业务使用 `app/businesses/<业务>/`，固定 `ENTRY_MODULES` 由显式 composition/catalog 提供；
-原 `app/integrations/<业务>/` 入口仍支持。两者复用同一三类注册表、文件名/来源保护及唯一 Sender，
+领域业务唯一来源为 `app.businesses.<业务>.<模块>`。固定 `ENTRY_MODULES` 由所属 composition 提供，
+composition 必须由 `catalog.entries()` 列出；三类入口共用注册表、文件名/来源保护及唯一 Sender，
 不另建插件注册器。业务 definition 保持纯声明，服务和模型留在子包；入口通过控制器注入的
 `BusinessRuntime` 调用具体服务。全部正式合同在任何 local/资源/factory 装配前交叉校验。
 模型通过 composition 的 `MODEL_MODULES` 统一加载，不在应用启动建表。

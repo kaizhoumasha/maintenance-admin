@@ -2,9 +2,10 @@
 
 业务流程与消息先看[工作线业务 API 索引](workline-business-api.md)：人工分拣为旧系统参考合同，粗分机为待确认草案；
 当前接入路线见[快速开始](business-development-quickstart.md)，原子受理、独立推进及恢复证据见[事务配方](business-transaction-recipes.md)。
-[重构设计](../superpowers/specs/2026-10-27-business-development-simplification-design.md)保留为当时的目标设计；
-当前已实现无配置声明检查和现行接口配方，后续模型式 API 及真实业务验收不能据此视为完成。
-其中 @ecs_command、compile_commands、模型形式的 WMS send/ECS create 和声明感知角色解析尚不存在；下文仍是现行接入规则。
+当前业务仅使用模型 WMS send/ECS create、`device_roles` 和 composition 的 `COMMANDS`；
+契约变化、支持模型及实测边界见[单一 API 验收](business-development-single-api-acceptance.md)。
+原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
+这些平台能力不表示真实业务或供应商/现场已验收。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单仍为空。
 隔离测试中的两份业务不进入生产清单。没有合同与资源完整的真实业务包前，整体接入交付未完成，
@@ -51,11 +52,11 @@ DEFINITION = BusinessDefinition(
 先确定入口、业务经过身份、每条请求/结果的完整字段和错误/超时边界，再定义严格模型。
 ECS/WMS 入站模型复用 `CallbackPayload`，严格校验类型、默认忽略多余字段；WMS 出站模型复用
 `RequestPayload`，严格校验类型并拒绝多余字段。具体业务须按已确认合同确定是否收紧入站字段规则。
-ECS 命令参数/结果/错误模型应同样严格；每个 `DeviceAnnex` 明确版本和超时范围。
-`command_contracts.py` 通过同一个 `SCAN.role_key` 构造 `CommandBinding`，不复制角色字符串或合同模型。
-`from app.integrations.ecs_command import CommandBinding, DeviceAnnex` 只加载声明元数据；
-`RoleRoutes`、`EcsCommands` 和 `configure_ecs` 在显式引用时才加载运行设施。
-没有确认合同的命令和 operation 不注册。`history_annexes` 仅保留原结果解析能力，不扩大新命令权限。
+ECS 参数/结果/错误模型必须满足[命令模型约束](ecs-command.md#模型声明与显式编译)，
+在原参数类上用 `@ecs_command(..., device_roles=(SCAN.role_key, ...))` 声明已确认的任务、附录版本和超时。
+严格类型模型可保留各自 `extra` 策略，一个模型可供多个角色共享。新字节按模型 JSON 序列化；
+忽略的字段不会恢复到请求中。业务不手写绑定或附录，也不调用编译器。
+没有确认合同的命令和 operation 不注册。平台可信历史附录仅保留原 Result 校验，不授权新命令。
 
 消息身份用于原收据重放和出站去重；本次业务经过身份用于业务执行/动作和消费进度。保存两者的关联，
 原消息重放保持原执行；相同物料明确的新经过使用新的业务经过身份，不能仅按物料码吞掉后续作业。
@@ -63,16 +64,17 @@ ECS 命令参数/结果/错误模型应同样严格；每个 `DeviceAnnex` 明�
 
 ## 3. 可信装配 composition.py
 
-固定入口及模型模块路径，引用同一份 `DEFINITION`、命令声明和附录。工厂只构造无作业状态的服务，
+固定入口及模型模块路径，引用同一份 `DEFINITION` 和命令模型清单。工厂只构造无作业状态的服务，
 不保存活动 session、不访问网络。平台只注入 `Capabilities.ecs / wms / transport`；不新增通用 execute。
 真实业务的独立推进入口还需要 session factory，由 composition 的可信工厂明确注入：
 
 ```python
-from .command_contracts import ANNEXES, COMMAND_BINDINGS
+from .ecs_command import MoveTo
 from .definition import DEFINITION
 
 ENTRY_MODULES = ("app.businesses.my_business.ecs_event",)
 MODEL_MODULES = ("app.businesses.my_business.models",)
+COMMANDS = (MoveTo,)
 
 
 def build_service(capabilities):
@@ -84,6 +86,11 @@ def build_service(capabilities):
 ```
 
 按实际合同补充 `callback` / `request` 固定模块；不接受用户输入动态 import。目录读取不会调用工厂。
+无命令时显式写 `COMMANDS = ()`。catalog 内部编译清单：每个模型至少覆盖本业务一个已声明角色，
+所有模型角色必须存在于显式 catalog 的 definitions；本业务仅激活与自己角色的交集。
+其他业务未列同一模型时不会获得权限。共享角色/任务冲突、冲突附录或非法来源在资源创建前失败。
+仅有文件不会注册；该 composition 必须由 `catalog.entries()` 明确列出。
+业务唯一来源是 `app.businesses.<business>.<module>`，平台固定清单仅加载平台自己拥有的入口。
 应用先加载全部正式入口，再交叉校验全部合同，之后才加载 local 入口、构造资源和业务工厂，最后受理请求。
 错误业务包使整体启动失败。API 与 worker 读取同一显式清单；非 local 不加载 dev 入口。
 
@@ -172,4 +179,4 @@ SQLite 覆盖配置 API 和注册/路由接缝；显式独立 PostgreSQL 覆盖�
 
 配置保存成功只代表配置已持久化；可执行还需要业务许可、完整合同/资源和原发送门禁；物理完成要依据
 该真实业务的结果/完成合同。测试通过、工厂可构造、ACK、消息 DONE 都不能替代这三个边界。
-开发验收与供应商/现场验收分别记录；当前 Step5 真实业务接入门槛仍未满足。
+开发验收与供应商/现场验收分别记录；真实业务注册、供应商和现场验收仍须分别完成。

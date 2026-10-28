@@ -51,19 +51,20 @@ Redis仅保存预览与协调数据，不保存详情状态。不可用503；近
 
 工作线通过PUT `/api/v1/work-lines/{id}`维护`device_bindings`（角色→device_code）和`position_bindings`（位置角色→位置编码）。设备必须已登记且属于该线，同设备不能兼任多个角色；设备移出/转移/删除前须先解绑。省略这两个字段的资料更新保持原绑定，显式`{}`才清空。工作线version和事务审计继续使用原机制。
 
-正式启动装配一份角色任务声明和严格附录：
+业务使用 `@ecs_command(..., device_roles=(...))` 声明模型，composition 仅列 `COMMANDS`。
+正式启动加载全部 catalog 入口后，平台复用内部编译/校验结果装配：
 
 ```python
-from app.integrations.ecs_command import CommandBinding, configure_ecs
+from app.businesses.catalog import validate_business_contracts
+from app.integrations.ecs_command import configure_ecs
 from app.services.device_routes import DeviceRoutes
 
-# annexes由使用方提供已确认的DeviceAnnex；ScanPayload是相应的源模型。
-bindings = [CommandBinding("SCAN1", "MOVE_FORWARD", "scanner", "1", ScanPayload)]
+bindings, annexes = validate_business_contracts()
 routes = DeviceRoutes(bindings, annexes=annexes)
 configure_ecs(app, routes=routes, annexes=annexes)
 ```
 
-重复角色/task声明、缺少附录在装配时失败，不维护逐设备合同副本。业务可用`app.services.device_bindings.resolve_role(session, line_id, role)`取得并锁定预期设备，再调用原EcsCommands.create；事件和路由共用resolve_binding，按工作线→设备取锁和刷新复核。Status的supported_commands不授予业务执行许可。
+重复角色/task声明、缺少附录在装配时失败，不维护逐设备合同副本。业务可用`app.services.device_bindings.resolve_role(session, line_id, role)`取得并锁定预期设备，再用精确模型调用 EcsCommands.create(..., command=Model(...))；事件和路由共用resolve_binding，按工作线→设备取锁和刷新复核。Status的supported_commands不授予业务执行许可。
 
 发送门禁复用冻结route_id和version中的配置摘要。设备/工作线管理版本变化（含资料编辑）、改址、解绑或删除后，旧命令停止后续发送并沿用HELD/AUTHORIZATION_REVOKED；恢复原值、重启和同键查询都不重新发送。旧正式布局1无法证明原管理版本，保持UNKNOWN暂停，不补猜版本。Status查询不升管理版本，不导致停发。
 

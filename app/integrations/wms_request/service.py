@@ -2,16 +2,18 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_settings
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
+from app.integrations.model_payload import validated_model_payload
 from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
 from .adapter import ADAPTERS, PROTOCOL_OF
-from .operation import InvalidRequestPayload, UnknownOperation, lookup
+from .operation import InvalidRequestPayload, UnknownOperation, operations
 from .results import WmsRequestResult, get_result
 
 
@@ -57,23 +59,26 @@ class WmsRequests:
     async def send(
         self,
         session: AsyncSession,
-        operation: str,
-        data: dict,
+        payload: BaseModel,
         *,
         operation_id: str,
     ) -> EnqueueResult:
-        registered = lookup(operation)
-        if registered is None:
-            raise UnknownOperation(f"operation {operation!r} is not registered")
+        matches = [item for item in operations().values() if item.data_model is type(payload)]
+        if len(matches) > 1:
+            raise InvalidRequestPayload("payload model has multiple registered operations")
+        if not matches:
+            raise UnknownOperation(f"payload model {type(payload).__name__!r} is not registered")
+        registered = matches[0]
+        operation = registered.name
         try:
             validate_uuid7(operation_id)
-            payload = registered.data_model.model_validate(data).model_dump(mode="json")
+            data = validated_model_payload(payload)
             raw = json.dumps(
                 {
                     "operation_id": operation_id,
                     "operation": operation,
                     "timestamp": unix_ms(self.clock()),
-                    "data": payload,
+                    "data": data,
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),

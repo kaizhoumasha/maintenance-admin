@@ -101,16 +101,18 @@ def test_real_composition_contract_imports_stay_metadata_only(tmp_path, load_mod
     )
     (package / "command_contracts.py").write_text(
         "from pydantic import BaseModel, ConfigDict\n"
-        "from app.integrations.ecs_command import CommandBinding, DeviceAnnex\n"
+        "from app.integrations.ecs_command import ecs_command\n"
         "from app.integrations.ecs_command.contracts import ErrorDetail\n"
-        "class Payload(BaseModel):\n"
+        "class Result(BaseModel):\n"
         "    model_config = ConfigDict(strict=True, extra='forbid')\n"
-        "COMMAND_BINDINGS = (CommandBinding('SCAN', 'MOVE', 'probe', '1', Payload),)\n"
-        "ANNEXES = {('probe', '1'): DeviceAnnex(Payload, Payload, ErrorDetail, 0, 100)}\n"
+        "@ecs_command('MOVE', device_roles=('SCAN',), annex_id='probe', annex_version='1', "
+        "result=Result, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=100)\n"
+        "class Payload(Result): pass\n"
+        "COMMANDS = (Payload,)\n"
     )
     (package / "composition.py").write_text(
         "from .definition import DEFINITION\n"
-        "from .command_contracts import COMMAND_BINDINGS, ANNEXES\n"
+        "from .command_contracts import COMMANDS\n"
         "ENTRY_MODULES = ()\n"
         "MODEL_MODULES = ('app.businesses.metadata_probe.models',)\n"
         "def build_service(capabilities):\n"
@@ -163,7 +165,7 @@ else:
 composition, = entries()
 assert catalog.definitions() == (composition.DEFINITION,)
 assert catalog.get_definition('metadata_probe') is composition.DEFINITION
-assert len(composition.COMMAND_BINDINGS) == len(composition.ANNEXES) == 1
+assert len(composition.COMMANDS) == 1
 """,
             str(tmp_path),
             str(load_models),
@@ -173,10 +175,3 @@ assert len(composition.COMMAND_BINDINGS) == len(composition.ANNEXES) == 1
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_command_binding_public_and_routing_imports_share_identity():
-    from app.integrations.ecs_command import CommandBinding
-    from app.integrations.ecs_command.routing import CommandBinding as RoutingBinding
-
-    assert CommandBinding is RoutingBinding

@@ -63,7 +63,7 @@ Retry-After 支持非负整数秒及带时区的未来 HTTP 日期，不截短�
 - `kind=ecs_status`、`name=ecs.device.status@v1`、`entry_type=builtin_capability`。
 - `module/source_file/symbol` 由目录侧从真实 `query` 函数提取，`local_only=false`；通用模块不导入注册或应用基础设施。
 - `method/path`、`query_schema/response_schema` 描述内置查询；`endpoint/payload_schema` 为 null，保留原 WMS 业务字段含义。
-- 原三类注册项标记为 `business_registration`，注册与自动发现机制不变。三类业务集合全空时，内置 Status 条目仍存在。
+- 原三类注册项标记为 `business_registration`，注册身份不变；加载由 catalog 显式入口与固定平台 manifest 统一控制。三类业务集合全空时，内置 Status 条目仍存在。
 
 这不是第四类业务注册表，不新增装饰器，不为每个 ECS、设备或类型注册代码。读取目录不触发 Status 请求，也不读取设备表或启动轮询；目录 HTTP 本身仍保留既有认证依赖及 local-only 可见性。源码来源说明哪个实现提供能力，运行结果中的 origin/编码/时间说明查询来源，两者均不证明供应商或物理现场已验收。
 

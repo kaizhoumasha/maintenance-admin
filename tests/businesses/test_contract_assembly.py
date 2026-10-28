@@ -1,14 +1,14 @@
 from dataclasses import replace
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.businesses import catalog
 from app.businesses.definitions import InitialEntry
 from app.integrations.ecs_callback import CallbackPayload
 from app.integrations.ecs_callback import registry as ecs_registry
-from app.integrations.ecs_command import CommandBinding, DeviceAnnex
-from app.integrations.ecs_command.contracts import ErrorDetail
+from app.integrations.ecs_command import compile_commands, ecs_command
+from app.integrations.ecs_command.declaration import ErrorDetail, command_declaration
 from app.integrations.registration import RegistrationSource
 from app.integrations.wms_callback import registry as wms_registry
 from app.integrations.wms_request import operation as requests
@@ -16,10 +16,24 @@ from tests.helpers import business_composition
 
 
 class Params(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+
+@ecs_command(
+    "MOVE",
+    device_roles=("TEST_SCAN", "OTHER"),
+    annex_id="test.move",
+    annex_version="1",
+    result=Params,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=100,
+)
+class SharedMove(Params):
     pass
 
 
-ANNEX = DeviceAnnex(Params, Params, ErrorDetail, 1, 100)
+ANNEX = command_declaration(SharedMove).annex
 KEY = ("test.move", "1")
 
 
@@ -36,7 +50,19 @@ def composition(monkeypatch):
 
 
 def command(role="TEST_SCAN"):
-    return CommandBinding(role, "MOVE", *KEY, Params)
+    class Move(Params):
+        pass
+
+    return ecs_command(
+        "MOVE",
+        device_roles=(role,),
+        annex_id="test.move",
+        annex_version="1",
+        result=Params,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=100,
+    )(Move)
 
 
 def register_event(entry, role="TEST_SCAN", *, module=None, local=False):
@@ -52,8 +78,7 @@ def register_event(entry, role="TEST_SCAN", *, module=None, local=False):
 
 
 def test_command_role_must_belong_to_its_business(composition):
-    composition.COMMAND_BINDINGS = (command("OTHER_ROLE"),)
-    composition.ANNEXES = {KEY: ANNEX}
+    composition.COMMANDS = (command("OTHER_ROLE"),)
     with pytest.raises(ValueError, match="test_sorting.*OTHER_ROLE"):
         catalog.validate_business_contracts()
 
@@ -64,14 +89,14 @@ def test_registered_event_role_must_belong_to_its_business(composition):
         catalog.validate_business_contracts()
 
 
-def test_command_requires_its_declared_annex(composition, monkeypatch):
+def test_business_omitting_shared_command_receives_no_binding(composition, monkeypatch):
     other = business_composition("other", "OTHER")
     other.DEFINITION = replace(other.DEFINITION, initial_entries=())
-    other.ANNEXES = {KEY: ANNEX}
-    composition.COMMAND_BINDINGS = (command(),)
+    composition.COMMANDS = (SharedMove,)
     monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
-    with pytest.raises(ValueError, match="test_sorting.*test.move"):
-        catalog.validate_business_contracts()
+    bindings, annexes = catalog.validate_business_contracts()
+    assert [binding.device_role for binding in bindings] == ["TEST_SCAN"]
+    assert annexes == {KEY: ANNEX}
 
 
 @pytest.mark.parametrize("kind", ["ecs_event", "wms_callback"])
@@ -116,46 +141,49 @@ def test_duplicate_command_keys_fail_assembly(composition, monkeypatch):
     other = business_composition("other")
     other.DEFINITION = replace(other.DEFINITION, initial_entries=())
     for entry in (composition, other):
-        entry.COMMAND_BINDINGS = (command(),)
-        entry.ANNEXES = {KEY: ANNEX}
+        entry.COMMANDS = (command(),)
     monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
-    with pytest.raises(ValueError, match="duplicate.*TEST_SCAN.*MOVE"):
+    with pytest.raises(ValueError, match="duplicate.*TEST_SCAN.*MOVE") as caught:
         catalog.validate_business_contracts()
+    assert composition.__name__ in str(caught.value)
+    assert other.__name__ in str(caught.value)
+    assert "修复: 每个角色/任务只声明一次" in str(caught.value)
 
 
 @pytest.mark.parametrize(
     "field", ["params_model", "result_model", "error_model", "timeout_min_ms", "timeout_max_ms"]
 )
 def test_conflicting_annex_keys_fail_before_resource_creation(composition, monkeypatch, field):
-    other = business_composition("other", "OTHER")
-    other.DEFINITION = replace(other.DEFINITION, initial_entries=())
-    composition.ANNEXES = {KEY: ANNEX}
+    from fastapi import FastAPI
+
+    from app.integrations.ecs_command.dev import configure_local_ecs
+
     value = (
         type("Other", (ErrorDetail if field == "error_model" else Params,), {})
         if field.endswith("model")
         else 2
     )
-    other.ANNEXES = {KEY: replace(ANNEX, **{field: value})}
-    monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
-    with pytest.raises(ValueError, match="other.*test.move"):
-        catalog.validate_business_contracts()
+    with pytest.raises(ValueError, match="conflicting annex"):
+        configure_local_ecs(
+            FastAPI(),
+            environment="local",
+            history_annexes={KEY: ANNEX},
+            annexes={KEY: replace(ANNEX, **{field: value})},
+        )
 
 
 def test_identical_annex_contract_can_be_shared(composition, monkeypatch):
     other = business_composition("other", "OTHER")
     other.DEFINITION = replace(other.DEFINITION, initial_entries=())
-    composition.COMMAND_BINDINGS = (command(),)
-    other.COMMAND_BINDINGS = (command("OTHER"),)
-    composition.ANNEXES = {KEY: ANNEX}
-    other.ANNEXES = {KEY: replace(ANNEX)}
+    composition.COMMANDS = other.COMMANDS = (SharedMove,)
     monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
     commands, annexes = catalog.validate_business_contracts()
-    assert commands == composition.COMMAND_BINDINGS + other.COMMAND_BINDINGS
+    assert commands == compile_commands(SharedMove)[0]
     assert annexes == {KEY: ANNEX}
 
 
 def test_definition_query_does_not_crossvalidate_or_load_entries(composition):
-    composition.COMMAND_BINDINGS = (command("OTHER"),)
+    composition.COMMANDS = (command("OTHER"),)
     assert catalog.definitions() == (composition.DEFINITION,)
 
 
@@ -210,9 +238,11 @@ async def test_history_annex_does_not_grant_new_role_command_permission(monkeypa
     )
     assert service.annexes[KEY] is ANNEX
     assert service.routes.bindings == {}
-    with pytest.raises(ValueError, match="Role command annex"):
+    with pytest.raises(ValueError, match="role|annex"):
         # No role exists; retaining the result contract does not authorize a new action.
-        await service.routes.resolve(None, "NO_DEVICE", "MOVE")
+        await service.routes.resolve_declared(
+            None, "NO_DEVICE", command_declaration(command("SCAN1"))
+        )
 
 
 def test_invalid_contract_never_constructs_routes_sender_or_factory(tmp_path):
@@ -254,3 +284,31 @@ else:
         env={**os.environ, "ENVIRONMENT": "local"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_each_command_requires_a_role_in_the_listing_business(composition, monkeypatch):
+    other = business_composition("other", "OTHER")
+    other.DEFINITION = replace(other.DEFINITION, initial_entries=())
+    composition.COMMANDS = (command("OTHER"),)
+    monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
+    with pytest.raises(ValueError, match="own declared role"):
+        catalog.validate_business_contracts()
+
+
+def test_unknown_shared_role_cannot_hide_behind_a_matching_role(composition):
+    composition.COMMANDS = (SharedMove,)
+    with pytest.raises(ValueError, match="undeclared command role.*OTHER"):
+        catalog.validate_business_contracts()
+
+
+def test_conflicting_business_annex_preserves_both_sources(composition, monkeypatch):
+    other = business_composition("other", "OTHER")
+    other.DEFINITION = replace(other.DEFINITION, initial_entries=())
+    composition.COMMANDS = (command(),)
+    other.COMMANDS = (command("OTHER"),)
+    monkeypatch.setattr(catalog, "entries", lambda: (composition, other))
+    with pytest.raises(ValueError, match="conflicting annex") as caught:
+        catalog.validate_business_contracts()
+    assert composition.__name__ in str(caught.value)
+    assert other.__name__ in str(caught.value)
+    assert "修复" in str(caught.value)

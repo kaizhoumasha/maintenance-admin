@@ -1,7 +1,9 @@
 import pytest
 from fastapi import FastAPI
 
+from app.integrations.ecs_command.dev import create_debug_command
 from tests.helpers import (
+    EcsMove,
     ecs_history_annexes,
     ecs_protocol_annexes,
     reset_ecs_assembly,
@@ -406,15 +408,20 @@ async def test_sender_fences_unavailable_policy_without_unholding(ecs, change):
     ecs.service.annexes = ecs_protocol_annexes()
     ecs.service.routes = DevEcsRoutes().for_origin("http://127.0.0.1:8000")
     async with ecs.factory.begin() as session:
-        command = await ecs.service.create(
-            session,
-            owner=ecs.owner,
-            call_key="gate",
-            device_code="D1",
-            task_type="MOVE",
-            timeout_ms=30000,
-            params={"qty": 1},
-        )
+        command = (
+            await create_debug_command(
+                session,
+                owner=ecs.owner,
+                client_request_id="gate",
+                device_code="D1",
+                task_type="MOVE",
+                timeout_ms=30000,
+                params={"qty": 1},
+                service=ecs.service,
+                ecs_url="http://127.0.0.1:8000",
+                authorize_send=authorized_debug,
+            )
+        )[0]
         row = await session.get(EcsCommand, command.command_code)
         if change in ("v1", "v2"):
             row.route = {**row.route, "version": change[1:]}
@@ -578,9 +585,8 @@ async def test_formal_route_provider_uses_automatic_channel_without_debug_defaul
                 owner=ecs.owner,
                 call_key=device,
                 device_code=device,
-                task_type="MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=EcsMove(qty=1),
             )
             row = await session.get(EcsCommand, command.command_code)
             assert row.route["origin"] == origin and row.device_code == device
@@ -626,15 +632,20 @@ async def test_isolated_sender_rejects_unowned_origin_before_tcp(ecs, monkeypatc
     ecs.service.annexes = ecs_protocol_annexes()
     ecs.service.routes = DevEcsRoutes().for_origin(destination)
     async with ecs.factory.begin() as session:
-        view = await ecs.service.create(
-            session,
-            owner=ecs.owner,
-            call_key="unowned",
-            device_code="D1",
-            task_type="MOVE",
-            timeout_ms=30000,
-            params={"qty": 1},
-        )
+        view = (
+            await create_debug_command(
+                session,
+                owner=ecs.owner,
+                client_request_id="unowned",
+                device_code="D1",
+                task_type="MOVE",
+                timeout_ms=30000,
+                params={"qty": 1},
+                service=ecs.service,
+                ecs_url=destination,
+                authorize_send=authorized_debug,
+            )
+        )[0]
     async with simulator_sender(ecs, ["http://127.0.0.1:8000"]) as sender:
         assert await sender.tick() == 1
         async with asyncio.timeout(5):
@@ -693,9 +704,8 @@ async def test_startup_merges_history_annexes_for_original_results(
                 owner=ecs.owner,
                 call_key=key,
                 device_code="D1",
-                task_type="MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=EcsMove(qty=1),
             )
             row = await session.get(EcsCommand, view.command_code)
             # Durable pre-upgrade fixture; no old dev policy is ever dispatched.
@@ -849,3 +859,7 @@ def test_automatic_channel_rejects_parallel_ecs_target_configuration(runtime_set
             runtime_settings, SimpleNamespace(target="ecs-local") if assembled else None
         )
     assert runtime_settings.RELIABLE_TARGETS == original
+
+
+async def authorized_debug():
+    pass

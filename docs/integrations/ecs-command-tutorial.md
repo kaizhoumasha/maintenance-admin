@@ -39,17 +39,14 @@ client_request_id标识一次业务调用，重试时保持不变；同键同输
 
 DEVICE_CODE在设备记录中全系统唯一；多设备可共用ecs_origin。不单建ECS配置表，不在命令表device_code上加唯一约束。
 
-维护者在应用启动前提供DeviceRouteProvider与版本化DeviceAnnex，并调用一次：
+业务在 `app/businesses/<business>/` 用 `@ecs_command(..., device_roles=(ROLE, ...))` 声明严格参数、
+结果、错误和超时，在 composition 写 `COMMANDS=(MoveTo,)`；入口同时显式列入 `ENTRY_MODULES`，
+完整业务由 catalog 列出。应用启动从 catalog 校验结果装配设备路由、合同与唯一 Sender。
+具体模型示例见[命令声明](ecs-command.md#模型声明与显式编译)，业务无需手写编译产物。
 
-```python
-from app.integrations.ecs_command import configure_ecs
-
-service = configure_ecs(app, routes=routes, annexes=annexes)
-```
-
-这是装配片段，app/routes/annexes由应用提供，不是独立程序。使用角色常量及注入绑定时按[角色接入](ecs-roles.md)构造 `RoleRoutes`；local 同时调试正式角色时，由可信启动模块调用一次 `configure_local_ecs(..., routes=routes, history_annexes=annexes)` 组合装配，共用原服务和 Sender，不再重复调用 `configure_ecs`。
-
-resolve在创建时读取有效设备地址/授权；authorize_frozen在发送门禁检查原授权。通用路由端口由提供方决定原授权是否撤销；`RoleRoutes` 将绑定版本及地址变化视为旧配置失效，停止旧命令后续发送，保留执行记录及已可能交付命令的原身份迟到结果。正式附录约束参数、结果、错误和timeout；它与Swagger通用JSON合同分工不同。端口定义、可信history_annexes及完整协议见[ECS参考](ecs-command.md)。
+运行时 `resolve_declared` 读取有效设备绑定、角色和地址，`authorize_frozen` 在发送门禁检查原授权。
+`RoleRoutes` 将绑定版本和地址变化视为旧配置失效，停止旧命令后续发送；已可能交付的原命令仍保留
+原身份和 Result 合同。平台注入接缝及可信历史附录见[角色接入](ecs-roles.md)，与 Swagger 动态 JSON 协议调试分别验证。
 
 ## 4. 事务内登记
 
@@ -65,14 +62,18 @@ async with session_factory.begin() as session:
         owner=CommandOwner("my_business"),
         call_key=action_key,
         device_code="D1",
-        task_type="MOVE",
         timeout_ms=30000,
-        params={"qty": 1},
+        command=MoveTo(qty=1),
     )
     # 同事务将command.command_code关联到本次业务动作。
 ```
 
-service已完成lifespan装配，session_factory和action_key由业务提供。不能在事务内直接HTTP下发；回滚必须同时撤销业务动作、命令和Outbox义务。新动作必须有当前权威许可，不能因新建READY行或换调用键而获得许可；业务版本从权威记录取得，不从路由版本、设备Status或动作计数推导。
+service 已完成 lifespan 装配；MoveTo 为已列入 COMMANDS 的精确模型，session_factory 和 action_key 由业务提供。不能在事务内直接HTTP下发；回滚必须同时撤销业务动作、命令和Outbox义务。新动作必须有当前权威许可，不能因新建READY行或换调用键而获得许可；业务版本从权威记录取得，不从路由版本、设备Status或动作计数推导。
+
+模型是唯一业务调用形式。实际字段先重验，再按模型的 JSON/extra 策略序列化；
+字段级 frozen dataclass 或无法唯一解析的泛型上下文须改用明确的嵌套合同，不能回退到字典发送。
+存量动作按原 owner/call_key/command_code 恢复和核对，不为换语法或换目标创建新动作。
+完整支持边界见[模型约束](ecs-command.md#模型声明与显式编译)及[验收记录](business-development-single-api-acceptance.md)。
 
 ## 5. 单表安全消费
 
@@ -90,7 +91,7 @@ service已完成lifespan装配，session_factory和action_key由业务提供。�
 
 ## 6. 继续查阅
 
-- 业务调用、协议与排障：[ECS参考](ecs-command.md)。新命令W固定300秒，旧调用/存量原期限不重算。
+- 业务调用、协议与排障：[ECS参考](ecs-command.md)。新命令W固定300秒，原身份重入和存量原期限不重算。
 - 现有回归入口：[现有测试说明](../testing/ecs-command-verification.md)。本方开发及维护测试已结项，不是调用前置步骤。
 - 实际供应商/现场/生产：[独立接入清单](ecs-acceptance-checklist.md)，独立于开发，未启动。
 

@@ -1,13 +1,14 @@
 """示例 callback operation `example.echo@v1`:照着它就能写一个真实的 WMS 回调业务。
 
-本文件名是 `dev_callback.py`,只在 `ENVIRONMENT=local` 被自动发现,生产不暴露;它不写业务表。
+本文件名是 `dev_callback.py`,只由固定平台清单在 `ENVIRONMENT=local` 加载,生产不暴露;它不写业务表。
 联调:在 Swagger 的 `POST /api/v1/wms/events` 选 `example.echo@v1` 示例,改 `data.outcome`
 看四种响应。
 
-新增一个真实 operation(通常只新建一个文件,不改控制器、不改 `main.py`)
+新增一个真实 operation(显式入口由 composition 和 catalog 共同拥有)
 =========================================================================
-1. 新建 `app/integrations/<业务>/callback/<域>_<名称>_v1.py`
-   (所有环境自动发现),照下面声明 Payload 和处理函数。
+1. 新建 `app/businesses/<业务>/callback/<域>_<名称>_v1.py`
+   照下面声明 Payload 和处理函数；在所属 composition.ENTRY_MODULES 列出入口，
+   再由 catalog.entries() 列出完整真实业务的 composition。仅新建文件不会加载。
 2. `@callback_operation("域.名称@vN", data=Payload)` 注册:小写字母/数字/下划线,
    点分层,`@v` 加版本号,如
    `transport.task.resulted@v1`;字段语义不兼容变化时升版本,不要在同一版本上悄悄改字段规则。

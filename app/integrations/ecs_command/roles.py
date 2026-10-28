@@ -9,9 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identifiers import validate_uuid7
 from app.integrations.ecs_callback.binding import BindingResolver, DeviceBinding
-from app.integrations.ecs_command.contracts import PROTOCOL_RETRY_WINDOW, DeviceAnnex
-from app.integrations.ecs_command.routing import (
+from app.integrations.ecs_command.contracts import (
+    PROTOCOL_RETRY_WINDOW,
     CommandBinding,
+    DeviceAnnex,
+    merge_annexes,
+)
+from app.integrations.ecs_command.routing import (
     RouteAuthorization,
     RouteSnapshot,
     normalize_origin,
@@ -35,6 +39,7 @@ class RoleRoutes:
     ):
         self._resolve_binding = resolve_binding
         self._resolve_route = resolve_route
+        self.annexes = dict(annexes or {})
         self.bindings = {}
         for entry in bindings:
             if not isinstance(entry, CommandBinding):
@@ -66,15 +71,25 @@ class RoleRoutes:
             PROTOCOL_RETRY_WINDOW,
         )
 
-    async def resolve(self, session, device_code, task_type):
+    async def resolve_declared(self, session, device_code, declaration) -> RouteSnapshot:
         binding = await self._resolve_binding(session, device_code)
         if binding is None:
             raise ValueError("Current device role is not configured")
-        if binding.device_code != device_code:
-            raise ValueError("ECS binding does not match command device")
-        entry = self.bindings.get((binding.device_role, task_type))
-        if entry is None:
-            raise ValueError("Role command annex is not configured")
+        expected = next(
+            (entry for entry in declaration.bindings if entry.device_role == binding.device_role),
+            None,
+        )
+        if binding.device_code != device_code or expected is None:
+            raise ValueError("Declared command does not match current device role")
+        entry = self.bindings.get((binding.device_role, expected.task_type))
+        if entry is None or (entry.annex_id, entry.annex_version) != (
+            expected.annex_id,
+            expected.annex_version,
+        ):
+            raise ValueError("Declared command annex is not active for device role")
+        key = (entry.annex_id, entry.annex_version)
+        models = self.annexes[key]
+        merge_annexes({key: models}, {key: declaration.annex}, source="declared role route")
         return await self._snapshot(session, binding, entry)
 
     async def authorize_frozen(self, session, frozen):

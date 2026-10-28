@@ -1,9 +1,16 @@
-"""Transactional ECS commands with formal routes and automatic local protocol assembly."""
+"""Model-only transactional ECS commands and automatic local protocol assembly.
+
+Businesses declare @ecs_command(..., device_roles=(...)), list exact models in
+composition.COMMANDS, and call create(..., command=Model(...)). The business
+catalog compiles contracts internally; bindings and annexes are platform details.
+Dynamic local HTTP JSON is parsed by the trusted adapter into the same core.
+"""
 
 from importlib import import_module
 from typing import TYPE_CHECKING
 
-from .contracts import PROTOCOL_RETRY_WINDOW, CommandBinding, DeviceAnnex
+from .contracts import PROTOCOL_RETRY_WINDOW
+from .declaration import compile_commands, ecs_command
 
 if TYPE_CHECKING:
     from .roles import RoleRoutes
@@ -27,10 +34,10 @@ def __getattr__(name):
 
 __all__ = [
     "PROTOCOL_RETRY_WINDOW",
-    "CommandBinding",
     "CommandOwner",
-    "DeviceAnnex",
     "EcsCommands",
     "RoleRoutes",
     "configure_ecs",
+    "compile_commands",
+    "ecs_command",
 ]

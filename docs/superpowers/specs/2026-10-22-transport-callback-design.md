@@ -1,5 +1,8 @@
 # Transport 回调接收开发说明书
 
+> **接入代码历史说明（2026-10-28）。** 本文的旧业务目录、发现器、字符串/字典 SDK 或手写绑定示例已被[单一 API 接入](../../integrations/business-development-quickstart.md)及[验收记录](../../integrations/business-development-single-api-acceptance.md)替代；三类 registry 的独立 discovery.py 已删除，当前使用共享加载器和 catalog/固定平台 manifest。原协议、冻结数据、身份、结果与历史执行记录保持其原有语境，本文不作为当前 SDK 示例。
+
+
 状态:**第四版已实现,2026-10-23 首轮代码评审见 §18,解除环境限制后的续验见 §19。通用接收、operation 注册、Transport 请求事务内应用均已落地;完整套件、PostgreSQL 并发与本机 Mock 五层架链路已通过。真实 WMS/设备联调按用户最新决定改为本机 Mock,不计作现场验收。§0–§13 为现行方案,§14–§16 为第三版历史记录,§17 为第四版设计评审记录** · 依据:`wes_backend/docs/contracts/transport-fulfillment-contract.md` §5(v0.4.0 Approved)、`wms-async-callback-envelope-contract.md`、`2026-10-21-transport-outbound-design.md`、`2026-10-22-rack-transport-integration-design.md` §5 · 范围:WMS → 本项目的统一回调入口,以及首个具体业务 `transport.task.member_position_changed@v1`、`transport.task.resulted@v1`
 
 ## 0. 第四版修订:在 `transport_task` 上直接应用(取代证据表与后台应用)

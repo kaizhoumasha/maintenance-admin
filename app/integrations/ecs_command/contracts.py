@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.integrations.registration import RegistrationSource, registration_source
+from app.integrations.registration import RegistrationSource, validate_registration_source
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class CommandBinding:
     registration_source: RegistrationSource = field(init=False)
 
     def __post_init__(self):
-        source = registration_source(self.source)
+        source = validate_registration_source(self.source)
         for name in (self.device_role, self.task_type):
             if not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
                 raise ValueError(f"{source.location}: invalid ECS role/task {name!r}")

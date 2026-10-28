@@ -2,7 +2,8 @@
 
 请求体核心字段是 `device_code`、`event_type`、`timestamp` 加可选的 `data`;其他顶层字段忽略,
 成功回 `{"code":200,"message":"ACK"}`。这个包只认识信封和 `event_type`,不认识任何具体事件;
-具体事件写在 `app/integrations/<业务>/ecs_event/` 里,启动时自动发现。
+具体事件写在 `app/businesses/<业务>/ecs_event/` 里，
+由所属 composition.ENTRY_MODULES 显式列出，composition 由 catalog.entries() 拥有后启动导入。
 设计见 docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md。
 
 ## 它负责什么
@@ -38,7 +39,8 @@
 
 ## 怎么新增一个事件类型
 
-在 `app/integrations/<业务>/ecs_event/` 目录里加一个文件,不用改控制器和 `main.py`。
+在 `app/businesses/<业务>/ecs_event/` 目录里加一个文件，
+并在所属 composition.ENTRY_MODULES 中列出入口，composition 由 catalog.entries() 拥有。
 一个事件类型一个文件,文件名统一按名称转小写并把点和 @ 换成下划线
 (`SCAN_COMPLETED` 对应 `scan_completed.py`),
 导入期检查两者一致。事件类型很少时也可以用单个 `ecs_event.py`。`event_type` 必须匹配

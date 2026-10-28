@@ -156,25 +156,41 @@ async def test_registry_describes_each_event_role_and_payload(client, admin, mon
     assert row["endpoint"] is None
 
 
+@pytest.mark.parametrize("roles", [("SCAN1",), ("SCAN1", "SCAN4")])
 async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
-    client, admin, monkeypatch
+    client, admin, monkeypatch, roles
 ):
     from types import SimpleNamespace
 
-    from app.integrations.ecs_command import CommandBinding, RoleRoutes
+    from app.integrations.ecs_command import (
+        RoleRoutes,
+        compile_commands,
+        ecs_command,
+    )
+    from app.integrations.ecs_command.contracts import ErrorDetail
     from app.main import app
-    from tests.helpers import TrialPayload, ecs_history_annexes
+    from tests.helpers import TrialPayload
 
-    annexes = ecs_history_annexes()
+    class Move(TrialPayload):
+        pass
+
+    ecs_command(
+        "MOVE",
+        device_roles=roles,
+        annex_id="trial",
+        annex_version="1",
+        result=TrialPayload,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )(Move)
+    bindings, annexes = compile_commands(Move)
 
     async def forbidden(*args):
         raise AssertionError("catalog must not resolve runtime devices")
 
     routes = RoleRoutes(
-        [
-            CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload),
-            CommandBinding("SCAN4", "MOVE", "trial", "1", TrialPayload),
-        ],
+        bindings,
         annexes=annexes,
         resolve_binding=forbidden,
         resolve_route=forbidden,
@@ -186,11 +202,14 @@ async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
     assert response.status_code == 200
     entries = [row for row in response.json() if row["kind"] == "ecs_command"]
     assert {(row["device_role"], row["name"]) for row in entries} == {
-        ("SCAN1", "MOVE"),
-        ("SCAN4", "MOVE"),
+        (role, "MOVE") for role in roles
     }
     assert all(row["entry_type"] == "command_contract" for row in entries)
-    assert all(row["symbol"] == "TrialPayload" for row in entries)
+    assert all(row["symbol"].endswith("Move") for row in entries)
+    assert len(entries) == len(roles)
+    assert all(row["module"] == __name__ for row in entries)
+    assert all(row["source_file"].endswith("test_dev_registry.py") for row in entries)
+    assert all(row["local_only"] is False for row in entries)
     assert all("qty" in row["payload_schema"]["properties"] for row in entries)
 
 

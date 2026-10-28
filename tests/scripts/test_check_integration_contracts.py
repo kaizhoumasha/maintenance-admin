@@ -13,39 +13,39 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def contract_packages(tmp_path, *, packaged=True):
-    """Complete real declarations, with shared permissive legacy annex models."""
-    files = {"legacy/__init__.py": ""}
+    """Complete declarations sharing an original strict model with ignore-extra policy."""
+    files = {}
     for code, role in (("alpha", "ALPHA_SCAN"), ("beta", "BETA_SCAN")):
         prefix = f"businesses/{code}"
         files[f"{prefix}/__init__.py"] = ""
         files[f"{prefix}/composition.py"] = f"""
 from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
-from app.businesses.alpha.contracts import Payload, ANNEX
-from app.integrations.ecs_command import CommandBinding
+from app.businesses.alpha.contracts import Payload
 DEFINITION = BusinessDefinition(code={code!r}, display_name='Probe',
     device_roles=(DeviceRole(role_key={role!r}, display_name='Scan'),),
     initial_entries=(InitialEntry(kind='wms_callback', name='{code}.done@v1'),))
 ENTRY_MODULES = tuple('app.businesses.{code}.' + name for name in
     ('ecs_event', 'callback', 'request', 'dev_ecs_event', 'dev_callback', 'dev'))
 MODEL_MODULES = ('app.businesses.{code}.models',)
-COMMAND_BINDINGS = (CommandBinding({role!r}, 'MOVE', 'shared', '1', Payload),)
-ANNEXES = {{('shared', '1'): ANNEX}}
+COMMANDS = (Payload,)
 def build_service(capabilities):
     raise AssertionError('business factory must not run')
 """
         files[f"{prefix}/models.py"] = "raise AssertionError('business models must not load')\n"
     files["businesses/alpha/contracts.py"] = """
-from pydantic import BaseModel
-from app.integrations.ecs_command import DeviceAnnex
+from pydantic import BaseModel, ConfigDict
+from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 class Payload(BaseModel):
+    model_config = ConfigDict(strict=True, extra='ignore')
     value: int = 1
-ANNEX = DeviceAnnex(Payload, Payload, ErrorDetail, 0, 1000)
+ecs_command('MOVE', device_roles=('ALPHA_SCAN', 'BETA_SCAN'), annex_id='shared',
+            annex_version='1', result=Payload, error=ErrorDetail,
+            timeout_min_ms=0, timeout_max_ms=1000)(Payload)
 """
     for owner, code, role, use_package in (
         ("businesses/alpha", "alpha", "ALPHA_SCAN", packaged),
         ("businesses/beta", "beta", "BETA_SCAN", not packaged),
-        ("legacy", "legacy", "LEGACY_SCAN", not packaged),
     ):
         for local in (False, True):
             suffix = "preview" if local else "done"
@@ -87,9 +87,8 @@ class Report(RequestPayload):
                     files[f"{owner}/{entry}.py"] = source
     write_python_modules(tmp_path, files)
     return f"""
-from app import businesses, integrations
+from app import businesses
 businesses.__path__.insert(0, {str(tmp_path / "businesses")!r})
-integrations.__path__.insert(0, {str(tmp_path)!r})
 from app.businesses import catalog
 def entries():
     from app.businesses.alpha import composition as alpha
@@ -164,7 +163,6 @@ catalog.validate_business_contracts = validate
     for prefix, code, role in (
         ("app.businesses.alpha", "alpha", "ALPHA_SCAN"),
         ("app.businesses.beta", "beta", "BETA_SCAN"),
-        ("app.integrations.legacy", "legacy", "LEGACY_SCAN"),
     ):
         for kind, name, device_role in (
             ("ecs_event", f"{code.upper()}_DONE", role),
@@ -205,7 +203,7 @@ catalog.validate_business_contracts = validate
         ("duplicate", "load_formal_modules", "ValueError"),
         ("filename", "load_formal_modules", "ValueError"),
         ("role", "validate_business_contracts", "ValueError"),
-        ("missing_annex", "validate_business_contracts", "ValueError"),
+        ("undeclared_model", "validate_business_contracts", "ValueError"),
         ("annex_conflict", "validate_business_contracts", "ValueError"),
         ("missing_module", "load_formal_modules", "ModuleNotFoundError"),
         ("internal_import", "load_formal_modules", "ImportError"),
@@ -225,16 +223,26 @@ def test_invalid_contract_never_reports_success(tmp_path, problem, phase, error_
         callback.rename(callback.with_name("wrong.py"))
     elif problem == "role":
         composition.write_text(
-            composition.read_text()
-            + "\nCOMMAND_BINDINGS = (CommandBinding('WRONG', 'MOVE', 'shared', '1', Payload),)\n"
+            composition.read_text() + "\nfrom dataclasses import replace\n"
+            "DEFINITION = replace(DEFINITION, device_roles=(DeviceRole("
+            "role_key='WRONG', display_name='Wrong'),))\n"
         )
-    elif problem == "missing_annex":
-        composition.write_text(composition.read_text() + "\nANNEXES = {}\n")
+    elif problem == "undeclared_model":
+        composition.write_text(
+            composition.read_text()
+            + "\nclass Undeclared(Payload): pass\nCOMMANDS = (Undeclared,)\n"
+        )
     elif problem == "annex_conflict":
         other = tmp_path / "businesses/beta/composition.py"
         other.write_text(
-            other.read_text() + "\nfrom dataclasses import replace\n"
-            "ANNEXES = {('shared', '1'): replace(ANNEX, timeout_max_ms=2000)}\n"
+            other.read_text() + "\nfrom app.integrations.ecs_command import ecs_command\n"
+            "from app.integrations.ecs_command.contracts import ErrorDetail\n"
+            "class Conflicting(Payload): pass\n"
+            "ecs_command('MOVE', device_roles=('BETA_SCAN',), "
+            "annex_id='shared', annex_version='1', "
+            "result=Payload, error=ErrorDetail, timeout_min_ms=0, "
+            "timeout_max_ms=2000)(Conflicting)\n"
+            "COMMANDS = (Conflicting,)\n"
         )
     elif problem == "missing_module":
         composition.write_text(
@@ -294,6 +302,76 @@ def test_check_does_not_invoke_runtime_or_business_handlers(tmp_path, environmen
     excluded = " ".join(report["scope"]["excluded"]).lower()
     for unverified in ("runtime", "status", "v3", "models", "network", "permissions", "physical"):
         assert unverified in excluded
+
+
+@pytest.mark.parametrize("environment", ["production", "local"])
+def test_explicit_commands_join_the_existing_catalog_with_original_sources(tmp_path, environment):
+    bootstrap = contract_packages(tmp_path)
+    write_python_modules(
+        tmp_path,
+        {
+            "businesses/alpha/ecs_command/__init__.py": "",
+            "businesses/alpha/ecs_command/move.py": """
+from pydantic import BaseModel, ConfigDict, field_validator, field_serializer
+from app.integrations.ecs_command import ecs_command
+from app.integrations.ecs_command.contracts import ErrorDetail
+class Result(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    target: str
+@ecs_command('MOVE', device_roles=('ALPHA_SCAN',), annex_id='alpha.move', annex_version='1',
+    result=Result, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=1000)
+class Move(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    target: str
+    @field_validator('target')
+    @classmethod
+    def validate_target(cls, value):
+        raise AssertionError('metadata must not validate payloads')
+    @field_serializer('target')
+    def serialize_target(self, value):
+        raise AssertionError('metadata must not serialize payloads')
+""",
+        },
+    )
+    composition = tmp_path / "businesses/alpha/composition.py"
+    composition.write_text(
+        composition.read_text() + "\nfrom .ecs_command.move import Move\nCOMMANDS = (Move,)\n"
+    )
+    result = check(tmp_path, environment, bootstrap=bootstrap)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    report = json.loads(result.stdout)
+    declared, shared = report["command_contracts"]
+    assert declared["device_role"] == "ALPHA_SCAN"
+    assert declared["module"] == "app.businesses.alpha.ecs_command.move"
+    assert declared["source_file"] == str(tmp_path / "businesses/alpha/ecs_command/move.py")
+    assert declared["symbol"] == "Move"
+    assert declared["local_only"] is False
+    assert (declared["annex_id"], declared["annex_version"]) == ("alpha.move", "1")
+    assert shared["device_role"] == "BETA_SCAN"
+    assert shared["symbol"] == "Payload"
+
+
+def test_explicit_command_compile_failure_precedes_resources_and_factories(tmp_path):
+    bootstrap = contract_packages(tmp_path)
+    composition = tmp_path / "businesses/alpha/composition.py"
+    composition.write_text(
+        composition.read_text()
+        + "\nfrom app.integrations.ecs_command import compile_commands, ecs_command\n"
+        "from app.integrations.ecs_command.contracts import ErrorDetail\n"
+        "ecs_command('MOVE', device_roles=('ALPHA_SCAN',), "
+        "annex_id='alpha.move', annex_version='1',\n"
+        "    result=Payload, error=ErrorDetail,\n"
+        "    timeout_min_ms=0, timeout_max_ms=1000)(Payload)\n"
+        "COMMANDS = (Payload,)\n"
+    )
+    result = check(tmp_path, bootstrap=bootstrap)
+    assert result.returncode == 1, result.stderr
+    assert result.stdout == ""
+    assert "phase=load_formal_modules" in result.stderr
+    assert "error_type=ValueError" in result.stderr
+    assert "runtime resource" not in result.stderr
+    assert "factory must not run" not in result.stderr
 
 
 @pytest.mark.parametrize(

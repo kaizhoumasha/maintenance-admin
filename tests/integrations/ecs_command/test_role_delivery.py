@@ -5,13 +5,13 @@ import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy import delete, select
 
-from app.integrations.ecs_command import CommandBinding
+from app.integrations.ecs_command import compile_commands
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
 from app.models import Device, DeviceRoute, EcsCommand, WorkLine
 from app.reliable.store import MessageStore
 from app.services.device_routes import DeviceRoutes
-from tests.helpers import TrialPayload, add_bound_device, loopback_app, simulator_sender
+from tests.helpers import EcsMove, add_bound_device, loopback_app, simulator_sender
 
 
 @pytest.fixture
@@ -23,7 +23,7 @@ async def role_device(ecs):
         line, device, route = await add_bound_device(session, code, "http://127.0.0.1:45841")
         line_id, device_id, route_id = line.id, device.id, route.id
     ecs.service.routes = DeviceRoutes(
-        [CommandBinding("SCAN1", "MOVE", "test", "1", TrialPayload)],
+        compile_commands(EcsMove)[0],
         annexes=ecs.service.annexes,
     )
     try:
@@ -45,9 +45,8 @@ async def create(device, key):
             owner=ecs.owner,
             call_key=key,
             device_code=device.code,
-            task_type="MOVE",
             timeout_ms=30000,
-            params={"qty": 1},
+            command=EcsMove.model_validate({"qty": 1}),
         )
 
 

@@ -9,7 +9,7 @@ from app.operation_names import is_operation_name
 from .definitions import BusinessDefinition
 
 if TYPE_CHECKING:
-    from app.integrations.ecs_command import CommandBinding, DeviceAnnex
+    from app.integrations.ecs_command.contracts import CommandBinding, DeviceAnnex
 
 _validated_entries: tuple[ModuleType, ...] | None = None
 
@@ -90,7 +90,7 @@ def validate_business_contracts() -> tuple[
 ]:
     """Crosscheck all formal registrations before local imports or resource assembly."""
     from app.integrations.ecs_callback.registry import events
-    from app.integrations.ecs_command import CommandBinding, DeviceAnnex
+    from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.contracts import merge_annexes
     from app.integrations.registration import DEV_MODULES
     from app.integrations.wms_callback.registry import operations
@@ -98,15 +98,26 @@ def validate_business_contracts() -> tuple[
     global _validated_entries
     _validated_entries = None
     current = entries()
-    definitions()  # Preserve definition/code/operation validation for every composition.
-    commands, annexes, owners = [], {}, {}
+    all_roles = {role.role_key for definition in definitions() for role in definition.device_roles}
+    commands, annexes, owners, annex_sources = [], {}, {}, {}
     registered_events, callbacks = events(), operations()
     for entry in current:
         definition = entry.DEFINITION
         prefix = entry.__name__.rsplit(".", 1)[0] + "."
         roles = {role.role_key for role in definition.device_roles}
-        declared = entry.ANNEXES
+        compiled, declared = compile_commands(*entry.COMMANDS)
         location = f"{definition.code} ({entry.__name__})"
+        for model in entry.COMMANDS:
+            model_bindings = [binding for binding in compiled if binding.source is model]
+            model_roles = {binding.device_role for binding in model_bindings}
+            source = model_bindings[0].registration_source.location
+            if model_roles - all_roles:
+                raise ValueError(
+                    f"{location}: undeclared command role {model_roles - all_roles!r}: {source}"
+                )
+            if not model_roles & roles:
+                raise ValueError(f"{location}: command requires an own declared role: {source}")
+        entry_annex_sources = {}
 
         def own_formal(item, prefix=prefix):
             source = item.registration_source
@@ -116,28 +127,30 @@ def validate_business_contracts() -> tuple[
                 and source.module.removeprefix(prefix).split(".")[0] not in DEV_MODULES
             )
 
-        for command in entry.COMMAND_BINDINGS:
-            if not isinstance(command, CommandBinding):
-                raise ValueError(f"{location}: CommandBinding required")
-            source = command.registration_source.location
+        for command in compiled:
             if command.device_role not in roles:
-                raise ValueError(
-                    f"{location}: undeclared command role {command.device_role!r}: {source}"
-                )
+                continue
+            source = command.registration_source.location
             key = (command.annex_id, command.annex_version)
-            if not isinstance(declared.get(key), DeviceAnnex):
-                raise ValueError(
-                    f"{location}: command requires own declared annex {key!r}: {source}"
-                )
             command_key = (command.device_role, command.task_type)
             if command_key in owners:
                 raise ValueError(
                     f"duplicate command {command_key!r}: {owners[command_key]} "
-                    f"and {location}: {source}"
+                    f"and {location}: {source}; 修复: 每个角色/任务只声明一次"
                 )
             owners[command_key] = f"{location}: {source}"
+            entry_annex_sources[key] = f"{location}: {source}"
             commands.append(command)
-        annexes = merge_annexes(annexes, declared, source=location)
+        for key, annex in declared.items():
+            source = entry_annex_sources.get(key, location)
+            try:
+                annexes = merge_annexes(annexes, {key: annex}, source=source)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{exc}; original source: {annex_sources.get(key, location)}; "
+                    "修复: 同一附录身份保留精确原模型与超时合同"
+                ) from None
+            annex_sources.setdefault(key, source)
         for (role, name), item in registered_events.items():
             if own_formal(item) and role not in roles:
                 raise ValueError(

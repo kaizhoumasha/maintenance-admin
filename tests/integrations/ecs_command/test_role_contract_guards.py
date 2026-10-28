@@ -12,7 +12,9 @@ from sqlalchemy import func, select
 from app.controllers.ecs_callback import include_ecs_callback
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import CallbackPayload, registry
-from app.integrations.ecs_command import CommandBinding, RoleRoutes, configure_ecs
+from app.integrations.ecs_command import RoleRoutes, compile_commands, configure_ecs
+from app.integrations.ecs_command.contracts import CommandBinding
+from app.integrations.ecs_command.declaration import command_declaration
 from app.integrations.ecs_command.dev import (
     PROTOCOL_ANNEX,
     PROTOCOL_MODELS,
@@ -38,7 +40,7 @@ def runtime():
         return state.origin, state.route_id
 
     state.resolve_binding, state.resolve_route = binding, route
-    state.entry = CommandBinding("SCAN1", "MOVE", "trial", "1", TrialPayload)
+    state.entry = compile_commands(TrialPayload)[0][0]
     state.annexes = ecs_history_annexes()
     state.routes = RoleRoutes(
         [state.entry], annexes=state.annexes, resolve_binding=binding, resolve_route=route
@@ -110,7 +112,7 @@ async def test_damaged_frozen_routes_do_not_consult_current_bindings(runtime):
         {"unexpected": "field"},
     ]:
         runtime.binding = await ecs_binding(None, "D1")
-        route = await runtime.routes.resolve(None, "D1", "MOVE")
+        route = await runtime.routes.resolve_declared(None, "D1", command_declaration(TrialPayload))
         frozen = asdict(route) | {"retry_window": route.retry_window.total_seconds()}
 
         async def forbidden(*args):
@@ -131,7 +133,7 @@ async def test_damaged_frozen_routes_do_not_consult_current_bindings(runtime):
 async def test_changed_runtime_identity_never_reauthorizes_an_old_command(runtime):
     for change in ["device", "role", "device_version", "origin", "route"]:
         runtime.binding = await ecs_binding(None, "D1")
-        route = await runtime.routes.resolve(None, "D1", "MOVE")
+        route = await runtime.routes.resolve_declared(None, "D1", command_declaration(TrialPayload))
         frozen = asdict(route) | {"retry_window": route.retry_window.total_seconds()}
         if change == "device":
             runtime.binding = replace(runtime.binding, device_code="OTHER")
@@ -152,7 +154,7 @@ async def test_changed_runtime_identity_never_reauthorizes_an_old_command(runtim
 @pytest.mark.parametrize("failed_port", ["binding", "route"])
 async def test_runtime_infrastructure_failures_are_retryable_errors(runtime, failed_port):
     runtime.binding = await ecs_binding(None, "D1")
-    route = await runtime.routes.resolve(None, "D1", "MOVE")
+    route = await runtime.routes.resolve_declared(None, "D1", command_declaration(TrialPayload))
     frozen = asdict(route) | {"retry_window": route.retry_window.total_seconds()}
 
     async def failed(*args):
@@ -165,7 +167,7 @@ async def test_runtime_infrastructure_failures_are_retryable_errors(runtime, fai
         resolve_route=failed if failed_port == "route" else runtime.resolve_route,
     )
     with pytest.raises(RuntimeError, match="infrastructure unavailable"):
-        await routes.resolve(None, "D1", "MOVE")
+        await routes.resolve_declared(None, "D1", command_declaration(TrialPayload))
     with pytest.raises(RuntimeError, match="infrastructure unavailable"):
         await routes.authorize_frozen(None, frozen)
 
@@ -267,13 +269,15 @@ async def test_debug_http_entrypoint_preserves_formal_routes_and_one_outbox(
     assert (
         replay.status_code == 200 and replay.json()["command_code"] == first.json()["command_code"]
     )
-    formal = await ecs.service.routes.resolve(None, "D1", "MOVE")
+    formal = await ecs.service.routes.resolve_declared(
+        None, "D1", command_declaration(TrialPayload)
+    )
     assert (formal.annex_id, formal.annex_version) == ("trial", "1")
 
 
 async def test_malformed_frozen_origin_is_unknown_before_runtime_lookup(runtime):
     runtime.binding = await ecs_binding(None, "D1")
-    route = await runtime.routes.resolve(None, "D1", "MOVE")
+    route = await runtime.routes.resolve_declared(None, "D1", command_declaration(TrialPayload))
     frozen = asdict(route) | {
         "retry_window": route.retry_window.total_seconds(),
         "origin": "http://127.0.0.1:bad",

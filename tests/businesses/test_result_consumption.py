@@ -10,7 +10,13 @@ from sqlalchemy import event, select, text, update
 from app.integrations.wms_callback import receive
 from app.main import app
 from app.models import CallbackReceipt
-from tests.helpers import business_flow_fixture, flow_request, result_task, transport_callback
+from tests.helpers import (
+    FlowMove,
+    business_flow_fixture,
+    flow_request,
+    result_task,
+    transport_callback,
+)
 
 
 @pytest.fixture
@@ -401,9 +407,8 @@ async def test_duplicate_wakeups_and_config_update_serialize_without_cross_line(
             owner=flow.owner,
             call_key="existing-send-gate",
             device_code=flow.codes[0],
-            task_type="MOVE",
             timeout_ms=100,
-            params={"position": "POSITION_0"},
+            command=FlowMove(position="POSITION_0"),
         )
     store = MessageStore(flow.factory, lifecycles={"ecs-command": EcsLifecycle(flow.commands)})
     claims = await store.claim(1, {"seam-ecs": flow.targets["seam-ecs"]})

@@ -58,14 +58,13 @@ class Payload(RequestPayload): pass
 
 
 @pytest.mark.parametrize("query", ["operations", "lookup"])
-@pytest.mark.parametrize("root", ["businesses", "integrations"])
-def test_cold_request_discovery_inside_local_scope_stays_formal(tmp_path, query, root):
+def test_cold_request_discovery_inside_local_scope_stays_formal(tmp_path, query):
+    root = "businesses"
     write_module(tmp_path, root, "probe.request", REQUEST)
     write_module(tmp_path, "integrations", "probe.helper")
     run_cold(
         tmp_path,
         SETUP
-        + ("entry.ENTRY_MODULES = ()\n" if root == "integrations" else "")
         + f"""
 from app.integrations.registration import local_registration
 from app.integrations.wms_request import operation
@@ -100,7 +99,7 @@ assert 'app.main' not in sys.modules
 @pytest.mark.parametrize("environment", ["local", "production"])
 @pytest.mark.parametrize("package", [False, True])
 def test_all_formal_kinds_load_before_any_local_entry(tmp_path, environment, package):
-    for root in ("businesses", "integrations"):
+    for root in ("businesses",):
         for kind in ("ecs_event", "callback", "request"):
             name = f"{root}.done@v1"
             if kind == "request":
@@ -130,7 +129,7 @@ def test_all_formal_kinds_load_before_any_local_entry(tmp_path, environment, pac
                 root,
                 f"probe.{kind}" + (".__init__" if package else ""),
                 "import builtins\n"
-                "assert len([x for x in builtins.loaded_entries if '.dev' not in x]) == 6\n"
+                "assert len([x for x in builtins.loaded_entries if '.dev' not in x]) == 3\n"
                 f"builtins.loaded_entries.append('{root}.{kind}')\n",
             )
     run_cold(
@@ -144,14 +143,14 @@ load_formal_modules()
 load_local_modules(environment={environment!r})
 load_formal_modules()
 load_local_modules(environment={environment!r})
-assert len(builtins.loaded_entries) == {12 if environment == "local" else 6}
+assert len(builtins.loaded_entries) == {6 if environment == "local" else 3}
 from app.integrations.ecs_callback.registry import events
 from app.integrations.wms_callback.registry import operations as callbacks
 from app.integrations.wms_request.operation import operations as requests
 for items in (events(), callbacks(), requests()):
     sources = [item.registration_source for item in items.values()
                if '.probe.' in item.registration_source.module]
-    assert len(sources) == 2
+    assert len(sources) == 1
     assert all(source.local_only is False for source in sources)
 """,
     )
@@ -269,7 +268,8 @@ else:
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
-def test_cold_application_loads_formal_before_local(tmp_path, environment):
+@pytest.mark.parametrize("application", ["app.main", "app.tasks.celery_app"])
+def test_cold_application_loads_formal_before_local(tmp_path, environment, application):
     for kind in ("ecs_event", "callback", "request"):
         write_module(
             tmp_path,
@@ -282,6 +282,7 @@ def test_cold_application_loads_formal_before_local(tmp_path, environment):
         "businesses",
         "probe.dev_callback",
         "import builtins\nassert len(builtins.loaded_entries) == 3\n"
+        "from app.businesses import catalog\nassert len(catalog.validated_entries()) == 1\n"
         "builtins.loaded_entries.append('local')\n",
     )
     run_cold(
@@ -292,12 +293,59 @@ import os
 os.environ['ENVIRONMENT'] = {environment!r}
 from app.businesses.definitions import BusinessDefinition
 entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
-entry.COMMAND_BINDINGS = ()
-entry.ANNEXES = {{}}
+entry.COMMANDS = ()
 entry.ENTRY_MODULES += ('app.businesses.probe.dev_callback',)
-from app.main import app
+import importlib
+importlib.import_module({application!r})
+assert catalog.validated_entries() == (entry,)
 assert len(builtins.loaded_entries) == {4 if environment == "local" else 3}
 assert ('app.businesses.probe.dev_callback' in sys.modules) == {environment == "local"!r}
+""",
+    )
+
+
+@pytest.mark.parametrize("environment", ["local", "production"])
+@pytest.mark.parametrize("problem", ["missing_module", "missing_initial_entry"])
+def test_invalid_formal_business_prevents_worker_initialization(tmp_path, environment, problem):
+    for kind in ("ecs_event", "callback", "request"):
+        if problem == "missing_module" and kind == "request":
+            continue
+        write_module(tmp_path, "businesses", f"probe.{kind}")
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.dev_callback",
+        "raise AssertionError('local entry loaded before formal validation')\n",
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+import os
+os.environ['ENVIRONMENT'] = {environment!r}
+import celery
+from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
+entry.DEFINITION = BusinessDefinition(
+    code='probe', display_name='Probe',
+    device_roles=(DeviceRole(role_key='PROBE_SCAN', display_name='Scan'),),
+    initial_entries=(InitialEntry(kind='ecs_event', name='DONE', device_role='PROBE_SCAN'),),
+)
+entry.COMMANDS = ()
+entry.ENTRY_MODULES += ('app.businesses.probe.dev_callback',)
+original_celery = celery.Celery
+def construct_celery(*args, **kwargs):
+    builtins.loaded_entries.append('resources:celery')
+    return original_celery(*args, **kwargs)
+celery.Celery = construct_celery
+try:
+    from app.tasks.celery_app import celery_app
+    celery_app.loader.import_default_modules()
+except {"ModuleNotFoundError" if problem == "missing_module" else "ValueError"}:
+    pass
+else:
+    raise AssertionError('worker accepted an invalid formal business')
+assert 'resources:celery' not in builtins.loaded_entries
+assert 'app.businesses.probe.dev_callback' not in sys.modules
 """,
     )
 
@@ -311,7 +359,7 @@ def test_cold_noninitial_entry_typo_rejects_startup_without_success_cache(tmp_pa
         + f"""
 from app.businesses.definitions import BusinessDefinition
 entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
-entry.COMMAND_BINDINGS, entry.ANNEXES = (), {{}}
+entry.COMMANDS = ()
 entry.ENTRY_MODULES = ('app.businesses.probe.{declared}',)
 from app.integrations import discovery
 try:
@@ -323,5 +371,107 @@ except ValueError as error:
     assert not discovery._loaded_formal and discovery._loading is False
 else:
     raise AssertionError('declared noninitial entry was silently omitted')
+""",
+    )
+
+
+@pytest.mark.parametrize("environment", ["production", "local"])
+def test_fixed_platform_entries_are_required_and_do_not_scan_package_roots(tmp_path, environment):
+    write_module(tmp_path, "businesses", "probe.helper")
+    write_module(
+        tmp_path,
+        "integrations",
+        "unlisted.request",
+        "raise AssertionError('unlisted platform import')\n",
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+entry.ENTRY_MODULES = ()
+from app.integrations import discovery
+from app.core import module_tree
+original_import = module_tree.import_module_tree
+seen = []
+def importing(name, *, required=False):
+    seen.append((name, required))
+    original_import(name, required=required)
+module_tree.import_module_tree = importing
+discovery.load_formal_modules()
+discovery.load_local_modules(environment={environment!r})
+expected = {{'app.integrations.wms_transport.callback'}}
+if {environment == "local"!r}:
+    expected.update((
+        'app.integrations.ecs_callback.dev_ecs_event',
+        'app.integrations.wms_callback.dev_callback',
+        'app.integrations.wms_request.dev',
+        'app.integrations.wms_transport.dev',
+    ))
+assert {{name for name, required in seen}} == expected, seen
+assert all(required for name, required in seen), seen
+from app.integrations.wms_callback.registry import operations
+assert 'transport.task.resulted@v1' in operations()
+assert 'transport.task.member_position_changed@v1' in operations()
+if {environment == "local"!r}:
+    from app.core.dev_scenarios import scenarios
+    assert {{item.name for item in scenarios()}} == {{
+        "rack.enter", "rack.rotate", "rack.depart", "bin.feed", "bin.return", "bin.exchange"
+    }}
+""",
+    )
+
+
+@pytest.mark.parametrize("environment", ["production", "local"])
+def test_missing_fixed_platform_entry_fails_instead_of_skipping(monkeypatch, environment):
+    from app.integrations import discovery
+    from app.integrations.registration import PLATFORM_FORMAL_MODULES, PLATFORM_LOCAL_MODULES
+
+    monkeypatch.setattr(discovery, "_loaded_formal", set())
+    manifest = PLATFORM_LOCAL_MODULES if environment == "local" else PLATFORM_FORMAL_MODULES
+    suffix = "dev.absent_platform" if environment == "local" else "absent_platform"
+    monkeypatch.setitem(manifest, "request", (f"app.integrations.wms_request.{suffix}",))
+    with pytest.raises(ModuleNotFoundError, match="absent_platform"):
+        discovery.load_formal_modules()
+        discovery.load_local_modules(environment=environment)
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request", "ecs_command"])
+def test_direct_application_import_enforces_registration_source(tmp_path, kind):
+    sources = {
+        "ecs_event": (
+            "from app.integrations.ecs_callback import ecs_event, CallbackPayload\n"
+            "@ecs_event('DONE', device_role='SCAN', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        ),
+        "callback": (
+            "from app.integrations.wms_callback import callback_operation, CallbackPayload\n"
+            "@callback_operation('probe.done@v1', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        ),
+        "request": REQUEST,
+        "ecs_command": (
+            "from app.integrations.ecs_command import ecs_command\n"
+            "from app.integrations.ecs_command.contracts import ErrorDetail\n"
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class Payload(BaseModel):\n    model_config = ConfigDict(strict=True)\n"
+            "@ecs_command('MOVE', device_roles=('SCAN',), annex_id='probe', annex_version='1',\n"
+            "    result=Payload, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=1000)\n"
+            "class Move(Payload): pass\n"
+        ),
+    }
+    write_module(tmp_path, "integrations", f"unlisted.{kind}", sources[kind])
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+import importlib
+try:
+    importlib.import_module('app.integrations.unlisted.{kind}')
+except ValueError as error:
+    assert 'invalid registration source' in str(error)
+    assert 'app.integrations.unlisted.{kind}' in str(error)
+    assert '修复' in str(error)
+else:
+    raise AssertionError('ordinary import bypassed registration source boundary')
 """,
     )

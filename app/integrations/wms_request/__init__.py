@@ -20,7 +20,7 @@ Transport 业务,在 `wms_transport`。
 - `operation.py`:operation 注册表。`@request_operation(名称, Endpoint.FACTS 或 DECISIONS)`
   登记,同名重复登记会报错。`RequestPayload` 禁止多余字段,与 WMS 拒绝未知字段的合同一致。
   JSON Schema 示例按严格 JSON 模式验证,不合法时在导入期报错。
-- `service.py`:`WmsRequests.send(session, 名称, 数据, operation_id=...)`。在调用方的事务里
+- `service.py`:`WmsRequests.send(session, MyFact(...), operation_id=...)`。在调用方的事务里
   校验 UUIDv7 和 Payload,冻结信封(operation_id、operation、timestamp、data),再交给
   可靠层 `Outbox` 入队。不提交,不发网。
 - `adapter.py`:`WmsEndpointAdapter` 按端点发 POST,并按合同 §4.4 的公共响应联合分类。
@@ -31,16 +31,17 @@ Transport 业务,在 `wms_transport`。
   - 其余一律算未知,继续重试。
   - 不属于本端点的消息会被拒绝。
 - 合同 §4 的响应前置检查在 `app/integrations/wms_envelope.py`,Transport 适配器共用它。
-- `discovery.py`:第一次读注册表时(`send`,或发送器构造请求时)导入各业务包的 `request`,
-  让装饰器完成注册。
+- `app.integrations.discovery`:第一次读注册表时(`send`,或发送器构造请求时)，
+  按 catalog 的显式声明导入 `request` 入口，让装饰器完成注册。
 
 发送、租约、退避、TTL 和终态清理都在 `app/reliable`,这个包不重复实现。
 
 ## 怎么新增一个 operation
 
-在 `app/integrations/<业务>/request/` 目录里加一个文件,一个 operation 一个文件,整个目录自动导入。
+在 `app/businesses/<业务>/request/` 目录里加一个文件,一个 operation 一个文件。
+在所属 composition.ENTRY_MODULES 列出入口包，并由 catalog.entries() 列出完整业务的 composition。
 文件名是注册名把 `.` 和 `@` 换成 `_`,导入期检查两者一致。例如下面这个 operation 写在
-`app/integrations/<业务>/request/<域>_<名称>_v1.py`:
+`app/businesses/<业务>/request/<域>_<名称>_v1.py`:
 
     @request_operation("域.名称@v1", Endpoint.FACTS)
     class MyFact(RequestPayload):
@@ -49,7 +50,8 @@ Transport 业务,在 `wms_transport`。
 可选装饰器参数 title=、ttl= 声明标题及有效期；注册项直接保存模型与元数据。
 完整接入步骤与注册清单排障见 docs/integrations/registration.md。
 
-只有一两个很小的 operation 时,也可以用单个 `request.py`,发现逻辑两种形式都认。
+只有一两个很小的 operation 时,也可以用单个 `request.py`，
+两种形式都须在所属 composition.ENTRY_MODULES 中显式列出。
 调用方保存自己的业务记录和 `operation_id`(小写 canonical UUIDv7),在同一个事务里调用 `send`。
 
 ## 上线前要配置

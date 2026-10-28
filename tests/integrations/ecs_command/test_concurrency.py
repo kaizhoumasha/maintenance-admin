@@ -10,6 +10,7 @@ from app.integrations.ecs_command.protocol import PROTOCOL
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.models import EcsCommand, EcsResultEvidence, ReliableMessage
 from app.reliable.store import MessageStore
+from tests.helpers import EcsMove
 
 
 async def create(ecs, session):
@@ -18,9 +19,8 @@ async def create(ecs, session):
         owner=ecs.owner,
         call_key="call",
         device_code="D1",
-        task_type="MOVE",
         timeout_ms=30000,
-        params={"qty": 1},
+        command=EcsMove.model_validate({"qty": 1}),
     )
 
 

@@ -10,7 +10,7 @@ PR #23已合并到develop，合并提交`479c48b41edbe1befd56e757ec92450f0098ca8
 
 ## 设备身份与地址来源
 
-DEVICE_CODE定义为全系统唯一，沿用wire字段device_code。地址由设备管理的ecs_origin或调试适配层提供，ECS通用模块只依赖DeviceRouteProvider；只有地址信息时不单建ECS配置表。正式设备表/全局唯一约束当前尚未实现，设备表是正式地址来源，不是通用模块的硬依赖。原命令地址快照、原授权及UNKNOWN/HELD边界保持不变。
+DEVICE_CODE定义为全系统唯一，沿用wire字段device_code。地址由设备管理的ecs_origin或调试适配层提供，ECS通用模块只依赖DeviceRouteProvider；只有地址信息时不单建ECS配置表。设备管理已提供设备表及全局唯一约束；设备表是正式地址来源，不是通用模块的硬依赖。原命令地址快照、原授权及UNKNOWN/HELD边界保持不变。
 
 Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_url、device_code、task_type和params，不逐动作手工登记；稳定client_request_id及执行timeout_ms仍保留。状态为GENERIC_PROTOCOL_VERIFIED / WINDOW_DECISION_APPROVED / SUPPLIER_CONFORMANCE_PENDING，当前回归覆盖该合同和原冻结期限，入口见[现有测试](../testing/ecs-command-verification.md)；真实设备仍受真实接入验收独立门槛约束。
 
@@ -20,7 +20,11 @@ Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_
 
 应用启动前调用 `configure_ecs(app, routes=routes, annexes=annexes)`，从 `app.integrations.ecs_command` 导入。无需给RELIABLE_TARGETS添加ECS条目，也不用为每个ECS或DEVICE配置发送目标。`routes` 实现 `DeviceRouteProvider`：创建时解析生效快照，发送门禁中锁原授权记录并返回 ALLOW/REVOKED/UNKNOWN；A→B 不改写旧命令的 A，原授权是否撤销由路由提供方决定。`RoleRoutes` 按 `(device_role, task_type)` 选择严格附录，注入绑定与地址解析器；配置版本或地址变化即停止旧命令后续发送，保留执行记录及已可能交付命令的原身份迟到结果，见[角色接入](ecs-roles.md)。缺省 UnconfiguredRoutes 拒绝解析。
 
-`annexes` 使用 `(annex_id, annex_version)` 映射到 `DeviceAnnex(params_model, result_model, error_model, timeout_min_ms, timeout_max_ms)`，必须是已确认的参数、结果、错误及 timeout 合同；测试附录在tests中。local v3自动提供内置协议合同，详见下节。正式业务仍可保留严格版本化附录，测试qty模型不作为通用合同或供应商保证。
+业务在 `app/businesses/<business>/` 的命令模型声明角色和版本化合同，并在 composition 写
+`COMMANDS = (Model, ...)`；catalog 校验时内部编译为路由绑定和附录，应用启动装配直接使用该结果。
+`annexes` 是平台装配与历史 Result 解析的内部表示；业务不直接构造或导入内部绑定/附录类型。
+主应用共用 catalog 和唯一 Sender，独立平台装配的解析器注入见[角色接入](ecs-roles.md)。
+测试 qty 模型不作为通用供应商合同。
 
 configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.state.ecs_commands，保留原WMS映射并拒绝重复/冲突装配。主应用lifespan将统一ECS逻辑通道加入原有Sender配置，并关联同一个outbox；启动完成前不可调用create，不再启动第二个Sender。local Swagger由框架自动调用联调装配；可信启动模块可按[角色接入](ecs-roles.md)一次组合正式角色与调试路由，不重复装配服务。低层EcsCommands(outbox, target, routes, annexes)仍供独立运行时/测试注入使用，不是主应用的手工配置步骤。
 
@@ -30,13 +34,76 @@ configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.s
 
 ## 事务内创建与读取
 
-调用 `await service.create(session, owner=CommandOwner(domain), call_key=..., device_code=..., task_type=..., timeout_ms=..., params=...)`，由调用者提交。owner 来自受信任业务装配，不能从外部请求任意选择；没有生产 HTTP 发命令接口。
+唯一业务调用为 `await service.create(session, owner=owner, call_key=saved_key,
+device_code=device_code, timeout_ms=timeout_ms, command=MoveTo(...))`，由调用者提交。
+owner 来自受信任业务装配，不能由外部请求任意选择；没有生产 HTTP 发命令接口。
+`command` 必须是精确声明模型，未声明类/子类或实际字段不合法时在入队前拒绝。
 
 同业务调用键、同原输入返回旧命令；不同输入冲突。创建先查旧命令，再解析路由并生成一次 UUIDv7、时间和原始请求。回滚不留下命令/出站消息。技术重试保持 command_code、时间、字节和冻结 origin，不按设备历史失败封锁新独立意图。
 
 `get_command(session, owner=..., command_code=...)` 和 `get_by_call(session, owner=..., call_key=...)` 返回只读 DTO，区分 command status、delivery status、实际 ACK、已应用结果、暂停原因和对账标记。查询不返回可靠层 ORM。消费方须在自己的事务中保证一次推进：一动作一命令、一个固定消费者、同库副作用时，可将原命令关联、冻结业务绑定/版本和消费标记合入业务动作行，通过受保护的WAITING_RESULT→SUCCEEDED/FAILED转换完成；多消费者等场景仍需按实际需求设计各自消费唯一性。不能凭 ACK/DONE 推断物理完成，也不自动撤销已应用业务。
 
 调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。通用 Status 查询已实现，所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，详见[通用 Status](ecs-status.md)；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
+
+## 模型声明与显式编译
+
+以下仅为合同形状示例，不是正式动作或供应商附录。真实字段、错误、超时及 SUCCESS/FAILED 含义须先确认。
+在原参数类上声明，不复制模型或更换原附录版本来迁语法：
+
+```python
+from pydantic import BaseModel, ConfigDict
+
+from app.integrations.ecs_command import ecs_command
+from app.integrations.ecs_command.contracts import ErrorDetail
+
+
+class MoveResult(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    qty: int
+
+
+@ecs_command(
+    "MOVE",
+    device_roles=("ARM", "ARM_BACKUP"),
+    annex_id="example.arm.move",
+    annex_version="1",
+    result=MoveResult,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=30_000,
+)
+class MoveTo(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    qty: int
+
+
+# composition.py 显式导入原模型；两角色须在 catalog definitions 中声明。
+COMMANDS = (MoveTo,)
+```
+
+装饰器返回原精确类，`device_roles` 必须为非空、唯一角色 tuple。一个参数模型可供多个角色共享，
+composition 只声明 `COMMANDS`。catalog 内部编译并只激活所属 definition 角色的交集；
+模型至少覆盖本业务一个角色，所有声明角色须存在于显式 catalog 中，未列模型的其他业务不获得权限。
+重复角色/动作、同附录键不同模型/范围、非法合同或 local 来源在资源构造前失败。
+编译产物及声明元数据属于平台内部；业务不手造绑定/附录或修改元数据，不建立命令发现树。
+标题保留“显式编译”锚点供历史链接跳转，编译由 catalog 负责。
+
+参数、Result、error 及其嵌套合同须为受支持的严格类型模型，错误模型继承 `ErrorDetail`，超时范围明确。
+严格模型保留各自 `extra="forbid"/"ignore"/"allow"` 策略，也支持严格对象 RootModel；不改写原类或 schema。
+新请求字节遵循模型 JSON 序列化，包括别名、默认值、校验器、序列化器和 extra 策略；ignore 丢弃字段不会恢复。
+这属于明确的不兼容输入边界，不能承诺与任意旧字典输入逐字节等价。
+
+序列化前会重验实际字段，包括构造绕过、嵌套可变值，不修改调用方实例。
+字段级 `Field(frozen=True)` 的 Pydantic dataclass，以及无法解析/无法唯一定位的同运行时类泛型
+上下文会明确拒绝；使用显式嵌套模型表达合同。类级 frozen、唯一上下文及可由直接字段区分的泛型合同可用。
+
+正式路由端口唯一为 `resolve_declared(session, device_code, declaration)`。
+`RoleRoutes` 在同次绑定解析核对实际设备角色是否属于声明、task_type、活动附录、原模型及超时；
+local 组合只委托正式路由，动态 JSON 调试由受信任适配器进入同一规范化核心和 Sender。
+已有同 owner/call_key/规范输入先返回原命令，不受当前路由、换绑或活动合同变化影响；输入漂移仍冲突。
+无法用模型表达历史输入时，通过原 owner/call_key/command_code 读原记录并核对，不换身份或目标重发。
+历史冻结行、字节、路由、期限及 Result 合同保留；历史附录只解析原 Result，不授权新动作。
+不兼容变化及专项证据见[单一 API 验收](business-development-single-api-acceptance.md)。
 
 ## 无设备表的ECS联调入口（内置协议合同）
 
@@ -50,7 +117,7 @@ history_annexes仅来自可信启动模块的版本化原DeviceAnnex模型；装
 
 enterprise_admin已批准统一最低合同：W=300秒，从本方首次创建命令起算并冻结expires_at；D=对端ECS持久确认确定终态后至少24小时（86400秒），活动/未决命令去重依据不按TTL清理。W不是执行timeout或结果截止，重启不重算；原退避/Retry-After、原next_attempt_at前零发送/到期且窗口有效才重试、超期停止新尝试及合法迟到结果规则不变。数值是本项目规范选择，不是测试值推导或供应商既有证明，完整依据见[设计§10.4](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。在contracts.py定义共享PROTOCOL_RETRY_WINDOW=timedelta(seconds=300)，不新增请求/.env/逐动作窗口参数，已完成隔离验证。
 
-W=300秒同时约束调试及正式新命令，唯一来源迁至contracts.py并从ECS包导出PROTOCOL_RETRY_WINDOW，dev.py/正式DeviceRouteProvider/service.py共同引用。共享EcsCommands.create先查原调用：旧同键同输入只读返回原身份且保持原冻结期限，查询/响应字段不变，异输入仍冲突；仅新调用在路由解析后、生成/写入命令与outbox前检查retry_window为timedelta且精确300秒。不一致按既有AppError/HTTP 503机制拒绝，message/detail提示路由提供方引用共享常量，零新义务/HTTP；不以400业务参数错误解释，不宣称数据库连接故障，不新增错误码/协议字段。不取整、截短或放大路由值，也不豁免正式路径。 路由快照构造也将缺失、错误类型及非正窗口识别为配置503，避免在共享创建检查前误报400/500；发送时遇到损坏快照仍保守围栏，不套用当前300秒改写旧期限。
+W=300秒同时约束调试及正式新命令，唯一来源迁至contracts.py并从ECS包导出PROTOCOL_RETRY_WINDOW，dev.py/正式DeviceRouteProvider/service.py共同引用。共享规范化核心先查原调用：同键同规范输入只读返回原身份且保持原冻结期限，查询/响应字段不变，异输入仍冲突；仅新调用在路由解析后、生成/写入命令与outbox前检查retry_window为timedelta且精确300秒。不一致按既有AppError/HTTP 503机制拒绝，message/detail提示路由提供方引用共享常量，零新义务/HTTP；不以400业务参数错误解释，不宣称数据库连接故障，不新增错误码/协议字段。不取整、截短或放大路由值，也不豁免正式路径。 路由快照构造也将缺失、错误类型及非正窗口识别为配置503，避免在共享创建检查前误报400/500；发送时遇到损坏快照仍保守围栏，不套用当前300秒改写旧期限。
 
 验收须覆盖正式路由300秒的命令/消息期限一致、60/600秒及亚秒偏差拒绝，以及历史60/600秒记录在当前路由不一致/不可用时仍可同参只读重入、异参冲突、存量按原安全重试/期限恢复。Sender/Result不重新套用当前常量，旧dev策略围栏、UNKNOWN/HELD和正式业务许可/原授权保持；保留原期限不等于放行旧策略。详见[设计§10.4.1](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
 

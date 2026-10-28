@@ -27,7 +27,7 @@ uv run pytest tests/controllers/test_dev_ecs_command.py tests/integrations/ecs_c
 
 | 行为 | 现有位置及必须保持的断言 |
 |---|---|
-| 两条当前许可 | test_service.py：test_new_reference_intent_requires_current_permission_but_replay_keeps_identity、test_new_authorized_reference_intent_uses_current_version；旧调用保留原身份，新动作读取当前许可/版本 |
+| 两条当前许可 | test_service.py：test_new_reference_intent_requires_current_permission_but_replay_keeps_identity、test_new_authorized_reference_intent_uses_current_version；原身份重入保持原记录，新动作读取当前许可/版本 |
 | 路由P2与P3 | test_service.py：test_pending_route_keeps_active_route_and_revocation_only_fences_old_call，revoked=False/True；A撤销B有效允许新意图走B，A未撤销时旧命令仍按原授权走A |
 | 消费P2与权威事实 | test_query.py：test_consumption_and_business_change_follow_lock_order，cancel/rebind/version×两种顺序；test_consumer_requires_current_authority_even_when_action_is_unchanged；原结果保留，拒绝错误业务推进 |
 | 窗口/原期限/停启 | test_service.py、test_restart.py、test_dev.py；新正式/调试300秒，不一致配置拒绝；历史60/600秒及原退避/Retry-After不重算，UNKNOWN/HELD不解封 |

@@ -2,7 +2,6 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -11,11 +10,7 @@ from app.database import create_database_engine
 from app.integrations.ecs_command import PROTOCOL_RETRY_WINDOW
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
 from app.models import Base
-
-
-class Payload(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
-    qty: int
+from tests.helpers import EcsMove, EcsOther
 
 
 class Routes:
@@ -23,7 +18,7 @@ class Routes:
     authorization = RouteAuthorization.ALLOW
     calls = 0
 
-    async def resolve(self, session, device_code, task_type):
+    async def resolve_declared(self, session, device_code, declaration):
         self.calls += 1
         return RouteSnapshot(
             device_code, self.origin, "route-1", "v1", "test", "1", ("MOVE",), PROTOCOL_RETRY_WINDOW
@@ -35,7 +30,7 @@ class Routes:
 
 @pytest.fixture(params=["sqlite", "postgres"])
 async def ecs(request):
-    from app.integrations.ecs_command.contracts import DeviceAnnex, ErrorDetail
+    from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
     from app.reliable import Outbox
@@ -63,9 +58,7 @@ async def ecs(request):
     adapters = {PROTOCOL: EcsCommandAdapter()}
     routes = Routes()
     outbox = Outbox(targets, adapters)
-    service = EcsCommands(
-        outbox, "ecs", routes, {("test", "1"): DeviceAnnex(Payload, Payload, ErrorDetail, 1, 60000)}
-    )
+    service = EcsCommands(outbox, "ecs", routes, compile_commands(EcsMove)[1])
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
 
     outbox.lifecycles = {PROTOCOL: EcsLifecycle(service)}
@@ -114,7 +107,8 @@ class Reference:
         self.routes, self.actions = routes, actions
         self.current_business = current_business
 
-    async def resolve(self, session, device_code, task_type):
+    async def resolve_declared(self, session, device_code, declaration):
+        task_type = declaration.bindings[0].task_type
         result = await session.execute(
             select(self.routes)
             .where(
@@ -224,9 +218,8 @@ class Reference:
                 owner=self.owner,
                 call_key=f"action:{action_id}",
                 device_code=device_code,
-                task_type=task_type,
                 timeout_ms=timeout_ms,
-                params=params,
+                command=(EcsMove if task_type == "MOVE" else EcsOther).model_validate(params),
             )
             if row["command_code"] is None:
                 await session.execute(
@@ -237,8 +230,8 @@ class Reference:
                         version=fact["version"],
                         intent_device_code=fact["device_code"],
                         intent_version=fact["version"],
-                        task_type=task_type,
                         timeout_ms=timeout_ms,
+                        task_type=task_type,
                         params=params,
                         command_code=command.command_code,
                         state="WAITING_RESULT",

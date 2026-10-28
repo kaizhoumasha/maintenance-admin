@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy import func, select, update
 
 from app.models import ReliableMessage
+from tests.helpers import EcsMove, EcsOther
 
 
 async def create(ecs, session, key="call", qty=1):
@@ -10,9 +11,8 @@ async def create(ecs, session, key="call", qty=1):
         owner=ecs.owner,
         call_key=key,
         device_code="D1",
-        task_type="MOVE",
         timeout_ms=30000,
-        params={"qty": qty},
+        command=EcsMove.model_validate({"qty": qty}),
     )
 
 
@@ -60,9 +60,8 @@ async def test_timeout_must_match_frozen_annex(ecs):
                 owner=ecs.owner,
                 call_key="bad-timeout",
                 device_code="D1",
-                task_type="MOVE",
                 timeout_ms=999999,
-                params={"qty": 1},
+                command=EcsMove.model_validate({"qty": 1}),
             )
 
 
@@ -169,9 +168,8 @@ async def test_no_single_authorized_route_or_action_has_no_side_effects(referenc
                 owner=ecs.owner,
                 call_key="bad",
                 device_code="D1",
-                task_type="OTHER" if case == "action" else "MOVE",
                 timeout_ms=30000,
-                params={"qty": 1},
+                command=(EcsOther if case == "action" else EcsMove)(qty=1),
             )
         for table in (EcsCommand, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
@@ -285,7 +283,7 @@ async def test_action_freezes_authoritative_version_and_replay_ignores_new_permi
         row = await reference.state(session)
         assert row["intent_version"] == 7 and row["intent_device_code"] == "D1"
         with pytest.raises(ValueError, match="different input"):
-            await reference.register(session, action_id=1, params={"qty": True})
+            await reference.register(session, action_id=1, params={"qty": 2})
         with pytest.raises(ValueError, match="different input"):
             await reference.register(session, action_id=1, business_key="B2")
 
@@ -326,13 +324,13 @@ async def test_new_commands_require_protocol_retry_window(ecs, monkeypatch, seco
     from app.core.errors import AppError, ErrorCode
     from app.models import EcsCommand
 
-    resolve = ecs.routes.resolve
+    resolve = ecs.routes.resolve_declared
 
     async def route(*args):
         window = timedelta(seconds=seconds) if type(seconds) in (int, float) else seconds
         return replace(await resolve(*args), retry_window=window)
 
-    monkeypatch.setattr(ecs.routes, "resolve", route)
+    monkeypatch.setattr(ecs.routes, "resolve_declared", route)
     async with ecs.factory.begin() as session:
         if seconds != 300:
             with pytest.raises(AppError) as error:
@@ -373,14 +371,14 @@ async def test_existing_calls_preserve_frozen_retry_window(ecs, monkeypatch, sec
     if policy == "invalid":
         from dataclasses import replace
 
-        resolve = ecs.routes.resolve
+        resolve = ecs.routes.resolve_declared
 
         async def invalid(*args):
             return replace(await resolve(*args), retry_window=timedelta(seconds=12))
 
-        monkeypatch.setattr(ecs.routes, "resolve", invalid)
+        monkeypatch.setattr(ecs.routes, "resolve_declared", invalid)
     else:
-        monkeypatch.setattr(ecs.routes, "resolve", unavailable)
+        monkeypatch.setattr(ecs.routes, "resolve_declared", unavailable)
     calls = ecs.routes.calls
     async with ecs.factory.begin() as session:
         assert (await create(ecs, session)).command_code == original.command_code

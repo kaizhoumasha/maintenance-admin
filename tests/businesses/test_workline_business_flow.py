@@ -4,8 +4,9 @@ import pytest
 from sqlalchemy import select
 
 from app.businesses.runtime import BusinessRuntime
+from app.integrations.ecs_command.declaration import command_declaration
 from app.models import CallbackReceipt
-from tests.helpers import business_flow_fixture, flow_request
+from tests.helpers import FlowMove, business_flow_fixture, flow_request
 
 
 @pytest.fixture
@@ -33,7 +34,9 @@ async def test_same_business_two_lines_never_cross_routes(flow, client):
         async with flow.factory() as session:
             command = await flow.commands.get_by_call(session, owner=flow.owner, call_key=row["id"])
             assert command.command_code == row["next_intent"]["command_code"]
-            route = await flow.commands.routes.resolve(session, flow.codes[index], "MOVE")
+            route = await flow.commands.routes.resolve_declared(
+                session, flow.codes[index], command_declaration(FlowMove)
+            )
             assert route.origin == flow.origins[index]
 
 

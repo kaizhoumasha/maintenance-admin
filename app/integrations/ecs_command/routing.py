@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.errors import AppError, ErrorCode
 from app.http_client import HttpClientConfig
 
-from .contracts import CommandBinding as CommandBinding
+from .declaration import CommandDeclaration
 
 
 def normalize_origin(value: str) -> str:
@@ -53,15 +53,15 @@ class RouteSnapshot:
 
 
 class DeviceRouteProvider(Protocol):
-    async def resolve(
-        self, session: AsyncSession, device_code: str, task_type: str
+    async def resolve_declared(
+        self, session: AsyncSession, device_code: str, declaration: CommandDeclaration
     ) -> RouteSnapshot: ...
     async def authorize_frozen(self, session: AsyncSession, route: dict) -> RouteAuthorization: ...
 
 
 class UnconfiguredRoutes:
-    async def resolve(
-        self, session: AsyncSession, device_code: str, task_type: str
+    async def resolve_declared(
+        self, session: AsyncSession, device_code: str, declaration: CommandDeclaration
     ) -> RouteSnapshot:
         raise ValueError("ECS route and annex must be explicitly configured")
 

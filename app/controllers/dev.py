@@ -1,6 +1,6 @@
 """联调控制台:仅 ENVIRONMENT=local 挂载。统一入口按场景下拉触发出站,另有按 business_key 的状态节点。
 
-场景由 app/integrations/<业务>/dev.py 里的 @dev_scenario 登记,启动时自动扫描,新增业务无需改这里。
+场景由固定 Transport 平台入口及业务 composition.ENTRY_MODULES 中的 dev 入口显式导入。
 """
 
 from typing import Annotated, Union

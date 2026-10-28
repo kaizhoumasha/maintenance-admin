@@ -16,7 +16,7 @@ from app.models import EcsCommand, EcsSendEvidence, ReliableMessage
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore
 from app.reliable.testing import FakeClock, ScriptedHttpClient
-from tests.helpers import ecs_protocol_annexes
+from tests.helpers import EcsMove, ecs_protocol_annexes
 
 
 def reply(code=200, message="ACK", retry_after=None):
@@ -43,15 +43,33 @@ async def restart(ecs, request):
     else:
         ecs.routes.origin = "http://127.0.0.1:8000"
     async with ecs.factory.begin() as session:
-        await ecs.service.create(
-            session,
-            owner=ecs.owner,
-            call_key="restart",
-            device_code="D1",
-            task_type="MOVE",
-            timeout_ms=30000,
-            params={"qty": 1},
-        )
+        if historical_window is None:
+            from app.integrations.ecs_command.dev import create_debug_command
+
+            async def authorize():
+                pass
+
+            await create_debug_command(
+                session,
+                service=ecs.service,
+                owner=ecs.owner,
+                client_request_id="restart",
+                ecs_url="http://127.0.0.1:8000",
+                device_code="D1",
+                task_type="MOVE",
+                timeout_ms=30000,
+                params={"qty": 1},
+                authorize_send=authorize,
+            )
+        else:
+            await ecs.service.create(
+                session,
+                owner=ecs.owner,
+                call_key="restart",
+                device_code="D1",
+                timeout_ms=30000,
+                command=EcsMove(qty=1),
+            )
     if historical_window is not None:
         # A pre-upgrade formal snapshot fixture; no old dev policy is sent.
         async with ecs.factory.begin() as session:

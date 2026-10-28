@@ -1,12 +1,12 @@
 """WES → WMS 出站端点(decisions / facts)的 operation 注册:端点先建立,具体 operation 逐个确认后再加。
 
-新增一个 operation:在 `app/integrations/<业务>/request.py`(自动发现)里
+新增一个 operation:在 `app/businesses/<业务>/request.py`(由 composition.ENTRY_MODULES 显式列出)里
 
     @request_operation("域.名称@v1", Endpoint.FACTS)
     class MyFact(RequestPayload):            # 严格类型、字段闭集
         task_id: str
 
-调用方再用 `WmsRequests.send(session, "域.名称@v1", {...}, operation_id=...)` 在自己的事务里入队。
+调用方再用 `WmsRequests.send(session, MyFact(...), operation_id=...)` 在自己的事务里入队。
 """
 
 import json
@@ -119,9 +119,9 @@ def request_operation(
 
 def _loaded() -> dict[str, Registered]:
     # 读注册表前保证业务包的 request 模块已导入:发送器重启后可能先于任何 `send` 就要读它
-    from .discovery import load_operation_modules
+    from app.integrations.discovery import load_formal_modules
 
-    load_operation_modules()
+    load_formal_modules(kind="request")
     return _registry
 
 

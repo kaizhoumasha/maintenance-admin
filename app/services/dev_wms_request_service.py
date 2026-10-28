@@ -31,7 +31,7 @@ async def send(
         raise AppError(ErrorCode.INVALID_REQUEST, str(error)) from error
     reference = await commit_or_map(
         session,
-        wms_requests.send(session, operation, payload.model_dump(), operation_id=operation_id),
+        wms_requests.send(session, payload, operation_id=operation_id),
         _ERRORS,
     )
     return DevRequestOut(

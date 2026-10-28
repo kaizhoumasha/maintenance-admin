@@ -7,7 +7,6 @@ import pytest
 
 from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 from app.integrations.wms_request import operation as registry
-from app.integrations.wms_request.discovery import candidate_modules
 
 
 class Plain(RequestPayload):
@@ -23,10 +22,6 @@ def test_invalid_names_are_rejected_at_registration(name):
 def test_duplicate_names_are_rejected_even_across_endpoints():
     with pytest.raises(ValueError, match="duplicate operation"):
         request_operation("example.fact.report@v1", Endpoint.DECISIONS)(Plain)
-
-
-def test_business_packages_are_discovered_by_request_module_name():
-    assert "app.integrations.wms_transport.request" in candidate_modules()
 
 
 def test_describe_exposes_what_every_display_needs():

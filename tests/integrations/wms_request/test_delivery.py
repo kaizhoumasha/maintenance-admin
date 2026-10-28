@@ -6,6 +6,7 @@ import pytest
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 from app.reliable.delivery import send_one
 from app.reliable.store import MessageStore
@@ -40,7 +41,7 @@ async def test_invalid_ack_preserves_uncertainty_and_retries_the_frozen_request(
     outbox.targets[target] = replace(outbox.targets[target], max_not_received_attempts=1)
     async with sessions() as session, session.begin():
         reference = await wms.send(
-            session, operation, {"task_id": "T-1", "qty": 2}, operation_id=operation_id
+            session, lookup(operation).data_model(task_id="T-1", qty=2), operation_id=operation_id
         )
     store = MessageStore(sessions, clock=clock, uniform=lambda low, high: high)
     responses = [
