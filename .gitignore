@@ -16,3 +16,4 @@ wheels/
 backups/
 frontend-dist/
 releases/
+.DS_Store

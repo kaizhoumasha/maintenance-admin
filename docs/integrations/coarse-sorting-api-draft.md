@@ -1,125 +1,1039 @@
 # 粗分机业务与 API 交互草案
 
-状态：**流程依据用户描述；operation 名、payload、角色及设备命令附录均未确认，未注册、未实施。** 本文给出便于 WMS/ECS 对接讨论的最小合同建议。共用信封、身份、事务见[交互索引](workline-business-api.md)。
+状态：**对接草案，未注册、未实施。** 职责边界、接口字段和交互流程见正文；三个粗分专用 operation、拟议共用货架离场合同、扩展字段约束和设备附录待对端确认，集中见第 7 节。
 
-## 1. 一次作业是什么
+## 简介：完整交互顺序
 
-一次作业是“一个物料在一条粗分线的一次明确经过”，不是一个物料码永久只能作业一次。扫描设备事实触发受理，WES 请求 WMS 验证及 GRN 绑定，根据决定分流；正常通过后分配储位并指挥机械臂搬运，最后报告结果。
+| 路径 | 步骤 | 方向 | Operation / Event / Command（点击跳转） | 交互 | 推进条件 |
+| --- | --- | --- | --- | --- | --- |
+| 共用 | 1 | ECS → WES | Event：[SCAN_COMPLETED](#ecs-scan-completed) | 上报原始条码和检测信息 | WES 可靠保存扫码事实 |
+| 共用 | 2 | WES → WMS | Operation：[inbound.coarse_sorting.validate_bind@v1](#wms-validate-bind) | 验证及 GRN 绑定 | WMS 返回 `OK + binding_id`，或 `NG + reason_code` |
+| 正常 | 3 | WES → ECS | Command：[MOVE_FORWARD](#ecs-move-forward) | 下发移动命令 | WMS 验证通过 |
+| 正常 | 4 | ECS → WES | Result：[原 MOVE_FORWARD 命令](#ecs-move-forward-result) | 回传原移动命令的执行结果 | 明确移动完成后才申请箱格 |
+| 正常 | 5 | WES → WMS | Operation：[inbound.coarse_sorting.storage_allocate@v1](#wms-storage-allocate) | 沿原 `binding_id` 请求箱格分配，WMS 检查工作点位的在位架及可用箱格 | 返回直接分配、补架或换架决定 |
+| 补架 | 5.1 | WES → WMS → RCS | Operation：[transport.task.submit@v1](#transport-rack-in) | 按 WMS 方案将新架送入指定工作点位 | 提交接纳后继续等待原搬运结果 |
+| 补架 | 5.2 | WMS → WES | Operation：[transport.task.resulted@v1](#transport-rack-in-result) | 回传原新架补入任务结果 | 原任务已应用成功，且架号、目标工作点位及约定面向匹配 |
+| 换架 | 5.1 | WES → WMS | Operation：[rack.departure_decide@v1](#wms-rack-departure) | 请求旧架离场去向 | READY 冻结原去向；WAIT 保留等待条件 |
+| 换架 | 5.2 | WES → WMS → RCS | Operation：[transport.task.submit@v1](#transport-rack-out) | 按原 READY 去向搬离旧架 | 提交接纳后继续等待原搬运结果 |
+| 换架 | 5.3 | WMS → WES | Operation：[transport.task.resulted@v1](#transport-rack-out-result) | 回传原旧架搬离任务结果 | 明确完成原旧架搬离，才进入补架 5.1～5.2 |
+| 补架 / 换架 | 5.4 | WES → WMS | Operation：[inbound.coarse_sorting.storage_allocate@v1](#wms-storage-reallocate) | 货架明确到位后，使用原 `binding_id`、新 `operation_id` 重新分配 | 取得当前在位新架上的有效箱格，才进入正常步骤 6 |
+| 正常 | 6 | WES → ECS | Command：[PUT_TO_BIN](#ecs-put-to-bin) | 下发入箱命令 | 已取得有效的放料目标 |
+| 正常 | 7 | ECS → WES | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result) | 回传原入箱命令的执行结果 | 明确物理放料完成 |
+| 正常 | 8 | WES → WMS | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report) | 反馈原绑定及目标箱格的物理完成事实 | WMS 返回 `RECORDED / DUPLICATE` |
+| NG | 3 | WES → ECS | Command：[MOVE_TO_NG](#ecs-move-to-ng) | 下发搬至对应区域 NG 平台的命令 | WMS 验证返回 `NG + reason_code` |
+| NG | 4 | ECS → WES | Result：[原 MOVE_TO_NG 命令](#ecs-move-to-ng-result) | 回传原 NG 搬运命令的执行结果 | 明确结果后保存；NG 成功不触发正常入箱反馈 |
 
-业务经过身份与收据身份分开：相同 Event 重试复用原经过；同码再次真实进入是新经过。**物料码、设备码、WES 接收时间都不能单独证明新经过**。需与 ECS 确认可稳定关联本次到位的 occurrence/visit 标识或等价机制，以及传递方式和重放规则。现有 Event 公共信封没有 event_id，不擅自给它增加必填字段。
+表中三个粗分 operation 名及扩展字段为候选；旧架去向复用 `rack.departure_decide@v1`，搬架复用现有 Transport。ECS Result 共用 `POST /api/v1/callback/result`，按原 `command_code + device_code` 关联；Transport 结果走 `POST /api/v1/wms/events`，按原 `transport_task_id` 关联，两者不混用。
 
-候选业务 code 为 `coarse_sorting`。候选角色 `SORT_CONVEYOR` 表示负责扫码及分流的逻辑设备，`SORT_ARM` 表示搬运机械臂；若实际扫码和分流属于不同设备，应按实际合同拆角色，不能为了少配字段合并身份。`Sort_SCAN1` 若是设备码，属于工作线实际绑定，不是写死的业务角色。
+步骤 1～2 为共用流程，随后按 WMS 决定进入正常步骤 3～8 或 NG 步骤 3～4。正常步骤 5 按需进入补架或换架子流程；货架明确到位后重新请求分配，不直接跳到入箱。NG 路径不执行正常放行、箱格分配及入箱；NG 报告与业务闭合仍待确认。任何提交 ACK 均不代表物理完成。
 
-储位来自 WMS。若机械臂需要本地 INLET 等固定交接位，则在业务声明中增加经确认的位置槽；不能把动态目标储位都预先登记为工作线固定槽。
+设备参考：《SMT粗分机ECS接口调用说明书》v3.3（2026-09-27，源文件位于 `wes_backend/docs/hardware/SMT粗分机接口调用说明书.pdf`）。设备说明书提供命令和设备参考，接口以本文定义及双方确认的合同为准；待确认项集中见第 7 节。公共信封、结果读取及事务分别见[交互索引](workline-business-api.md)、[出站结果](outbound-results.md)和[事务配方](business-transaction-recipes.md)。
 
-## 2. 正常与 NG 路径
+## 1. 职责边界与关联方式
+
+| 参与方 | 职责 |
+| --- | --- |
+| 粗分设备 / ECS | 自主取料、检测和扫码，上报原始扫码事实；负责入口/出口缓存、运动互锁、设备执行及硬件异常处理；关联命令与实物并回传明确结果 |
+| WES | 可靠接收扫码事实，原样转交扫码内容；请求 WMS 决定，按顺序下发 ECS 命令；按补/换架决定提交 Transport、消费原搬运结果并在明确到位后重新分配；保存原身份和目标，仅凭明确物理完成向 WMS 反馈 |
+| WMS | 解析条码、验证业务条件及绑定 GRN；掌握工作点位的货架在位信息，决定直接分配、补架或换架，选择新架并提供补入方案；通过通用 rack.departure_decide@v1 决定旧架去向；对接 RCS、回传搬运结果并负责内部落库和库存处理 |
+
+- ECS 上报原始条码，WES 原样转交，条码业务内容由 WMS 解析。WES 负责请求结构、字段类型及约定限额的校验。
+- 信息链为 **原始 `barcode` → `binding_id` → 原放料目标 → 物理完成反馈**。
+- `binding_id` 由 WMS 在验证及 GRN 绑定成功后返回，供箱格分配和物理完成反馈使用。装载记录、内部记录 ID 及库存处理由 WMS 管理。
+- 本盘厚度和直径统一使用数值字段 `reel_thickness`、`reel_diameter`，示例分别为 `20`、`15`。ECS 上报后由 WES 原样转交 WMS，不改名、不转字符串、不自行换算单位；测量单位和精度见第 7 节。
+- 本系统目标草案将 `reel_totalthickness` 定义为数值类型，表示**料格内当前已存储物料的总高度，不包含本次待放入物料**。空料格为 `0`；相对设备 v3.3 的类型调整、数值语义、单位和精度均待 ECS 确认，本文示例按 mm 表示，见第 5 节差异说明。
+- WMS 已掌握工作点位的货架在位信息：无架则补架，有架但无可用箱格则换架，有架且可分配才返回有效箱格。WES 不根据条码缺失、超时或本地状态猜测无架；箱格分配不依赖扫码时的旧料箱清单。
+- WES 负责补/换架的业务顺序和 Transport 请求关联；RCS/MCS 与 ECS 负责 AGV 执行、门禁及现场互锁。WES 不管理入口/出口缓存数量、不实现 AGV 路径调度、硬件恢复或自动补偿。
+- 本系统拟由 ECS 根据设备及动作管理固定取放位置，包括输送线入口/出口、机械臂取料位、出料位置和对应区域 NG 平台。目标合同中 WES 不配置或传递这些固定位置，只传递业务关联及 WMS 返回的动态箱格参数；这是相对设备 v3.3 的协议调整，尚待 ECS 确认，见第 5 节。
+- 同一条码可能再次真实进料，`barcode` 不作为作业或命令唯一键。WES 内部保存原扫码事实及其执行关联；同一 Event 重放复用原执行。
+
+## 2. 正常与 NG 交互
+
+流程按共用入口、正常处理、NG、补架和换架分图。节点标明责任方，失败或未知结果在对应步骤旁分支。绿色表示明确到位/收妥，橙色表示 NG 待确认，红色表示保留原执行并恢复或核对。
+
+### 2.1 共用入口与业务分流
 
 ```mermaid
-sequenceDiagram
-    participant ECS as ECS/粗分设备
-    participant WES as WES 粗分业务
-    participant WMS as WMS
-    ECS->>WES: 扫码 Event（本次经过、物料码）
-    WES-->>ECS: 可靠受理 ACK
-    WES->>WMS: CS-WMS-01 验证及 GRN 绑定
-    WMS-->>WES: OK / NG
-    alt NG
-        WES->>ECS: MOVE_NG
-        ECS->>WES: 原命令 Result
-        Note over WES,WMS: NG 是否报告及结束条件待确认
-    else OK
-        WES->>ECS: MOVE_FORWARD
-        ECS->>WES: 原命令 Result
-        Note over WES: 仅匹配原命令 SUCCESS 才继续
-        WES->>WMS: CS-WMS-02 分配储位
-        WMS-->>WES: 分配结果
-        WES->>ECS: 机械臂搬到已分配储位
-        ECS->>WES: 原机械臂 Result
-        WES->>WMS: CS-WMS-03 执行结果报告
-        WMS-->>WES: 原报告收妥
-        Note over WES: 正常作业闭合
-    end
+%%{init: {"htmlLabels":false,"theme":"base","flowchart":{"htmlLabels":false,"padding":18,"nodeSpacing":36,"rankSpacing":42,"curve":"linear"},"themeVariables":{"fontFamily":"sans-serif","fontSize":"18px","primaryColor":"#f8fafc","primaryTextColor":"#1e293b","primaryBorderColor":"#94a3b8","lineColor":"#64748b"}}}%%
+flowchart TB
+    scan["ECS｜上报扫码事实"]
+    accept["WES｜可靠保存，原样提交验证"]
+    validate{"WMS｜验证及 GRN 绑定"}
+    normal["WES｜进入正常流程"]
+    ng["WES｜进入 NG 流程"]
+    pending["WES｜保留原请求，恢复或核对"]
+    scan --> accept --> validate
+    validate -->|OK + binding_id| normal
+    validate -->|NG + reason_code| ng
+    validate -->|协议拒绝 / 响应未知| pending
+    classDef normal fill:#eaf4ee,stroke:#3d7651,color:#163c25
+    classDef ngBranch fill:#fff4e5,stroke:#b87418,color:#633d08
+    classDef pending fill:#fbeeee,stroke:#af4b4b,color:#6f2525
+    class normal normal
+    class ng ngBranch
+    class pending pending
 ```
 
-图中的每根消息跨越提交和等待，不是一条跨系统数据库事务。Event ACK、WMS 业务 OK、滚筒 SUCCESS、机械臂 SUCCESS、WMS 报告收妥是五个不同节点。
+WMS 返回 OK 后进入第 2.2 节，返回业务 NG 后进入第 2.3 节；协议拒绝或响应未知不触发 NG 搬运。
 
-## 3. WMS Operation 建议清单
+### 2.2 正常处理与异常出口
 
-下列 `CS-WMS-*` 是文档定位号，**不是线上 operation 字符串**。候选 operation 名只供确认，不能直接放入注册表。也不从人工业务借用已有 operation 来“先跑通”。
+```mermaid
+%%{init: {"htmlLabels":false,"theme":"base","flowchart":{"htmlLabels":false,"padding":18,"nodeSpacing":36,"rankSpacing":42,"curve":"linear"},"themeVariables":{"fontFamily":"sans-serif","fontSize":"18px","primaryColor":"#f8fafc","primaryTextColor":"#1e293b","primaryBorderColor":"#94a3b8","lineColor":"#64748b"}}}%%
+flowchart TB
+    start["WES｜下发 MOVE_FORWARD"]
+    move{"ECS｜移动结果"}
+    movePending["WES｜保存原命令<br/>等待硬件处理或核对"]
+    request["WES｜请求箱格分配"]
+    allocate{"WMS｜分配结果"}
+    rackPrepare["WES｜转补架 / 换架<br/>见 2.4 / 2.5"]
+    requestPending["WES｜保留原请求<br/>恢复或核对"]
+    command["WES｜保存原目标<br/>下发 PUT_TO_BIN"]
+    put{"ECS｜入箱结果"}
+    putPending["WES｜保存原命令<br/>不报告完成、不重搬"]
+    report["WES｜保存完成事实<br/>反馈原绑定与目标"]
+    receive{"WMS｜报告响应"}
+    reportPending["WES｜保留物理完成<br/>仅恢复原报告或核对"]
+    done["WES｜反馈义务结束"]
+    start --> move
+    move -->|明确移动完成| request
+    move -->|FAILED / 结果未知| movePending
+    request --> allocate
+    allocate -->|取得有效箱格参数| command
+    allocate -->|补架 / 换架决定| rackPrepare
+    allocate -->|协议拒绝 / 响应未知| requestPending
+    command --> put
+    put -->|明确指定箱格已放料| report
+    put -->|FAILED / 结果未知| putPending
+    report --> receive
+    receive -->|RECORDED / DUPLICATE| done
+    receive -->|未收妥 / 响应未知| reportPending
+    classDef pending fill:#fbeeee,stroke:#af4b4b,color:#6f2525
+    classDef completed fill:#eaf4ee,stroke:#3d7651,color:#163c25
+    class movePending,requestPending,putPending,reportPending pending
+    class done completed
+```
 
-| 文档号 / 候选 operation（DRAFT） | 方向 / 端点 | 建议请求 data | 建议正常响应 |
-| --- | --- | --- | --- |
-| CS-WMS-01：`inbound.coarse_sorting.validate_bind@v1` | WES → WMS / decisions | `visit_id,workline_code,material_code,scanned_at`；GRN 是输入还是由 WMS 推导待确认 | `200/DECIDED`，data 的判别字段 `result=OK\|NG`；OK 返回本次业务绑定引用（如 binding_id/grn_id），NG 返回已确认枚举 reason_code |
-| CS-WMS-02：`inbound.coarse_sorting.storage_allocate@v1` | WES → WMS / decisions | `visit_id,material_code` 及原绑定引用；是否需 workline_code 由 WMS 确认 | `200/DECIDED`，建议 `result=ALLOCATED`，返回 allocation_id 及可执行 target；库存预留/有效期语义待确认 |
-| CS-WMS-03：`inbound.coarse_sorting.execution_report@v1` | WES → WMS / facts | `visit_id,material_code,allocation_id`、原搬运结果及已确认目标、completed_at；失败/NG 是否适用待确认 | `200/RECORDED\|DUPLICATE`，原报告收妥；与库存落账完成的关系待确认 |
+只有原移动命令明确完成后才申请箱格。WMS 返回补架/换架时转相应子流程，货架明确到位后以新请求重新分配；只有 ALLOCATED 允许入箱。只有原入箱命令明确证明指定箱格已放料后才报告物理完成。报告未收妥时保留物理完成事实，只恢复原报告或核对，不再搬运。
 
-这是**三项业务接口建议**，不是已确认 WMS API。以下字段语义也属于建议，确认前不生成空模型或宽松 dict 合同：
+### 2.3 NG 处理与异常出口
 
-| 字段 | 需要锁定的语义 |
+```mermaid
+%%{init: {"htmlLabels":false,"theme":"base","flowchart":{"htmlLabels":false,"padding":18,"nodeSpacing":36,"rankSpacing":42,"curve":"linear"},"themeVariables":{"fontFamily":"sans-serif","fontSize":"18px","primaryColor":"#f8fafc","primaryTextColor":"#1e293b","primaryBorderColor":"#94a3b8","lineColor":"#64748b"}}}%%
+flowchart TB
+    command["WES｜保存 NG 原因<br/>下发 MOVE_TO_NG"]
+    execute["ECS｜搬至对应 NG 平台"]
+    result{"WES｜核对原命令结果"}
+    pending["WES｜保存原结果<br/>等待硬件处理或核对"]
+    completed["WES｜保存 NG 搬运完成<br/>NG 报告与业务闭合：待确认"]
+    command --> execute --> result
+    result -->|明确送达 NG 平台| completed
+    result -->|FAILED / 结果未知| pending
+    classDef pending fill:#fbeeee,stroke:#af4b4b,color:#6f2525
+    classDef ngBranch fill:#fff4e5,stroke:#b87418,color:#633d08
+    class completed ngBranch
+    class pending pending
+```
+
+NG 搬运成功只保存送达 NG 平台的事实，不触发正常入箱反馈；NG 报告与业务闭合仍为待确认。硬件异常处理由 ECS/硬件方负责，WES 保留原命令和结果。
+
+### 2.4 无在位架：补架
+
+```mermaid
+%%{init: {"htmlLabels":false,"theme":"base","flowchart":{"htmlLabels":false,"padding":18,"nodeSpacing":36,"rankSpacing":42,"curve":"linear"},"themeVariables":{"fontFamily":"sans-serif","fontSize":"18px","primaryColor":"#f8fafc","primaryTextColor":"#1e293b","primaryBorderColor":"#94a3b8","lineColor":"#64748b"}}}%%
+flowchart TB
+    submit["WES｜按 WMS 新架方案<br/>提交 RACK_MOVE"]
+    execute["WMS / RCS｜执行补架"]
+    result{"WES｜核对原搬运结果"}
+    retry["WES｜原 binding_id + 新请求身份<br/>重新请求箱格分配"]
+    pending["WES｜保留原搬运任务<br/>不分配、不入箱、不重复叫架"]
+    submit --> execute --> result
+    result -->|指定新架明确到达原工作点位| retry
+    result -->|失败 / 取消 / 结果未知| pending
+    classDef pending fill:#fbeeee,stroke:#af4b4b,color:#6f2525
+    class pending pending
+```
+
+Transport 接纳不是货架到位；只有原任务的已应用成功结果匹配新架、目标工作点位和约定面向后，才发起新的分配决定。新决定仍由 WMS 检查当前在位架，不能把补架方案直接当作可用箱格。
+
+### 2.5 有架但无可用箱格：换架
+
+```mermaid
+%%{init: {"htmlLabels":false,"theme":"base","flowchart":{"htmlLabels":false,"padding":18,"nodeSpacing":36,"rankSpacing":42,"curve":"linear"},"themeVariables":{"fontFamily":"sans-serif","fontSize":"18px","primaryColor":"#f8fafc","primaryTextColor":"#1e293b","primaryBorderColor":"#94a3b8","lineColor":"#64748b"}}}%%
+flowchart TB
+    request["WES｜请求旧架去向<br/>departure_decide"]
+    decision{"WMS｜离场决定"}
+    wait["WES｜保存 WAIT 到期点<br/>到期或新事实后重新决定"]
+    submit["WES｜冻结原 READY 去向<br/>提交旧架 RACK_MOVE"]
+    result{"WES｜核对原旧架搬离结果"}
+    incoming["WES｜进入 2.4 补架流程<br/>新架到位后重新请求分配"]
+    requestPending["WES｜保留原决定请求<br/>恢复或核对"]
+    movePending["WES｜保留原旧架任务<br/>不补新架、不换号重搬"]
+    request --> decision
+    decision -->|READY| submit
+    decision -->|WAIT| wait
+    decision -->|协议拒绝 / 响应未知| requestPending
+    submit --> result
+    result -->|原旧架明确完成搬离| incoming
+    result -->|失败 / 取消 / 结果未知| movePending
+    classDef pending fill:#fbeeee,stroke:#af4b4b,color:#6f2525
+    class wait,requestPending,movePending pending
+```
+
+旧架目的地只能来自原 `rack.departure_decide@v1` 的 READY，不在箱格分配响应中夹带，不固定写死。正常换架顺序为旧架明确搬离 → 补入新架明确到位 → 原绑定重新分配；不以旧架离场 ACK 或资源闭合代替搬离成功。
+
+**ACK 仅代表受理，不代表物理完成。** 图中省略逐条 ACK；硬件处理或设备恢复不自动解锁后续动作，须依原命令的明确结果和已确认恢复合同处理。通信恢复继续保存的原身份；有效 WAIT 后重新求值、货架明确到位后重新分配使用新 operation_id，不重做原物理动作。
+
+跨系统消息不构成一条数据库事务。WMS 收妥后结束反馈义务，不将其解释成整箱入库或库存可用。无在位架时补架，在位架无可用箱格时换架；无新架可补等暂不可执行情况见第 7 节 P05。
+
+可识别的扫码及检测事实提交 WMS，由 WMS 决定 OK/NG。完全读不到码、PLC 自行送 NG 且无事件上报的路径由硬件方处理。已上报检测 NG 的处理约束见第 7 节 P04。
+
+## 3. 三个粗分 WMS 接口与复用交互
+
+`CS-WMS-*` 为本文定位号；三个粗分专用 operation 名为候选名。旧架去向使用通用 `rack.departure_decide@v1`，搬架使用[Transport](wms-transport.md)。
+
+| 文档号 / operation | 方向 / 端点 | 返回的业务含义 |
+| --- | --- | --- |
+| CS-WMS-01：`inbound.coarse_sorting.validate_bind@v1` | WES → WMS，`POST /api/v1/wes/decisions` | 验证及 GRN 绑定完成，或明确业务 NG |
+| CS-WMS-02：`inbound.coarse_sorting.storage_allocate@v1` | WES → WMS，`POST /api/v1/wes/decisions` | 检查 WMS 掌握的在位架，返回直接分配、补架或换架决定 |
+| CS-WMS-03：`inbound.coarse_sorting.execution_report@v1` | WES → WMS，`POST /api/v1/wes/facts` | 收妥原入箱物理完成事实 |
+| 复用：`rack.departure_decide@v1` | WES → WMS，`POST /api/v1/wes/decisions` | 为本次旧架离场返回 READY 去向或 WAIT |
+| 复用：`transport.task.submit@v1` | WES → WMS → RCS，`POST /api/v1/wes/transport-requests` | 接纳指定旧架搬离或新架补入任务，物理结果另行回调 |
+| 复用：`transport.task.resulted@v1` | WMS → WES，`POST /api/v1/wms/events` | 原 RACK_MOVE 的搬运结果及版本 |
+
+公共规则：每个新的业务请求使用独立、小写标准连字符 UUIDv7 `operation_id`；响应回显原 ID，不增加 `operation` 字段。`timestamp` 为 UTC Unix 毫秒整数。通信重试必须复用原 ID、原时间戳及完整冻结正文；货架到位后的重新分配属于新业务求值，使用新 ID。顶层 `code` 为协议结果；有效 DECIDED 响应的 `data.result` 为业务决定，完成报告的 RECORDED/DUPLICATE 则使用空对象 `data`。仅 HTTP 200 不足以推进。
+
+以下所有编号、条码、设备绑定及时间均为示例，不构成现场配置。
+
+<a id="wms-validate-bind"></a>
+
+### 3.1 验证及 GRN 绑定
+
+WES 原样转交料盘条码；WMS 解析条码、验证收货条件并完成 GRN 绑定，全部成功才返回 `OK`。
+
+| 请求字段 | 含义 |
 | --- | --- |
-| visit_id | WES 本次执行的稳定身份；如何从原设备经过建立唯一关联需先确认。与 operation_id 各司其职 |
-| material_code | 原扫码与归一化规则、允许字符/长度、多件同码问题；不默认沿用人工箱码的 -B/-C 规则 |
-| binding_id / grn_id | 是一个还是两个标识、由谁生成、原请求重放是否返回同一绑定；不能由 WES 猜 GRN |
-| allocation_id / target | 分配还是预留、是否过期、目标类型/层位/坐标、机器人可识别编码，以及原响应重放稳定性 |
-| result / reason_code | 业务 NG 与协议拒绝分开；NG 是可执行分流决定，不是把请求当作未接纳 |
-| completed_at / 执行证据 | 形成事实的时间源；报告哪些原命令/设备标识、物理成功/失败及可信位置，不额外上传内部日志 |
+| `workline_code` | 作业工作线；示例 `COARSE-A` 可唯一确定 A 区执行单元 |
+| `barcode` | ECS 上报的原始料盘条码 |
+| `scanned_at` | ECS 原 `scan_time`，不使用 WES 接收时间代替 |
+| `reel_diameter` | ECS 上报的本盘直径，数值类型；单位和精度待 ECS 确认 |
+| `reel_thickness` | ECS 上报的本盘厚度，数值类型；示例按 mm 表示，单位和精度待 ECS 确认 |
+| `inspection_result` | 取自 ECS 事件 `data.result` 的综合检测结论；与条码解析独立 |
 
-若有“暂时不能绑定/暂时无储位”的场景，再确认 WAIT 联合、重求值条件、retry_after_ms 和最大等待策略；当前用户只明确验证 OK/NG，**不能假定已有 WAIT**。协议 UNAVAILABLE、内容冲突、确定拒绝和技术恢复继续沿公共信封规则，业务分支/HTTP/code 联合仍需逐项确认。
+请求：
 
-## 4. ECS Event / Command / Result 建议清单
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43901",
+  "operation": "inbound.coarse_sorting.validate_bind@v1",
+  "timestamp": 1793206800000,
+  "data": {
+    "workline_code": "COARSE-A",
+    "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
+    "scanned_at": 1793206799000,
+    "reel_diameter": 15,
+    "reel_thickness": 20,
+    "inspection_result": "OK"
+  }
+}
+```
 
-| 消息 | 名称与状态 | data / params / 结果要求 |
+成功响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43901",
+  "code": "DECIDED",
+  "timestamp": 1793206800100,
+  "data": {
+    "result": "OK",
+    "binding_id": "BIND-0001"
+  }
+}
+```
+
+`binding_id` 关联原条码、解析后的物料身份、检测信息及 GRN，必要时关联 GRN 行。WES 保存该引用，不自行解析或猜测物料身份、GRN。相同请求重放返回原决定和原绑定。
+
+业务 NG 响应（HTTP 200；与上述成功响应为互斥示例）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43901",
+  "code": "DECIDED",
+  "timestamp": 1793206800100,
+  "data": {
+    "result": "NG",
+    "reason_code": "BARCODE_INVALID"
+  }
+}
+```
+
+`BARCODE_INVALID` 为待确认原因码示例。NG 不返回可供正常分配的绑定；通信失败、系统不可用和格式错误不包装成业务 NG。本示例暂按 WMS 可由条码和工作线确定 GRN；所需收货上下文及 NG 绑定副作用见第 7 节。
+
+<a id="wms-storage-allocate"></a>
+
+### 3.2 箱格分配
+
+仅在原 `MOVE_FORWARD` 明确完成后调用。通过 `binding_id` 引用原业务信息，不重复提交料盘条码或拆分字段。
+
+WMS 已掌握工作点位的货架在位信息，并通过原 `binding_id` 找到工作线和对应工作点位；依据当前在位架及其箱格业务信息决定后续。请求 data 为 `binding_id`。货架更换后，WMS 按当前在位架及其箱格信息重新分配。
+
+请求：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43902",
+  "operation": "inbound.coarse_sorting.storage_allocate@v1",
+  "timestamp": 1793206805000,
+  "data": {
+    "binding_id": "BIND-0001"
+  }
+}
+```
+
+三个业务分支均使用 HTTP 200 / DECIDED，`data.result` 为候选判别字段：
+
+| 当前工作点位 | data.result | 返回内容 / WES 动作 |
 | --- | --- | --- |
-| 扫码 Event | 候选 `SCAN_COMPLETED`，角色 SORT_CONVEYOR 或实际独立扫码角色，待确认 | 建议 data 包含 material_code 与双方确认的本次经过关联字段；是否一条事件对应一件物料须明确 |
-| 正常放行 Command | `MOVE_FORWARD` 为用户给定业务动作，正式 task_type/附录待确认 | 参数要能定位原经过/物料；若设备仅允许无参数，必须确认物理占位、顺序和结果关联足以消除歧义 |
-| NG 分流 Command | `MOVE_NG` 为用户给定动作，附录待确认 | NG 目标/交接点、失败和人工处置方式需确认；不能默认它等于人工线 MOVE_LEFT |
-| 机械臂 Command | **task_type 待 ECS 确认** | 原物料/经过、可执行 target、必要抓取参数，不能预设叫 PICK_AND_PUT 或用 Transport 的 RACK_BIN_SLOT 代替机器人合同 |
-| 三类命令 Result | 共用 `/api/v1/callback/result`，不另造 Event 名 | 通用 result=SUCCESS/FAILED，按原 command_code/device_code/附录校验；data 明确任务完成范围和必要终位，error 使用约定 code/msg |
+| 有在位架，且能分配可用箱格 | `ALLOCATED` | 当前架和工作点位、精确箱格及放料参数；保存后允许 PUT_TO_BIN |
+| 无在位架 | `REPLENISH_REQUIRED` | 工作点位与新架补入方案；完成 Transport 到位后重新请求分配 |
+| 有在位架，但不能分配可用箱格 | `REPLACE_REQUIRED` | 当前旧架、工作点位及新架补入方案；先独立决定旧架去向并搬离，再补架、重新分配 |
 
-粗分单机的机械臂指令按本次用户流程通过 ECS。只有确认为跨设备的 Transport 业务时才另行讨论 Transport 接入；不因为“都是搬运”自动转给 RCS。
+以下三种响应互斥，表示同一请求在不同现场业务条件下的示例。补/换架响应不携带可供提前执行的箱格和原高度；没有可用箱格也不等同料盘 NG，不能据此调用 MOVE_TO_NG。
 
-## 5. 建议业务状态和执行许可
+#### 3.2.1 直接分配：ALLOCATED
 
-这些是本业务的可读状态建议，不是平台通用流程枚举：
+成功响应（HTTP 200）：
 
-| 阶段 | 进入依据 | 允许的下一动作 |
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43902",
+  "code": "DECIDED",
+  "timestamp": 1793206805100,
+  "data": {
+    "result": "ALLOCATED",
+    "rack_position_code": "COARSE-A-OUT",
+    "rack_id": "RACK-OLD-01",
+    "bin_code": "BIN-A002",
+    "bin_location": "2",
+    "bin_cell_location": "1",
+    "bin_type": "3",
+    "reel_totalthickness": 120
+  }
+}
+```
+
+| 响应字段 | 含义 |
+| --- | --- |
+| `result=ALLOCATED` | 本次放料目标和参数已确定，不承诺已生成 WMS 内部装载记录 |
+| `rack_position_code / rack_id` | WMS 确认的目标工作点位及当前在位架，供 WES 保存本次目标上下文；不下发为 ECS 固定位置参数 |
+| `bin_code` | 真实目标料箱条码，不等同于设备箱位 |
+| `bin_location` | 目标料箱所在设备箱位，取值为 `"1"`～`"4"` |
+| `bin_cell_location` | 目标箱内格位，合法范围须与箱型及 ECS 合同匹配 |
+| `bin_type` | `"3"` 为三格箱，`"6"` 为六格箱 |
+| `reel_totalthickness` | 数值类型；料格内当前已存储物料的总高度，不包含本次待放入物料 |
+
+例如料格内当前已存储物料的总高度为 120、本盘厚度为 20，响应仍为数值 `120`，不返回 `140`。WES 不自行累加或推导当前物理高度。
+
+WES 保存原目标及参数，用于唯一的入箱命令及后续反馈。同一原请求重放须返回原决定，不重新挑选箱格、货架或搬运方案。WMS 负责容量、并发及目标有效性，ECS 负责设备互锁。
+
+#### 3.2.2 无在位架：REPLENISH_REQUIRED
+
+响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43902",
+  "code": "DECIDED",
+  "timestamp": 1793206805100,
+  "data": {
+    "result": "REPLENISH_REQUIRED",
+    "rack_position_code": "COARSE-A-OUT",
+    "incoming_rack": {
+      "rack_id": "RACK-NEW-01",
+      "target_face": "90"
+    }
+  }
+}
+```
+
+WMS 负责选择新架，`incoming_rack` 返回架号及约定到位面向；`rack_position_code` 为补入目标。WES 按 `incoming_rack.rack_id` 发起 Transport，起点使用 `source.kind=RACK`、`source.location_code=rack_id`，由 WMS/RCS 定位货架。模板与现场配置的确认事项见第 7 节 P14。
+
+WES 保存决定和补入方案，登记唯一新架补入任务；明确到位后执行第 3.2.4 节，不提前创建 PUT_TO_BIN。
+
+#### 3.2.3 有架但无法分配：REPLACE_REQUIRED
+
+响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43902",
+  "code": "DECIDED",
+  "timestamp": 1793206805100,
+  "data": {
+    "result": "REPLACE_REQUIRED",
+    "rack_position_code": "COARSE-A-OUT",
+    "current_rack": {
+      "rack_id": "RACK-OLD-01",
+      "current_face": "90"
+    },
+    "incoming_rack": {
+      "rack_id": "RACK-NEW-01",
+      "target_face": "90"
+    }
+  }
+}
+```
+
+`current_rack` 为 WMS 确认的当前在位旧架及已知面向；无法确认面向时显式使用 `null`，不得用计划面向补造。无可用箱格不限定为满架，也可能由箱型、尺寸或装载规则导致。
+
+此响应只给出换架需求、当前架和新架补入方案，**不返回旧架目的地**。WES 必须先按第 3.4 节获取旧架去向，再按第 3.5 节依次完成旧架搬离和新架补入。
+
+<a id="wms-storage-reallocate"></a>
+
+#### 3.2.4 货架明确到位后重新分配
+
+补架或换架后的新架补入成功，且原 Transport 的已应用结果与新架、工作点位和约定面向匹配后，继续使用原 `binding_id`，生成**新的**分配请求身份。此前补/换架决定已是原请求的确定结果，重放原请求只能取回原决定，不能用于重新分配。
+
+请求：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43915",
+  "operation": "inbound.coarse_sorting.storage_allocate@v1",
+  "timestamp": 1793206861000,
+  "data": {
+    "binding_id": "BIND-0001"
+  }
+}
+```
+
+新分配成功响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43915",
+  "code": "DECIDED",
+  "timestamp": 1793206861100,
+  "data": {
+    "result": "ALLOCATED",
+    "rack_position_code": "COARSE-A-OUT",
+    "rack_id": "RACK-NEW-01",
+    "bin_code": "BIN-N002",
+    "bin_location": "2",
+    "bin_cell_location": "1",
+    "bin_type": "3",
+    "reel_totalthickness": 0
+  }
+}
+```
+
+这次目标是新架上的 `BIN-N002`，不复用旧架上的 `BIN-A002` 或旧原总高度。WES 保存新目标后才下发入箱命令，完成反馈也关联这一新目标；第 3.3、5.2 节保留的是直接分配路径示例，补/换架后的同类消息使用此处的新目标参数。
+
+重新分配沿用原绑定及 MOVE_FORWARD 完成事实。新分配请求自身的通信重试复用其 ID 和冻结正文。若已确认新架到位，而 WMS 新决定仍指向旧架或与原工作点位矛盾，应保留证据核对，不立即再叫一架。
+
+同一工作点位已有在途补/换架作业时，多个等待分配的料盘关联同一作业及原 Transport，不能逐盘重复发起搬架。恢复后各料盘沿各自原 `binding_id` 重新分配；WMS 应保证并发决定的搬运方案和箱格有效性，WES 不以通信失败触发新的补/换架。
+
+<a id="wms-execution-report"></a>
+
+### 3.3 物理完成反馈
+
+仅在原 `PUT_TO_BIN` 的可信成功结果证明指定箱格放料完成后发送。本接口描述正常入箱完成；NG 搬运成功不作为正常入箱反馈。
+
+请求：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43903",
+  "operation": "inbound.coarse_sorting.execution_report@v1",
+  "timestamp": 1793206815000,
+  "data": {
+    "binding_id": "BIND-0001",
+    "bin_code": "BIN-A002",
+    "bin_location": "2",
+    "bin_cell_location": "1",
+    "command_code": "CMD-COARSE-A-PUT-0001",
+    "device_code": "RS-OUTPUT-ARM-01",
+    "completed_at": 1793206814000
+  }
+}
+```
+
+| 请求字段 | 含义 |
+| --- | --- |
+| `binding_id` | 原验证成功的绑定引用 |
+| `bin_code / bin_location / bin_cell_location` | 原已完成命令关联的真实目标料箱、设备箱位及格位 |
+| `command_code / device_code` | 明确完成的原入箱命令及执行设备 |
+| `completed_at` | 原 ECS Result 的 `finish_time`，不使用报告发送时间 |
+
+目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。失败、未知、超时均不提交本完成接口，也不推导装箱后总高度。
+
+首次收妥响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43903",
+  "code": "RECORDED",
+  "timestamp": 1793206815100,
+  "data": {}
+}
+```
+
+原报告重放响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43903",
+  "code": "DUPLICATE",
+  "timestamp": 1793206816100,
+  "data": {}
+}
+```
+
+WMS 根据原绑定、目标及完成事实处理内部落库，不要求返回内部记录 ID；重复报告不得重复增加装载数量或重复记账。`RECORDED / DUPLICATE` 表示原完成事实可靠收妥，WES 结束反馈义务。库存落账、库存可用与整箱入库的具体业务效果由 WMS 定义，不从公共收妥响应推断。
+
+<a id="wms-rack-departure"></a>
+
+### 3.4 换架前复用旧架离场去向决定
+
+通过 `POST /api/v1/wes/decisions` 调用本系统拟议的共用货架离场决定 `rack.departure_decide@v1`，供人工、粗分和自动线草案共同采用。名称和字段裁剪尚待 WMS/WES 确认，未注册、未实施，见[共用合同说明](workline-business-api.md#货架离场决定的拟议共用合同)。请求 data 包含 `rack_id`、`current_location`、`current_face`；WMS 根据货架和当前位置决定离场去向。响应为 READY 及目的地，或 WAIT 及等待间隔。
+
+上述三个请求字段均须存在；`current_location` 必须是已确认的 `RACK_POSITION`，`current_face` 在面向无法确认时显式为 `null`，不省略或使用计划面向代替。
+
+请求：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43910",
+  "operation": "rack.departure_decide@v1",
+  "timestamp": 1793206806000,
+  "data": {
+    "rack_id": "RACK-OLD-01",
+    "current_location": {
+      "type": "RACK_POSITION",
+      "location_code": "COARSE-A-OUT"
+    },
+    "current_face": "90"
+  }
+}
+```
+
+架号、当前工作点位和当前面向来自本次 WMS 在位决定及匹配的原业务事实。该决定只允许在旧架可交出时发起；与旧架直接关联的已创建入箱动作/搬运尚在途或结果未知时，先收口原动作，不因新的换架决定绕过已知依赖。已物理完成的反馈义务也须保留，不能因架已移走丢失。
+
+READY 响应（HTTP 200）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43910",
+  "code": "DECIDED",
+  "timestamp": 1793206806100,
+  "data": {
+    "result": "READY",
+    "rack_destination": {
+      "type": "RACK_POSITION",
+      "location_code": "RACK-RETURN-01"
+    }
+  }
+}
+```
+
+WES 冻结原 READY 的身份和 `rack_destination`，据此创建唯一旧架搬离任务。目的地类型为 `ZONE | RACK_POSITION`；示例使用精确工作位。不得固定回库区、从补架方案猜旧架去向，或按货架取“最新一条”决定代替原决定。
+
+WAIT 响应（HTTP 200，与 READY 为互斥示例）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43910",
+  "code": "DECIDED",
+  "timestamp": 1793206806100,
+  "data": {
+    "result": "WAIT",
+    "retry_after_ms": 1000
+  }
+}
+```
+
+WAIT 的 `retry_after_ms` 为 1～60000 的整数。保存有效 WAIT 及其固定到期点；到期或有新业务事实时以新 ID 重新请求旧架去向。协议不可用或响应未知仅恢复原请求。READY 是业务离场许可，不是搬离完成；现场门禁与互锁由 RCS/MCS、ECS 负责。
+
+### 3.5 补/换架的 Transport 交互
+
+整架搬运通过 `transport.task.submit@v1` 提交，`kind=RACK_MOVE`。WES → WMS → RCS 的提交入口为 `POST /api/v1/wes/transport-requests`；WMS → WES 的结果入口为 `POST /api/v1/wms/events`。协议及原任务结果读取分别见[Transport 合同](wms-transport.md)和[出站结果](outbound-results.md)。
+
+Transport 的 `source / target` 表达架级业务来源和目的地；ECS 固定取放位置由 ECS 管理。示例使用 `rcs_template_id=F01`；模板按货架类型和现场配置选定，对接确认事项见第 7 节 P14。
+
+旧架搬离、新架补入各有独立的 `transport_task_id` 和提交 `operation_id`，WES 内部保存稳定的 `client_request_id` 及其与本次补/换架的关系；内部调用身份不加入 wire。Transport 提交和回调的 ID 与单盘 `binding_id` 各司其职。
+
+<a id="transport-rack-out"></a>
+
+#### 3.5.1 旧架搬离
+
+仅换架路径需要。按第 3.4 节原 READY 去向提交：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43911",
+  "operation": "transport.task.submit@v1",
+  "timestamp": 1793206807000,
+  "data": {
+    "transport_task_id": "transport-coarse-a-out-0001",
+    "kind": "RACK_MOVE",
+    "rack_id": "RACK-OLD-01",
+    "rcs_template_id": "F01",
+    "source": {
+      "kind": "RACK_POSITION",
+      "location_code": "COARSE-A-OUT"
+    },
+    "target": {
+      "kind": "RACK_POSITION",
+      "location_code": "RACK-RETURN-01"
+    }
+  }
+}
+```
+
+接纳响应（HTTP 202）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43911",
+  "code": "RECEIVED",
+  "timestamp": 1793206807100,
+  "data": {
+    "transport_task_id": "transport-coarse-a-out-0001"
+  }
+}
+```
+
+<a id="transport-rack-out-result"></a>
+
+旧架搬离成功回调（WMS → WES）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43912",
+  "operation": "transport.task.resulted@v1",
+  "timestamp": 1793206830000,
+  "data": {
+    "transport_task_id": "transport-coarse-a-out-0001",
+    "kind": "RACK_MOVE",
+    "outcome_revision": 1,
+    "rack_id": "RACK-OLD-01",
+    "status": "SUCCEEDED",
+    "final_position": {
+      "kind": "RACK_POSITION",
+      "location_code": "RACK-RETURN-01"
+    }
+  }
+}
+```
+
+WES 收据受理响应（HTTP 202）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43912",
+  "code": "RECEIVED",
+  "timestamp": 1793206830100,
+  "data": {
+    "transport_task_id": "transport-coarse-a-out-0001"
+  }
+}
+```
+
+WES 业务必须通过原任务结果确认 SUCCEEDED 已有效应用、旧架身份和终位与冻结目标一致，且该终位不再是原工作点位，才提交新架补入。不能仅凭回调 HTTP 202、提交消息结束或任务资源闭合认定旧架搬离。目标为 ZONE 时按现有合同信任 WMS/RCS 解析出的终位，同时不能忽略终位仍在原工作点位等业务矛盾。
+
+<a id="transport-rack-in"></a>
+
+#### 3.5.2 新架补入
+
+无架补架直接执行此步；换架在原旧架明确搬离后执行。架号、目标工作点位及约定面向取原 WMS 补入方案；按架号构造 `source={kind: RACK, location_code: rack_id}`，由 WMS/RCS 定位货架：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43913",
+  "operation": "transport.task.submit@v1",
+  "timestamp": 1793206831000,
+  "data": {
+    "transport_task_id": "transport-coarse-a-in-0001",
+    "kind": "RACK_MOVE",
+    "rack_id": "RACK-NEW-01",
+    "rcs_template_id": "F01",
+    "source": {
+      "kind": "RACK",
+      "location_code": "RACK-NEW-01"
+    },
+    "target": {
+      "kind": "RACK_POSITION",
+      "location_code": "COARSE-A-OUT"
+    },
+    "target_face": "90"
+  }
+}
+```
+
+接纳响应（HTTP 202）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43913",
+  "code": "RECEIVED",
+  "timestamp": 1793206831100,
+  "data": {
+    "transport_task_id": "transport-coarse-a-in-0001"
+  }
+}
+```
+
+<a id="transport-rack-in-result"></a>
+
+新架到位成功回调（WMS → WES）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43914",
+  "operation": "transport.task.resulted@v1",
+  "timestamp": 1793206860000,
+  "data": {
+    "transport_task_id": "transport-coarse-a-in-0001",
+    "kind": "RACK_MOVE",
+    "outcome_revision": 1,
+    "rack_id": "RACK-NEW-01",
+    "status": "SUCCEEDED",
+    "final_position": {
+      "kind": "RACK_POSITION",
+      "location_code": "COARSE-A-OUT"
+    },
+    "arrival_face": "90"
+  }
+}
+```
+
+WES 收据受理响应（HTTP 202）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43914",
+  "code": "RECEIVED",
+  "timestamp": 1793206860100,
+  "data": {
+    "transport_task_id": "transport-coarse-a-in-0001"
+  }
+}
+```
+
+确认原任务已应用成功、`rack_id=RACK-NEW-01`、终位为原目标 `COARSE-A-OUT`、面向满足原约定后，才登记第 3.2.4 节新的箱格分配请求。这里只回到分配，不直接下发 PUT_TO_BIN。
+
+整架结果使用 `transport.task.resulted@v1`；不伪造整架的 `transport.task.member_position_changed@v1`，后者用于料箱成员里程碑。回调自己的 `operation_id` 由 WMS 生成，与 submit ID 不同，重报保持原身份；版本与冻结任务的校验沿用现有 Transport。
+
+#### 3.5.3 失败、取消与结果未知
+
+位置未知的回调示例（与上述新架成功结果为互斥场景，不覆盖已应用的成功结果）：
+
+```json
+{
+  "operation_id": "01a18363-1841-7463-91b2-9cb89ae43916",
+  "operation": "transport.task.resulted@v1",
+  "timestamp": 1793206860000,
+  "data": {
+    "transport_task_id": "transport-coarse-a-in-0001",
+    "kind": "RACK_MOVE",
+    "outcome_revision": 1,
+    "rack_id": "RACK-NEW-01",
+    "status": "FAILED",
+    "position_unknown": true,
+    "failure_code": "POSITION_UNKNOWN"
+  }
+}
+```
+
+当前 wire 没有 `status=UNKNOWN` 分支，位置未知按现有 FAILED + POSITION_UNKNOWN 表达；业务不能把它当作从未移动或确定不在目标。合法结果的收据响应仍为上文 RECEIVED，但是否已应用、是否满足后续条件必须另按原任务读取。
+
+- 旧架搬离失败、取消或结果未知：不补新架，不因任务 CLOSED 推断架位空出。
+- 新架补入失败、取消或结果未知：不重新分配有效箱格、不入箱、不换号再叫一架。
+- 确定拒绝/取消后的新业务尝试与通信恢复分开；若需再次决定或创建新搬运任务，须先按有效业务条件和已确认恢复规则处理，不能以超时自动替代原任务。
+- 请求与回调同身份的技术重报保持原字节；submit DUPLICATE 使用既有 HTTP 200 / DUPLICATE 合同，回调重复也沿用原版本/收据规则。任何接纳响应都不替代物理结果。
+
+## 4. ECS 设备、位置和扫码事件
+
+以下是说明书中的设备及 ECS 固定位置参考，用于理解设备交互和结果。固定位置由 ECS 管理，不作为 WES 工作线位置配置或命令参数。候选业务 code 为 `coarse_sorting`；逻辑角色分别对应入料机械臂、输送线和出料机械臂，由运行时绑定取得设备。
+
+| 交互 / 位置 | A 区 | B 区 |
 | --- | --- | --- |
-| 已受理扫码 | 原 Event 和本次经过唯一绑定、工作线可执行 | 登记唯一验证绑定请求 |
-| 等待验证绑定 | 保存原 WMS 请求身份 | 原响应 OK 才允许正常放行；NG 只允许 NG 分流 |
-| 等待滚筒结果 | 原方向命令已登记 | 仅原 MOVE_FORWARD SUCCESS 允许申请储位；NG SUCCESS 不分配储位 |
-| 等待储位 | 保存原分配请求和绑定关系 | 已确认有效的分配目标才允许创建机械臂命令 |
-| 等待机械臂结果 | 原分配与原命令关联 | 确定结果后按合同登记事实报告；不因 ACK 完成物料作业 |
-| 等待报告收妥 | 原报告已登记；保留物理结果 | 只恢复原报告；按最终确认的报告合同闭合 |
-| 正常完成 | 物理成功且报告义务闭合 | 同码的新真实经过可建新作业；原消息重放仍返回原执行 |
-| NG 完成 / 需核对 | 具体闭合/人工处理合同待确认 | 不默认替 NG 分配储位、解 GRN 或重做原动作 |
+| `SCAN_COMPLETED` 上报 / `MOVE_TO_NG` 执行设备 | `RS-INPUT-ARM-01` | `RS-INPUT-ARM-02` |
+| `MOVE_FORWARD` 执行设备 | `RS-CONVEYOR-01` | `RS-CONVEYOR-02` |
+| `PUT_TO_BIN` 执行设备 | `RS-OUTPUT-ARM-01` | `RS-OUTPUT-ARM-02` |
+| 输送线入口 | `STATION_PIPELINE1_INPUT1` | `STATION_PIPELINE2_INPUT1` |
+| 输送线出口 | `STATION_PIPELINE1_OUTPUT1` | `STATION_PIPELINE2_OUTPUT1` |
+| 出料位置 | `STATION_OUTPUT1` | `STATION_OUTPUT2` |
+| NG 平台 | `STATION_NG_PLATFORM1` | `STATION_NG_PLATFORM2` |
 
-这里“报告义务闭合才标正常完成”是**建议**；用户描述尚未明确报告 ACK 是否业务完成门槛。实施前要确认库存落账、失败报告、NG 反馈是否需要其他回调，不悄悄增加新的完成通知。
+<a id="ecs-scan-completed"></a>
 
-## 6. 不能用自动重试掩盖的异常
+### 4.1 扫码事件：ECS → WES
 
-- Event 重放不创建新作业；同码新经过需确切证据。并行物料与设备物理容量的关系需明确，不能靠软件“每线只能一件”替代合同。
-- 验证/绑定响应未知：保存原请求和占位，恢复原请求；不能换 operation_id 造成重复 GRN 绑定。
-- 原 MOVE_FORWARD FAILED：不能申请储位；UNKNOWN/HELD：保留原身份核对，不创建替代放行命令。
-- 分配响应未知：不创建机械臂命令，不重新申请可能不同的储位。有效 WAIT 若将来确认，才按其合同重新求值。
-- 机械臂 UNKNOWN：不宣布成功，不自行释放/更换预留储位；机械臂确定失败时也先按业务合同决定报告与人工处理，不能臆造补偿 API。
-- 机械臂成功但报告失败：物理结果保留，只恢复原报告，不再搬一次。报告 ACK 若丢失，重放原报告必须可得到原结果。
-- Result 先于命令 ACK、重复 Result、重启丢通知：使用现有 ECS 持久结果和原身份读取；业务待办恢复不需要第二套 sender。
+`POST /api/v1/callback/event`。设备自主完成取料、尺寸/厚度检测和扫码，WES 不另发扫码、测量或进料命令。
 
-当前没有确认“解除 GRN”“释放/续期储位”“撤销搬运”的 API，因此不引入 Saga 自动补偿。若以后确有业务补偿，先确认它是一个有授权、可幂等的新业务动作，再单独设计。
+```json
+{
+  "device_code": "RS-INPUT-ARM-01",
+  "event_type": "SCAN_COMPLETED",
+  "timestamp": 1793206799000,
+  "data": {
+    "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
+    "box_barcodes": "BIN-A001,BIN-A002,BIN-A003,BIN-A004",
+    "scan_time": 1793206799000,
+    "reel_diameter": 15,
+    "reel_thickness": 20,
+    "result": "OK"
+  }
+}
+```
 
-## 7. 实施前必须回答的合同问题
+`timestamp` 为事件时间，`data.scan_time` 为扫码时间；`data.result` 是设备综合检测结论，不是 WMS 业务许可。`data.barcode` 为原始料盘条码。WES 从受信任的设备绑定确定 `workline_code`，将原条码及检测值用于第 3.1 节。`box_barcodes` 可随原扫码事实保存；箱格分配以 WMS 掌握的当前在位架及其箱格信息为准。
 
-| 优先级 | 问题 / 责任方 | 对设计的影响 |
+WES 可靠保存原收据、业务受理及持久待办后响应（HTTP 200）：
+
+```json
+{
+  "code": 200,
+  "message": "ACK"
+}
+```
+
+ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创建验证请求。如何区分同一事件重传和同码真实重入，属于第 7 节待确认合同，不能只按条码字符串判断。
+
+## 5. ECS 命令与结果示例
+
+三类命令共用 `POST /api/v1/device/command`，三类 Result 共用 WES 的 `POST /api/v1/callback/result`。
+
+`params.business_key` 为原始 `barcode` 的透传关联值，供 ECS 关联当前实物。命令唯一性和结果关联由 `command_code + device_code` 承担；WMS 的绑定关系保存在 WES 内部。
+
+命令示例按本系统目标草案列出核心业务字段，并非可直接发送的完整合同。完整信封须补齐 `priority / timeout / timestamp`，遵循[ECS 合同](ecs-command.md)；WES 保存冻结投递期限。仅补齐这些字段仍不满足所引 v3.3 的设备参数合同；启用前还须确认下述调整及第 7 节 P08 的严格参数/结果附录。
+
+### 与 v3.3 的差异及启用门槛
+
+以下对照依据上述说明书 §2.2、§3.3 及版本历史。本稿保留简化方案，**不与 v3.3 原参数合同兼容，也不表示设备已支持这些调整**。
+
+| 项目 | 设备 v3.3 参考合同 | 本系统目标草案及待确认内容 |
 | --- | --- | --- |
-| 阻断 | ECS：如何唯一识别一次经过？扫码与分流是否同一设备、容量和先后顺序是什么？ | 唯一受理、动作定位及同码重入；否则无法证明命令针对哪个物料 |
-| 阻断 | WMS：验证与 GRN 绑定能否作为同一个幂等决定？NG 是否产生绑定？ | 请求拆分、已完成副作用与失败恢复边界 |
-| 阻断 | WMS：分配接口的目标、预留与失效规则？ECS：机器人使用什么目标与命令合同？ | 分配到下命令期间的有效性，是否需要新能力；不能先用字符串填平差异 |
-| 阻断 | WMS/ECS：NG/确定失败/位置未知由谁处置，是否报告以及何时闭合？ | 不正常完成、待核对、资源保留和人工恢复策略 |
-| 阻断 | WMS：报告收妥是否意味着本次业务可结束？字段、错误及 HTTP/code 联合是什么？ | 最终完成门槛及报告幂等 |
-| 接入前 | 双方：正式 operation、Event、全部字段/枚举/限额/错误/超时与鉴权 | 决定 DTO、CommandBinding/DeviceAnnex 和注册清单 |
+| 三类命令的固定起止位置 | `params.source_location / target_location` 为必填字符串；MOVE_TO_NG 示例另带 `ng_location` | WES 不传这些固定位置字段；须由 ECS 明确按 `device_code + task_type` 及 A/B 执行单元确定固定起止位置和 NG 平台，并确认映射缺失/冲突时不执行的失败语义 |
+| PUT_TO_BIN 的 `reel_totalthickness` | 字段类型为 string，示例为 `"300"` | WMS 响应与 ECS 命令均保持 JSON number；表示当前已存储总高度、不含本盘，空料格为 `0`。须确认类型调整、数值语义、单位和精度，不由 WES 转字符串或累加本盘高度 |
 
-## 8. 后续隔离测试范围
+ECS 责任方确认目标设备版本及上述能力后，才能形成正式严格附录并启用真实设备调用。内部 MOCK 可先按目标草案验证；其通过不表示 v3.3 或供应商设备已经支持。此处仅对照历史合同，不增加旧参数的公开用法、兼容分支或自动补字段路径。
 
-纯业务测试覆盖 OK→原放行成功→分配→原机械臂成功→报告，以及 NG、每一阶段的确定失败/未知、有效 WAIT（若确认）。接缝测试覆盖同 Event 重放、同码新经过、两线同名 Event 使用各自角色、配置变更后无新执行许可、原动作结果消费与下一 Outbox 原子、进程在读取后失败及恢复整组重读。
+<a id="ecs-move-forward"></a>
 
-PostgreSQL 用于真实隔离/并发测试；ECS/WMS 使用 fake/loopback。正式 payload、完整错误表和 JSON 样例在以上阻断项确认后补齐，不能把本草案当作供应商已接受的接口说明。
+### 5.1 正常移动：MOVE_FORWARD
+
+WMS 验证返回 `OK` 后，WES → ECS：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-MOVE-0001",
+  "device_code": "RS-CONVEYOR-01",
+  "task_type": "MOVE_FORWARD",
+  "params": {
+    "business_key": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D"
+  }
+}
+```
+
+ECS 命令接纳响应（HTTP 200；三类命令共用）：
+
+```json
+{
+  "code": 200,
+  "message": "ACK"
+}
+```
+
+<a id="ecs-move-forward-result"></a>
+
+ACK 仅表示已接纳，WES 继续等待原命令 Result。移动完成后，ECS → WES：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-MOVE-0001",
+  "device_code": "RS-CONVEYOR-01",
+  "result": "SUCCESS",
+  "finish_time": 1793206804000,
+  "data": {
+    "actual_qty": 1,
+    "location": "STATION_PIPELINE1_OUTPUT1",
+    "pick_and_put_result": "MOVE_FINISHED"
+  }
+}
+```
+
+ECS 根据输送线设备及动作执行入口到出口的移动。WES 核对原命令、设备及动作完成结果后才调用箱格分配。`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。
+
+<a id="ecs-put-to-bin"></a>
+
+### 5.2 入箱：PUT_TO_BIN
+
+取得第 3.2 节目标后，WES 保存原目标和参数并创建唯一入箱命令：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-PUT-0001",
+  "device_code": "RS-OUTPUT-ARM-01",
+  "task_type": "PUT_TO_BIN",
+  "params": {
+    "business_key": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
+    "bin_location": "2",
+    "bin_cell_location": "1",
+    "bin_type": "3",
+    "reel_totalthickness": 120
+  }
+}
+```
+
+固定取料位和出料位置由 ECS 管理；箱位、格位、箱型和料格内当前已存储物料的总高度取原 WMS 响应。`bin_code` 保存在 WES 原目标记录中用于完成反馈。箱格参数全部原样使用，`reel_totalthickness` 保持数值类型，WES 不计算装箱后高度。
+
+<a id="ecs-put-to-bin-result"></a>
+
+ECS 接纳响应见第 5.1 节。明确放料完成后，ECS → WES：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-PUT-0001",
+  "device_code": "RS-OUTPUT-ARM-01",
+  "result": "SUCCESS",
+  "finish_time": 1793206814000,
+  "data": {
+    "actual_qty": 1,
+    "location": "STATION_OUTPUT1",
+    "pick_and_put_result": "PUT_FINISHED"
+  }
+}
+```
+
+入箱完成要求：**料盘已放入原命令指定的箱位和格位，整个放料动作完成**。`location=STATION_OUTPUT1` 本身不证明具体箱格，必须结合原命令和已确认的动作结果语义；仅机械臂到达出料区域不满足完成门槛。WES 据此登记第 3.3 节反馈，不以 ACK、设备空闲或时间流逝代替。设备结果的合同确认事项见第 7 节 P08。
+
+<a id="ecs-move-to-ng"></a>
+
+### 5.3 NG 搬运：MOVE_TO_NG
+
+WMS 验证返回业务 NG 后，WES → ECS（原因码为示例）：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-NG-0001",
+  "device_code": "RS-INPUT-ARM-01",
+  "task_type": "MOVE_TO_NG",
+  "params": {
+    "business_key": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
+    "reason_code": "BARCODE_INVALID"
+  }
+}
+```
+
+正式动作名为 `MOVE_TO_NG`，由 ECS 根据入料机械臂确定固定取料位及对应区域 NG 平台；WES 只传递原条码关联和 NG 原因。
+
+<a id="ecs-move-to-ng-result"></a>
+
+ECS 接纳响应见第 5.1 节。NG 搬运成功结果示例：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-NG-0001",
+  "device_code": "RS-INPUT-ARM-01",
+  "result": "SUCCESS",
+  "finish_time": 1793206804000,
+  "data": {
+    "actual_qty": 1,
+    "location": "STATION_NG_PLATFORM1"
+  }
+}
+```
+
+该结果仅表示 NG 搬运完成，不申请正常箱格、不报告正常入箱完成。NG 是否另行报告及何时结束其业务义务，见第 7 节。
+
+### 5.4 失败结果及 WES 受理响应
+
+任一命令确定失败时，ECS 使用原命令身份回传；下例与第 5.2 节成功结果互斥，不能用它覆盖已应用的成功结果：
+
+```json
+{
+  "command_code": "CMD-COARSE-A-PUT-0001",
+  "device_code": "RS-OUTPUT-ARM-01",
+  "result": "FAILED",
+  "finish_time": 1793206814000,
+  "error_detail": {
+    "code": "PUT_TO_BIN_TIMEOUT",
+    "msg": "放料超时"
+  }
+}
+```
+
+`error_detail.code / msg` 按最终附录约定；硬件错误由硬件方处理，WES 保存结果，不将失败或超时转换为物理完成，也不自动更换命令号重做。
+
+WES 成功保存、校验及应用原 Result 后响应（HTTP 200；成功、失败及合法重复结果共用）：
+
+```json
+{
+  "code": 200,
+  "message": "ACK"
+}
+```
+
+该 ACK 表示 WES 已受理 ECS 回传的原命令结果。设备/命令不匹配或矛盾结果按接收器规则拒绝。
+
+## 6. 身份、等待与恢复边界
+
+| 场景 | WES 的处理边界 |
+| --- | --- |
+| 同一扫码事件重传 | 复用原受理及验证请求；不凭新接收时间创建新作业 |
+| 同码真实重入 | 依据双方确认的 ECS 事实区分；barcode 仅关联条码内容，WES 保存各次执行关联 |
+| WMS 验证/分配响应未知 | 保留原请求身份及正文，按现有机制恢复或核对；不换 ID 重求绑定或挑选新目标 |
+| 分配返回补架/换架 | 保存当前工作点位及原决定；同一工作点位复用已有在途准备作业，未取得有效箱格前不下发入箱命令 |
+| departure 返回 WAIT / 响应未知 | 有效 WAIT 固定等待到期点，再按合同新 ID 重求值；未知响应保持原决定身份，不搬离旧架 |
+| 旧架搬离在途、失败、取消或未知 | 保留原任务及结果，不以 ACK、CLOSED 或窗口释放推断架位已空，不补入替代新架 |
+| 新架补入在途、失败、取消或未知 | 保留原任务，不把方案或提交接纳当到位，不重新分配或重复叫架 |
+| 原新架明确到位 | 保存原任务及已应用结果版本，沿原 binding_id 以新分配请求身份继续，不重做验证或输送线移动 |
+| MOVE_FORWARD 失败/未知 | 不申请箱格；保存原命令结果或未决状态，硬件方处理异常 |
+| PUT_TO_BIN 失败/未知 | 不反馈入箱完成、不换号重搬、不自行释放或更换目标 |
+| 已放料但 WMS 报告未收妥 | 保留物理完成及原目标，仅恢复原报告；收到 RECORDED/DUPLICATE 后结束反馈义务 |
+| Result 早于命令 ACK 或重复到达 | 按原 command_code/device_code 及冻结合同处理，不按“设备最近一条命令”猜测 |
+| 设备恢复在线/空闲 | 不据此将未决动作改成成功，也不自动重放原动作 |
+
+硬件方负责故障排除及现场恢复，ECS 负责提供明确结果。FAILED/未知后发现实际完成时，按第 7 节 P09 确认的结果核对/纠正规则处理，不用相反 Result 覆盖原结果。
+
+WES 在受理事务内可靠保存原收据、业务受理和持久待办；业务推进事务内原子保存结果消费、推进状态和下一出站意图。事务与结果读取约束见文首公共文档。
+
+## 7. 集中待确认项
+
+业务分工见第 1 节，其中拟议的设备协议调整见第 5 节。下列问题在正式业务注册和实现前必须落实；内部 MOCK 可以按目标草案验证，不据此标记对端已确认。入口/出口缓存数量与硬件恢复步骤由设备方管理，不要求 WES 建模。
+
+| 编号 | 责任方 | 待确认合同及影响 |
+| --- | --- | --- |
+| P01 | WMS | 三个粗分专用 operation 名、扩展字段必填性/类型/限额、原因码、HTTP/code 联合、鉴权和时间约束。三个粗分名字、BARCODE_INVALID 等为候选 |
+| P02 | WMS | 原始 barcode 与工作线能否唯一确定 GRN/GRN 行；若不能，需什么收货上下文。验证/绑定的原请求重放规则及 NG 是否留下绑定副作用，不能要求 WES 猜测 GRN |
+| P03 | ECS / WMS | 当前在位架内的真实箱码与设备箱位/格位如何保持一致，箱型与空位如何表达 |
+| P04 | ECS / WMS | 已上报的尺寸/厚度等检测 NG 是否统一交给验证接口决定；业务 NG 的 reason_code 与 MOVE_TO_NG 原因参数是否可直接透传。NG 搬运是否另报 WMS、何时闭合 |
+| P05 | WMS / ECS | 无可补入新架或暂时不能绑定等不可执行情况如何响应；补/换架期间如何稳定方案、协调同工作点位的并发决定，以及目标和原高度的有效性 |
+| P06 | ECS | 原始 barcode 作为 business_key 时的长度/字符约束，以及命令与当前实物的对应保证 |
+| P07 | ECS | 事件重传与同码真实重入如何区分，原 timestamp/scan_time/正文重报是否稳定 |
+| P08 | ECS | 确认第 5 节相对 v3.3 的协议调整：省略固定位置字段后由 ECS 按设备/动作/A/B 单元确定位置及映射失败语义；reel_totalthickness 从 string 改为 JSON number、当前高度不含本盘的语义及单位/精度。冻结三类命令的严格参数/结果附录、箱型/格位范围及 SUCCESS 完成范围，尤其 PUT_FINISHED 是否保证原指定箱格已放料；同时确认 reel_thickness、reel_diameter 的单位/精度 |
+| P09 | ECS | 命令持久接纳、同号同载荷去重、同号异载荷拒绝、去重与结果保留窗口、原结果重报、跨重启保证及失败/未知后的核对/纠正规则；期限及状态冲突保护须满足 ECS 合同 |
+| P10 | WMS | 完成报告的去重及冲突规则，如何避免同原命令重复装载/记账；RECORDED 的确切内部业务效果 |
+| P11 | ECS / WES | 正式设备角色、工作线与 A/B 执行单元绑定、来源认证，以及设备 → ECS → WES → WMS 上报链路的端点和转发配置 |
+| P12 | WMS | 补/换架判别字段、rack_position_code、current_rack、incoming_rack 及 ALLOCATED 架信息的正式约束；原 binding_id 能否唯一定位工作点位 |
+| P13 | WMS / WES | 旧架可交出条件与既有入箱/完成报告义务如何衔接，以及何时允许离场 |
+| P14 | WMS / RCS / ECS | 本业务架型对应的 Transport 模板、实际工作点位及面向、门禁互锁、已应用结果与 WMS 在位信息更新的衔接；到位后新分配不得继续使用旧架信息。示例 F01 不是现场验收结论 |
+| P15 | WMS / WES | 旧架/新架确定失败或取消后的业务恢复与重新决定条件、当前物理位置/面向依据、同一工作点位的并发补换架去重；结果未知时保留原身份，不自动创建替代动作 |
+| P16 | WMS / WES | 确认拟议共用 `rack.departure_decide@v1` 的名称、仅三个请求字段及 READY/WAIT、幂等和错误规则；与人工/自动线采用同一目标合同，确认前不注册 |
+
+## 8. 对接验收范围
+
+合同确认后的隔离验证应覆盖：原始条码不被解析/改写；正常直接分配和 NG 路径；无架补架、有架无箱格换架；换架先复用 departure，READY 原目的地只用于原旧架任务，WAIT/未知不搬架；旧架明确搬离后才补入新架；新架明确到位后沿原 binding_id 用新 operation_id 重新分配；分配期间不重复验证或 MOVE_FORWARD；多盘同工作点位不重复叫架；原决定/任务重放稳定；旧扫码箱清单不污染新架目标或原高度；Transport ACK、仅收据或 CLOSED 不等于到位；失败/取消/位置未知及冲突结果不能推进；物理成功后仅恢复原完成报告；重复/早到 Result；事务内消费及下一意图原子。本稿目标合同中，WES 不向 ECS 传固定取放位置，Transport 保留架级 source/target。
+
+针对第 5 节协议调整，内部 MOCK 还须覆盖下列场景。以下为待实施的验收要求，**不是本轮已执行结果**：
+
+| 场景 | 预期行为 |
+| --- | --- |
+| 组装三类目标命令 | 不传 `source_location / target_location / ng_location`，也不由 WES 隐式补入旧参数；除通用信封外，还按目标严格附录验证必填字段和类型，参数不合法不形成可发送请求 |
+| PUT_TO_BIN 的当前高度为 `120` 或空料格高度 `0` | WMS 响应至 ECS 参数均保持数值，不转为字符串或加上本盘厚度；字符串、布尔值等不符合目标类型的输入校验失败，不下发命令 |
+| A/B 单元及不同设备/动作的固定位置推导 | MOCK ECS 按目标合同推导各自起止位置和 NG 平台；映射缺失、冲突不执行，不由 WES 猜测旧位置。该模拟结果不证明供应商已实现位置推导 |
+
+模拟及隔离测试用于验证本方软件，真实 WMS/ECS/设备交互及物理动作需现场验收。
