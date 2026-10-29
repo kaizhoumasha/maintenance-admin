@@ -352,6 +352,7 @@ async def mock_cycle_fixture(factory, monkeypatch):
                         commands,
                         WmsRequests(flow.outbox),
                         old.services["seam_a"].capabilities.transport,
+                        factory,
                     ),
                     factory,
                     flow.table,
@@ -425,3 +426,294 @@ async def mock_cycle(pg_sessions, monkeypatch):
     async with mock_cycle_fixture(pg_sessions, monkeypatch) as flow:
         await flow.configure()
         yield flow
+
+
+@pytest.fixture
+async def coarse_scan(callback_store, monkeypatch):
+    """Own a temporary scan table and two bound lines for the deployed scan entry."""
+    import sys
+
+    from app.businesses import catalog
+    from app.businesses.coarse_sorting.service import CoarseSortingService
+    from app.businesses.runtime import build_runtime
+    from app.integrations import discovery
+    from app.integrations.ecs_callback import registry as events
+    from app.models import DeviceRoute, ReliableMessage
+    from app.reliable import Outbox
+    from tests.helpers import (
+        add_bound_device,
+        coarse_sorting_composition,
+        coarse_sorting_scan_table,
+    )
+
+    table = coarse_sorting_scan_table("coarse_scan_test_" + uuid7().hex)
+    composition = coarse_sorting_composition(table)
+    definition = composition.DEFINITION
+    engine = callback_store.kw["bind"]
+    codes, line_ids, route_ids, conveyor_codes = [], [], [], []
+    async with engine.begin() as connection:
+        await connection.run_sync(table.create)
+    monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(app.state, "ecs_event_binding_resolver", resolve_binding)
+    state = SimpleNamespace(
+        factory=callback_store,
+        table=table,
+        definition=definition,
+        codes=codes,
+        line_ids=line_ids,
+        route_ids=route_ids,
+        conveyor_codes=conveyor_codes,
+    )
+
+    def event(*, device=0, timestamp=1793206799000, changes=None, omit=()):
+        data = {
+            "barcode": " P032-0561,原始条码 ",
+            "reel_diameter": 15,
+            "reel_thickness": 20,
+        }
+        data.update(changes or {})
+        for key in omit:
+            data.pop(key)
+        return {
+            "device_code": codes[device],
+            "event_type": "SCAN_COMPLETED",
+            "timestamp": timestamp,
+            "data": data,
+        }
+
+    async def post(body):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post("/api/v1/callback/event", json=body)
+
+    async def rows():
+        async with callback_store() as session:
+            return list((await session.execute(select(table).order_by(table.c.id))).mappings())
+
+    async def outbound_counts():
+        from sqlalchemy import func
+
+        async with callback_store() as session:
+            return (
+                await session.scalar(select(func.count()).select_from(ReliableMessage)),
+                await session.scalar(select(func.count()).select_from(EcsCommand)),
+            )
+
+    state.event, state.post, state.rows, state.outbound_counts = event, post, rows, outbound_counts
+
+    original_accept = CoarseSortingService.accept_scan
+
+    async def observe_acceptance(service, ctx, payload):
+        with monkeypatch.context() as guard:
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("business acceptance cannot own a transaction")
+
+            for method in ("begin", "begin_nested", "commit", "rollback", "connection"):
+                guard.setattr(ctx.session, method, forbidden)
+            await original_accept(service, ctx, payload)
+
+        if getattr(state, "after_accept", None) is not None:
+            await state.after_accept(ctx)
+
+    monkeypatch.setattr(CoarseSortingService, "accept_scan", observe_acceptance)
+    entry_module = "app.businesses.coarse_sorting.ecs_event.scan_completed"
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(catalog, "_registration_guard_enabled", catalog._registration_guard_enabled)
+
+    def install():
+        monkeypatch.setattr(events, "_registry", {})
+        monkeypatch.setattr(discovery, "_loaded_formal", set())
+        monkeypatch.delitem(sys.modules, entry_module, raising=False)
+        discovery.load_formal_modules("ecs_event")
+        bindings, annexes = catalog.validate_business_contracts()
+        from app.services.device_routes import DeviceRoutes
+
+        outbox = Outbox({}, {})
+        commands = EcsCommands(
+            outbox, "coarse-test", DeviceRoutes(bindings, annexes=annexes), annexes
+        )
+        state.runtime = build_runtime(
+            outbox=outbox, ecs_commands=commands, session_factory=callback_store
+        )
+        monkeypatch.setattr(app.state, "business_runtime", state.runtime, raising=False)
+
+    state.install = install
+    try:
+        install()
+        async with callback_store.begin() as session:
+            for _ in range(2):
+                code = "COARSE_TEST_" + uuid7().hex
+                line, device, route = await add_bound_device(
+                    session, code, "http://127.0.0.1:1", role="INPUT_ARM"
+                )
+                conveyor_code = "CONVEYOR_" + uuid7().hex
+                conveyor_route = DeviceRoute(
+                    id=str(uuid7()), device_code=conveyor_code, ecs_origin="http://127.0.0.1:1"
+                )
+                session.add(conveyor_route)
+                await session.flush()
+                session.add(
+                    Device(
+                        device_code=conveyor_code,
+                        display_name=conveyor_code,
+                        current_route_id=conveyor_route.id,
+                        work_line_id=line.id,
+                    )
+                )
+                line.device_bindings = {"INPUT_ARM": code, "CONVEYOR": conveyor_code}
+                conveyor_codes.append(conveyor_code)
+                route_ids.append(conveyor_route.id)
+                line.business_code = "coarse_sorting"
+                line.position_bindings = {}
+                codes.append(code)
+                line_ids.append(line.id)
+                route_ids.append(route.id)
+        yield state
+    finally:
+        async with callback_store.begin() as session:
+            await session.execute(
+                delete(Device).where(Device.device_code.in_([*codes, *conveyor_codes]))
+            )
+            await session.execute(delete(WorkLine).where(WorkLine.id.in_(line_ids)))
+            await session.execute(delete(DeviceRoute).where(DeviceRoute.id.in_(route_ids)))
+        async with engine.begin() as connection:
+            await connection.run_sync(table.drop)
+
+
+@pytest.fixture
+async def coarse_forward(coarse_scan, monkeypatch):
+    """Real formal service and Sender against an explicit loopback WMS/ECS peer."""
+    from app.businesses import catalog
+    from app.businesses.runtime import build_runtime
+    from app.integrations.ecs_command.protocol import EcsCommandAdapter
+    from app.integrations.wms_request import ADAPTERS
+    from app.models import DeviceRoute, ReliableMessage
+    from app.reliable import Outbox
+    from app.services.device_routes import DeviceRoutes
+
+    flow = coarse_scan
+    flow.peer = SimpleNamespace(
+        decision={"result": "OK", "binding_id": "BIND-ORIGINAL"},
+        decision_code="DECIDED",
+        decision_status=200,
+        command="ack",
+        requests=[],
+        commands=[],
+        started=asyncio.Event(),
+        release=asyncio.Event(),
+    )
+    peer = FastAPI()
+
+    @peer.post("/api/v1/wes/decisions")
+    async def decide(request: Request):
+        raw = await request.body()
+        body = json.loads(raw)
+        flow.peer.requests.append(raw)
+        return JSONResponse(
+            dict(
+                operation_id=body["operation_id"],
+                code=flow.peer.decision_code,
+                timestamp=1,
+                data=flow.peer.decision,
+            ),
+            status_code=flow.peer.decision_status,
+        )
+
+    @peer.post("/api/v1/device/command")
+    async def command(request: Request):
+        flow.peer.commands.append(await request.body())
+        flow.peer.started.set()
+        if flow.peer.command == "hold_ack":
+            await flow.peer.release.wait()
+        if flow.peer.command == "invalid":
+            return {"invalid": True}
+        return {"code": 200, "message": "ACK"}
+
+    async with loopback_app(peer) as origin:
+        async with flow.factory.begin() as session:
+            routes = await session.scalars(
+                select(DeviceRoute).where(DeviceRoute.id.in_(flow.route_ids))
+            )
+            for route in routes:
+                route.ecs_origin = origin
+        bindings, annexes = catalog.validate_business_contracts()
+        targets = {
+            "coarse-wms": TargetConfig("coarse-wms", origin, "wms-decisions"),
+            "ecs-local": TargetConfig("ecs-local", None, "ecs-command", address_mode="SNAPSHOT"),
+        }
+        adapters = {**ADAPTERS, "ecs-command": EcsCommandAdapter()}
+        commands = EcsCommands(None, "ecs-local", DeviceRoutes(bindings, annexes=annexes), annexes)
+        lifecycle = EcsLifecycle(commands)
+        outbox = Outbox(targets, adapters, lifecycles={"ecs-command": lifecycle})
+        commands.outbox = outbox
+        flow.commands, flow.outbox = commands, outbox
+
+        def rebuild():
+            flow.runtime = build_runtime(
+                outbox=outbox, ecs_commands=commands, session_factory=flow.factory
+            )
+            flow.service = flow.runtime.services["coarse_sorting"]
+            monkeypatch.setattr(app.state, "business_runtime", flow.runtime)
+            monkeypatch.setattr(app.state, "ecs_commands", commands, raising=False)
+
+        rebuild()
+        flow.rebuild = rebuild
+        store = MessageStore(flow.factory, lifecycles={"ecs-command": lifecycle})
+        sender = Sender(
+            store,
+            targets,
+            adapters,
+            {"coarse-wms": AsyncHttpClient(HttpClientConfig(origin, "coarse-wms"))},
+            provider=DynamicClients(factory=simulator_client_factory([origin])),
+        )
+        flow.sender, flow.store = sender, store
+
+        async def dispatch():
+            count = await sender.tick(maintain=False)
+            if sender.inflight:
+                await asyncio.gather(*tuple(sender.inflight))
+            return count
+
+        async def result(row, **changes):
+            body = dict(
+                command_code=row["command_code"],
+                device_code=row["conveyor_device_code"],
+                result="SUCCESS",
+                finish_time=1,
+                data={"actual_qty": 1, "location": "STATION_PIPELINE1_OUTPUT1"},
+                error_detail=None,
+            )
+            body.update(changes)
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                return await client.post("/api/v1/callback/result", json=body)
+
+        async def prepare_command():
+            assert (await flow.post(flow.event())).status_code == 200
+            row = (await flow.rows())[0]
+            assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
+            assert await dispatch() == 1
+            assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+            return (await flow.rows())[0]
+
+        flow.dispatch, flow.result, flow.prepare_command = dispatch, result, prepare_command
+        try:
+            yield flow
+        finally:
+            flow.peer.release.set()
+            await sender.aclose()
+            async with flow.factory.begin() as session:
+                codes = select(EcsCommand.command_code).where(
+                    EcsCommand.device_code.in_(flow.conveyor_codes)
+                )
+                await session.execute(
+                    delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+                )
+                await session.execute(
+                    delete(EcsCommand).where(EcsCommand.device_code.in_(flow.conveyor_codes))
+                )
+                await session.execute(
+                    delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
+                )

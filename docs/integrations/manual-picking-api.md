@@ -100,12 +100,12 @@ flowchart TD
 | `outbound.bin.inbound_batch@v1` | `task_id,plan_revision,rack_id,rack_face`（单面） | `200/DECIDED`：READY + `bins[{bin_code,source_locator}]`，或 RACK_FACE_DONE；清单完整最终，不按 Transport 限额截断再求新清单 |
 | `outbound.bin.return_batch@v1` | `workline_code,rack_id,rack_face,return_candidates` | `200/DECIDED`：READY + `moves`，或 NO_BATCH；READY 只取冻结候选的连续 FIFO 前缀 |
 | `workline.return_buffer.drain_rack_decide@v1` | `workline_code,required_slot_count`（正数） | `200/DECIDED`：READY + `racks[{rack_id,rack_face:[面]}]`；或 WAIT + `reason_code=NO_DRAIN_RACK_AVAILABLE,retry_after_ms` |
-| `rack.departure_decide@v1` | `rack_id,current_location:{type:RACK_POSITION,location_code},current_face`（可为 null） | `200/DECIDED`：READY + `rack_destination:{type:ZONE\|RACK_POSITION,location_code}`；或 WAIT + retry_after_ms；READY 目的地要冻结 |
+| `rack.departure_decide@v1` | `workline_code,rack_id,current_location:{type:RACK_POSITION,location_code},current_face`（可为 null） | `200/DECIDED`：READY + `rack_destination:{type:ZONE\|RACK_POSITION,location_code}`；或 WAIT + retry_after_ms；READY 目的地要冻结 |
 | `outbound.picking_task.completion_confirm@v1` | `task_id,last_applied_plan_revision`（可为 0） | `200/DECIDED`：COMPLETED；或 PLAN_REVISION_STALE + current_plan_revision；或 BUSINESS_IN_PROGRESS + retry_after_ms |
 | `outbound.return_rack.arrival_report@v1` | `task_id,transport_task_id,outcome_revision,rack_id,final_position:{type:RACK_POSITION,location_code},arrival_face` | facts：`200/RECORDED\|DUPLICATE`，data `{}`；报告原已知到位事实，不以报告 ACK 制造到位 |
 | `outbound.manual_bin.work_admission_decide@v1` | `task_id,bin_code`（归一化）、`scanned_at`（原 SCAN2 时间） | `200/DECIDED`：WORK_REQUIRED + **原 task_id**；或 NO_WORK；或 WAIT + retry_after_ms |
 
-`rack.departure_decide@v1` 是本系统人工、粗分和自动线草案拟议共用的货架离场决定，名称及字段裁剪尚待 WMS/WES 确认，状态见[共用合同说明](workline-business-api.md#货架离场决定的拟议共用合同)。通过 `POST /api/v1/wes/decisions` 调用，请求 `data` 仅含 `rack_id`、`current_location`、`current_face`，三个字段均须存在；面向无法确认时 `current_face` 显式为 `null`，位置和面向不使用计划值代替。由 WMS 根据货架和当前位置决定离场去向，人工任务及版本关系由 WES 内部保存。WES 申请离场前核对该货架对应的业务条件及相关物理义务。通用请求与 READY/WAIT 响应示例见[货架离场决定](coarse-sorting-api-draft.md#wms-rack-departure)，示例位置需替换为本业务的已确认工作位。
+`rack.departure_decide@v1` 是本系统人工、粗分和自动线草案拟议共用的货架离场决定，名称及字段约束尚待 WMS/WES 确认，状态见[共用合同说明](workline-business-api.md#货架离场决定的拟议共用合同)。通过 `POST /api/v1/wes/decisions` 调用，请求 `data` 仅含 `workline_code`、`rack_id`、`current_location`、`current_face`，四个字段均须存在；工作线编码沿用原业务上下文并与货架及工作位一致；面向不适用或无法确认时 `current_face` 显式为 `null`，位置和面向不使用计划值代替。由 WMS 核对工作线上下文后根据货架和当前位置决定离场去向，人工任务及版本关系由 WES 内部保存。WES 申请离场前核对该货架对应的业务条件及相关物理义务。通用请求与 READY/WAIT 响应示例见[货架离场决定](coarse-sorting-api-draft.md#wms-rack-departure)，示例位置及面向需替换为本业务的已确认事实；粗分示例的 null 表示面向不适用，不改变人工线自身的面向要求。
 
 READY 只表示允许按返回去向离场；WES 冻结原决定及目的地后创建唯一 Transport，并以原任务明确结果判断是否搬离。有效 WAIT 保存固定到期点，到期或有新业务事实时使用新 operation_id 重新求值；通信重试或响应未知继续原请求身份和冻结正文。
 
@@ -167,7 +167,7 @@ WMS 业务 locator 使用 `type`，箱码使用 `bin_code`；Transport wire 使�
 | P02 | WES / WMS | OUTLET 本地 Return 交接所需的可信接纳证据及公开结果依据；本地交接与物理取走分别判断，位置未知或结果冲突时保留原义务，相关架动作继续受直接前序约束 |
 | P03 | WES / ECS | 工作线设备角色、货架类型、工作位类型及位置绑定的配置校验规则；各角色/命令/版本的参数、结果 data、错误码及超时范围 |
 | P04 | WMS / RCS | 各架型进场、换面、离场所用模板及现场支持范围，包括 CTU01、CTU02、CTU03、F01、CK04；目标点位和面向须与原任务及可信结果一致 |
-| P05 | WMS / WES | 确认拟议共用 `rack.departure_decide@v1` 的名称、仅三个请求字段及 READY/WAIT、幂等和错误规则；旧系统 DTO 不代表本系统已支持此调整，确认前不注册 |
+| P05 | WMS / WES | 确认拟议共用 `rack.departure_decide@v1` 的名称、workline_code / rack_id / current_location / current_face 四个必填请求字段及 READY/WAIT、幂等和错误规则；旧系统 DTO 不代表本系统已支持此调整，确认前不注册 |
 
 ## 8. 对接验收范围
 
@@ -175,7 +175,7 @@ WMS 业务 locator 使用 `type`，箱码使用 `bin_code`；Transport wire 使�
 - WORK_REQUIRED/NO_WORK/WAIT/NORMAL/NG、完成早到与冲突、SCAN3 重新投入、SCAN4 到位但命令未知，分别有确定行为；重放不产生第二条释放命令。
 - 来源/直接/转运架并行，feed_complete 与退箱分开；RETURN_RACK 不接滚筒退箱；同架直接依赖阻挡换面、无关旧离场不永久挡新架。
 - 完整清单拆段、FIFO 前缀、跨任务退箱、drain WAIT/READY、后续版本不被旧完成覆盖。
-- 通用 rack.departure_decide@v1 传货架、已确认位置及当前面向；离场前满足对应业务条件及物理义务门槛；READY 冻结去向后执行 Transport，WAIT 后新身份求值，未知响应保持原身份。
+- 通用 rack.departure_decide@v1 传原工作线编码、货架、已确认位置及当前面向，工作线与货架/工作位上下文一致；离场前满足对应业务条件及物理义务门槛；READY 冻结去向后执行 Transport，WAIT 后新身份求值，未知响应保持原身份。
 - 依索引的统一快照与消费恢复规则：更新 UNKNOWN 不被历史里程碑覆盖，消费与下一 Outbox 原子；ECS ACK 不替代 Result。
 - 第 7 节事项确认后，覆盖可信扫码应用、交接证据、配置约束和设备合同的专用验收场景。
 

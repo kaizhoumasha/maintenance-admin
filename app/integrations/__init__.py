@@ -21,7 +21,9 @@
 声明的入口可以是模块或包；包内子模块仍逐个导入，一个 operation 一个文件时校验注册名对应文件名。
 
 固定平台正式入口是 `wms_transport.callback`；local 固定加载 ECS/WMS 示例及 Transport 场景。
-所有正式入口与合同校验先于 local 入口和运行时资源装配。生产业务 catalog 当前为空。
+所有正式入口与合同校验先于 local 入口和运行时资源装配。
+正式 catalog 当前登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段，
+各环境使用同一入口与配置数据库。
 
 ## 依赖方向
 

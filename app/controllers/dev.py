@@ -15,6 +15,7 @@ from app.core import SessionDep, error_responses, get_current_user, get_settings
 from app.core.dev_scenarios import DevScenario, scenarios
 from app.core.routing import new_router
 from app.integrations.discovery import load_formal_modules, load_local_modules
+from app.integrations.ecs_command.contracts import CommandBinding
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import operations
 from app.reliable.config import parse_reliable_config, target_config_hint
@@ -65,16 +66,24 @@ def _submit_router(items: list[DevScenario]):
     return router
 
 
-def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
+def include_dev_routers(
+    app: FastAPI,
+    *,
+    environment: str,
+    command_bindings: tuple[CommandBinding, ...],
+    prefix: str = "/api/v1",
+    read_business=None,
+) -> None:
     settings = get_settings()
     targets = parse_reliable_config(settings).targets
     if environment != "local":
         return
     _load_dev_modules()
-    from app.controllers.dev_ecs_command import mock_router
-    from app.controllers.dev_ecs_command import router as ecs_command_router
+    from app.controllers.dev_ecs_command import ecs_command_router, mock_router
+    from app.controllers.dev_ecs_event import ecs_event_router
 
-    app.include_router(ecs_command_router, prefix=prefix)
+    app.include_router(ecs_command_router(command_bindings), prefix=prefix)
+    app.include_router(ecs_event_router(read_business=read_business), prefix=prefix)
     app.include_router(mock_router, prefix=prefix)
     items = scenarios()
     if items:

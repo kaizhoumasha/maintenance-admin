@@ -9,6 +9,11 @@ from tests.helpers import business_composition
 
 @pytest.fixture(autouse=True)
 def isolated_validation(monkeypatch):
+    from app.integrations.ecs_callback import registry
+    from app.integrations.wms_request import operation
+
+    monkeypatch.setattr(registry, "_registry", {})
+    monkeypatch.setattr(operation, "_registry", {})
     monkeypatch.setattr(catalog, "_validated_entries", None)
 
 
@@ -22,10 +27,11 @@ def test_factories_share_platform_capabilities_without_job_state(monkeypatch):
         entry.build_service = lambda capabilities: seen.append(capabilities) or object()
     monkeypatch.setattr(catalog, "entries", lambda: (first, second))
     catalog.validate_business_contracts()
-    outbox, ecs = object(), object()
-    runtime = build_runtime(outbox=outbox, ecs_commands=ecs)
+    outbox, ecs, factory = object(), object(), lambda: None
+    runtime = build_runtime(outbox=outbox, ecs_commands=ecs, session_factory=factory)
     assert set(runtime.services) == {"first", "second"}
     assert seen[0] is seen[1]
+    assert seen[0].session_factory is factory
     assert seen[0].ecs is ecs
     assert seen[0].wms.outbox is outbox
     assert seen[0].transport.outbox is outbox
@@ -42,10 +48,10 @@ def test_runtime_requires_validated_catalog_and_available_capabilities(monkeypat
     entry.DEFINITION = replace(entry.DEFINITION, initial_entries=())
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     with pytest.raises(RuntimeError, match="validat"):
-        build_runtime(outbox=object(), ecs_commands=None)
+        build_runtime(outbox=object(), ecs_commands=None, session_factory=lambda: None)
     catalog.validate_business_contracts()
     with pytest.raises(ValueError, match="outbox"):
-        build_runtime(outbox=None, ecs_commands=None)
+        build_runtime(outbox=None, ecs_commands=None, session_factory=lambda: None)
 
 
 def test_empty_catalog_needs_no_communication_resources(monkeypatch):
@@ -53,7 +59,7 @@ def test_empty_catalog_needs_no_communication_resources(monkeypatch):
 
     monkeypatch.setattr(catalog, "entries", lambda: ())
     catalog.validate_business_contracts()
-    runtime = build_runtime(outbox=None, ecs_commands=None)
+    runtime = build_runtime(outbox=None, ecs_commands=None, session_factory=lambda: None)
     assert runtime.services == runtime.definitions == {}
 
 
@@ -66,7 +72,7 @@ def test_business_factory_must_return_a_service(monkeypatch):
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     catalog.validate_business_contracts()
     with pytest.raises(ValueError, match="test_sorting.*factory must return a service"):
-        build_runtime(outbox=object(), ecs_commands=None)
+        build_runtime(outbox=object(), ecs_commands=None, session_factory=lambda: None)
 
 
 def test_declared_commands_require_ecs_before_any_factory(monkeypatch):
@@ -96,7 +102,7 @@ def test_declared_commands_require_ecs_before_any_factory(monkeypatch):
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     catalog.validate_business_contracts()
     with pytest.raises(ValueError, match="ECS capability"):
-        build_runtime(outbox=object(), ecs_commands=None)
+        build_runtime(outbox=object(), ecs_commands=None, session_factory=lambda: None)
 
 
 def test_require_runtime_accepts_only_real_runtime_container():
@@ -107,3 +113,14 @@ def test_require_runtime_accepts_only_real_runtime_container():
     for value in (None, {}, SimpleNamespace(services={})):
         with pytest.raises(RuntimeError):
             require_runtime(SimpleNamespace(runtime=value))
+
+
+def test_business_runtime_requires_a_session_factory_before_constructing_services(monkeypatch):
+    from app.businesses.runtime import build_runtime
+
+    entry = business_composition()
+    entry.DEFINITION = replace(entry.DEFINITION, initial_entries=())
+    monkeypatch.setattr(catalog, "entries", lambda: (entry,))
+    catalog.validate_business_contracts()
+    with pytest.raises(ValueError, match="session factory"):
+        build_runtime(outbox=object(), ecs_commands=None, session_factory=None)

@@ -165,7 +165,7 @@ rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --en
 
 JSON 包含 `environment`、排序的业务 code 数组 `businesses`、三类原来源元数据 `entries`、
 catalog 从 COMMANDS 编译并校验的 `command_contracts` 和 `scope.checked/excluded`。
-仅检查共享加载器已加载的显式声明，正式业务来自 catalog；当前业务为空仍检查 Transport 正式回调。
+仅检查共享加载器已加载的显式声明，正式业务来自 catalog；当前粗分扫码、验证请求、首个 MOVE_FORWARD 合同与 Transport 正式回调均纳入校验。
 不扫描任意源码；历史 Result 附录不授予新命令权限。local 只列原 dev 三类入口，
 通用 v3 调试命令、Status runtime、模型资源，以及路由、迁移、网络、许可和物理/业务完成均不在范围。
 字段与排序约定见[快速开始](business-development-quickstart.md#启动应用前检查声明)。
@@ -217,5 +217,9 @@ composition 必须由 `catalog.entries()` 列出；三类入口共用注册表�
 `BusinessRuntime` 调用具体服务。全部正式合同在任何 local/资源/factory 装配前交叉校验。
 模型通过 composition 的 `MODEL_MODULES` 统一加载，不在应用启动建表。
 
-最小接入、独立推进事务和两线验收见[业务包开发指南](business-packages.md)。正式业务清单当前为空，
+最小接入、独立推进事务和两线验收见[业务包开发指南](business-packages.md)。当前正式清单包括粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段，
 测试接缝不代表完整真实业务交付；未确认协议不登记可发送 operation 或空占位业务。
+
+## ECS Event 手工调试
+
+local 登录后可使用 `POST /api/v1/dev/ecs/events` 的 Examples 下拉，选项及样例来自唯一实际事件注册表；GET 同路径/{digest} 查看持久收据和只读业务投影。粗分扫码由正式 catalog 装配同一处理器及配置数据库，各环境不另设 local 业务入口或存储。MOCK 数据和对端由测试/部署配置准备，详见 [ECS Event Swagger 调试](ecs-event-debugging.md)。

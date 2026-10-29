@@ -2,7 +2,7 @@
 
 先确认业务怎样受理、等待、推进和恢复，再接入唯一的模型 API。
 示例名称、字段和测试合同不是已确认的 WMS/ECS 合同，也不会自动注册。
-正式 `catalog.entries()` 仍为空；只有合同、资源、实现与恢复完整且获准的真实业务才可加入。
+正式 `catalog.entries()` 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段；新增业务或阶段须具备获准的合同、资源和实现。
 当前不兼容变化、模型约束和验证证据见[单一 API 验收记录](business-development-single-api-acceptance.md)。
 旧阶段设计、计划与验收记录已移出仓库归档，当前调用形式与验证证据统一使用上述文档。
 
@@ -82,7 +82,7 @@ production 表示正式声明范围，不连接生产；无需数据库、Redis�
 
 JSON 包含 `environment`、`businesses`、`entries`、`command_contracts`、`scope`。
 `entries` 保留 kind/name/device_role 与原 module/source_file/symbol/local_only；命令合同显示 task_type、角色、附录版本、超时和原模型来源。
-当前 `businesses=[]`、命令合同为空，仍检查两个正式 Transport 回调。local 保留 ECS/WMS 演示及六个 Transport 场景。
+当前 `businesses=["coarse_sorting"]`，命令合同包含 `CONVEYOR / MOVE_FORWARD`；同时检查粗分 `INPUT_ARM / SCAN_COMPLETED`、`inbound.coarse_sorting.validate_bind@v1` 和两个正式 Transport 回调。local 保留 ECS/WMS 演示及六个 Transport 场景。
 通用 v3 调试命令、Status、模型资源、路由、迁移、网络、许可和物理完成不在静态检查范围。
 清单只证明实际加载的声明，不扫描任意源码；环境切换需新进程，不提供缓存清理/重扫接口。
 

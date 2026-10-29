@@ -1003,7 +1003,7 @@ async def business_flow_fixture(factory, monkeypatch):
         outbox.lifecycles = {"ecs-command": EcsLifecycle(commands)}
         monkeypatch.setattr(ecs, "_registry", {})
         monkeypatch.setattr(callbacks, "_registry", dict(callbacks._registry))
-        monkeypatch.setattr(requests, "_registry", dict(requests._registry))
+        monkeypatch.setattr(requests, "_registry", {})
         entries, receipt_ids = [], set()
         for code, role, payload in (
             ("seam_a", "SEAM_A", FlowScanA),
@@ -1059,7 +1059,7 @@ async def business_flow_fixture(factory, monkeypatch):
         catalog.validate_business_contracts()
 
         def rebuild():
-            return build_runtime(outbox=outbox, ecs_commands=commands)
+            return build_runtime(outbox=outbox, ecs_commands=commands, session_factory=factory)
 
         runtime = rebuild()
         monkeypatch.setattr(app.state, "business_runtime", runtime, raising=False)
@@ -1266,3 +1266,39 @@ async def cleanup_flow_results(factory, tasks, operation_ids):
                 TransportTask.transport_task_id.in_(t.handle.transport_task_id for t in tasks)
             )
         )
+
+
+def coarse_sorting_scan_table(name):
+    from sqlalchemy import MetaData
+
+    from app.businesses.coarse_sorting.models import CoarseSortingScan
+    from app.database import SCHEMA
+
+    table = CoarseSortingScan.__table__.to_metadata(MetaData(schema=SCHEMA), name=name)
+    for constraint in table.constraints:
+        constraint.name = None
+    return table
+
+
+def coarse_sorting_composition(table):
+    """Use the deployed declarations with an independently owned test table."""
+    from types import ModuleType
+
+    from app.businesses.coarse_sorting import composition
+    from app.businesses.coarse_sorting.service import CoarseSortingService
+
+    entry = ModuleType(composition.__name__)
+    entry.DEFINITION = composition.DEFINITION
+    entry.ENTRY_MODULES = composition.ENTRY_MODULES
+    entry.MODEL_MODULES = ()
+    entry.COMMANDS = composition.COMMANDS
+
+    def build_service(capabilities):
+        from app.businesses.coarse_sorting.request.inbound_coarse_sorting_validate_bind_v1 import (
+            ValidateBind,
+        )
+
+        return CoarseSortingService(table, capabilities, ValidateBind)
+
+    entry.build_service = build_service
+    return entry

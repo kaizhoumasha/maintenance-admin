@@ -12,6 +12,7 @@ from app.integrations.ecs_callback import registry as ecs
 from app.integrations.ecs_status import query
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_request import operation as requests
+from app.main import app
 
 PATH = "/api/v1/dev/integrations/registry"
 
@@ -94,7 +95,7 @@ async def test_catalog_does_not_query_ecs(client, admin, monkeypatch):
 @pytest.mark.parametrize("environment", ["production", "test"])
 def test_registry_is_not_mounted_outside_local(environment):
     app = FastAPI()
-    include_dev_routers(app, environment=environment)
+    include_dev_routers(app, environment=environment, command_bindings=())
     assert PATH not in app.openapi()["paths"]
 
 
@@ -149,7 +150,9 @@ async def test_registry_describes_each_event_role_and_payload(client, admin, mon
 
     response = await client.get(PATH, headers=admin)
     assert response.status_code == 200, response.text
-    row = next(row for row in response.json() if row["kind"] == "ecs_event")
+    row = next(
+        row for row in response.json() if row["kind"] == "ecs_event" and row["name"] == "RAW_DATA"
+    )
     assert row["name"] == "RAW_DATA"
     assert row["device_role"] == "SCAN1"
     assert row["payload_schema"]["type"] == "object"
@@ -168,7 +171,6 @@ async def test_catalog_reads_role_command_contracts_from_the_configured_routes(
         ecs_command,
     )
     from app.integrations.ecs_command.contracts import ErrorDetail
-    from app.main import app
     from tests.helpers import TrialPayload
 
     class Move(TrialPayload):

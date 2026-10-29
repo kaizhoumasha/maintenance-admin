@@ -61,8 +61,11 @@ device_role及data模型必须明确声明；同一事件按工作线逻辑角�
 
 ## 处理器契约
 
-- 只写当前数据库事务。不得在处理器里直接调用设备、HTTP 或其他外部服务;外发动作只能用
-  同事务的 `Outbox.enqueue` 登记,提交后由发送器执行。不要自己 commit 或 rollback。
+- 只写当前数据库事务。不得在处理器里直接调用设备、HTTP 或其他外部服务。
+  业务需要外发时,在 `ctx.session` 中调用公开模型 API:WMS 请求用 `WmsRequests.send`,
+  ECS 命令用 `EcsCommands.create`;Transport 任务使用其公开业务服务。
+  框架在同一事务登记 Outbox,提交后由现有唯一 Sender 发送;业务不直接操作 Outbox。
+  具体调用方式见 docs/integrations/business-development-quickstart.md。不要自己 commit 或 rollback。
 - 对已通过校验的消息不得抛异常。冲突、未知设备这类业务情况用 `ctx.note(reason_code, ...)`
   记录并返回(仍 ACK)。抛异常会让这条消息永远回 503,变成越不过去的毒消息。
   `ctx.note` 随收据同事务保存,提交后输出告警日志(字符串值在日志副本里转义并截断);

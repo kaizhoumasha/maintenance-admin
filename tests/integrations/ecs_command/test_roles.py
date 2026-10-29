@@ -415,7 +415,7 @@ sys.meta_path.insert(0, NoDeviceServices())
 from app.integrations.ecs_command import RoleRoutes, compile_commands, ecs_command
 from app.integrations.ecs_command import configure_ecs
 from app.controllers.ecs_callback import include_ecs_callback
-from app.controllers.dev_ecs_command import router
+from app.controllers.dev_ecs_command import ecs_command_router
 from app.controllers.dev_registry import list_registrations
 """,
         ],

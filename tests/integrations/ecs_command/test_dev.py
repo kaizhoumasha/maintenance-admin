@@ -59,7 +59,7 @@ def test_nonlocal_application_does_not_mount_debug_or_mock_routes():
     from app.controllers.dev import include_dev_routers
 
     app = FastAPI()
-    include_dev_routers(app, environment="production")
+    include_dev_routers(app, environment="production", command_bindings=())
     paths = {route.path for route in app.routes}
     assert "/api/v1/dev/ecs/commands" not in paths
     assert "/api/v1/device/command" not in paths

@@ -112,7 +112,7 @@ def check(tmp_path, environment="production", *, bootstrap="", inherited=None):
     )
 
 
-def test_empty_business_catalog_reports_checked_formal_scope():
+def test_deployed_business_catalog_reports_checked_formal_scope():
     clean_env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(PROJECT_ROOT)}
     result = subprocess.run(
         [sys.executable, "-m", MODULE, "--environment", "production"],
@@ -126,8 +126,13 @@ def test_empty_business_catalog_reports_checked_formal_scope():
     report = json.loads(result.stdout)
     assert set(report) == {"environment", "businesses", "entries", "command_contracts", "scope"}
     assert report["environment"] == "production"
-    assert report["businesses"] == []
-    assert report["command_contracts"] == []
+    from app.businesses import catalog
+
+    assert report["businesses"] == sorted(d.code for d in catalog.definitions())
+    assert any(
+        row["device_role"] == "CONVEYOR" and row["name"] == "MOVE_FORWARD"
+        for row in report["command_contracts"]
+    )
     assert any(row["name"] == "transport.task.resulted@v1" for row in report["entries"])
     assert report["scope"]["checked"]
     assert report["scope"]["excluded"]

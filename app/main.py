@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.businesses import catalog
+from app.businesses.coarse_sorting.service import read_scan
 from app.businesses.runtime import BusinessRuntime, build_runtime
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
@@ -71,7 +72,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 ecs_commands.outbox = outbox
             runtime = getattr(application.state, "business_runtime", None)
             if runtime is None:
-                runtime = build_runtime(outbox=outbox, ecs_commands=ecs_commands)
+                runtime = build_runtime(
+                    outbox=outbox, ecs_commands=ecs_commands, session_factory=session_factory
+                )
                 owns_business_runtime = True
             expected = {definition.code: definition for definition in catalog.definitions()}
             if (
@@ -138,7 +141,12 @@ from app.integrations.ecs_command.dev import configure_local_ecs  # noqa: E402
 
 include_wms_events(app, environment=settings.ENVIRONMENT)
 include_ecs_callback(app, environment=settings.ENVIRONMENT, resolve_binding=resolve_binding)
-include_dev_routers(app, environment=settings.ENVIRONMENT)
+include_dev_routers(
+    app,
+    environment=settings.ENVIRONMENT,
+    command_bindings=command_bindings,
+    read_business=read_scan,
+)
 
 _openapi = app.openapi
 app.openapi = lambda: drop_422(_openapi())  # type: ignore[method-assign]

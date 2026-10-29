@@ -5,7 +5,7 @@
 | 文档 | 用途 | 合同状态 |
 | --- | --- | --- |
 | [人工分拣](manual-picking-api.md) | 单据驱动，货架供料、人工处理、退箱、换面及离场 | 参考旧系统流程；共用离场合同等调整待确认，业务未接入 |
-| [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 专用接口、拟议共用离场合同及设备附录待确认，业务未接入 |
+| [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 已实现扫码、验证绑定、MOVE_FORWARD 及原 Result 消费，成功后等待箱格分配；后续阶段未实现，对端合同及设备附录待确认 |
 | [自动线](automatic-picking-wms-api.md) | BIN / RackSlot 逐盘取料、决定、放置及来源架面推进 | 本系统对接草案；简化 wire、盘次关联及设备边界待确认，业务未接入 |
 | [业务开发唯一用法设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md) | 唯一公开模型 API、命令声明、业务目录及迁移边界 | 已实现；MOCK 与内部验证结果见当前验收说明 |
 
@@ -15,7 +15,7 @@
 
 ## 1. 核对基线和“已存在”的含义
 
-- 本系统：`a1eccce7bf35fafb82ca408a07ff834d31324e36`（PR #28 合入 develop 后）。已有业务声明、工作线绑定、入口装配、通信与结果读取接缝；**正式业务清单为空**。
+- 本系统：`a1eccce7bf35fafb82ca408a07ff834d31324e36`（PR #28 合入 develop 后）。已有业务声明、工作线绑定、入口装配、通信与结果读取接缝；**该基线的正式业务清单为空**。当前增量已登记粗分扫码、验证及首个 MOVE_FORWARD / Result 阶段，其他业务仍按各自草案实施。
 - wes_backend：人工业务相关文件核对到 `c45e3ca7be52ad6afc30b22e0b09406eefcb5714`。本地检查使用的 HEAD 为 `8b558912ccd04873556582b70fa62163d7f45cfe`，本次引用的人工子包与相关合同/wire 文件相对该 develop 基线无差异。
 - “参考合同”表示旧系统中有出处，不能据此宣称本系统已注册，也不能替代对端版本、设备附录和现场确认。
 - 旧文档标题中的“人工出库”不限制 `business_type`：新合同允许 MANUAL 任务区分 `inbound/outbound`，仍用同一套任务生命周期。以较新合同与 wire 为准，旧 README 的“仅出库”说明已落后。
@@ -55,7 +55,7 @@ WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合
 
 ### 货架离场决定的拟议共用合同
 
-人工、粗分和自动线草案统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `rack_id`、`current_location`、`current_face`；当前位置为已确认的 `RACK_POSITION`，未知面向显式为 `null`。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
+人工、粗分和自动线草案统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `workline_code`、`rack_id`、`current_location`、`current_face`；`workline_code` 为原业务保存的非空工作线编码，须与货架及工作点位上下文一致；当前位置为已确认的 `RACK_POSITION`，面向不适用或无法确认时显式为 `null`。粗分架位不涉及面向，使用 `current_face=null`；人工及自动线仍按各自业务要求核对面向。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
 
 这是本系统**拟议的新共用合同，尚待 WMS/WES 确认，未注册、未实施**。旧系统来源基线的离场 operation 带 `outbound` 前缀，且要求 `task_id` 字段存在（可为 null）；不能把本文的改名和字段裁剪当作旧 DTO 已支持的原样复用。三份草案仅保留上述目标用法，不增加兼容入口；对端确认名称、请求/响应、幂等及错误规则后，才能交付本系统的正式 DTO 和业务入口。这里的历史来源说明不改变第 1 节所列核对基线。
 

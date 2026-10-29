@@ -38,7 +38,7 @@ def body(scenario, **extra):
 
 def test_dev_routes_do_not_exist_outside_local():
     app = FastAPI()
-    include_dev_routers(app, environment="production")
+    include_dev_routers(app, environment="production", command_bindings=())
     assert app.openapi()["paths"] == {}
 
 
