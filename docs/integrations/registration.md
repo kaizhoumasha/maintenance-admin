@@ -40,6 +40,16 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 未声明入口均会阻止启动。跨业务共享合同须由其所属完整业务显式列出入口，不能靠被其他业务 import 启用。
 API/worker 在 local 入口和运行设施前校验，静态检查失败不返回部分成功目录。
 
+正式校验成功后，工厂或业务方法的首次 import 仍受同一模块/点分包归属规则约束。
+ECS Event、WMS callback/request 在写入各自注册表之前立即拒绝清单外来源；拒绝不会占用注册键，
+也不会允许业务继续到下一意图或 WMS 入队。`probe.request` 只覆盖自身和 `probe.request.*`，
+不覆盖 `probe.request_extra`。另一个已列完整业务拥有的合法入口仍可共享。
+首次启动的组合模块和声明导入仍由最终合同校验统一核对；ECS 命令模型只按 `COMMANDS` 编译，
+不套用三类入口的 `ENTRY_MODULES` 规则。校验成功后的保护持续生效；再次校验失败会使运行时装配失效，
+但不会重新开放初始导入阶段。固定平台、local 和隔离非 app 夹具沿用原边界。
+共享文件校验通过既有 `discovery` 桥接访问 catalog，通用 `registration` 不直接依赖业务层；
+不为此扩展分层例外，也不增加注册表或发送路径。
+
 ## ECS：声明数据与处理函数
 
 文件：`app/businesses/example/ecs_event/scan1/scan_completed.py`。

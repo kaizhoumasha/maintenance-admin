@@ -57,6 +57,130 @@ class Payload(RequestPayload): pass
 """
 
 
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize("owner", ["unlisted", "probe_shadow", "probe", "other"])
+@pytest.mark.parametrize("timing", ["factory", "method"])
+def test_runtime_imports_cannot_enable_undeclared_business_entries(tmp_path, kind, owner, timing):
+    sources = {
+        "ecs_event": (
+            "from app.integrations.ecs_callback import ecs_event, CallbackPayload\n"
+            "@ecs_event('DONE', device_role='PROBE_SCAN', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): ctx.append('handled')\n"
+        ),
+        "callback": (
+            "from app.integrations.wms_callback import callback_operation, CallbackPayload\n"
+            "@callback_operation('probe.done@v1', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): ctx.append('handled')\n"
+        ),
+        "request": REQUEST,
+    }
+    filename = "done" if kind == "ecs_event" else "probe_done_v1"
+    module = f"app.businesses.{owner}.{kind}.{filename}"
+    write_module(tmp_path, "businesses", f"{owner}.{kind}.{filename}", sources[kind])
+    # This declared package also hosts the recovery import, created only after validation.
+    write_module(tmp_path, "businesses", f"other.{kind}.__init__")
+    write_module(tmp_path, "businesses", "probe.request.declared")
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.composition",
+        f"""
+from importlib import import_module
+from app.businesses.definitions import BusinessDefinition, DeviceRole
+DEFINITION = BusinessDefinition(code='probe', display_name='Probe', device_roles=(
+    DeviceRole(role_key='PROBE_SCAN', display_name='Scan'),))
+COMMANDS = ()
+ENTRY_MODULES = ('app.businesses.probe.request.declared',)
+class Service:
+    def __init__(self, capabilities): self.capabilities = capabilities
+    async def advance(self):
+        item = import_module({module!r})
+        if {kind == "request"!r}:
+            await self.capabilities.wms.send(None, item.Payload(),
+                operation_id='01900000-0000-7000-8000-000000000001')
+        else:
+            from app.integrations.wms_callback import CallbackPayload
+            await item.handler(self.capabilities.wms.outbox.intents, CallbackPayload())
+def build_service(capabilities):
+    if {timing == "factory"!r}: import_module({module!r})
+    return Service(capabilities)
+""",
+    )
+    write_module(
+        tmp_path,
+        "businesses",
+        "other.composition",
+        f"""
+from app.businesses.definitions import BusinessDefinition, DeviceRole
+DEFINITION = BusinessDefinition(code='other', display_name='Other', device_roles=(
+    DeviceRole(role_key='PROBE_SCAN', display_name='Scan'),))
+COMMANDS = ()
+ENTRY_MODULES = ('app.businesses.other.{kind}',)
+def build_service(capabilities): return object()
+""",
+    )
+    run_cold(
+        tmp_path,
+        f"""
+import asyncio
+import importlib
+import sys
+from pathlib import Path
+from app import businesses
+from app.businesses import catalog
+from app.businesses.runtime import build_runtime
+from app.integrations.discovery import load_formal_modules
+from app.integrations.ecs_callback.registry import events
+from app.integrations.wms_callback.registry import operations as callbacks
+from app.integrations.wms_request.operation import operations as requests
+from app.integrations.wms_request import WmsRequests
+from app.reliable.config import TargetConfig
+root = Path(sys.argv[1])
+businesses.__path__ = [str(root / 'businesses'), *businesses.__path__]
+probe = importlib.import_module('app.businesses.probe.composition')
+other = importlib.import_module('app.businesses.other.composition')
+catalog.entries = lambda: (probe, other)
+load_formal_modules()
+catalog.validate_business_contracts()
+assert ({module!r} in sys.modules) is {owner == "other"!r}
+class CaptureOutbox:
+    targets = {{'facts': TargetConfig('facts', 'http://example.test', 'wms-facts')}}
+    def __init__(self): self.intents = []
+    async def enqueue(self, session, draft): self.intents.append(draft)
+outbox = CaptureOutbox()
+try:
+    runtime = build_runtime(outbox=outbox, ecs_commands=None)
+    asyncio.run(runtime.services['probe'].advance())
+except ValueError as error:
+    assert {owner != "other"!r}, str(error)
+    assert {module!r} in str(error) and 'ENTRY_MODULES' in str(error) and '修复' in str(error)
+else:
+    assert {owner == "other"!r}, 'runtime import accepted an undeclared formal registration'
+    assert len(outbox.intents) == 1
+key = ('PROBE_SCAN', 'DONE') if {kind == "ecs_event"!r} else 'probe.done@v1'
+def registered():
+    return {{'ecs_event': events, 'callback': callbacks, 'request': requests}}[{kind!r}]()
+if {owner != "other"!r}:
+    assert key not in registered()
+    assert not outbox.intents
+    assert catalog.validated_entries() == (probe, other)
+    # The rejected source cannot reserve a key against a later, legal module.
+    legal = root / 'businesses' / 'other' / {kind!r} / {filename + ".py"!r}
+    legal.write_text({sources[kind]!r})
+    importlib.invalidate_caches()
+    recovered = importlib.import_module('app.businesses.other.{kind}.{filename}')
+    assert registered()[key].registration_source.module == recovered.__name__
+    if {kind == "request"!r}:
+        asyncio.run(WmsRequests(outbox).send(None, recovered.Payload(),
+            operation_id='01900000-0000-7000-8000-000000000002'))
+    else:
+        from app.integrations.wms_callback import CallbackPayload
+        asyncio.run(recovered.handler(outbox.intents, CallbackPayload()))
+    assert len(outbox.intents) == 1
+""",
+    )
+
+
 @pytest.mark.parametrize("query", ["operations", "lookup"])
 def test_cold_request_discovery_inside_local_scope_stays_formal(tmp_path, query):
     root = "businesses"
@@ -592,7 +716,8 @@ assert catalog.validated_entries() == (entry,)
     )
 
 
-def test_similar_entry_prefix_is_rejected_and_invalidates_prior_validation(tmp_path):
+@pytest.mark.parametrize("failed_revalidation", [False, True])
+def test_similar_entry_prefix_is_rejected_after_validation(tmp_path, failed_revalidation):
     declared = "app.businesses.probe.request.probe_done_v1"
     undeclared = declared + "0"
     write_module(tmp_path, "businesses", "probe.request.probe_done_v1")
@@ -607,26 +732,38 @@ def test_similar_entry_prefix_is_rejected_and_invalidates_prior_validation(tmp_p
         SETUP
         + f"""
 from app.businesses.definitions import BusinessDefinition
+from dataclasses import replace
+from app.businesses.definitions import InitialEntry
 from app.integrations.discovery import load_formal_modules
 from app.integrations.registration import import_registration_module
+from app.integrations.wms_request.operation import operations
 entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
 entry.COMMANDS = ()
 entry.ENTRY_MODULES = ({declared!r},)
 load_formal_modules()
 catalog.validate_business_contracts()
 assert catalog.validated_entries() == (entry,)
-import_registration_module({undeclared!r}, required=True)
+if {failed_revalidation!r}:
+    entry.DEFINITION = replace(entry.DEFINITION, initial_entries=(
+        InitialEntry(kind='wms_callback', name='probe.missing@v1'),))
+    try:
+        catalog.validate_business_contracts()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('invalid business passed revalidation')
+    try:
+        catalog.validated_entries()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('failed revalidation retained a usable catalog')
 try:
-    catalog.validate_business_contracts()
+    import_registration_module({undeclared!r}, required=True)
 except ValueError as error:
     assert {undeclared!r} in str(error)
 else:
     raise AssertionError('similar entry prefix was treated as an owned package')
-try:
-    catalog.validated_entries()
-except RuntimeError:
-    pass
-else:
-    raise AssertionError('failed revalidation retained a usable catalog')
+assert 'probe.done@v10' not in operations()
 """,
     )

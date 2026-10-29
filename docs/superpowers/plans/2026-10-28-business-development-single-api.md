@@ -1,7 +1,8 @@
 # 业务开发唯一用法实施计划
 
-> Task 1–4、原分支和交付授权保留当时记录。当前 catalog 归属校验增量按文末修复计划执行；
-> 从 develop 新建 `feature/catalog-registration-ownership`，保留三项原有修改及暂存状态；实施验收阶段不提交推送，交付按末尾授权执行。
+> Task 1–4、原分支、交付授权及首轮 catalog 归属修复均保留当时记录；首轮修复已合入 develop。
+> 当前“校验后首次导入”增量在 `feature/catalog-late-registration-guard` 实施，详见文末增量计划；
+> 保留三项原有修改及暂存状态，本增量不提交推送、不部署，不沿用历史交付授权。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development。任务顺序实施、逐项评审；提交范围遵循全局约束及末尾交付授权。
 
@@ -118,3 +119,9 @@
 
 用户随后授权提交并推送本轮 catalog 归属修复、负向回归和文档更新到当前功能分支。
 原 `.gitignore`、人工/粗分两份文档的修改和暂存状态继续保留，不纳入提交；不合并或部署。
+
+## 校验后首次导入增量（2026-10-28）
+
+上一轮catalog修复已合入develop。本轮评审发现工厂/业务方法首次导入可发生在最终校验之后，
+用户授权从当前develop新建`feature/catalog-late-registration-guard`修复，具体任务和实际验收见
+[增量实施计划](2026-10-28-catalog-late-registration.md)。保留原三项修改及暂存状态，不提交推送、不部署。

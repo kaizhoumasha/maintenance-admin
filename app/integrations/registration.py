@@ -119,6 +119,8 @@ def validate_registration_source(target) -> RegistrationSource:
 
 
 def validate_registration_file(name: str, target) -> RegistrationSource:
+    from app.integrations.discovery import validate_late_registration
+
     source = validate_registration_source(target)
     parts = source.module.split(".")
     if (
@@ -131,6 +133,7 @@ def validate_registration_file(name: str, target) -> RegistrationSource:
             f"{source.location}: filename mismatch for {name!r}; "
             f"修复: 将文件重命名为 {registration_filename(name)}，一个注册项一个文件"
         )
+    validate_late_registration(source)
     return source
 
 

@@ -10,8 +10,11 @@ from .definitions import BusinessDefinition
 
 if TYPE_CHECKING:
     from app.integrations.ecs_command.contracts import CommandBinding, DeviceAnnex
+    from app.integrations.registration import RegistrationSource
 
 _validated_entries: tuple[ModuleType, ...] | None = None
+# Failed revalidation invalidates runtime assembly without reopening startup registration.
+_registration_guard_enabled = False
 
 
 def entries() -> tuple[ModuleType, ...]:
@@ -85,6 +88,34 @@ def validated_entries() -> tuple[ModuleType, ...]:
     return current
 
 
+def validate_registration_owners(
+    sources: tuple["RegistrationSource", ...], *, allow_unvalidated: bool = False
+) -> None:
+    """Require exact formal entry ownership; initial imports defer to the final crosscheck."""
+    if allow_unvalidated and not _registration_guard_enabled:
+        return
+    sources = tuple(
+        source
+        for source in sources
+        if not source.local_only and source.module.startswith("app.businesses.")
+    )
+    if allow_unvalidated and not sources:
+        return
+    formal_modules = tuple(
+        name
+        for kind in ("ecs_event", "callback", "request")
+        for name in entry_modules(kind, environment="production")
+    )
+    for source in sources:
+        if not any(
+            source.module == name or source.module.startswith(name + ".") for name in formal_modules
+        ):
+            raise ValueError(
+                f"{source.location}: registration requires a catalog-owned formal ENTRY_MODULES "
+                "path; 修复: 将完整业务列入 catalog，并显式声明所属正式入口"
+            )
+
+
 def validate_business_contracts() -> tuple[
     tuple["CommandBinding", ...], dict[tuple[str, str], "DeviceAnnex"]
 ]:
@@ -96,7 +127,7 @@ def validate_business_contracts() -> tuple[
     from app.integrations.wms_callback.registry import operations
     from app.integrations.wms_request.operation import operations as request_operations
 
-    global _validated_entries
+    global _validated_entries, _registration_guard_enabled
     _validated_entries = None
     current = entries()
     all_roles = {role.role_key for definition in definitions() for role in definition.device_roles}
@@ -168,21 +199,16 @@ def validate_business_contracts() -> tuple[
                 raise ValueError(
                     f"{location}: initial entry {key!r} requires own formal registration: {source}"
                 )
-    formal_modules = tuple(
-        name
-        for kind in ("ecs_event", "callback", "request")
-        for name in entry_modules(kind, environment="production")
-    )
-    for item in (*registered_events.values(), *callbacks.values(), *request_operations().values()):
-        source = item.registration_source
-        if source.local_only or not source.module.startswith("app.businesses."):
-            continue
-        if not any(
-            source.module == name or source.module.startswith(name + ".") for name in formal_modules
-        ):
-            raise ValueError(
-                f"{source.location}: registration requires a catalog-owned formal ENTRY_MODULES "
-                "path; 修复: 将完整业务列入 catalog，并显式声明所属正式入口"
+    validate_registration_owners(
+        tuple(
+            item.registration_source
+            for item in (
+                *registered_events.values(),
+                *callbacks.values(),
+                *request_operations().values(),
             )
+        )
+    )
     _validated_entries = current
+    _registration_guard_enabled = True
     return tuple(commands), annexes
