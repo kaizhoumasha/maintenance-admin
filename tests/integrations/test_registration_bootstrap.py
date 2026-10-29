@@ -559,3 +559,74 @@ if {owner != "other"!r}:
         raise AssertionError('invalid business catalog remained usable')
 """,
     )
+
+
+@pytest.mark.parametrize("scope", ["local", "isolated"])
+def test_catalog_validation_preserves_nonformal_registration_scopes(tmp_path, scope):
+    module = "app.businesses.unlisted.dev" if scope == "local" else "isolated_request"
+    write_module(
+        tmp_path,
+        "businesses" if scope == "local" else "isolated",
+        "unlisted.dev" if scope == "local" else module,
+        REQUEST,
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+from app.businesses.definitions import BusinessDefinition
+from app.integrations.discovery import load_formal_modules
+from app.integrations.registration import import_registration_module
+from app.integrations.wms_request.operation import lookup
+entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
+entry.COMMANDS = ()
+entry.ENTRY_MODULES = ()
+load_formal_modules()
+catalog.validate_business_contracts()
+sys.path.insert(0, str(root / 'isolated'))
+import_registration_module({module!r}, local_only={scope == "local"!r}, required=True)
+assert lookup('probe.done@v1').registration_source.local_only is {scope == "local"!r}
+assert catalog.validate_business_contracts() == ((), {{}})
+assert catalog.validated_entries() == (entry,)
+""",
+    )
+
+
+def test_similar_entry_prefix_is_rejected_and_invalidates_prior_validation(tmp_path):
+    declared = "app.businesses.probe.request.probe_done_v1"
+    undeclared = declared + "0"
+    write_module(tmp_path, "businesses", "probe.request.probe_done_v1")
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.request.probe_done_v10",
+        REQUEST.replace("probe.done@v1", "probe.done@v10"),
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+from app.businesses.definitions import BusinessDefinition
+from app.integrations.discovery import load_formal_modules
+from app.integrations.registration import import_registration_module
+entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
+entry.COMMANDS = ()
+entry.ENTRY_MODULES = ({declared!r},)
+load_formal_modules()
+catalog.validate_business_contracts()
+assert catalog.validated_entries() == (entry,)
+import_registration_module({undeclared!r}, required=True)
+try:
+    catalog.validate_business_contracts()
+except ValueError as error:
+    assert {undeclared!r} in str(error)
+else:
+    raise AssertionError('similar entry prefix was treated as an owned package')
+try:
+    catalog.validated_entries()
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('failed revalidation retained a usable catalog')
+""",
+    )
