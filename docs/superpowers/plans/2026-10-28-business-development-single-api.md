@@ -1,8 +1,9 @@
 # 业务开发唯一用法实施计划
 
 > Task 1–4、原分支、交付授权及首轮 catalog 归属修复均保留当时记录；首轮修复已合入 develop。
-> 当前“校验后首次导入”增量在 `feature/catalog-late-registration-guard` 实施，详见文末增量计划；
-> 保留三项原有修改及暂存状态，本增量不提交推送、不部署，不沿用历史交付授权。
+> “校验后首次导入”增量已完成，并通过 [PR #35](https://github.com/kaizhoumasha/maintenance-admin/pull/35) 合入 develop；
+> 原两份业务合同文档及 `.gitignore` 修改已通过 [PR #36](https://github.com/kaizhoumasha/maintenance-admin/pull/36) 合入 develop。
+> 下文分支、文件保护要求及交付授权均保留当时记录；当前能力与验证边界见[单一 API 验收记录](../../integrations/business-development-single-api-acceptance.md)，实际交付以 Git 记录为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development。任务顺序实施、逐项评审；提交范围遵循全局约束及末尾交付授权。
 
@@ -122,6 +123,9 @@
 
 ## 校验后首次导入增量（2026-10-28）
 
-上一轮catalog修复已合入develop。本轮评审发现工厂/业务方法首次导入可发生在最终校验之后，
-用户授权从当前develop新建`feature/catalog-late-registration-guard`修复，具体任务和实际验收见
-[增量实施计划](2026-10-28-catalog-late-registration.md)。保留原三项修改及暂存状态，不提交推送、不部署。
+首轮 catalog 修复合入 develop 后，评审发现工厂/业务方法首次导入可发生在最终校验之后，
+用户当时授权从 develop 新建 `feature/catalog-late-registration-guard` 修复。
+该增量已完成，并通过 [PR #35](https://github.com/kaizhoumasha/maintenance-admin/pull/35) 合入 develop；具体任务和实际验收见
+[增量实施计划](2026-10-28-catalog-late-registration.md)。实施验收阶段保留原三项修改及暂存状态，未提交推送或部署；这些保护要求和阶段授权仅记录当时范围。
+原两份业务合同文档及 `.gitignore` 修改随后通过 [PR #36](https://github.com/kaizhoumasha/maintenance-admin/pull/36) 合入 develop。
+当前能力与验证边界见[单一 API 验收记录](../../integrations/business-development-single-api-acceptance.md)，继续区分 MOCK/内部验证与真实对端、设备和现场验收。
