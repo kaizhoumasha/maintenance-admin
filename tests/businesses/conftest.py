@@ -425,3 +425,170 @@ async def mock_cycle(pg_sessions, monkeypatch):
     async with mock_cycle_fixture(pg_sessions, monkeypatch) as flow:
         await flow.configure()
         yield flow
+
+
+@pytest.fixture
+async def coarse_scan(callback_store, monkeypatch):
+    """Own a temporary scan table and two bound lines; never enroll a partial business."""
+    import sys
+
+    from sqlalchemy import (
+        JSON,
+        BigInteger,
+        Boolean,
+        Column,
+        DateTime,
+        Integer,
+        MetaData,
+        String,
+        Table,
+    )
+
+    from app.businesses import catalog
+    from app.businesses.coarse_sorting.service import CoarseSortingService
+    from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
+    from app.businesses.runtime import build_runtime
+    from app.database import SCHEMA
+    from app.integrations import discovery
+    from app.integrations.ecs_callback import registry as events
+    from app.models import DeviceRoute, ReliableMessage
+    from app.reliable import Outbox
+    from tests.helpers import add_bound_device, business_composition
+
+    table = Table(
+        "coarse_scan_test_" + uuid7().hex,
+        MetaData(schema=SCHEMA),
+        Column("id", String, primary_key=True),
+        Column("event_digest", String(64), unique=True, nullable=False),
+        Column("receipt_id", Integer, nullable=False),
+        Column("work_line_id", Integer, nullable=False),
+        Column("workline_code", String, nullable=False),
+        Column("device_id", Integer, nullable=False),
+        Column("device_code", String, nullable=False),
+        Column("device_role", String, nullable=False),
+        Column("device_version", Integer, nullable=False),
+        Column("work_line_version", Integer, nullable=False),
+        Column("binding_revision", String, nullable=False),
+        Column("timestamp", BigInteger, nullable=False),
+        Column("payload", JSON, nullable=False),
+        Column("received_at", DateTime(timezone=True), nullable=False),
+        Column("pending", Boolean, nullable=False),
+        Column("wait_reason", String, nullable=False),
+    )
+    definition = BusinessDefinition(
+        code="coarse_sorting",
+        display_name="粗分扫码受理测试范围",
+        device_roles=(DeviceRole(role_key="INPUT_ARM", display_name="入料机械臂"),),
+        initial_entries=(
+            InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="INPUT_ARM"),
+        ),
+    )
+    engine = callback_store.kw["bind"]
+    codes, line_ids, route_ids = [], [], []
+    async with engine.begin() as connection:
+        await connection.run_sync(table.create)
+    monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(app.state, "ecs_event_binding_resolver", resolve_binding)
+    state = SimpleNamespace(
+        factory=callback_store,
+        table=table,
+        definition=definition,
+        codes=codes,
+        line_ids=line_ids,
+        route_ids=route_ids,
+    )
+
+    def event(*, device=0, timestamp=1793206799000, changes=None, omit=()):
+        data = {
+            "barcode": " P032-0561,原始条码 ",
+            "box_barcodes": "BIN-A001,BIN-A002",
+            "scan_time": 1793206798000,
+            "reel_diameter": 15,
+            "reel_thickness": 20,
+            "result": "OK",
+        }
+        data.update(changes or {})
+        for key in omit:
+            data.pop(key)
+        return {
+            "device_code": codes[device],
+            "event_type": "SCAN_COMPLETED",
+            "timestamp": timestamp,
+            "data": data,
+        }
+
+    async def post(body):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post("/api/v1/callback/event", json=body)
+
+    async def rows():
+        async with callback_store() as session:
+            return list((await session.execute(select(table).order_by(table.c.id))).mappings())
+
+    async def outbound_counts():
+        from sqlalchemy import func
+
+        async with callback_store() as session:
+            return (
+                await session.scalar(select(func.count()).select_from(ReliableMessage)),
+                await session.scalar(select(func.count()).select_from(EcsCommand)),
+            )
+
+    state.event, state.post, state.rows, state.outbound_counts = event, post, rows, outbound_counts
+
+    original_accept = CoarseSortingService.accept_scan
+
+    async def observe_acceptance(service, ctx, payload):
+        with monkeypatch.context() as guard:
+
+            def forbidden(*args, **kwargs):
+                raise AssertionError("business acceptance cannot own a transaction")
+
+            for method in ("begin", "begin_nested", "commit", "rollback", "connection"):
+                guard.setattr(ctx.session, method, forbidden)
+            await original_accept(service, ctx, payload)
+
+        if getattr(state, "after_accept", None) is not None:
+            await state.after_accept(ctx)
+
+    monkeypatch.setattr(CoarseSortingService, "accept_scan", observe_acceptance)
+    entry_module = "app.businesses.coarse_sorting.ecs_event.scan_completed"
+    composition = business_composition("coarse_sorting", "INPUT_ARM")
+    composition.DEFINITION = definition
+    composition.ENTRY_MODULES = (entry_module,)
+    composition.build_service = lambda capabilities: CoarseSortingService(table)
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(catalog, "_registration_guard_enabled", catalog._registration_guard_enabled)
+
+    def install():
+        monkeypatch.setattr(events, "_registry", {})
+        monkeypatch.setattr(discovery, "_loaded_formal", set())
+        monkeypatch.delitem(sys.modules, entry_module, raising=False)
+        discovery.load_formal_modules("ecs_event")
+        catalog.validate_business_contracts()
+        state.runtime = build_runtime(outbox=Outbox({}, {}), ecs_commands=None)
+        monkeypatch.setattr(app.state, "business_runtime", state.runtime, raising=False)
+
+    state.install = install
+    try:
+        install()
+        async with callback_store.begin() as session:
+            for _ in range(2):
+                code = "COARSE_TEST_" + uuid7().hex
+                line, device, route = await add_bound_device(
+                    session, code, "http://127.0.0.1:1", role="INPUT_ARM"
+                )
+                line.business_code = "coarse_sorting"
+                line.position_bindings = {}
+                codes.append(code)
+                line_ids.append(line.id)
+                route_ids.append(route.id)
+        yield state
+    finally:
+        async with callback_store.begin() as session:
+            await session.execute(delete(Device).where(Device.device_code.in_(codes)))
+            await session.execute(delete(WorkLine).where(WorkLine.id.in_(line_ids)))
+            await session.execute(delete(DeviceRoute).where(DeviceRoute.id.in_(route_ids)))
+        async with engine.begin() as connection:
+            await connection.run_sync(table.drop)
