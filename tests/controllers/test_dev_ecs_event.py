@@ -38,7 +38,7 @@ async def event_debug(client, admin, callback_db, monkeypatch):
     application.state.callback_session_factory = callback_db
     application.dependency_overrides.update(main_app.dependency_overrides)
     include_ecs_callback(application, environment="local", resolve_binding=ecs_binding)
-    include_dev_routers(application, environment="local")
+    include_dev_routers(application, environment="local", command_bindings=())
     body = {
         "device_code": "TEST_DEVICE",
         "event_type": "SCAN_COMPLETED",
@@ -227,5 +227,5 @@ async def test_event_query_projects_owned_state_in_one_read_only_snapshot(event_
 @pytest.mark.parametrize("environment", ["production", "staging"])
 def test_nonlocal_application_has_no_event_debug_routes(environment):
     application = FastAPI()
-    include_dev_routers(application, environment=environment)
+    include_dev_routers(application, environment=environment, command_bindings=())
     assert URL not in application.openapi()["paths"]

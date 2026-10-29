@@ -129,7 +129,10 @@ def test_deployed_business_catalog_reports_checked_formal_scope():
     from app.businesses import catalog
 
     assert report["businesses"] == sorted(d.code for d in catalog.definitions())
-    assert report["command_contracts"] == []
+    assert any(
+        row["device_role"] == "CONVEYOR" and row["name"] == "MOVE_FORWARD"
+        for row in report["command_contracts"]
+    )
     assert any(row["name"] == "transport.task.resulted@v1" for row in report["entries"])
     assert report["scope"]["checked"]
     assert report["scope"]["excluded"]

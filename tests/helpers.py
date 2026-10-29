@@ -1003,7 +1003,7 @@ async def business_flow_fixture(factory, monkeypatch):
         outbox.lifecycles = {"ecs-command": EcsLifecycle(commands)}
         monkeypatch.setattr(ecs, "_registry", {})
         monkeypatch.setattr(callbacks, "_registry", dict(callbacks._registry))
-        monkeypatch.setattr(requests, "_registry", dict(requests._registry))
+        monkeypatch.setattr(requests, "_registry", {})
         entries, receipt_ids = [], set()
         for code, role, payload in (
             ("seam_a", "SEAM_A", FlowScanA),
@@ -1059,7 +1059,7 @@ async def business_flow_fixture(factory, monkeypatch):
         catalog.validate_business_contracts()
 
         def rebuild():
-            return build_runtime(outbox=outbox, ecs_commands=commands)
+            return build_runtime(outbox=outbox, ecs_commands=commands, session_factory=factory)
 
         runtime = rebuild()
         monkeypatch.setattr(app.state, "business_runtime", runtime, raising=False)
@@ -1292,5 +1292,13 @@ def coarse_sorting_composition(table):
     entry.ENTRY_MODULES = composition.ENTRY_MODULES
     entry.MODEL_MODULES = ()
     entry.COMMANDS = composition.COMMANDS
-    entry.build_service = lambda capabilities: CoarseSortingService(table)
+
+    def build_service(capabilities):
+        from app.businesses.coarse_sorting.request.inbound_coarse_sorting_validate_bind_v1 import (
+            ValidateBind,
+        )
+
+        return CoarseSortingService(table, capabilities, ValidateBind)
+
+    entry.build_service = build_service
     return entry

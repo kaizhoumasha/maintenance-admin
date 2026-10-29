@@ -18,6 +18,8 @@ UNKNOWN表示可能已经交付；HELD保持暂停，不换命令号、改址或
 
 使用项目正常开发环境启动app.main:app，在/docs登录并填写授权凭证，打开POST /api/v1/dev/ecs/commands。准备好要连接的模拟ECS，将其实际IP地址填入ecs_url：
 
+点击 **Try it out**，在 **Examples** 中选择平台 `MOVE` 或当前有效的声明项，例如 **CONVEYOR / MOVE_FORWARD**。下拉会填好完整请求；平台演示为：
+
 ```json
 {
   "client_request_id": "demo-1",
@@ -28,6 +30,21 @@ UNKNOWN表示可能已经交付；HELD保持暂停，不换命令号、改址或
   "params": {"qty": 1}
 }
 ```
+
+粗分 **CONVEYOR / MOVE_FORWARD** 的完整样例为：
+
+```json
+{
+  "client_request_id": "demo-CONVEYOR-MOVE_FORWARD-1",
+  "ecs_url": "http://127.0.0.1:8000",
+  "device_code": "CONVEYOR-01",
+  "task_type": "MOVE_FORWARD",
+  "timeout_ms": 30000,
+  "params": {"barcode": "RAW-001"}
+}
+```
+
+设备码、地址和请求标识均为占位，执行前按支持该任务的模拟 ECS 修改。每个新调用换请求标识，原调用重试保持不变。参数来自原声明模型的 JSON Schema examples；若下拉提示无对象样例，按注册目录 `command_contract` 的 `payload_schema` 填写 `params`。样例超时按声明范围约束；选择声明项只填充请求，调试仍走通用协议合同，既不创建正式业务动作，也不自动获得正式设备绑定或消费结果。
 
 ecs_url填写你指定的模拟ECS实际地址；上面只展示字段形状，不要求修改启动地址配置，也不要求使用框架测试专用模拟端。仅接受合法HTTP(S) IP origin，固定命令路径，不带凭据、path、query或fragment，不使用DNS、重定向或环境代理。task_type不查白名单，params保留合法JSON对象；具体动作语义由对端校验。
 

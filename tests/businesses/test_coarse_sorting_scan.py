@@ -10,7 +10,6 @@ from app.models import CallbackReceipt, WorkLine
     "changes,omit",
     [
         ({}, ()),
-        ({"result": "NG"}, ()),
         ({"reel_diameter": 15.5, "reel_thickness": 20.25}, ()),
     ],
 )
@@ -44,17 +43,11 @@ async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, chang
     "changes,omit",
     [
         ({}, ("barcode",)),
-        ({}, ("scan_time",)),
         ({}, ("reel_diameter",)),
         ({}, ("reel_thickness",)),
-        ({}, ("result",)),
         ({"barcode": 123}, ()),
-        ({"scan_time": True}, ()),
-        ({"scan_time": -1}, ()),
-        ({"scan_time": 2**63}, ()),
         ({"reel_diameter": True}, ()),
         ({"reel_thickness": "20"}, ()),
-        ({"result": "UNKNOWN"}, ()),
     ],
 )
 async def test_invalid_scan_is_rejected_without_business_acceptance(coarse_scan, changes, omit):
@@ -216,7 +209,7 @@ async def test_old_scan_does_not_follow_reassigned_device_after_receipt_cleanup(
         new = await session.get(WorkLine, scan.line_ids[1])
         device = await session.scalar(select(Device).where(Device.device_code == scan.codes[0]))
         old.device_bindings = {}
-        new.device_bindings = {"INPUT_ARM": scan.codes[0]}
+        new.device_bindings = {**new.device_bindings, "INPUT_ARM": scan.codes[0]}
         old.version += 1
         new.version += 1
         device.work_line_id = new.id

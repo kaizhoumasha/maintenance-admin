@@ -7,8 +7,8 @@
 原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
 这些平台能力不表示真实业务或供应商/现场已验收。
 
-当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单已登记粗分扫码受理。
-隔离测试中的两份示例业务不进入生产清单。粗分当前只交付扫码事实与待办受理，完整粗分流程和 manual-picking 仍需后续实现。
+当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单已登记粗分扫码、WMS 验证和首个输送动作结果消费。
+隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。分配、入箱、NG 搬运和 manual-picking 仍需后续实现。
 
 以下按 definition → 严格合同 → composition → 子包 service/model → 薄入口 → catalog →
 模型加载 → 两线测试说明最小接入方式。示例中的 `<已确认…>`、`Confirmed…` 都是待替换的标记，
@@ -64,8 +64,8 @@ ECS 参数/结果/错误模型必须满足[命令模型约束](ecs-command.md#�
 ## 3. 可信装配 composition.py
 
 固定入口及模型模块路径，引用同一份 `DEFINITION` 和命令模型清单。工厂只构造无作业状态的服务，
-不保存活动 session、不访问网络。平台只注入 `Capabilities.ecs / wms / transport`；不新增通用 execute。
-真实业务的独立推进入口还需要 session factory，由 composition 的可信工厂明确注入：
+不保存活动 session、不访问网络。平台注入 `Capabilities.ecs / wms / transport / session_factory`；不新增通用 execute。
+API 与 worker 分别传入自己的 session factory；composition 不能导入全局数据库工厂跨事件循环复用：
 
 ```python
 from .ecs_command import MoveTo
@@ -77,11 +77,9 @@ COMMANDS = (MoveTo,)
 
 
 def build_service(capabilities):
-    from app.core.database import session_factory
-
     from .service import MyBusinessService
 
-    return MyBusinessService(capabilities, session_factory=session_factory)
+    return MyBusinessService(capabilities)
 ```
 
 按实际合同补充 `callback` / `request` 固定模块；不接受用户输入动态 import。目录读取不会调用工厂。

@@ -149,7 +149,7 @@ class CaptureOutbox:
     async def enqueue(self, session, draft): self.intents.append(draft)
 outbox = CaptureOutbox()
 try:
-    runtime = build_runtime(outbox=outbox, ecs_commands=None)
+    runtime = build_runtime(outbox=outbox, ecs_commands=None, session_factory=lambda: None)
     asyncio.run(runtime.services['probe'].advance())
 except ValueError as error:
     assert {owner != "other"!r}, str(error)

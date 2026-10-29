@@ -95,7 +95,7 @@ async def test_catalog_does_not_query_ecs(client, admin, monkeypatch):
 @pytest.mark.parametrize("environment", ["production", "test"])
 def test_registry_is_not_mounted_outside_local(environment):
     app = FastAPI()
-    include_dev_routers(app, environment=environment)
+    include_dev_routers(app, environment=environment, command_bindings=())
     assert PATH not in app.openapi()["paths"]
 
 

@@ -129,6 +129,7 @@ async def test_lifespan_factory_receives_only_the_available_platform_capabilitie
     from app import main
     from app.businesses import catalog
     from app.integrations.ecs_callback import registry
+    from app.integrations.wms_request import operation
     from tests.helpers import business_composition
 
     entry = business_composition()
@@ -136,6 +137,7 @@ async def test_lifespan_factory_receives_only_the_available_platform_capabilitie
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(registry, "_registry", {})
+    monkeypatch.setattr(operation, "_registry", {})
     catalog.validate_business_contracts()
     outbox, service = object(), object()
     app = FastAPI()
@@ -148,6 +150,7 @@ async def test_lifespan_factory_receives_only_the_available_platform_capabilitie
         assert app.state.outbox is outbox
         assert capabilities.ecs is app.state.ecs_commands
         assert capabilities.wms.outbox is capabilities.transport.outbox is outbox
+        assert capabilities.session_factory is main.session_factory
         return service
 
     entry.build_service = build

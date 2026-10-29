@@ -15,7 +15,7 @@ SCAN_MIGRATION = (
 def test_scan_contract_exposes_only_device_facts():
     from app.businesses.coarse_sorting.contracts import ScanCompletedData
 
-    facts = {"barcode", "scan_time", "reel_diameter", "reel_thickness", "result"}
+    facts = {"barcode", "reel_diameter", "reel_thickness"}
     schema = ScanCompletedData.model_json_schema()
     assert set(schema["properties"]) == facts
     assert all(set(example) == facts for example in schema["examples"])
@@ -55,23 +55,46 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
 
     from sqlalchemy import delete
 
+    from app.businesses import catalog
     from app.businesses.coarse_sorting.models import CoarseSortingScan
     from app.businesses.runtime import build_runtime
     from app.core.identifiers import uuid7
+    from app.integrations.ecs_command import EcsCommands
     from app.main import app
     from app.models import Device, DeviceRoute, WorkLine
     from app.reliable import Outbox
+    from app.services.device_routes import DeviceRoutes
     from tests.helpers import add_bound_device
 
-    runtime = build_runtime(outbox=Outbox({}, {}), ecs_commands=None)
+    bindings, annexes = catalog.validate_business_contracts()
+    outbox = Outbox({}, {})
+    commands = EcsCommands(outbox, "coarse-test", DeviceRoutes(bindings, annexes=annexes), annexes)
+    runtime = build_runtime(outbox=outbox, ecs_commands=commands, session_factory=callback_db)
     monkeypatch.setattr(app.state, "business_runtime", runtime, raising=False)
-    lines, codes, routes = [], [], []
+    lines, codes, routes, conveyor_codes = [], [], [], []
     async with callback_db.begin() as session:
         for _ in range(2):
             code = "SCAN_" + uuid7().hex
             line, device, route = await add_bound_device(
                 session, code, "http://127.0.0.1:1", role="INPUT_ARM"
             )
+            conveyor_code = "CONVEYOR_" + uuid7().hex
+            conveyor_route = DeviceRoute(
+                id=str(uuid7()), device_code=conveyor_code, ecs_origin="http://127.0.0.1:1"
+            )
+            session.add(conveyor_route)
+            await session.flush()
+            session.add(
+                Device(
+                    device_code=conveyor_code,
+                    display_name=conveyor_code,
+                    current_route_id=conveyor_route.id,
+                    work_line_id=line.id,
+                )
+            )
+            line.device_bindings = {"INPUT_ARM": code, "CONVEYOR": conveyor_code}
+            conveyor_codes.append(conveyor_code)
+            routes.append(conveyor_route.id)
             line.business_code = "coarse_sorting"
             line.position_bindings = {}
             lines.append(line.id)
@@ -83,10 +106,8 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
         "timestamp": 1793206799000,
         "data": {
             "barcode": " RAW,TEST-1 ",
-            "scan_time": 1793206798000,
             "reel_diameter": 15,
             "reel_thickness": 20,
-            "result": "OK",
         },
     }
     try:
@@ -98,7 +119,9 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
             await session.execute(
                 delete(CoarseSortingScan).where(CoarseSortingScan.device_code.in_(codes))
             )
-            await session.execute(delete(Device).where(Device.device_code.in_(codes)))
+            await session.execute(
+                delete(Device).where(Device.device_code.in_([*codes, *conveyor_codes]))
+            )
             await session.execute(delete(WorkLine).where(WorkLine.id.in_(lines)))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id.in_(routes)))
 

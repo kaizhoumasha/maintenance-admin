@@ -1,5 +1,7 @@
 # 粗分机 SCAN_COMPLETED 可靠受理实施计划
 
+> 当前增量已进入[验证与首个 MOVE_FORWARD / Result 阶段](../specs/2026-10-29-coarse-sorting-move-forward-design.md)，操作见 [ECS Event 调试](../../integrations/ecs-event-debugging.md)。下文全部为首阶段历史设计与验收，保留当时范围和结果；现行合同以上述增量为准。
+
 > 当前范围修订：2026-10-29 用户确认将扫码受理登记为同一套正式装配，撤销此前空生产 catalog 及专用 local 隔离要求；移除 ECS 无法提供的箱码清单。下述旧阶段决定与验收结果保留为历史，当前实现与验证以 [调试计划 Task 7](2026-10-29-dev-ecs-events.md#task-7唯一正式粗分扫码装配当前修订) 为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

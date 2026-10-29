@@ -28,3 +28,12 @@ class CoarseSortingScan(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     pending: Mapped[bool]
     wait_reason: Mapped[str]
+    validation_operation_id: Mapped[str | None]
+    validation_message_id: Mapped[int | None]
+    validation_response: Mapped[dict | None] = mapped_column(JSON)
+    binding_id: Mapped[str | None]
+    conveyor_device_id: Mapped[int | None]
+    conveyor_device_code: Mapped[str | None]
+    conveyor_device_version: Mapped[int | None]
+    command_code: Mapped[str | None]
+    move_result: Mapped[dict | None] = mapped_column(JSON)

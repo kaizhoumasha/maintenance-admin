@@ -1,11 +1,14 @@
-"""The implemented coarse scan acceptance entry and its required device role."""
+"""The coarse scan and first conveyor movement roles."""
 
 from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
 
 DEFINITION = BusinessDefinition(
     code="coarse_sorting",
-    display_name="粗分扫码受理",
-    device_roles=(DeviceRole(role_key="INPUT_ARM", display_name="入料机械臂"),),
+    display_name="粗分",
+    device_roles=(
+        DeviceRole(role_key="INPUT_ARM", display_name="入料机械臂"),
+        DeviceRole(role_key="CONVEYOR", display_name="输送线"),
+    ),
     initial_entries=(
         InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="INPUT_ARM"),
     ),

@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from app.businesses import catalog
 from app.businesses.definitions import BusinessDefinition
 from app.integrations.ecs_command import EcsCommands
@@ -15,6 +17,7 @@ class Capabilities:
     ecs: EcsCommands | None
     wms: WmsRequests
     transport: TransportService
+    session_factory: async_sessionmaker[AsyncSession]
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,7 @@ class BusinessRuntime:
     services: Mapping[str, object]
 
 
-def build_runtime(*, outbox, ecs_commands) -> BusinessRuntime:
+def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
     entries = catalog.validated_entries()
     if not entries:
         return BusinessRuntime(definitions={}, services={})
@@ -31,7 +34,11 @@ def build_runtime(*, outbox, ecs_commands) -> BusinessRuntime:
         raise ValueError("Business runtime requires the application outbox")
     if ecs_commands is None and any(entry.COMMANDS for entry in entries):
         raise ValueError("Business commands require the application ECS capability")
-    capabilities = Capabilities(ecs_commands, WmsRequests(outbox), TransportService(outbox))
+    if not callable(session_factory):
+        raise ValueError("Business runtime requires an application session factory")
+    capabilities = Capabilities(
+        ecs_commands, WmsRequests(outbox), TransportService(outbox), session_factory
+    )
     services = {}
     for entry in entries:
         service = entry.build_service(capabilities)

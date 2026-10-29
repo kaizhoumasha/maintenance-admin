@@ -1,5 +1,7 @@
 # 通用 ECS Event 调试与粗分本地验收设计
 
+> 当前业务范围见[验证与首个 MOVE_FORWARD / Result 增量](2026-10-29-coarse-sorting-move-forward-design.md)和 [ECS Event 操作指南](../../integrations/ecs-event-debugging.md)。下文全部为当时阶段设计及验收记录（含当时合同示例），其中“当前”指该历史时点；现行合同以上述增量为准。
+
 ## 当前决定
 
 用户确认撤销空生产 catalog 约束。粗分扫码使用唯一正式 `ecs_event/scan_completed.py`、所属 definition/composition 和正式扫码表；API/worker/迁移共享同一 catalog。各环境装配相同，验证数据库、设备/工作线、MOCK 对端由已有部署配置与测试准备，启动不自动生成测试数据。

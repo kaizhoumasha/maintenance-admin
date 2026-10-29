@@ -4,7 +4,7 @@
 [ECS 命令合同](ecs-command.md)为准。本页不定义新协议或平台 API。
 `accept/advance/scan_pending` 均是具体业务方法名；可执行参照是
 [隔离测试业务 FlowService](../../tests/helpers.py)和下方真实 PostgreSQL 用例，不能复制到生产清单。
-正式 `catalog.entries()` 已登记获准的粗分扫码受理阶段；其他业务须按各自实现范围登记。
+正式 `catalog.entries()` 已登记获准的粗分扫码、验证、首个 MOVE_FORWARD / Result 阶段；其他业务须按各自实现范围登记。
 
 ## 先保存哪些依据
 

@@ -109,6 +109,10 @@ local 组合只委托正式路由，动态 JSON 调试由受信任适配器进�
 
 新登记要求ENVIRONMENT=local、登录及dev:ecs:send_real。框架自动提供统一信封、ACK/错误和Result协议合同；task_type不查动作白名单，params/data接受并保留合法JSON对象。统一ErrorDetail(code,msg)、SUCCESS/FAILED条件、类型/大小/身份等协议校验保留，动作是否支持及业务字段语义由对端ECS/正式业务负责。正式消费仍校验当前许可、绑定/版本和结果，协议SUCCESS不等于业务已完成。
 
+`POST /api/v1/dev/ecs/commands` 的 Swagger **Examples** 下拉保留平台 `MOVE` 演示，并为 catalog 已编译且实际生效的每个角色/动作提供完整六字段请求，例如 `CONVEYOR / MOVE_FORWARD`。主应用将同一份有效 `command_bindings` 传给开发路由，在挂载时固定样例；控制器不扫描业务目录、不重新编译或扩展声明中的其他角色。平台样例只取 `DevCommandIn` 的模型示例，业务 `params` 取原命令模型 JSON Schema `examples` 中首个对象；模型无对象样例时仍可选择，`params={}`，按提示查看注册目录 `command_contract` 条目的 `payload_schema` 后填写。样例超时以 30000ms 为基准，限制在该声明的最小/最大范围内。
+
+样例设备码、ECS 地址及请求标识均为占位，使用前按模拟 ECS 修改；每个新调用换请求标识，同一次调用重试保留整份输入。角色/动作仅用于组织样例，不增加模式或选择器字段，不绑定设备，也不将调试入口切换到正式严格参数/Result 合同。`task_type` 仍可填写未登记动作。内置 Mock 只支持 `D1/MOVE` 的 ACK；`MOVE_FORWARD` 等其他动作须使用支持对应任务的模拟 ECS，不能把样例地址直接当作对应 Mock 已可执行的证明。
+
 ecs_url必填且沿用HTTP(S) IP origin规范化、固定路径、无凭据/query/fragment/DNS/重定向/环境代理及非法地址拒绝。DEVICE_CODE全系统唯一；不新建ECS表、逐地址/动作清单或联网开关。新增设备、动作或改址只改请求；client_request_id保持稳定，timeout_ms仍为现有非负int64执行毫秒值，不新增默认值或请求窗口字段。
 
 受限工厂及历史附录通过可信Python启动依赖传入，接口为configure_local_ecs(app, *, environment, history_annexes=None, client_factory=AsyncHttpClient, routes=None)。`routes` 可组合正式角色路由，`history_annexes` 同时提供其严格附录；非 local 显式传入角色路由会报错。普通主lifespan只传environment，自动使用内置合同；测试夹具先持有本轮模拟端并绑定受限client_factory，再进入真实主lifespan。它须在服务/provider均未预装时调用原生产装配函数一次，先检查冲突、合并合同并构造DynamicClients(factory=client_factory)，再发布服务/provider、关联outbox、启动唯一Sender。不得提前占用app.state.reliable_client_provider、先手工造服务绕过自动分支或在冲突时重置状态。底层configure_ecs只增加同名可选工厂依赖，现有冲突保护不放宽。

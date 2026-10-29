@@ -3,6 +3,7 @@ from datetime import timedelta
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import ConfigDict, create_model
 from sqlalchemy import func, select
 
 from app.core import get_current_user
@@ -200,6 +201,128 @@ def test_swagger_documents_complete_command_examples():
     view = schema["components"]["schemas"]["DevCommandView"]
     assert "result" in view["required"]
     assert {"type": "null"} in view["properties"]["result"]["anyOf"]
+
+
+def test_swagger_offers_platform_and_effective_business_command_requests():
+    create = app.openapi()["paths"]["/api/v1/dev/ecs/commands"]["post"]
+    examples = create["requestBody"]["content"]["application/json"]["examples"]
+    assert examples["platform:MOVE"]["value"] == BODY
+    assert examples["CONVEYOR:MOVE_FORWARD"]["value"] == {
+        "client_request_id": "demo-CONVEYOR-MOVE_FORWARD-1",
+        "ecs_url": "http://127.0.0.1:8000",
+        "device_code": "CONVEYOR-01",
+        "task_type": "MOVE_FORWARD",
+        "timeout_ms": 30000,
+        "params": {"barcode": "RAW-001"},
+    }
+    assert "占位" in examples["CONVEYOR:MOVE_FORWARD"]["description"]
+    assert create["operationId"] == "create_command_api_v1_dev_ecs_commands_post"
+    query = app.openapi()["paths"]["/api/v1/dev/ecs/commands/{command_code}"]["get"]
+    assert query["operationId"] == "get_command_api_v1_dev_ecs_commands__command_code__get"
+
+
+async def test_selected_business_example_keeps_generic_debug_snapshot_and_identity(client, dev_ecs):
+    import json
+
+    create = app.openapi()["paths"]["/api/v1/dev/ecs/commands"]["post"]
+    examples = create["requestBody"]["content"]["application/json"]["examples"]
+    body = examples["CONVEYOR:MOVE_FORWARD"]["value"]
+    first = await client.post("/api/v1/dev/ecs/commands", headers=dev_ecs, json=body)
+    assert first.status_code == 200, first.text
+    code = first.json()["command_code"]
+    repeated = await client.post("/api/v1/dev/ecs/commands", headers=dev_ecs, json=body)
+    assert repeated.json()["command_code"] == code
+    conflict = await client.post(
+        "/api/v1/dev/ecs/commands", headers=dev_ecs, json={**body, "params": {"barcode": "OTHER"}}
+    )
+    assert conflict.status_code == 409
+    async with app.state.audit_session_factory() as session:
+        row = await session.get(EcsCommand, code)
+        assert json.loads(row.request_raw)["params"] == {"barcode": "RAW-001"}
+        assert row.route["version"] == "3"
+        assert (row.route["annex_id"], row.route["annex_version"]) == ("ecs.dev.protocol", "1")
+        assert row.route["retry_window"] == 300
+    # Picking an example does not switch the free-form endpoint to its strict business model.
+    generic = await client.post(
+        "/api/v1/dev/ecs/commands",
+        headers=dev_ecs,
+        json={**body, "client_request_id": "generic-move-forward", "params": {"opaque": [1, None]}},
+    )
+    assert generic.status_code == 200, generic.text
+
+
+@pytest.mark.parametrize(
+    "samples,timeout_range,params,timeout",
+    [
+        (None, (1, 20), {}, 20),
+        ([None, "not an object", []], (40000, 50000), {}, 40000),
+        (
+            [None, {"barcode": "ALIAS-01"}, {"barcode": "ALIAS-02"}],
+            (0, 60000),
+            {"barcode": "ALIAS-01"},
+            30000,
+        ),
+    ],
+)
+def test_mounted_examples_use_effective_bindings_model_samples_and_timeout_bounds(
+    samples, timeout_range, params, timeout
+):
+    from app.controllers.dev import include_dev_routers
+    from app.integrations.ecs_command import compile_commands, ecs_command
+    from app.integrations.ecs_command.contracts import ErrorDetail
+
+    config = ConfigDict(strict=True, extra="forbid")
+    if samples is not None:
+        config["json_schema_extra"] = {"examples": samples}
+    model = create_model("SharedMove", __config__=config, barcode=(str, ...))
+    ecs_command(
+        "MOVE_SHARED",
+        device_roles=("ARM_A", "ARM_B", "INACTIVE"),
+        annex_id="test.shared",
+        annex_version="1",
+        result=model,
+        error=ErrorDetail,
+        timeout_min_ms=timeout_range[0],
+        timeout_max_ms=timeout_range[1],
+    )(model)
+    bindings, _ = compile_commands(model)
+    effective = tuple(binding for binding in bindings if binding.device_role != "INACTIVE")
+    target = FastAPI()
+    include_dev_routers(target, environment="local", command_bindings=effective)
+    document = target.openapi()
+    media = document["paths"]["/api/v1/dev/ecs/commands"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]
+    examples = media["examples"]
+    assert set(examples) == {"platform:MOVE", "ARM_A:MOVE_SHARED", "ARM_B:MOVE_SHARED"}
+    identities = set()
+    for role in ("ARM_A", "ARM_B"):
+        sample = examples[f"{role}:MOVE_SHARED"]
+        value = sample["value"]
+        assert sample["summary"] == f"{role} / MOVE_SHARED"
+        assert value["params"] == params
+        assert value["timeout_ms"] == timeout
+        assert set(value) == set(BODY)
+        identities.add(value["client_request_id"])
+        if not params:
+            assert "params" in sample["description"] and "注册目录" in sample["description"]
+    assert len(identities) == 2
+    schema = document["components"]["schemas"]["DevCommandIn"]
+    assert set(schema["properties"]) == set(BODY)
+    assert "enum" not in schema["properties"]["task_type"]
+
+    # A second mount cannot leak its examples into the first application's snapshot.
+    other = FastAPI()
+    include_dev_routers(other, environment="local", command_bindings=())
+    other_examples = other.openapi()["paths"]["/api/v1/dev/ecs/commands"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["examples"]
+    assert set(other_examples) == {"platform:MOVE"}
+    assert set(
+        target.openapi()["paths"]["/api/v1/dev/ecs/commands"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["examples"]
+    ) == set(examples)
 
 
 async def test_requests_select_dynamic_origins_without_device_registration(client, dev_ecs):

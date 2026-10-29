@@ -1,8 +1,8 @@
 """Frozen scan-acceptance payload; business validation and commands are separate stages."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import ConfigDict, Field, FiniteFloat
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
 from app.integrations.ecs_callback import CallbackPayload
 
@@ -13,17 +13,33 @@ class ScanCompletedData(CallbackPayload):
             "examples": [
                 {
                     "barcode": "TEST-REEL-001",
-                    "scan_time": 1793206798000,
                     "reel_diameter": 15,
                     "reel_thickness": 20,
-                    "result": "OK",
                 }
             ]
         }
     )
 
     barcode: str
-    scan_time: Annotated[int, Field(ge=0, le=2**63 - 1)]
     reel_diameter: int | FiniteFloat
     reel_thickness: int | FiniteFloat
+
+
+NonemptyText = Annotated[str, Field(min_length=1)]
+
+
+class ValidateBindDecision(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
     result: Literal["OK", "NG"]
+    binding_id: NonemptyText | None = None
+    reason_code: NonemptyText | None = None
+
+    @model_validator(mode="after")
+    def check_decision(self) -> Self:
+        if self.result == "OK":
+            if self.binding_id is None or self.reason_code is not None:
+                raise ValueError("OK requires binding_id and forbids reason_code")
+        elif self.reason_code is None or self.binding_id is not None:
+            raise ValueError("NG requires reason_code and forbids binding_id")
+        return self

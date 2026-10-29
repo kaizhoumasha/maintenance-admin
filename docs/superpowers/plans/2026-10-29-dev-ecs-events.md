@@ -1,5 +1,7 @@
 # ECS Event 调试与粗分扫码正式装配实施计划
 
+> 当前业务范围见[验证与首个 MOVE_FORWARD / Result 增量](../specs/2026-10-29-coarse-sorting-move-forward-design.md)和 [ECS Event 操作指南](../../integrations/ecs-event-debugging.md)。下文全部为当时阶段设计及验收记录，其中“当前”指该历史时点；现行合同以上述增量为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **当前授权：** 2026-10-29 用户确认撤销空生产 catalog 约束，使用同一套正式扫码装配；MOCK 由测试/部署的数据库、设备绑定和对端配置决定。当前实施为 Task 7，Task 1–6 均为已被替代方案的历史记录。后续用户已授权修正文档并复评、验证通过后本地提交；不推送、不部署。
