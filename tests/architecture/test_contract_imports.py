@@ -171,7 +171,7 @@ else:
 load_formal_modules()
 commands, annexes = catalog.validate_business_contracts()
 assert any(c.device_role == 'CONVEYOR' and c.task_type == 'MOVE_FORWARD' for c in commands)
-assert ('coarse_sorting.move_forward', '1') in annexes
+assert all((command.annex_id, command.annex_version) in annexes for command in commands)
 assert "coarse_sorting" in {definition.code for definition in catalog.definitions()}
 assert "transport.task.resulted@v1" in operations()
 """,

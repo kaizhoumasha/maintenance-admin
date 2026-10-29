@@ -45,7 +45,7 @@
 - 信息链为 **原始 `barcode` → `binding_id` → 原放料目标 → 物理完成反馈**。
 - `binding_id` 由 WMS 在验证及 GRN 绑定成功后返回，供箱格分配和物理完成反馈使用。装载记录、内部记录 ID 及库存处理由 WMS 管理。
 - 验证、分配、重新分配、完成反馈及旧架离场决定请求均在 `data` 中显式携带必填、非空字符串 `workline_code`。工作线标识具体粗分执行单元，多台粗分机及其 A/B 独立执行单元须通过可信绑定明确区分；`COARSE-A` 仅为示例，不是全场共用默认值。WES 从原扫码受理时的可信设备绑定取得并保存该编码，后续业务请求沿用原工作线上下文，不根据条码、当前设备配置或最近一次作业重新猜测。Transport 提交沿用既有合同，不增加工作线字段，工作线关联保留在 WES 内部。
-- 货架工作点位由 WES 根据原 `workline_code`，从数据库中的 `WorkLine.position_bindings` 按粗分业务声明的出料架位角色取得；WMS 分配响应使用工作线编码，不另返位置编码。首次使用该架位时保存配置版本及具体位置编码，同一作业后续搬运、重试和结果核对沿用原值；位置绑定缺失时停止推进。配置只表示预期架位，不证明货架已在位或已到位。
+- 货架工作点位由 WES 根据原 `workline_code`，从数据库中的 `WorkLine.position_bindings["OUTPUT_RACK"]` 取得；联调配置为 RS01→CLN01、RS02→CLN02，不配置输送线出入口或面向。WMS 分配响应使用工作线编码，不另返位置编码。后续架位使用阶段须保存首次使用时的配置版本及具体位置编码，同一作业后续搬运、重试和结果核对沿用原值；位置绑定缺失时停止推进。配置只表示预期架位，不证明货架已在位或已到位。
 - 粗分机架位不涉及换面，不要求货架面向；共用离场请求的必填 `current_face` 显式为 `null`，Transport 提交省略可选的 `target_face`，到位判断不依赖 `arrival_face`。是否到位仍以原任务已应用成功、货架及具体工作位匹配为准。
 - 本盘厚度和直径统一使用数值字段 `reel_thickness`、`reel_diameter`，示例分别为 `20`、`15`。ECS 上报后由 WES 原样转交 WMS，不改名、不转字符串、不自行换算单位；测量单位和精度见第 7 节。
 - 本系统目标草案将 `reel_totalthickness` 定义为数值类型，表示**料格内当前已存储物料的总高度，不包含本次待放入物料**。空料格为 `0`；相对设备 v3.3 的类型调整、数值语义、单位和精度均待 ECS 确认，本文示例按 mm 表示，见第 5 节差异说明。
@@ -823,13 +823,13 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 
 入站 Payload 沿用 `CallbackPayload` 的严格类型及 `extra="ignore"`：额外字段不进入业务 Payload；公共事件摘要仍按原完整 `data` 计算，不能用忽略额外字段后的模型重新计算身份。请求体大小沿用公共接收器的 256 KiB 上限。
 
-本阶段业务 code 固定为 `coarse_sorting`，入料角色 key 固定为 `INPUT_ARM`；A/B 区使用各自工作线的可信设备绑定，样例设备码不构成配置。当前增量同时声明输送线角色 CONVEYOR；后续角色、位置及完整业务随后续阶段交付。
+本阶段业务 code 固定为 `coarse_sorting`，入料角色 key 固定为 `INPUT_ARM`；A/B 区使用各自工作线的可信设备绑定，样例设备码不构成配置。当前增量同时声明输送线角色 CONVEYOR 和唯一必需位置槽 OUTPUT_RACK（出料单层货架位）；其余角色及完整业务随后续阶段交付。
 
 重复身份沿用公共接收器对 `device_code + event_type + timestamp + data` 的规范化摘要。原样重报复用原扫码受理；同条码而事件事实不同视为独立上报，不用条码或 WES 接收时间去重。同毫秒、同设备、同内容的真实重入无法与重报区分，本基线按重复处理，不保证辨识这类实物重入。后续若调整身份合同，须保留原收据、业务去重依据和已冻结身份，不能重算历史记录或自动重放旧事件。
 
 扫码接收事务只原子保存原收据、扫码记录和持久待办，不在该事务发送网络请求。由后续独立任务登记原验证及命令。扫码记录与持久去重依据不随公共收据清理删除，本阶段不增加业务清理作业。完整流程、真实设备上报及现场验收不在本轮内部开发验收范围内。
 
-2026-10-29 当前实施范围：唯一正式 SCAN_COMPLETED 入口保存事实，具体推进任务每 5 秒处理持久待办。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，内部附录 coarse_sorting.move_forward/1）。已应用 SUCCESS 必须含严格整数 actual_qty=1 和 location=STATION_PIPELINE1_OUTPUT1，才进入 AWAITING_ALLOCATION_STAGE；FAILED、缺字段或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围。
+2026-10-29 当前实施范围（含双机配置增量）：唯一正式 SCAN_COMPLETED 入口保存事实，具体推进任务每 5 秒处理持久待办。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，新调用使用内部附录 coarse_sorting.move_forward/2）。按原 command_code + device_code 关联的已应用 SUCCESS 须含严格整数 actual_qty=1 且无待核对项，才进入 AWAITING_ALLOCATION_STAGE；MOVE_FORWARD 的 Result.data 仅包含 actual_qty，执行位置由 ECS 根据设备及动作管理。FAILED、缺数量或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围；原附录 /1 的历史设计及验收结论保持原时间范围。
 
 ## 5. ECS 命令与结果示例
 
@@ -895,13 +895,12 @@ ACK 仅表示已接纳，WES 继续等待原命令 Result。移动完成后，EC
   "result": "SUCCESS",
   "finish_time": 1793206804000,
   "data": {
-    "actual_qty": 1,
-    "location": "STATION_PIPELINE1_OUTPUT1"
+    "actual_qty": 1
   }
 }
 ```
 
-ECS 根据输送线设备及动作执行入口到出口的移动。WES 核对原命令、设备及动作完成结果后才调用箱格分配。`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。
+ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 command_code + device_code 核对动作完成结果；`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。MOVE_FORWARD 的 Result.data 仅包含 actual_qty，不携带固定位置。当前实现消费后等待箱格分配阶段，尚不调用分配接口。
 
 <a id="ecs-put-to-bin"></a>
 

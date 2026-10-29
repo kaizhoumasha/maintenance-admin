@@ -5,6 +5,31 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize("device", [0, 1])
+async def test_original_role_command_completes_with_only_quantity(coarse_forward, device):
+    flow = coarse_forward
+    data = {"actual_qty": 1}
+    row = await flow.prepare_command(device=device)
+    assert row["conveyor_device_code"] == flow.conveyor_codes[device]
+    await flow.dispatch()
+    response = await flow.result(row, data=data)
+    assert response.status_code == 200, response.text
+    assert await flow.service.advance(row["id"]) == "AWAITING_ALLOCATION_STAGE"
+    saved = (await flow.rows())[0]
+    assert saved["move_result"]["result"]["data"] == data
+    assert saved["command_code"] == row["command_code"]
+
+
+async def test_other_lines_device_cannot_complete_original_role_command(coarse_forward):
+    flow = coarse_forward
+    row = await flow.prepare_command()
+    await flow.dispatch()
+    response = await flow.result(row, device_code=flow.conveyor_codes[1])
+    assert response.status_code == 404, response.text
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+    assert (await flow.rows())[0]["move_result"] is None
+
+
 async def test_two_lines_complete_original_move_and_keep_raw_identity(coarse_forward):
     flow = coarse_forward
     for device in (0, 1):
@@ -138,8 +163,6 @@ async def test_only_valid_original_wms_ok_creates_command(
             "error_detail": {"code": "BLOCKED", "msg": "mock failure"},
         },
         {"data": {}},
-        {"data": {"actual_qty": 1}},
-        {"data": {"location": "STATION_PIPELINE1_OUTPUT1"}},
     ],
 )
 async def test_applied_incomplete_or_failed_result_preserves_evidence_without_completion(
@@ -162,9 +185,9 @@ async def test_applied_incomplete_or_failed_result_preserves_evidence_without_co
 @pytest.mark.parametrize(
     "changes",
     [
-        {"data": {"actual_qty": True, "location": "STATION_PIPELINE1_OUTPUT1"}},
-        {"data": {"actual_qty": 2, "location": "STATION_PIPELINE1_OUTPUT1"}},
-        {"data": {"actual_qty": 1, "location": "OTHER"}},
+        {"data": {"actual_qty": True}},
+        {"data": {"actual_qty": 2}},
+        {"data": {"actual_qty": 1, "unexpected": "not part of the result contract"}},
         {"device_code": "WRONG_DEVICE"},
         {"command_code": "MISSING_COMMAND"},
     ],

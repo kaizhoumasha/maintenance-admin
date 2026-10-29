@@ -96,7 +96,7 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
             conveyor_codes.append(conveyor_code)
             routes.append(conveyor_route.id)
             line.business_code = "coarse_sorting"
-            line.position_bindings = {}
+            line.position_bindings = {"OUTPUT_RACK": "RACK_" + code}
             lines.append(line.id)
             codes.append(code)
             routes.append(route.id)

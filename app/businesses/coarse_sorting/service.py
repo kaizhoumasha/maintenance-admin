@@ -183,7 +183,6 @@ class CoarseSortingService:
                     and result.get("result") == "SUCCESS"
                     and type(data.get("actual_qty")) is int
                     and data["actual_qty"] == 1
-                    and data.get("location") == "STATION_PIPELINE1_OUTPUT1"
                 )
                 return await save(
                     "AWAITING_ALLOCATION_STAGE" if complete else "MOVE_RECONCILIATION_REQUIRED",

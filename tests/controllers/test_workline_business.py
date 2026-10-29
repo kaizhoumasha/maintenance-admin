@@ -38,6 +38,36 @@ async def test_legacy_null_line_remains_readable(client, admin):
     assert selected.json()["business_code"] == "test_sorting"
 
 
+@pytest.mark.parametrize("line_code,rack", [("RS01", "CLN01"), ("RS02", "CLN02")])
+async def test_coarse_line_saves_only_its_output_rack_position(
+    client, admin, monkeypatch, line_code, rack
+):
+    from app.businesses import catalog
+    from app.businesses.coarse_sorting import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={
+            "line_code": line_code,
+            "line_name": line_code,
+            "business_code": "coarse_sorting",
+            "position_bindings": {"OUTPUT_RACK": rack},
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    read = await client.get(f"/api/v1/work-lines/{created['id']}", headers=admin)
+    assert read.status_code == 200, read.text
+    assert read.json()["position_bindings"] == {"OUTPUT_RACK": rack}
+    options = await client.get("/api/v1/businesses", headers=admin)
+    assert options.status_code == 200, options.text
+    assert options.json()[0]["position_slots"] == [
+        {"key": "OUTPUT_RACK", "display_name": "出料单层货架位", "required": True}
+    ]
+
+
 @pytest.mark.parametrize("selection", [{}, {"business_code": None}, {"business_code": "missing"}])
 async def test_new_line_requires_known_business(client, admin, selection):
     response = await client.post(

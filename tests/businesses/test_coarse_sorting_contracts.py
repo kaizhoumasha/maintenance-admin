@@ -26,11 +26,8 @@ def test_move_result_accepts_empty_failure_data_and_physical_completion():
     from app.businesses.coarse_sorting.ecs_command import MoveForwardResult
 
     MoveForwardResult.model_validate({})
-    result = MoveForwardResult.model_validate(
-        {"actual_qty": 1, "location": "STATION_PIPELINE1_OUTPUT1"}
-    )
+    result = MoveForwardResult.model_validate({"actual_qty": 1})
     assert result.actual_qty == 1
-    assert result.location == "STATION_PIPELINE1_OUTPUT1"
 
 
 @pytest.mark.parametrize(
@@ -41,7 +38,6 @@ def test_move_result_accepts_empty_failure_data_and_physical_completion():
         {"actual_qty": 1.0},
         {"actual_qty": 0},
         {"actual_qty": 2},
-        {"location": "OTHER"},
         {"extra": 1},
     ],
 )
@@ -113,8 +109,8 @@ definition = catalog.get_definition('coarse_sorting')
 required = {role.role_key for role in definition.device_roles if role.required}
 assert required == {'INPUT_ARM','CONVEYOR'}
 binding = next(b for b in bindings if b.device_role == 'CONVEYOR' and b.task_type == 'MOVE_FORWARD')
-assert (binding.annex_id, binding.annex_version) == ('coarse_sorting.move_forward','1')
-annex = annexes[('coarse_sorting.move_forward','1')]
+assert (binding.annex_id, binding.annex_version) == ('coarse_sorting.move_forward','2')
+annex = annexes[('coarse_sorting.move_forward','2')]
 assert (annex.timeout_min_ms, annex.timeout_max_ms) == (1, 60000)
 request = lookup('inbound.coarse_sorting.validate_bind@v1')
 assert request.endpoint is Endpoint.DECISIONS

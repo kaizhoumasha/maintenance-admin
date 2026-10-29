@@ -17,7 +17,7 @@
 ## 操作步骤
 
 1. 对选定的验证数据库执行已有迁移流程至 head，正常启动主应用 `app.main:app`。
-2. 使用管理员入口配置粗分扫码工作线：business_code=coarse_sorting，将 INPUT_ARM、CONVEYOR 绑定到各自实际设备；设备角色和版本由已有资产配置确定。代码不会自动补建或改写绑定。
+2. 使用管理员入口配置粗分扫码工作线：business_code=coarse_sorting，将 INPUT_ARM、CONVEYOR 绑定到各自实际设备，并配置唯一位置槽 OUTPUT_RACK（出料单层货架位）。例如 RS01→CLN01、RS02→CLN02；不配置输送线入口、出口或面向。设备角色和版本由已有资产配置确定，代码不会自动补建或改写绑定。
 3. 正常登录，在 `/docs` 的 **Authorize** 填入 access_token，不加 Bearer 前缀。
 4. 展开 **dev-ecs-event → POST /api/v1/dev/ecs/events → Try it out**，选择 **INPUT_ARM / SCAN_COMPLETED**。
 5. 将 device_code 改为已配置的设备码，修改条码和 timestamp 后 Execute。新事件用新 timestamp，验证重报则保留整份请求。
@@ -130,11 +130,13 @@ ECS HTTP 200 `{"code":200,"message":"ACK"}` 只确认接收。原设备通过公
   "device_code": "CONVEYOR-01",
   "command_code": "019c0000-0000-7000-8000-000000000002",
   "result": "SUCCESS", "finish_time": 1793206800500,
-  "data": {"actual_qty": 1, "location": "STATION_PIPELINE1_OUTPUT1"},
+  "data": {"actual_qty": 1},
   "error_detail": null
 }
 ```
 
-接收器 HTTP 200 ACK 后，任务消费原已应用结果，保存 move_result 和 binding_id，进入 AWAITING_ALLOCATION_STAGE（pending=true 表示后续业务义务仍在）。本轮不请求箱格、不执行 PUT_TO_BIN 或 MOVE_TO_NG。FAILED 可使用空 data 和严格 error_detail；SUCCESS 缺少数量/位置同样只保存原证据，停在 MOVE_RECONCILIATION_REQUIRED，不能当作完成或另发命令。
+接收器按原 command_code + device_code 关联结果；任务消费原已应用 SUCCESS、严格整数 actual_qty=1 且无待核对项的结果，保存 move_result 和 binding_id，进入 AWAITING_ALLOCATION_STAGE（pending=true 表示后续业务义务仍在）。MOVE_FORWARD 的 Result.data 仅包含 actual_qty；执行位置由 ECS 按设备和动作管理。新正式调用使用内部附录 coarse_sorting.move_forward/2，通用调试合同仍为 v3。
 
-以上附录位置、超时和 MOCK 响应是内部开发基线；供应商合同确认、部署与现场物理验收分别记录。
+本轮不请求箱格、不执行 PUT_TO_BIN 或 MOVE_TO_NG。FAILED 可使用空 data 和严格 error_detail；SUCCESS 缺少数量仍只保存原证据，停在 MOVE_RECONCILIATION_REQUIRED，不能当作完成或另发命令。错误数量、错误字段类型或错误原命令/设备身份在原 Result 接收边界拒绝。
+
+以上超时和 MOCK 响应是内部开发基线。供应商合同确认、部署与现场物理验收分别记录。

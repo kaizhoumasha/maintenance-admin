@@ -104,10 +104,6 @@ async def test_storage_failure_rolls_back_receipt_scan_and_pending(coarse_scan):
 
 @pytest.mark.parametrize("issue", ["wrong_business", "missing_position"])
 async def test_business_configuration_rejection_is_diagnostic_only(coarse_scan, issue):
-    from dataclasses import replace
-
-    from app.businesses.definitions import PositionSlot
-
     scan = coarse_scan
     if issue == "wrong_business":
         async with scan.factory.begin() as session:
@@ -115,10 +111,9 @@ async def test_business_configuration_rejection_is_diagnostic_only(coarse_scan, 
             line.business_code = None
         reason = "WORKLINE_BUSINESS_MISMATCH"
     else:
-        scan.runtime.definitions["coarse_sorting"] = replace(
-            scan.definition,
-            position_slots=(PositionSlot(slot_key="OUTLET", display_name="出料架位"),),
-        )
+        async with scan.factory.begin() as session:
+            line = await session.get(WorkLine, scan.line_ids[0])
+            line.position_bindings = {}
         reason = "WORKLINE_CONFIGURATION_INCOMPLETE"
     response = await scan.post(scan.event())
     assert response.status_code == 200
