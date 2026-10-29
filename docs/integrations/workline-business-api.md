@@ -4,8 +4,9 @@
 
 | 文档 | 用途 | 合同状态 |
 | --- | --- | --- |
-| [人工分拣](manual-picking-api.md) | 单据驱动，货架供料、人工处理、退箱、换面及离场 | 参考 wes_backend 已有合同与代码；迁入本系统仍有差异和门槛 |
-| [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 用户流程已明确；字段、operation 名和设备附录待对端确认 |
+| [人工分拣](manual-picking-api.md) | 单据驱动，货架供料、人工处理、退箱、换面及离场 | 参考旧系统流程；共用离场合同等调整待确认，业务未接入 |
+| [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 专用接口、拟议共用离场合同及设备附录待确认，业务未接入 |
+| [自动线](automatic-picking-wms-api.md) | BIN / RackSlot 逐盘取料、决定、放置及来源架面推进 | 本系统对接草案；简化 wire、盘次关联及设备边界待确认，业务未接入 |
 | [业务开发唯一用法设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md) | 唯一公开模型 API、命令声明、业务目录及迁移边界 | 已实现；MOCK 与内部验证结果见当前验收说明 |
 
 业务使用模型 send/create、`@ecs_command(..., device_roles=(...))` 及 composition `COMMANDS`，catalog 内部编译；业务目录唯一为 `app/businesses/<business>/`。
@@ -51,6 +52,12 @@ WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合
 技术重试必须复用原身份、时间戳和冻结正文。同 ID 内容漂移为冲突。业务 WAIT 已被有效解析并可靠保存后，才可能按约定时间/新事实发起**新的业务求值**；未知响应不是换 ID 重做的理由。
 
 不同协议的 HTTP/code 联合不同：Transport submit 不定义 `429/BUSY`；通用 WMS request 支持的组合不自动成为每个业务 operation 的合同。人工参考合同亦不定义 BUSY，不能从通用能力推导对端接受它。
+
+### 货架离场决定的拟议共用合同
+
+人工、粗分和自动线草案统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `rack_id`、`current_location`、`current_face`；当前位置为已确认的 `RACK_POSITION`，未知面向显式为 `null`。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
+
+这是本系统**拟议的新共用合同，尚待 WMS/WES 确认，未注册、未实施**。旧系统来源基线的离场 operation 带 `outbound` 前缀，且要求 `task_id` 字段存在（可为 null）；不能把本文的改名和字段裁剪当作旧 DTO 已支持的原样复用。三份草案仅保留上述目标用法，不增加兼容入口；对端确认名称、请求/响应、幂等及错误规则后，才能交付本系统的正式 DTO 和业务入口。这里的历史来源说明不改变第 1 节所列核对基线。
 
 ### ECS 消息信封
 
@@ -115,4 +122,4 @@ Python 集中声明描述“这个业务需要什么”；静态 catalog 与简�
 
 每个业务至少给出：流程及结束条件、完整 API 字段及联合分支、原身份/业务经过身份、角色附录、工作线资源表、异常等待/核对路径、受理与推进边界、孤立环境测试清单。接口草案必须由 WMS/ECS 责任方确认后，才转为正式注册。
 
-人工的旧系统来源和差异见其专页；粗分的未决合同集中列在草案末尾。公共协议细节以[注册](registration.md)、[ECS](ecs-command.md)、[Transport](wms-transport.md)及[出站结果](outbound-results.md)为准。
+人工的旧系统流程参考见其专页；人工、粗分和自动线的未决合同各自在文末列出，共用离场调整以本文草案说明为准。公共协议细节以[注册](registration.md)、[ECS](ecs-command.md)、[Transport](wms-transport.md)及[出站结果](outbound-results.md)为准。
