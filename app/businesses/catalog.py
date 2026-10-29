@@ -94,6 +94,7 @@ def validate_business_contracts() -> tuple[
     from app.integrations.ecs_command.contracts import merge_annexes
     from app.integrations.registration import DEV_MODULES
     from app.integrations.wms_callback.registry import operations
+    from app.integrations.wms_request.operation import operations as request_operations
 
     global _validated_entries
     _validated_entries = None
@@ -167,5 +168,21 @@ def validate_business_contracts() -> tuple[
                 raise ValueError(
                     f"{location}: initial entry {key!r} requires own formal registration: {source}"
                 )
+    formal_modules = tuple(
+        name
+        for kind in ("ecs_event", "callback", "request")
+        for name in entry_modules(kind, environment="production")
+    )
+    for item in (*registered_events.values(), *callbacks.values(), *request_operations().values()):
+        source = item.registration_source
+        if source.local_only or not source.module.startswith("app.businesses."):
+            continue
+        if not any(
+            source.module == name or source.module.startswith(name + ".") for name in formal_modules
+        ):
+            raise ValueError(
+                f"{source.location}: registration requires a catalog-owned formal ENTRY_MODULES "
+                "path; 修复: 将完整业务列入 catalog，并显式声明所属正式入口"
+            )
     _validated_entries = current
     return tuple(commands), annexes

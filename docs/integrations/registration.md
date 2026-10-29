@@ -35,6 +35,11 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 `wms_transport.dev` 的六个 Transport 场景。三类旧 discovery 包装模块已删除。
 实际 `app.*` 注册来源只允许所属业务子模块或固定平台入口树，普通 import 同样执行来源校验。
 
+正式合同校验会反查三类实际注册项：业务来源必须属于当前 catalog 中显式声明的正式
+`ENTRY_MODULES` 模块或其包内子模块。依赖 import 的注册副作用也受此约束；未列业务和同业务
+未声明入口均会阻止启动。跨业务共享合同须由其所属完整业务显式列出入口，不能靠被其他业务 import 启用。
+API/worker 在 local 入口和运行设施前校验，静态检查失败不返回部分成功目录。
+
 ## ECS：声明数据与处理函数
 
 文件：`app/businesses/example/ecs_event/scan1/scan_completed.py`。

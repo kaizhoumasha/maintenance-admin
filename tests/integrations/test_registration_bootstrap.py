@@ -475,3 +475,158 @@ else:
     raise AssertionError('ordinary import bypassed registration source boundary')
 """,
     )
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize("owner", ["unlisted", "probe_shadow", "probe", "other"])
+@pytest.mark.parametrize("consumer", ["catalog", "cli"])
+def test_indirect_registrations_require_a_declared_catalog_entry(tmp_path, kind, owner, consumer):
+    sources = {
+        "ecs_event": (
+            "from app.integrations.ecs_callback import ecs_event, CallbackPayload\n"
+            "@ecs_event('DONE', device_role='PROBE_SCAN', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        ),
+        "callback": (
+            "from app.integrations.wms_callback import callback_operation, CallbackPayload\n"
+            "@callback_operation('probe.done@v1', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        ),
+        "request": REQUEST,
+    }
+    filename = "done" if kind == "ecs_event" else "probe_done_v1"
+    module = f"app.businesses.{owner}.{kind}.{filename}"
+    write_module(tmp_path, "businesses", f"{owner}.{kind}.{filename}", sources[kind])
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.request.trigger",
+        f"import {module}\n",
+    )
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.dev_callback",
+        "raise AssertionError('local entry loaded before formal validation')\n",
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+from app.businesses.definitions import BusinessDefinition, DeviceRole
+entry.DEFINITION = BusinessDefinition(
+    code='probe', display_name='Probe',
+    device_roles=(DeviceRole(role_key='PROBE_SCAN', display_name='Scan'),),
+)
+entry.COMMANDS = ()
+entry.ENTRY_MODULES = ('app.businesses.probe.request.trigger',
+                       'app.businesses.probe.dev_callback')
+if {owner == "other"!r}:
+    other = ModuleType('app.businesses.other.composition')
+    other.DEFINITION = BusinessDefinition(
+        code='other', display_name='Other', device_roles=entry.DEFINITION.device_roles,
+    )
+    other.COMMANDS = ()
+    other.ENTRY_MODULES = ('app.businesses.other.{kind}',)
+    catalog.entries = lambda: (entry, other)
+if {consumer == "cli"!r}:
+    import contextlib
+    import io
+    from scripts.check_integration_contracts import main
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        result = main(['--environment', 'production'])
+    assert result == {0 if owner == "other" else 1}, (stdout.getvalue(), stderr.getvalue())
+    if {owner != "other"!r}:
+        assert stdout.getvalue() == ''
+else:
+    from app.integrations.discovery import load_formal_modules
+    load_formal_modules()
+    try:
+        catalog.validate_business_contracts()
+    except ValueError as error:
+        assert {owner != "other"!r}, str(error)
+        assert {module!r} in str(error)
+    else:
+        assert {owner == "other"!r}, 'undeclared indirect registration was accepted'
+assert 'app.businesses.probe.dev_callback' not in sys.modules
+if {owner != "other"!r}:
+    try:
+        catalog.validated_entries()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('invalid business catalog remained usable')
+""",
+    )
+
+
+@pytest.mark.parametrize("scope", ["local", "isolated"])
+def test_catalog_validation_preserves_nonformal_registration_scopes(tmp_path, scope):
+    module = "app.businesses.unlisted.dev" if scope == "local" else "isolated_request"
+    write_module(
+        tmp_path,
+        "businesses" if scope == "local" else "isolated",
+        "unlisted.dev" if scope == "local" else module,
+        REQUEST,
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+from app.businesses.definitions import BusinessDefinition
+from app.integrations.discovery import load_formal_modules
+from app.integrations.registration import import_registration_module
+from app.integrations.wms_request.operation import lookup
+entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
+entry.COMMANDS = ()
+entry.ENTRY_MODULES = ()
+load_formal_modules()
+catalog.validate_business_contracts()
+sys.path.insert(0, str(root / 'isolated'))
+import_registration_module({module!r}, local_only={scope == "local"!r}, required=True)
+assert lookup('probe.done@v1').registration_source.local_only is {scope == "local"!r}
+assert catalog.validate_business_contracts() == ((), {{}})
+assert catalog.validated_entries() == (entry,)
+""",
+    )
+
+
+def test_similar_entry_prefix_is_rejected_and_invalidates_prior_validation(tmp_path):
+    declared = "app.businesses.probe.request.probe_done_v1"
+    undeclared = declared + "0"
+    write_module(tmp_path, "businesses", "probe.request.probe_done_v1")
+    write_module(
+        tmp_path,
+        "businesses",
+        "probe.request.probe_done_v10",
+        REQUEST.replace("probe.done@v1", "probe.done@v10"),
+    )
+    run_cold(
+        tmp_path,
+        SETUP
+        + f"""
+from app.businesses.definitions import BusinessDefinition
+from app.integrations.discovery import load_formal_modules
+from app.integrations.registration import import_registration_module
+entry.DEFINITION = BusinessDefinition(code='probe', display_name='Probe')
+entry.COMMANDS = ()
+entry.ENTRY_MODULES = ({declared!r},)
+load_formal_modules()
+catalog.validate_business_contracts()
+assert catalog.validated_entries() == (entry,)
+import_registration_module({undeclared!r}, required=True)
+try:
+    catalog.validate_business_contracts()
+except ValueError as error:
+    assert {undeclared!r} in str(error)
+else:
+    raise AssertionError('similar entry prefix was treated as an owned package')
+try:
+    catalog.validated_entries()
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('failed revalidation retained a usable catalog')
+""",
+    )

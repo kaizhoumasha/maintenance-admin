@@ -198,6 +198,7 @@ def test_own_initial_entry_is_valid(composition, kind):
         source = RegistrationSource(
             "app.businesses.test_sorting.callback", "callback.py", "handler", False
         )
+        composition.ENTRY_MODULES += (source.module,)
         item = ecs_registry._registry[("TEST_SCAN", "SCAN_COMPLETED")]
         wms_registry._registry["scan.done@v1"] = Registered(
             item.func, CallbackPayload, None, (), source

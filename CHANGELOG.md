@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 业务注册 catalog 归属校验
+
+- 正式 ECS Event、WMS callback/request 注册必须属于显式 catalog 声明的入口模块或包；间接导入未列业务、同业务未声明入口或相似名称均阻止启动与目录输出，保留合法跨业务引用及平台/local 边界。补齐冷启动负向与重新校验回归，同步接入规则和 MOCK 验收记录。
+
 
 ### 业务开发单一 API 与 MOCK 验证
 
