@@ -410,7 +410,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 }
 ```
 
-`ROTATE` 表示同一目标货架换面，`REPLACE` 表示换成 `target_locator` 指定的新货架。当前货架离场去向由独立的 `rack.departure_decide@v1` 决定，本响应不携带旧架离场目的地。该接口为本系统拟议共用合同，名称及字段裁剪尚待确认；请求仅含必填的 `rack_id + current_location + current_face`，位置为已确认的 `RACK_POSITION`，未知面向显式为 `null`，不发送 `task_id`。状态与完整示例见[共用离场合同](workline-business-api.md#货架离场决定的拟议共用合同)。
+`ROTATE` 表示同一目标货架换面，`REPLACE` 表示换成 `target_locator` 指定的新货架。当前货架离场去向由独立的 `rack.departure_decide@v1` 决定，本响应不携带旧架离场目的地。该接口为本系统拟议共用合同，名称及字段约束尚待确认；请求仅含必填的 `workline_code + rack_id + current_location + current_face`，工作线编码沿用原业务上下文并与货架/工作位一致，位置为已确认的 `RACK_POSITION`，面向不适用或无法确认时显式为 `null`，不发送 `task_id`。状态与完整示例见[共用离场合同](workline-business-api.md#货架离场决定的拟议共用合同)。
 `ACCEPT` 不发送 `REJECT` 或 `WAIT` 分支字段。
 
 ##### REJECT
@@ -1327,7 +1327,7 @@ ARM02 将单盘放到扫码台后触发扫码，取得匹配原取盘的成功�
 | P05 | ECS | 失败错误码与供应商原厂码的对应；不以占位码作为执行约定 | [结果回调](#31-共用接口与回传格式) |
 | P06 | WMS / WES | BIN 的 REJECT.CONTINUE 后继参数、RackSlot 异常后的其他储位授权，以及空取和异常续行合同 | [BIN 决定](#22-bin-物料决定)、[RackSlot 决定](#26-rackslot-物料决定)、[面级结束](#27-退料架面结束与换面换架) |
 | P07 | WMS / WES | 确认未闭合单盘业务键唯一性、同码后续盘 WAIT、报告先去重再匹配、无唯一授权或去向冲突的拒绝，以及双方事务闭合边界；需要放宽并发时先确认新的自包含盘次合同 | [盘次关联约束](#plate-correlation) |
-| P08 | WMS / WES | 确认拟议共用 `rack.departure_decide@v1` 的名称、仅三个请求字段及 READY/WAIT、幂等和错误规则；确认前不注册 | [共用离场合同](workline-business-api.md#货架离场决定的拟议共用合同) |
+| P08 | WMS / WES | 确认拟议共用 `rack.departure_decide@v1` 的名称、workline_code / rack_id / current_location / current_face 四个必填请求字段及 READY/WAIT、幂等和错误规则；确认前不注册 | [共用离场合同](workline-business-api.md#货架离场决定的拟议共用合同) |
 
 ## 6. MOCK 与内部验收场景
 
