@@ -170,7 +170,7 @@ else:
 
 load_formal_modules()
 assert catalog.validate_business_contracts() == ((), {})
-assert catalog.definitions() == ()
+assert "coarse_sorting" in {definition.code for definition in catalog.definitions()}
 assert "transport.task.resulted@v1" in operations()
 """,
     )

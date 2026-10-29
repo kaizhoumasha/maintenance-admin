@@ -60,3 +60,16 @@ class CoarseSortingService:
                 wait_reason="AWAITING_VALIDATION_STAGE",
             )
         )
+
+
+async def read_scan(session, digest: str) -> dict | None:
+    """Read the persisted scan in the caller's transaction without advancing it."""
+    from .models import CoarseSortingScan
+
+    table = CoarseSortingScan.__table__
+    row = (
+        (await session.execute(select(table).where(table.c.event_digest == digest)))
+        .mappings()
+        .one_or_none()
+    )
+    return dict(row) if row is not None else None

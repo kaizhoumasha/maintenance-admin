@@ -65,7 +65,9 @@ def _submit_router(items: list[DevScenario]):
     return router
 
 
-def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
+def include_dev_routers(
+    app: FastAPI, *, environment: str, prefix: str = "/api/v1", read_business=None
+) -> None:
     settings = get_settings()
     targets = parse_reliable_config(settings).targets
     if environment != "local":
@@ -73,8 +75,10 @@ def include_dev_routers(app: FastAPI, *, environment: str, prefix: str = "/api/v
     _load_dev_modules()
     from app.controllers.dev_ecs_command import mock_router
     from app.controllers.dev_ecs_command import router as ecs_command_router
+    from app.controllers.dev_ecs_event import ecs_event_router
 
     app.include_router(ecs_command_router, prefix=prefix)
+    app.include_router(ecs_event_router(read_business=read_business), prefix=prefix)
     app.include_router(mock_router, prefix=prefix)
     items = scenarios()
     if items:

@@ -1266,3 +1266,31 @@ async def cleanup_flow_results(factory, tasks, operation_ids):
                 TransportTask.transport_task_id.in_(t.handle.transport_task_id for t in tasks)
             )
         )
+
+
+def coarse_sorting_scan_table(name):
+    from sqlalchemy import MetaData
+
+    from app.businesses.coarse_sorting.models import CoarseSortingScan
+    from app.database import SCHEMA
+
+    table = CoarseSortingScan.__table__.to_metadata(MetaData(schema=SCHEMA), name=name)
+    for constraint in table.constraints:
+        constraint.name = None
+    return table
+
+
+def coarse_sorting_composition(table):
+    """Use the deployed declarations with an independently owned test table."""
+    from types import ModuleType
+
+    from app.businesses.coarse_sorting import composition
+    from app.businesses.coarse_sorting.service import CoarseSortingService
+
+    entry = ModuleType(composition.__name__)
+    entry.DEFINITION = composition.DEFINITION
+    entry.ENTRY_MODULES = composition.ENTRY_MODULES
+    entry.MODEL_MODULES = ()
+    entry.COMMANDS = composition.COMMANDS
+    entry.build_service = lambda capabilities: CoarseSortingService(table)
+    return entry

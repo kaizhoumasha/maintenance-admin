@@ -9,6 +9,9 @@ from tests.helpers import business_composition
 
 @pytest.fixture(autouse=True)
 def isolated_validation(monkeypatch):
+    from app.integrations.ecs_callback import registry
+
+    monkeypatch.setattr(registry, "_registry", {})
     monkeypatch.setattr(catalog, "_validated_entries", None)
 
 

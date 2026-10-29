@@ -150,15 +150,15 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 
 业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
 最短路线见[业务开发快速开始](docs/integrations/business-development-quickstart.md)，不兼容边界与验证见[单一 API 验收记录](docs/integrations/business-development-single-api-acceptance.md)。
-正式业务 catalog 仍为空；动态 HTTP 调试字段不作为业务 SDK 形式。
+正式 catalog 已登记粗分扫码受理；动态 HTTP 调试字段不作为业务 SDK 形式。
 
 WES → WMS 的 `decisions` / `facts` 出站端点已建好但没有任何具体 operation：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，位于 `app/businesses/<业务>/request.py` 或入口包，须列入所属 composition.ENTRY_MODULES 并由 catalog 拥有）、信封冻结和公共响应分类，`WmsRequests.send(session, Payload(...), operation_id=...)` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；业务用 `WmsRequests.get_result` 按原消息身份读取可信终局响应，用 `TransportService.get_result` / `list_unclosed_predecessors` 读取已应用搬运结果及明确前序，具体字段和闭合规则见[出站结果契约](docs/integrations/outbound-results.md)。
 
 首次接入先看[业务开发快速开始](docs/integrations/business-development-quickstart.md)，其中包括启动应用前的独立合同检查命令；受理、推进及恢复见[事务配方](docs/integrations/business-transaction-recipes.md)。工作线业务按[业务包开发指南](docs/integrations/business-packages.md)在 `app/businesses/<业务>/` 声明角色、位置和初始入口，由显式清单及简单工厂复用 WMS、Transport、ECS 和 Outbox。启动先加载正式入口并交叉校验合同，再加载 local 入口和构造服务；受理使用原收据事务，需要结果消费的推进另开 REPEATABLE READ 事务，整组重读并原子提交消费依据与下一意图。
 
-管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单为空，完整真实业务登记前不能新建业务工作线；人工分拣、粗分流程和真实业务启用门槛尚未完成，公共接缝测试不代表现场业务验收。
+管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单提供 coarse_sorting 扫码受理，可配置 INPUT_ARM 工作线。完整粗分流程和人工分拣仍待实现；正式登记与内部验证不代表真实对端或现场验收。
 
-ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前没有具体业务事件处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/businesses/<业务>/ecs_event.py` 或同名包，并显式列入 catalog 所属 composition.ENTRY_MODULES，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
+ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前已正式登记粗分 SCAN_COMPLETED 扫码受理处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/businesses/<业务>/ecs_event.py` 或同名包，并显式列入 catalog 所属 composition.ENTRY_MODULES，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
 
 调试状态由 ECS 决定，额外 `is_debug` 不参与新事件身份或处理器上下文。历史收据仍按旧摘要查重并返回原响应，不重写身份、不回放旧事件；接收实例须协调切换算法，不支持新旧版本混跑。
 

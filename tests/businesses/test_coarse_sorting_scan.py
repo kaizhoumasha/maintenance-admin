@@ -12,7 +12,6 @@ from app.models import CallbackReceipt, WorkLine
         ({}, ()),
         ({"result": "NG"}, ()),
         ({"reel_diameter": 15.5, "reel_thickness": 20.25}, ()),
-        ({}, ("box_barcodes",)),
     ],
 )
 async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, changes, omit):
@@ -56,7 +55,6 @@ async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, chang
         ({"reel_diameter": True}, ()),
         ({"reel_thickness": "20"}, ()),
         ({"result": "UNKNOWN"}, ()),
-        ({"box_barcodes": None}, ()),
     ],
 )
 async def test_invalid_scan_is_rejected_without_business_acceptance(coarse_scan, changes, omit):

@@ -1,5 +1,7 @@
 # 业务开发单一 API 验收记录
 
+> 下文为空 catalog 阶段的历史验收。2026-10-29 用户另行批准将粗分扫码受理登记正式 catalog，加入业务表/迁移；当前状态见 [业务包指南](business-packages.md)和[扫码调试指南](ecs-event-debugging.md)。本轮仍未部署或连接真实对端。
+
 2026-10-28。本轮把业务调用、命令声明与业务目录收敛为唯一接入路线；当前规则见
 [快速开始](business-development-quickstart.md)、[业务包](business-packages.md)、[注册](registration.md)和[ECS 命令](ecs-command.md)。
 本轮[设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md)与[实施计划](../superpowers/plans/2026-10-28-business-development-single-api.md)保留接入取舍和任务验收范围。

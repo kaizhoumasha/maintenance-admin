@@ -18,8 +18,10 @@ _registration_guard_enabled = False
 
 
 def entries() -> tuple[ModuleType, ...]:
-    """Import actual composition modules here when a complete business is deployed."""
-    return ()
+    """Explicit business compositions shared by API, worker and model loading."""
+    from .coarse_sorting import composition
+
+    return (composition,)
 
 
 def definitions() -> tuple[BusinessDefinition, ...]:

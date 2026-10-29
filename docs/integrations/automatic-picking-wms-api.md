@@ -1,6 +1,6 @@
 # 自动线 WES 与 WMS API 对接文档
 
-状态：**本系统的自动线对接草案，未注册、未实施。** 本仓库尚无自动线业务包及对应业务 DTO，正式业务清单保持空。本文 WMS payload、共用离场调整及盘次关联约束须经 WMS/WES 确认后，才能交付正式合同和实现。旧系统流程来源可查 [wes_backend 合同基线（c45e3ca7）](https://github.com/kaizhoumasha/wes_backend/blob/c45e3ca7be52ad6afc30b22e0b09406eefcb5714/docs/contracts/wms-outbound-picking-task-integration-requirements.md)，该历史基线不表示本文调整已经实施或获得对端确认；本系统公共约定见[交互索引](workline-business-api.md)。
+状态：**本系统的自动线对接草案，未注册、未实施。** 本仓库尚无自动线业务包及对应业务 DTO，当前正式清单仅登记粗分扫码受理，自动线未登记。本文 WMS payload、共用离场调整及盘次关联约束须经 WMS/WES 确认后，才能交付正式合同和实现。旧系统流程来源可查 [wes_backend 合同基线（c45e3ca7）](https://github.com/kaizhoumasha/wes_backend/blob/c45e3ca7be52ad6afc30b22e0b09406eefcb5714/docs/contracts/wms-outbound-picking-task-integration-requirements.md)，该历史基线不表示本文调整已经实施或获得对端确认；本系统公共约定见[交互索引](workline-business-api.md)。
 
 各 API 直接携带本次业务对象、动作所需参数或观察事实。精简以去掉无关字段和无意义嵌套为准，不通过引用前序请求来补全 payload；`operation_id` 用于本次请求的幂等处理。
 

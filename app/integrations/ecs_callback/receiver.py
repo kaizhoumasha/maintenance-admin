@@ -39,6 +39,7 @@ class EcsResponse(CallbackResponse):
     event_type: str | None = None
     device_code: str | None = None
     digest: str | None = None  # 信封无效时为 None
+    diagnostic: list[dict] | None = None
 
 
 def event_identity(envelope: EcsEventEnvelope) -> str:
@@ -134,6 +135,7 @@ async def receive_ecs_event(
             event_type,
             device_code,
             existing.operation_id,
+            existing.diagnostic,
         )
 
     existing = await find_receipt(session, OPERATION, identity)
@@ -206,4 +208,4 @@ async def receive_ecs_event(
             update(CallbackReceipt).where(CallbackReceipt.id == receipt_id).values(diagnostic=notes)
         )
         queue_diagnostics(session, [_alert(identity, note) for note in notes])
-    return EcsResponse(200, dict(ACK), outcome, event_type, device_code, identity)
+    return EcsResponse(200, dict(ACK), outcome, event_type, device_code, identity, notes or None)

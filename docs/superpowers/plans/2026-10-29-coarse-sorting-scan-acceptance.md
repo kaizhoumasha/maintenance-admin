@@ -1,5 +1,7 @@
 # 粗分机 SCAN_COMPLETED 可靠受理实施计划
 
+> 当前范围修订：2026-10-29 用户确认将扫码受理登记为同一套正式装配，撤销此前空生产 catalog 及专用 local 隔离要求；移除 ECS 无法提供的箱码清单。下述旧阶段决定与验收结果保留为历史，当前实现与验证以 [调试计划 Task 7](2026-10-29-dev-ecs-events.md#task-7唯一正式粗分扫码装配当前修订) 为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 可靠保存粗分机扫码事件、原设备/工作线归属及持久待办；重复投递和重启不重复受理。
@@ -194,3 +196,8 @@
 ### 当前提交范围与后续工作
 
 2026-10-29 用户授权先评审、优化并提交当前待提交内容。本批包含粗分扫码 Payload、真实 ECS Event 入口、受理服务、隔离测试及对应草案和计划；评审发现的历史提交状态已明确标注。后续通用 `dev/ecs/events` 和粗分本地手工验收装配属于下一阶段，按新设计和实施计划继续，保持未提交、不推送、不部署。当前提交仍不代表生产 catalog 启用、真实 WMS/ECS 对接或现场验收。
+
+
+### 主应用 local 调试入口增量（历史，已撤销）
+
+此前扫码受理与正式薄入口的验收记录保留。现有主应用在 `ENVIRONMENT=local` 时直接提供 `INPUT_ARM / SCAN_COMPLETED` 下拉，local 薄适配器复用原具体服务；它使用私有注册集合、SQLite 和两线绑定，不修改生产 catalog 或公共回调处理器集合。原独立验证进程及令牌用法已迁移，当前操作见 [ECS Event 调试](../../integrations/ecs-event-debugging.md)，实施与实测结果见 [调试入口计划 Task 4–6](2026-10-29-dev-ecs-events.md#主应用-local-集成增量)。仍只覆盖 MOCK/内部扫码受理，待办不进入验证或设备执行阶段。

@@ -789,7 +789,6 @@ WES 收据受理响应（HTTP 202）：
   "timestamp": 1793206799000,
   "data": {
     "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
-    "box_barcodes": "BIN-A001,BIN-A002,BIN-A003,BIN-A004",
     "scan_time": 1793206799000,
     "reel_diameter": 15,
     "reel_thickness": 20,
@@ -798,7 +797,7 @@ WES 收据受理响应（HTTP 202）：
 }
 ```
 
-`timestamp` 为事件时间，`data.scan_time` 为扫码时间；`data.result` 是设备综合检测结论，不是 WMS 业务许可。`data.barcode` 为原始料盘条码。WES 从受信任的设备绑定确定 `workline_code`，将原条码及检测值用于第 3.1 节。`box_barcodes` 可随原扫码事实保存；箱格分配以 WMS 掌握的当前在位架及其箱格信息为准。
+`timestamp` 为事件时间，`data.scan_time` 为扫码时间；`data.result` 是设备综合检测结论，不是 WMS 业务许可。`data.barcode` 为原始料盘条码。WES 从受信任的设备绑定确定 `workline_code`，将原条码及检测值用于第 3.1 节。箱格分配以 WMS 掌握的当前在位架及其箱格信息为准，ECS 扫码事件不提供箱码清单。
 
 WES 可靠保存原收据、业务受理及持久待办后响应（HTTP 200）：
 
@@ -821,7 +820,6 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 | `event_type`          | 必填，string，固定 `SCAN_COMPLETED` | 沿用按角色分发的公共接收器                                                     |
 | `timestamp`           | 必填，integer，`0..2**63-1`         | 原事件 UTC Unix 毫秒；沿用公共信封严格校验，不接受 bool 或字符串转换           |
 | `data.barcode`        | 必填，string                          | 原样保存；不解析、修剪、拆分或增加文档未规定的业务格式/长度约束                |
-| `data.box_barcodes`   | 可省略；提供时为 string               | 不作为扫码受理的前置业务条件；提供时保存原值，缺失时不补造箱码，不据此分配箱格 |
 | `data.scan_time`      | 必填，integer，`0..2**63-1`         | 原扫码 UTC Unix 毫秒；不替换为接收时间，不要求与 timestamp 相等                |
 | `data.reel_diameter`  | 必填，有限 JSON number                | 接受整数或小数，拒绝 bool、字符串和非有限数；不换算单位或新增范围/精度约束     |
 | `data.reel_thickness` | 必填，有限 JSON number                | 同上；单位按原设备值保留，不将示例单位升级为换算规则                           |
@@ -835,7 +833,7 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 
 本阶段只原子保存原收据、扫码记录和持久待办，停止于等待后续验证；不发送 WMS 请求或 ECS 命令。扫码记录与持久去重依据不随公共收据清理删除，本阶段不增加业务清理作业。完整业务登记、真实设备上报及现场验收不在本次冻结授权范围内。
 
-2026-10-29 实施进展：严格扫码 Payload、真实 `ecs_event/scan_completed.py` 薄入口与具体受理服务已落地；隔离测试通过测试 composition 加载真实入口，经 catalog 归属/合同校验与运行时装配，由原接收器驱动并注入独立业务表。不启用生产 catalog，不创建生产模型或迁移。当前持久待办停在 `AWAITING_VALIDATION_STAGE`。测试与交付边界见[扫码受理实施记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md#2026-10-29-本轮实施与内部验证记录)。
+2026-10-29 当前实施范围：扫码 Payload、唯一正式 `ecs_event/scan_completed.py` 与受理服务通过所属 definition/composition 登记 catalog，使用配置数据库中的正式扫码表，API/worker 各环境共用同一装配。启动不生成测试工作线或设备；MOCK 数据、数据库和对端由测试/部署配置准备。现有 Swagger 提供下拉投递与摘要查询，公共回调和调试投递调用同一处理器。当前只保存事实和持久待办，停在 `AWAITING_VALIDATION_STAGE`，后续 WMS 验证、ECS 执行等仍未实现或启用。操作见 [ECS Event 调试](ecs-event-debugging.md)，历史验收与范围变更见[扫码受理实施记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md#2026-10-29-本轮实施与内部验证记录)。
 
 ## 5. ECS 命令与结果示例
 

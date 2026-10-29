@@ -58,6 +58,11 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
     },
 )
 async def event_callback(request: Request, background_tasks: BackgroundTasks) -> Response:
+    result = await receive_event_request(request, background_tasks)
+    return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
+
+
+async def receive_event_request(request: Request, background_tasks: BackgroundTasks) -> EcsResponse:
     started = perf_counter()
     received_at = datetime.now(UTC)
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
@@ -98,7 +103,7 @@ async def event_callback(request: Request, background_tasks: BackgroundTasks) ->
             received_at=received_at,
             source="ecs",
         )
-    return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
+    return result
 
 
 def _best_effort_identity(raw: bytes) -> tuple[str | None, str | None]:

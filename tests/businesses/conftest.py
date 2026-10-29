@@ -429,60 +429,25 @@ async def mock_cycle(pg_sessions, monkeypatch):
 
 @pytest.fixture
 async def coarse_scan(callback_store, monkeypatch):
-    """Own a temporary scan table and two bound lines; never enroll a partial business."""
+    """Own a temporary scan table and two bound lines for the deployed scan entry."""
     import sys
-
-    from sqlalchemy import (
-        JSON,
-        BigInteger,
-        Boolean,
-        Column,
-        DateTime,
-        Integer,
-        MetaData,
-        String,
-        Table,
-    )
 
     from app.businesses import catalog
     from app.businesses.coarse_sorting.service import CoarseSortingService
-    from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEntry
     from app.businesses.runtime import build_runtime
-    from app.database import SCHEMA
     from app.integrations import discovery
     from app.integrations.ecs_callback import registry as events
     from app.models import DeviceRoute, ReliableMessage
     from app.reliable import Outbox
-    from tests.helpers import add_bound_device, business_composition
+    from tests.helpers import (
+        add_bound_device,
+        coarse_sorting_composition,
+        coarse_sorting_scan_table,
+    )
 
-    table = Table(
-        "coarse_scan_test_" + uuid7().hex,
-        MetaData(schema=SCHEMA),
-        Column("id", String, primary_key=True),
-        Column("event_digest", String(64), unique=True, nullable=False),
-        Column("receipt_id", Integer, nullable=False),
-        Column("work_line_id", Integer, nullable=False),
-        Column("workline_code", String, nullable=False),
-        Column("device_id", Integer, nullable=False),
-        Column("device_code", String, nullable=False),
-        Column("device_role", String, nullable=False),
-        Column("device_version", Integer, nullable=False),
-        Column("work_line_version", Integer, nullable=False),
-        Column("binding_revision", String, nullable=False),
-        Column("timestamp", BigInteger, nullable=False),
-        Column("payload", JSON, nullable=False),
-        Column("received_at", DateTime(timezone=True), nullable=False),
-        Column("pending", Boolean, nullable=False),
-        Column("wait_reason", String, nullable=False),
-    )
-    definition = BusinessDefinition(
-        code="coarse_sorting",
-        display_name="粗分扫码受理测试范围",
-        device_roles=(DeviceRole(role_key="INPUT_ARM", display_name="入料机械臂"),),
-        initial_entries=(
-            InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="INPUT_ARM"),
-        ),
-    )
+    table = coarse_sorting_scan_table("coarse_scan_test_" + uuid7().hex)
+    composition = coarse_sorting_composition(table)
+    definition = composition.DEFINITION
     engine = callback_store.kw["bind"]
     codes, line_ids, route_ids = [], [], []
     async with engine.begin() as connection:
@@ -501,7 +466,6 @@ async def coarse_scan(callback_store, monkeypatch):
     def event(*, device=0, timestamp=1793206799000, changes=None, omit=()):
         data = {
             "barcode": " P032-0561,原始条码 ",
-            "box_barcodes": "BIN-A001,BIN-A002",
             "scan_time": 1793206798000,
             "reel_diameter": 15,
             "reel_thickness": 20,
@@ -553,10 +517,6 @@ async def coarse_scan(callback_store, monkeypatch):
 
     monkeypatch.setattr(CoarseSortingService, "accept_scan", observe_acceptance)
     entry_module = "app.businesses.coarse_sorting.ecs_event.scan_completed"
-    composition = business_composition("coarse_sorting", "INPUT_ARM")
-    composition.DEFINITION = definition
-    composition.ENTRY_MODULES = (entry_module,)
-    composition.build_service = lambda capabilities: CoarseSortingService(table)
     monkeypatch.setattr(catalog, "entries", lambda: (composition,))
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(catalog, "_registration_guard_enabled", catalog._registration_guard_enabled)
