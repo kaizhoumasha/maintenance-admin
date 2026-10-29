@@ -12,6 +12,11 @@ from app.integrations.wms_request import operation as requests
 
 @pytest.fixture(autouse=True)
 def isolated_registries(monkeypatch):
+    from app.businesses import catalog
+
+    # These isolated imports exercise the initial discovery phase, before final validation.
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(catalog, "_registration_guard_enabled", False)
     for registry in (ecs, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
     from app.integrations import discovery

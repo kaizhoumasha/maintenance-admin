@@ -7,6 +7,7 @@ from app.integrations.registration import (
     DEV_MODULES,
     PLATFORM_FORMAL_MODULES,
     PLATFORM_LOCAL_MODULES,
+    RegistrationSource,
     formal_registration,
     import_registration_module,
 )
@@ -15,6 +16,11 @@ Kind = Literal["ecs_event", "callback", "request"]
 _kinds: tuple[Kind, ...] = ("ecs_event", "callback", "request")
 _loaded_formal: set[Kind] = set()
 _loading = False
+
+
+def validate_late_registration(source: RegistrationSource) -> None:
+    """Keep actual registration's catalog access in the existing integration bridge."""
+    catalog.validate_registration_owners((source,), allow_unvalidated=True)
 
 
 def _candidates(kinds: tuple[Kind, ...], environment: str) -> tuple[str, ...]:
