@@ -496,3 +496,46 @@ async def test_missing_target_configuration_rolls_back_and_reports_scan_identity
     assert original["id"] in caplog.text
     assert "Coarse sorting advance failed" in caplog.text
     assert flow.peer.requests == flow.peer.commands == []
+
+
+@pytest.mark.parametrize(
+    "status,uncertain,expected",
+    [
+        ("PENDING", False, "AWAITING_VALIDATION_RESULT"),
+        ("SENDING", False, "AWAITING_VALIDATION_RESULT"),
+        ("HELD", True, "VALIDATION_RECONCILIATION_REQUIRED"),
+        ("EXPIRED", False, "VALIDATION_RECONCILIATION_REQUIRED"),
+        ("DONE", False, "VALIDATION_RECONCILIATION_REQUIRED"),
+    ],
+)
+async def test_validation_delivery_without_a_decision_retains_original_request(
+    coarse_forward, status, uncertain, expected
+):
+    from sqlalchemy import update
+
+    from app.models import ReliableMessage
+
+    flow = coarse_forward
+    assert (await flow.post(flow.event())).status_code == 200
+    await flow.service.advance((await flow.rows())[0]["id"])
+    original = (await flow.rows())[0]
+    delivery = {"status": status, "delivery_uncertain": uncertain}
+    if status == "HELD":
+        delivery.update(next_attempt_at=None, pause_reason="DELIVERY_UNKNOWN")
+    async with flow.factory.begin() as session:
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id == original["validation_message_id"])
+            .values(**delivery)
+        )
+    counts = await flow.outbound_counts()
+    for _ in range(2):
+        flow.rebuild()
+        assert await flow.service.advance(original["id"]) == expected
+        saved = (await flow.rows())[0]
+        assert saved["validation_operation_id"] == original["validation_operation_id"]
+        assert saved["validation_message_id"] == original["validation_message_id"]
+        assert saved["command_code"] is None
+        assert saved["pending"] is True
+    assert await flow.outbound_counts() == counts
+    assert flow.peer.requests == flow.peer.commands == []

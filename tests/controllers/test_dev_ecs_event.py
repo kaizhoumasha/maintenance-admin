@@ -229,3 +229,60 @@ def test_nonlocal_application_has_no_event_debug_routes(environment):
     application = FastAPI()
     include_dev_routers(application, environment=environment, command_bindings=())
     assert URL not in application.openapi()["paths"]
+
+
+def test_swagger_event_without_payload_example_points_to_registry(monkeypatch):
+    from app.controllers.dev_ecs_event import ecs_event_router
+
+    monkeypatch.setattr(registry, "_registry", {})
+
+    class Scan(CallbackPayload):
+        barcode: str
+
+    @ecs_event("SCAN_COMPLETED", device_role="INPUT_ARM", data=Scan)
+    async def accept(ctx, payload):
+        pass
+
+    application = FastAPI()
+    application.include_router(ecs_event_router(), prefix="/api/v1")
+    media = application.openapi()["paths"][URL]["post"]["requestBody"]["content"][
+        "application/json"
+    ]
+    example = media["examples"]["INPUT_ARM:SCAN_COMPLETED"]
+    assert example["value"]["data"] == {}
+    assert "data" in example["description"] and "注册目录" in example["description"]
+
+
+@pytest.mark.parametrize("failure", ["storage", "projection"])
+async def test_query_unavailability_is_safe_and_does_not_erase_persisted_receipt(
+    event_debug, failure
+):
+    from sqlalchemy.exc import OperationalError
+
+    from app.controllers.dev_ecs_event import ecs_event_router
+
+    e = event_debug
+    delivered = await e.client.post(URL, json=e.body, headers=e.headers)
+    digest = delivered.json()["digest"]
+    secret = "PRIVATE_QUERY_FAILURE"
+
+    def unavailable():
+        raise OperationalError("SELECT", {}, RuntimeError(secret))
+
+    async def project(session, key):
+        unavailable()
+
+    application = FastAPI()
+    register_exception_handlers(application)
+    application.state.callback_session_factory = unavailable if failure == "storage" else e.factory
+    application.dependency_overrides.update(e.app.dependency_overrides)
+    application.include_router(ecs_event_router(read_business=project), prefix="/api/v1")
+    async with AsyncClient(
+        transport=ASGITransport(app=application, raise_app_exceptions=False), base_url="http://test"
+    ) as reader:
+        response = await reader.get(URL + "/" + digest, headers=e.headers)
+    assert response.status_code == 503, response.text
+    assert secret not in response.text
+    original = await e.client.get(URL + "/" + digest, headers=e.headers)
+    assert original.status_code == 200
+    assert original.json()["receipt"]["response"] == delivered.json()["response"]
