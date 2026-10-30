@@ -39,3 +39,8 @@ def wms_result_committed(operation: str) -> None:
 def ecs_result_committed(owner_domain: str) -> None:
     if owner_domain in catalog.progressions():
         enqueue_business(owner_domain)
+
+
+def notify_business_committed(business_code: str) -> None:
+    if business_code in catalog.progressions():
+        enqueue_business(business_code)

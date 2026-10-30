@@ -131,10 +131,11 @@ def compile_commands(
         binding, annex = declaration.bindings[0], declaration.annex
         source = binding.registration_source
         parts = source.module.split(".")
+        entry_index = 4 if parts[:3] == ["app", "businesses", "_components"] else 3
         if source.local_only or (
             parts[:2] in (["app", "integrations"], ["app", "businesses"])
-            and len(parts) > 3
-            and parts[3] in DEV_MODULES
+            and len(parts) > entry_index
+            and parts[entry_index] in DEV_MODULES
         ):
             raise ValueError(
                 f"{source.location}: local-only command cannot enter formal compilation; "

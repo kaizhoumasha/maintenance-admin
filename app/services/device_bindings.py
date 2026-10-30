@@ -52,6 +52,7 @@ async def resolve_binding(session, device_code: str) -> DeviceBinding | None:
         device_role=roles[0],
         device_bindings=dict(line.device_bindings),
         position_bindings=dict(line.position_bindings),
+        business_code=line.business_code,
     )
 
 

@@ -204,6 +204,8 @@ async def business_configuration_issue(
     business_code: str,
     *,
     definition_lookup: Callable[[str], BusinessDefinition],
+    required_device_roles: tuple[str, ...] | None = None,
+    required_position_slots: tuple[str, ...] | None = None,
 ) -> str | None:
     """Check declaration completeness in the resolver's locked transaction; grant no permission."""
     # Resolver owns WorkLine → Device locks; never reacquire a workline lock after its device.
@@ -223,17 +225,25 @@ async def business_configuration_issue(
         return "WORKLINE_CONFIGURATION_INCOMPLETE"
     roles = {role.role_key for role in definition.device_roles}
     positions = {slot.slot_key for slot in definition.position_slots}
+    for selected, declared in (
+        (required_device_roles, roles),
+        (required_position_slots, positions),
+    ):
+        if selected is not None and (
+            not isinstance(selected, tuple) or any(key not in declared for key in selected)
+        ):
+            raise ValueError("Operation resources must be declared by the business")
+    needed_roles = {r.role_key for r in definition.device_roles if r.required}
+    needed_positions = {p.slot_key for p in definition.position_slots if p.required}
+    if required_device_roles is not None:
+        needed_roles = set(required_device_roles)
+    if required_position_slots is not None:
+        needed_positions = set(required_position_slots)
     if (
         line.device_bindings.keys() - roles
         or line.position_bindings.keys() - positions
-        or any(
-            role.required and not line.device_bindings.get(role.role_key)
-            for role in definition.device_roles
-        )
-        or any(
-            slot.required and not line.position_bindings.get(slot.slot_key)
-            for slot in definition.position_slots
-        )
+        or any(not line.device_bindings.get(key) for key in needed_roles)
+        or any(not line.position_bindings.get(key) for key in needed_positions)
     ):
         return "WORKLINE_CONFIGURATION_INCOMPLETE"
     return None

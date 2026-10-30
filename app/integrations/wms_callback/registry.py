@@ -63,6 +63,12 @@ class Rejected(Outcome):
 OUTCOMES = (Accepted, Duplicate, Conflict, Rejected)
 
 
+@dataclass
+class _CallbackBusiness:
+    business_code: str | None = None
+    component_key: str | None = None
+
+
 @dataclass(frozen=True)
 class CallbackContext:
     session: AsyncSession
@@ -72,6 +78,17 @@ class CallbackContext:
     parsed: dict
     notes: list = field(default_factory=list)
     runtime: object | None = field(default=None, kw_only=True)
+    registration_source: object | None = field(default=None, kw_only=True)
+    operation: str | None = field(default=None, kw_only=True)
+    _business_binding: _CallbackBusiness = field(default_factory=_CallbackBusiness, kw_only=True)
+
+    @property
+    def business_code(self) -> str | None:
+        return self._business_binding.business_code
+
+    @property
+    def component_key(self) -> str | None:
+        return self._business_binding.component_key
 
     def note(self, reason_code: str, **detail) -> None:
         """附上诊断:返回 202 但没有(完全)应用的事实(未知任务、事实矛盾等),随收据同事务持久化。"""

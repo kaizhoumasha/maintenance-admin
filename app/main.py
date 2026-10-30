@@ -4,7 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.business_wakeups import ecs_result_committed, event_committed, wms_result_committed
+from app.business_wakeups import (
+    ecs_result_committed,
+    event_committed,
+    notify_business_committed,
+    wms_result_committed,
+)
 from app.businesses import catalog
 from app.businesses.coarse_sorting.service import read_scan
 from app.businesses.runtime import BusinessRuntime, build_runtime
@@ -36,7 +41,7 @@ from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
 from app.services.device_bindings import resolve_binding
-from app.services.device_routes import DeviceRoutes
+from app.services.device_routes import DeviceRoutes, authorize_new_command
 from app.services.device_status_service import DeviceStatusService
 
 settings = get_settings()
@@ -54,16 +59,21 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     environment=settings.ENVIRONMENT,
                     routes=DeviceRoutes(command_bindings, annexes=command_annexes),
                     annexes=command_annexes,
+                    authorize_new=authorize_new_command,
                 )
             elif command_bindings or command_annexes:
                 ecs_commands = configure_ecs(
                     application,
                     routes=DeviceRoutes(command_bindings, annexes=command_annexes),
                     annexes=command_annexes,
+                    authorize_new=authorize_new_command,
                 )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
         application.state.business_event_committed = (
             getattr(application.state, "business_event_committed", None) or event_committed
+        )
+        application.state.business_committed = (
+            getattr(application.state, "business_committed", None) or notify_business_committed
         )
         application.state.ecs_result_committed = (
             getattr(application.state, "ecs_result_committed", None) or ecs_result_committed
@@ -102,6 +112,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.outbox = None
         application.state.ecs_result_committed = None
         application.state.business_event_committed = None
+        application.state.business_committed = None
         await engine.dispose()
         await get_redis().aclose()
         get_redis.cache_clear()
@@ -152,7 +163,12 @@ from app.controllers.dev import include_dev_routers  # noqa: E402
 from app.integrations.ecs_command.dev import configure_local_ecs  # noqa: E402
 
 include_wms_events(app, environment=settings.ENVIRONMENT)
-include_ecs_callback(app, environment=settings.ENVIRONMENT, resolve_binding=resolve_binding)
+include_ecs_callback(
+    app,
+    environment=settings.ENVIRONMENT,
+    resolve_binding=resolve_binding,
+    resolve_input_target=catalog.input_target,
+)
 include_dev_routers(
     app,
     environment=settings.ENVIRONMENT,

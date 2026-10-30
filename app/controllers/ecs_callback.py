@@ -79,6 +79,8 @@ async def receive_event_request(request: Request, background_tasks: BackgroundTa
                     resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
                     runtime=getattr(request.app.state, "business_runtime", None),
                     on_committed=getattr(request.app.state, "business_event_committed", None),
+                    on_business_committed=getattr(request.app.state, "business_committed", None),
+                    resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
                 )
     except Exception as error:  # 含提交失败:整个事务已回滚
         log_exception(
@@ -141,6 +143,7 @@ def include_ecs_callback(
     prefix: str = "/api/v1",
     resolve_binding: BindingResolver | None = None,
     runtime: object | None = None,
+    resolve_input_target=None,
 ) -> None:
     """Mount after the caller's formal loading, contract validation and local loading."""
     if runtime is not None:
@@ -149,6 +152,13 @@ def include_ecs_callback(
         not item.registration_source.local_only for item in events().values()
     ):
         raise ValueError("Formal ECS event handlers require a binding resolver")
+    if resolve_input_target is None and any(
+        not item.registration_source.local_only
+        and item.registration_source.module.startswith("app.businesses._components.")
+        for item in events().values()
+    ):
+        raise ValueError("Shared ECS event handlers require an input target resolver")
+    app.state.ecs_event_input_target = resolve_input_target
     if environment == "local":
         from app.integrations.ecs_callback.dev_ecs_event import local_bindings
 

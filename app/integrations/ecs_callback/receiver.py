@@ -110,6 +110,8 @@ async def receive_ecs_event(
     resolve_binding: BindingResolver | None = None,
     runtime: object | None = None,
     on_committed=None,
+    on_business_committed=None,
+    resolve_input_target=None,
 ) -> EcsResponse:
     if len(raw) > MAX_BODY_BYTES:
         return EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
@@ -162,6 +164,29 @@ async def receive_ecs_event(
     if binding is not None and binding.device_code != device_code:
         raise RuntimeError("ECS binding does not match event device")
     registered = lookup(binding.device_role, event_type) if binding else None
+    business_code = binding.business_code if binding is not None else None
+    component_key = None
+    shared = bool(
+        registered
+        and not registered.registration_source.local_only
+        and registered.registration_source.module.startswith("app.businesses._components.")
+    )
+    if registered is not None and (
+        shared
+        or (
+            resolve_input_target is not None
+            and business_code is not None
+            and registered.registration_source.module.startswith("app.businesses.")
+            and not registered.registration_source.local_only
+        )
+    ):
+        if resolve_input_target is None:
+            raise RuntimeError("Shared ECS events require a trusted input target resolver")
+        target = resolve_input_target(business_code, ("ecs_event", event_type, binding.device_role))
+        if target is None or target.source != registered.registration_source:
+            registered = None
+        else:
+            component_key = target.component_key
     data = envelope.data
     if registered is not None and registered.data_model is not None:
         try:
@@ -209,10 +234,14 @@ async def receive_ecs_event(
             timestamp=envelope.timestamp,
             binding=binding,
             runtime=runtime,
+            business_code=business_code,
+            component_key=component_key,
         )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
-        if on_committed is not None:
+        if shared and on_business_committed is not None:
+            after_commit(session, partial(on_business_committed, business_code))
+        elif not shared and on_committed is not None:
             after_commit(session, partial(on_committed, registered.registration_source))
         outcome, notes = "received", ctx.notes
     if notes:

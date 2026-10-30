@@ -591,3 +591,35 @@ async def test_model_creation_preserves_declared_json_output(ecs, declared, kind
         assert row.request_raw == frozen
         assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
+
+
+async def test_new_authorization_is_enforced_but_original_replay_keeps_identity(ecs, declared):
+    from app.integrations.ecs_command import EcsCommands
+
+    calls = []
+    permitted = True
+
+    async def authorize(session, owner, device_code, model):
+        calls.append((owner.domain, device_code, model))
+        if not permitted:
+            raise ValueError("business contract not authorized")
+
+    service = EcsCommands(
+        ecs.service.outbox,
+        ecs.service.target,
+        declared.routes,
+        declared.annexes,
+        clock=ecs.service.clock,
+        authorize_new=authorize,
+    )
+    async with ecs.factory.begin() as session:
+        original = await service.create(session, **arguments(ecs))
+    assert calls == [(ecs.owner.domain, "D1", Move)]
+    permitted = False
+    async with ecs.factory.begin() as session:
+        replay = await service.create(session, **arguments(ecs))
+        assert replay.command_code == original.command_code
+        assert len(calls) == 1
+        with pytest.raises(ValueError, match="not authorized"):
+            await service.create(session, **arguments(ecs, call_key="another"))
+        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1

@@ -12,14 +12,20 @@ from app.integrations.ecs_command.runtime import TARGET, ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as TRANSPORT_ADAPTERS
 from app.reliable import Outbox
-from app.services.device_routes import DeviceRoutes
+from app.services.device_routes import DeviceRoutes, authorize_new_command
 from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
 def _runtime(factory):
     bindings, annexes = catalog.validate_business_contracts()
-    commands = EcsCommands(None, TARGET, DeviceRoutes(bindings, annexes=annexes), annexes)
+    commands = EcsCommands(
+        None,
+        TARGET,
+        DeviceRoutes(bindings, annexes=annexes),
+        annexes,
+        authorize_new=authorize_new_command,
+    )
     config = ecs_runtime_config(get_settings(), commands)
     outbox = Outbox(
         config.targets,

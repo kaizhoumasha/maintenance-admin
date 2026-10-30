@@ -47,6 +47,7 @@ async def test_non_async_pending_entry_is_rejected(coarse_forward, progression_c
     from app.businesses.runtime import build_runtime
 
     progression_catalog.setattr(catalog.entries()[0], "PROGRESSION", "read_scan", raising=False)
+    catalog.validate_business_contracts()
     with pytest.raises(ValueError, match="PROGRESSION"):
         build_runtime(
             outbox=coarse_forward.outbox,

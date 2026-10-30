@@ -200,3 +200,99 @@ async def test_configuration_issue_propagates_database_failure(db, monkeypatch):
         await service.business_configuration_issue(
             db, binding, "test_sorting", definition_lookup=workline_definition_lookup
         )
+
+
+async def test_operation_resource_subset_preserves_business_and_binding_guards(db):
+    from app.businesses.definitions import BusinessDefinition, DeviceRole, PositionSlot
+    from app.services.device_bindings import resolve_binding
+
+    line, _, _ = await add_bound_device(db, "D3", "http://127.0.0.1:1", role="SCAN3")
+    line.business_code = "manual_test"
+    line.position_bindings = {}
+    await db.commit()
+    definition = BusinessDefinition(
+        code="manual_test",
+        display_name="Manual",
+        device_roles=(
+            DeviceRole(role_key="SCAN1", display_name="Input"),
+            DeviceRole(role_key="SCAN3", display_name="Return"),
+        ),
+        position_slots=(PositionSlot(slot_key="OUTLET", display_name="Outlet"),),
+    )
+    binding = await resolve_binding(db, "D3")
+
+    async def issue(**kwargs):
+        return await service.business_configuration_issue(
+            db, binding, "manual_test", definition_lookup=lambda _: definition, **kwargs
+        )
+
+    assert await issue() == "WORKLINE_CONFIGURATION_INCOMPLETE"
+    assert await issue(required_device_roles=("SCAN3",), required_position_slots=()) is None
+    with pytest.raises(ValueError, match="declared"):
+        await issue(required_device_roles=("UNDECLARED",), required_position_slots=())
+    line.business_code = "other"
+    await db.flush()
+    assert await issue(required_device_roles=("SCAN3",), required_position_slots=()) == (
+        "WORKLINE_BUSINESS_MISMATCH"
+    )
+
+
+@pytest.mark.parametrize("case", ["allowed", "undeclared", "other_line", "missing_device"])
+async def test_new_command_requires_declared_contract_and_own_workline(db, monkeypatch, case):
+    from dataclasses import replace
+
+    from pydantic import BaseModel, ConfigDict
+
+    from app.businesses import catalog
+    from app.businesses.definitions import DeviceRole
+    from app.integrations.ecs_callback import registry as events
+    from app.integrations.ecs_command import CommandOwner, ecs_command
+    from app.integrations.ecs_command.contracts import ErrorDetail
+    from app.integrations.wms_callback import registry as callbacks
+    from app.integrations.wms_request import operation as requests
+    from app.services.device_routes import authorize_new_command
+    from tests.helpers import business_composition
+
+    class Result(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        qty: int
+
+    @ecs_command(
+        "MOVE",
+        device_roles=("SCAN1",),
+        annex_id="auth",
+        annex_version="1",
+        result=Result,
+        error=ErrorDetail,
+        timeout_min_ms=1,
+        timeout_max_ms=60000,
+    )
+    class Move(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        qty: int
+
+    first, second = business_composition("first"), business_composition("second")
+    for entry in (first, second):
+        entry.DEFINITION = replace(
+            entry.DEFINITION,
+            initial_entries=(),
+            device_roles=(DeviceRole(role_key="SCAN1", display_name="Scan"),),
+        )
+        entry.ENTRY_MODULES = ()
+    first.COMMANDS = (Move,)
+    monkeypatch.setattr(catalog, "entries", lambda: (first, second))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(callbacks, "_registry", {})
+    monkeypatch.setattr(requests, "_registry", {})
+    catalog.validate_business_contracts()
+    line, device, _ = await add_bound_device(db, "AUTH-1", "http://127.0.0.1:1")
+    line.business_code = "first" if case in {"allowed", "missing_device"} else "second"
+    await db.flush()
+    owner = CommandOwner(domain="second" if case == "undeclared" else "first")
+    device_code = "unknown" if case == "missing_device" else device.device_code
+    if case == "allowed":
+        await authorize_new_command(db, owner, device_code, Move)
+    else:
+        with pytest.raises(ValueError, match="configured|authorized"):
+            await authorize_new_command(db, owner, device_code, Move)

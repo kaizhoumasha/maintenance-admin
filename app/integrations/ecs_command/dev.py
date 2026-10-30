@@ -178,6 +178,7 @@ def configure_local_ecs(
     client_factory=AsyncHttpClient,
     routes=None,
     annexes=None,
+    authorize_new=None,
 ):
     if environment != "local":
         if (
@@ -210,4 +211,5 @@ def configure_local_ecs(
         routes=LocalEcsRoutes(routes, DevEcsRoutes()) if routes is not None else DevEcsRoutes(),
         annexes=merged,
         client_factory=client_factory,
+        authorize_new=authorize_new,
     )

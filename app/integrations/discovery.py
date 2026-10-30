@@ -56,5 +56,8 @@ def load_local_modules(*, environment: str, kind: Kind | None = None) -> None:
         return
     load_formal_modules()
     for name in _candidates(_kinds if kind is None else (kind,), environment):
-        if name.split(".")[3] in DEV_MODULES:
+        if (
+            name.split(".")[4 if name.startswith("app.businesses._components.") else 3]
+            in DEV_MODULES
+        ):
             import_registration_module(name, local_only=True, required=True)
