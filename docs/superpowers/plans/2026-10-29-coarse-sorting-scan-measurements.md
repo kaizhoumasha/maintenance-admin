@@ -10,7 +10,9 @@
 
 **Spec:** [实际扫码测量字段设计](../specs/2026-10-29-coarse-sorting-scan-measurements-design.md)
 
-## Global Constraints
+**最新已验证状态（2026-10-29 17:16:21 PDT）：** 已随本地提交 `b68afec` 和固定制品 `integration-b68afec828c3-amd64-20261029-01` 完成联调部署。详见[后续本地提交与联调部署验收](#后续本地提交与联调部署验收)。下列原实施约束、Task 1 和交付前快照保留当时范围；后续仅本地提交和部署已获用户单独授权。本次仅回填文档，不提交、推送或部署。
+
+## Global Constraints（原实施阶段）
 
 - 用户已确认按实际字段同步实施；直径为英寸原值 7，厚度为毫米原值 15.3，不换算。
 - 保留当前功能分支、未提交文档及暂存状态；不提交、推送、部署或请求现场设备。
@@ -45,7 +47,7 @@
 - [x] 在本轮独立测试数据库和 Redis 上运行粗分、公开调试及相关集成测试，再运行完整 pytest、Ruff、格式检查，证据写仓库外。
 - [x] 对本轮差异及原有文档回填做独立复评，处理实际问题，核对暂存状态、已有文件和交付快照未变；保留未提交结果。
 
-## 完成状态与证据（2026-10-29）
+## 历史：交付前完成状态与证据（2026-10-29）
 
 以下完成状态为 2026-10-29 内部开发验收时的交付前快照；后续提交、制品及部署状态另以相应记录为准，原测试统计和阶段约束保持原范围。
 
@@ -56,3 +58,23 @@
 - Ruff 检查通过，475 个文件格式检查通过；当前 ECS/WMS 文档 JSON 样例通过实际模型校验。
 - [独立复评](</Users/kaizhou/.codex/recovery/maintenance-admin/scan-measurements-20261029T231252Z/final-review.md>)：13 文件快照核验，无 Critical/Important/Minor；评审时完整测试尚在运行，该条件已由上面的最终日志解除。评审后仅回填本计划状态及证据，没有代码变更。
 - [本轮验收与保留记录](</Users/kaizhou/.codex/recovery/maintenance-admin/scan-measurements-20261029T231252Z/acceptance.md>)：原文件、暂存状态、stash、交付快照及既有本地容器保留；只清理本轮自建的两个临时测试容器。
+
+## 后续本地提交与联调部署验收
+
+用户后续授权将 27 个已审文件仅在本地提交后生成固定制品部署，未推送、合并或打标签。对应源码为 `b68afec828c308a53520ec9db7a62a6e02bcef77`，部署完成证明的采集时点为 `2026-10-30T00:16:21.966502+00:00`（洛杉矶 2026-10-29 17:16:21 PDT，UTC−07:00）。以下均引用该次归档，本次文档回填未重新测试或连接服务器，不作为新的实时运行检查。
+
+- [x] 实际扫码字段映射、正式装配、测试和合同文档随上述干净源码制品交付。
+- [x] 新容器内通过完整实际报文的纯合同模型校验：直径 `size_inch=7` 映射至 `reel_diameter=7`（英寸），厚度 `thickness_mm=15.3` 映射至 `reel_thickness=15.3`（毫米），不做单位换算；未调用 receiver/handler、数据库或对端网络。
+- [x] Swagger 的 `SCAN_COMPLETED` 示例切换为实际扫码字段；API/worker/beat/migrate 使用同一 linux/amd64 镜像，232 个运行文件哈希核对通过，迁移 head 为 `ea8b20261029`。
+- [x] 原有待核对扫码、原始 15/20 尺寸及 FAILED 验证消息保留原身份，未被新示例值覆盖或自动重发；RS01→CLN01、RS02→CLN02 和共享配置保留。
+
+| 验收项 | 已验证结果及边界 | 证据索引 |
+| --- | --- | --- |
+| 最终联合回归 | 279 passed / 2 skipped；3555 passed / 35 skipped。部署前核对运行源码与该测试快照一致；不替换上方早期 197/7、3537/37 的原始记录，也不表述为本次回填重跑。 | [专项日志](</Users/kaizhou/.codex/recovery/maintenance-admin/receipt-device-20261029T232920Z/target-green.log>)、[全量日志](</Users/kaizhou/.codex/recovery/maintenance-admin/receipt-device-20261029T232920Z/full.log>)、[部署复评与快照说明](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/review-and-deployment.md>) |
+| 实际报文与字段单位 | 新容器纯模型校验输出 `actual_event_contract_valid=true`、`wms_diameter_inches=7`、`wms_thickness_mm=15.3`；业务受理及 WMS 请求映射行为由内部回归证明，不将纯模型校验当作现场完整链路受理。 | [合同校验输出](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/server-evidence/offline-contract-probe.log>)、[校验命令来源](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/site-finalize.py>)、上述专项日志 |
+| 固定制品、Swagger 与服务 | current 已指向上述制品；两套入口的 `/ready`、`/docs`、`/openapi.json` 均为 200，Swagger 含 `SCAN_COMPLETED`、`MOVE_FORWARD`，worker ping 正常、Beat 单实例。 | [固定制品清单](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/bundle/manifest.json>)、[运行检查](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/server-evidence/runtime-proof.json>)、[部署完成证明](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/server-evidence/completion-proof.json>) |
+| 原始业务事实与配置保留 | 原扫码仍为 `VALIDATION_RECONCILIATION_REQUIRED`，原验证消息仍为 FAILED；20 张原表 OID 保留，174 条非 Alembic 记录完整行哈希不变，另 1 条版本记录按迁移推进。 | [数据保留证明](</Users/kaizhou/.codex/recovery/maintenance-admin/review-deploy-20261029T235031Z/server-evidence/data-preservation-proof.json>)、上述部署完成证明 |
+
+与收据设备码变更使用同一制品、备份和迁移，详见[共同交付证据与执行偏差](2026-10-29-callback-receipt-device-code.md#共同交付证据与执行偏差)，包括慢速传输后的完整制品还原、旧备份脚本执行权限、Timescale 提示、空迁移日志及本次迁移仅执行一次的证据。原双机 `6f0f86c` 交付中的重复迁移偏差继续保留，不套用到本次交付。
+
+本轮开发验收仍为 MOCK/内部验证；未注入现场扫码、发送设备测试命令或完成真实 WMS/ECS 物理闭环。历史验收记录、原交付包和新制品中的计划快照保持构建时原样；本次只修改仓库工作副本。

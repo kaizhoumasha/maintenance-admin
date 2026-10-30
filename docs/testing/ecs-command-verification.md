@@ -19,6 +19,8 @@ uv run pytest tests/controllers/test_dev_ecs_command.py tests/integrations/ecs_c
 
 已有通过且执行输入未变的范围复用证据；只改说明不重复回归。行为缺陷先用原公开入口复现，再最小修复并运行受影响测试，不为文档整理或夹具接线新增用例。不要在同一测试库仍有运行中的联调API/Sender时运行会清理数据库的测试。
 
+重启过期测试区分冻结的业务期限与单轮维护的真实时间预算。`Sender.tick()` 返回本轮领取的发送数；返回 `0` 不保证过期处理已完成。快照维护耗尽预算时回滚当前事务、保留 `PENDING`，由后续扫描继续处理。测试在有限时间内推进并严格断言最终 `EXPIRED`，同时检查原期限、身份和请求字节不变、零外发及只完成一次状态迁移；不能仅凭一次 `tick()` 断言过期完成。
+
 生产与现场验证独立安排，不加入开发测试流程；测试通过不证明真实ECS或物理动作符合性。
 
 ## 必须保持的回归入口
@@ -31,6 +33,7 @@ uv run pytest tests/controllers/test_dev_ecs_command.py tests/integrations/ecs_c
 | 路由P2与P3 | test_service.py：test_pending_route_keeps_active_route_and_revocation_only_fences_old_call，revoked=False/True；A撤销B有效允许新意图走B，A未撤销时旧命令仍按原授权走A |
 | 消费P2与权威事实 | test_query.py：test_consumption_and_business_change_follow_lock_order，cancel/rebind/version×两种顺序；test_consumer_requires_current_authority_even_when_action_is_unchanged；原结果保留，拒绝错误业务推进 |
 | 窗口/原期限/停启 | test_service.py、test_restart.py、test_dev.py；新正式/调试300秒，不一致配置拒绝；历史60/600秒及原退避/Retry-After不重算，UNKNOWN/HELD不解封 |
+| 维护超时后的过期恢复 | test_restart.py：test_expiry_survives_maintenance_timeout；SQLite/PostgreSQL 下，事务中超时回滚后命令与 outbox 保留原状态，继续扫描及重建 Sender 均能按原期限过期，零外发、无伪造发送证据且只迁移一次 |
 | 启动/历史/出口 | test_dev.py与test_dev_ecs_command.py；唯一装配/冲突、原附录严格校验/缺失503/重复原响应；test_isolated_sender_rejects_unowned_origin_before_tcp直接断言零TCP |
 
 复用覆盖，只有稳定复现的行为缺口才在原文件补回归；不删参数、放宽断言或复制Reference。没有缺口可以零代码结项。生产验证不加入此表。

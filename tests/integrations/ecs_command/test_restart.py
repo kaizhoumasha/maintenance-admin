@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import time
 from datetime import UTC, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -13,6 +15,7 @@ from app.integrations.ecs_command.dev import DevEcsRoutes
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
 from app.models import EcsCommand, EcsSendEvidence, ReliableMessage
+from app.reliable import lifecycle
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore
 from app.reliable.testing import FakeClock, ScriptedHttpClient
@@ -109,6 +112,18 @@ async def dispatch_one(sender):
         await asyncio.gather(*list(sender.inflight))
 
 
+async def wait_for_expiry(ecs, sender):
+    # A bounded maintenance round can roll back before reaching this command.
+    async with asyncio.timeout(5):
+        while True:
+            assert await sender.tick() == 0
+            status = (await state(ecs))["status"]
+            if status != "PENDING":
+                break
+            await asyncio.sleep(0)
+    assert status == "EXPIRED"
+
+
 async def state(ecs):
     async with ecs.factory() as session:
         command = await session.scalar(select(EcsCommand))
@@ -137,6 +152,8 @@ async def state(ecs):
                 )
             },
             "status": message.status,
+            "command_status": command.status,
+            "delivery_status": command.delivery_status,
             "attempts": message.attempts,
             "not_received": message.not_received_count,
             "next": message.next_attempt_at.replace(tzinfo=UTC)
@@ -199,7 +216,7 @@ async def assert_safe_restart(ecs, restart, stage, expired):
     if expired:
         remaining = (saved["frozen"]["expires_at"].replace(tzinfo=UTC) - clock()).total_seconds()
         clock.advance(seconds=max(remaining, 0) + 1)
-        assert await second.tick() == 0
+        await wait_for_expiry(ecs, second)
     else:
         if has_attempt:
             assert await second.tick() == 0
@@ -217,6 +234,55 @@ async def assert_safe_restart(ecs, restart, stage, expired):
     if not expired:
         assert second_client.requests[0].body == saved["frozen"]["request_raw"]
     assert await first.tick() == 0
+
+
+@pytest.mark.parametrize("restart", [600], indirect=True)
+@pytest.mark.parametrize("restart_sender", [False, True], ids=["resume", "restart"])
+async def test_expiry_survives_maintenance_timeout(ecs, restart, restart_sender, monkeypatch):
+    clock, start = restart
+    saved = await state(ecs)
+    remaining = (saved["frozen"]["expires_at"].replace(tzinfo=UTC) - clock()).total_seconds()
+    clock.advance(seconds=remaining + 1)
+    client = ScriptedHttpClient(reply())
+    sender = start(client)
+    apply_transition = EcsLifecycle.apply_transition
+    maintenance_timeout = asyncio.timeout(None)
+    interrupted = asyncio.Event()
+
+    async def interrupted_transition(self, session, context, claim, outcome):
+        await apply_transition(self, session, context, claim, outcome)
+        await session.flush()
+        # Expire the real timeout after SQL writes, independent of query latency.
+        maintenance_timeout.reschedule(asyncio.get_running_loop().time())
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, "asyncio", SimpleNamespace(timeout=lambda _: maintenance_timeout))
+        patch.setattr(EcsLifecycle, "apply_transition", interrupted_transition)
+        async with asyncio.timeout(5):
+            assert await sender.store.maintain_snapshots(1, ecs.targets, time.monotonic() + 30) == 0
+
+    assert interrupted.is_set()
+    assert await state(ecs) == saved
+    assert not client.requests
+    if restart_sender:
+        await sender.aclose()
+        sender = start(client)
+    await wait_for_expiry(ecs, sender)
+    current = await state(ecs)
+    assert current["frozen"] == saved["frozen"]
+    assert current["status"] == "EXPIRED"
+    assert current["attempts"] == saved["attempts"] + 1
+    assert current["evidence"] == saved["evidence"]
+    assert current["command_status"] == current["delivery_status"] == "EXPIRED"
+    assert current["not_received"] == saved["not_received"]
+    assert not client.requests
+    assert await start(client).tick() == 0
+    assert await state(ecs) == current
 
 
 @pytest.mark.parametrize(

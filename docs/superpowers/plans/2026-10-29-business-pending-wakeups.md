@@ -10,7 +10,11 @@
 
 **Spec:** [按业务唤醒设计](../specs/2026-10-29-business-pending-wakeups-design.md)
 
-## Global Constraints
+**最新已验证状态（2026-10-30）：** 按业务唤醒、Beat 发布修复及相关测试和文档已通过 [PR #39](https://github.com/kaizhoumasha/maintenance-admin/pull/39)，以 merge commit [`a662fb8`](https://github.com/kaizhoumasha/maintenance-admin/commit/a662fb872799501d815a1ad71d5cdada8839aec3) 合入 develop；[该合并提交的 develop CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41063027336) 已通过。业务验收仍限定为 MOCK/内部验证，该次合入未执行部署，不代表现场业务或物理闭环验收。
+
+**历史范围说明：** 下文约束、Task 1–2 和执行记录保留原实施与复评时点，包括当时的未提交、不合并限制及测试统计，不作为当前 Git 状态。原三份部署计划中的 `6f0f86c` / `b68afec` 交付属于较早阶段的独立历史，不作为本次按业务唤醒实现已部署的证据。
+
+## Global Constraints（原实施阶段）
 
 - 在当前 feature/coarse-sorting-site-configuration 原位实施；用户已明确选择方案并授权设计、计划后继续，无提交步骤。
 - 不提交、推送、合并、部署、触发设备或真实 WMS；原三份已暂存计划、index、stash、历史记录及交付快照保持原样。
@@ -47,7 +51,7 @@
 - [x] 全量 pytest、Ruff、格式、单 head/check；核对旧用法仅出现在明确历史记录。
 - [x] 一次独立最终评审，按实际问题修复并验证；归档证据，核对原计划/index/stash/历史/容器保全，只清理本轮资源。
 
-## 执行记录
+## 历史执行记录（实施与复评阶段）
 
 平台与原边界专项 286 passed / 4 skipped，含实际主应用、两个业务隔离、发布失败与保存点合同。最新通知/负载专项 33 passed / 1 skipped，覆盖起始 ID 上界、101 条阻塞待办后的后页、三组双数据库 MOCK。以下保留早期快照；最终复评及完整回归已在文末闭环；原提交 4b7fb80 属于历史基线，不作为本轮新行为的验证结果。
 
