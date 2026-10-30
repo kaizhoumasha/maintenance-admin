@@ -190,7 +190,9 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
     monkeypatch.setattr(main, "engine", e.factory.kw["bind"])
     monkeypatch.setattr(main, "session_factory", e.factory)
     monkeypatch.setattr(main, "reliable_lifespan", isolated_sender)
-    monkeypatch.setattr(main, "enqueue_advance", lambda *args: published.append(args))
+    from app import business_wakeups
+
+    monkeypatch.setattr(business_wakeups, "enqueue_business", published.append)
     monkeypatch.setattr(main.app.state, "business_runtime", None)
     monkeypatch.setattr(main.app.state, "ecs_commands", commands, raising=False)
     monkeypatch.setattr(main.app.state, "reliable_adapters", {"ecs-command": EcsCommandAdapter()})
@@ -208,7 +210,7 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
             scan = await reader.scalar(
                 select(CoarseSortingScan).where(CoarseSortingScan.device_code == e.codes[0])
             )
-            assert published == [("coarse_sorting", "scan", scan.id)]
+            assert published == ["coarse_sorting"]
             assert scan.pending and scan.validation_message_id is None
 
 

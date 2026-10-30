@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.business_wakeups import ecs_result_committed, enqueue_advance, wms_result_committed
+from app.business_wakeups import ecs_result_committed, event_committed, wms_result_committed
 from app.businesses import catalog
 from app.businesses.coarse_sorting.service import read_scan
 from app.businesses.runtime import BusinessRuntime, build_runtime
@@ -62,6 +62,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     annexes=command_annexes,
                 )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
+        application.state.business_event_committed = (
+            getattr(application.state, "business_event_committed", None) or event_committed
+        )
         application.state.ecs_result_committed = (
             getattr(application.state, "ecs_result_committed", None) or ecs_result_committed
         )
@@ -81,7 +84,6 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     outbox=outbox,
                     ecs_commands=ecs_commands,
                     session_factory=session_factory,
-                    enqueue_advance=enqueue_advance,
                 )
                 owns_business_runtime = True
             expected = {definition.code: definition for definition in catalog.definitions()}
@@ -99,6 +101,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             application.state.business_runtime = None
         application.state.outbox = None
         application.state.ecs_result_committed = None
+        application.state.business_event_committed = None
         await engine.dispose()
         await get_redis().aclose()
         get_redis.cache_clear()

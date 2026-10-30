@@ -1,12 +1,16 @@
-"""Application-owned routing from committed identities to concrete business tasks."""
+"""Route committed inputs to catalog-owned business pending entries."""
+
+from app.businesses import catalog
+from app.integrations.registration import RegistrationSource
+from app.integrations.wms_request.operation import operations
 
 
-def enqueue_advance(business: str, source: str, identity: str) -> None:
-    if business != "coarse_sorting":
-        raise ValueError("Business advance task is not configured")
-    from app.tasks.coarse_sorting_tasks import advance_coarse_sorting_one
+def enqueue_business(business: str) -> None:
+    if business not in catalog.progressions():
+        raise ValueError("Business progression is not declared")
+    from app.tasks.business_tasks import advance_business_pending
 
-    app = advance_coarse_sorting_one.app
+    app = advance_business_pending.app
     options = {
         **app.conf.broker_transport_options,
         "max_retries": 0,
@@ -15,16 +19,23 @@ def enqueue_advance(business: str, source: str, identity: str) -> None:
     }
     with app.connection_for_write(connect_timeout=1, transport_options=options) as connection:
         with connection.Producer() as producer:
-            advance_coarse_sorting_one.apply_async(
-                args=(source, identity), producer=producer, retry=False, ignore_result=True
+            advance_business_pending.apply_async(
+                args=(business,), producer=producer, retry=False, ignore_result=True
             )
 
 
-def wms_result_committed(message_id: int, operation: str, operation_id: str) -> None:
-    if operation == "inbound.coarse_sorting.validate_bind@v1":
-        enqueue_advance("coarse_sorting", "wms", str(message_id))
+def event_committed(source: RegistrationSource) -> None:
+    business = catalog.progression_owner(source)
+    if business is not None:
+        enqueue_business(business)
 
 
-def ecs_result_committed(owner_domain: str, command_code: str) -> None:
-    if owner_domain == "coarse_sorting":
-        enqueue_advance(owner_domain, "ecs", command_code)
+def wms_result_committed(operation: str) -> None:
+    registered = operations().get(operation)
+    if registered is not None:
+        event_committed(registered.registration_source)
+
+
+def ecs_result_committed(owner_domain: str) -> None:
+    if owner_domain in catalog.progressions():
+        enqueue_business(owner_domain)

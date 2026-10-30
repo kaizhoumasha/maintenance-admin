@@ -1,5 +1,7 @@
 # 粗分验证与 MOVE_FORWARD / Result 实施计划
 
+> **后续开发约定：** 本文保留原方案与验收历史。当前调度已改为[按业务唤醒、共用待办入口](../specs/2026-10-29-business-pending-wakeups-design.md)，允许仅负责资源装配与委托的共享任务壳；业务仍持有推进规则和事务。旧任务名称及禁止通用 worker 的原文属于当时范围，不作为新业务开发用法。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 完成真实扫码经配置的 WMS 验证、唯一 MOVE_FORWARD、原 Result 消费，止于等待箱格分配。

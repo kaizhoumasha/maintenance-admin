@@ -539,3 +539,51 @@ async def test_raised_rejection_rolls_back_rows_written_before_it(
     assert response.status_code == 422
     assert response.json()["data"] == {"reason_code": "TOO_LATE"}
     assert await probe_rows(callback_store) == []
+
+
+@pytest.mark.parametrize("mode", ["accept", "reject", "rollback", "publish_failure"])
+async def test_input_notification_observes_committed_acceptance_only(
+    client, callback_store, monkeypatch, mode
+):
+    notices = []
+
+    def notify(source):
+        notices.append(source)
+        if mode == "publish_failure":
+            raise RuntimeError("synthetic broker unavailable")
+
+    monkeypatch.setattr(app.state, "business_event_committed", notify, raising=False)
+    if mode == "rollback":
+
+        def failing_factory():
+            session = callback_store()
+
+            def fail_outer(sync):
+                if not sync.in_nested_transaction():
+                    raise ValueError("outer commit rejected")
+
+            event.listen(session.sync_session, "before_commit", fail_outer)
+            return session
+
+        monkeypatch.setattr(app.state, "callback_session_factory", failing_factory)
+    body = dict(
+        operation=EXAMPLE_OPERATION,
+        operation_id=str(uuid7()),
+        timestamp=1,
+        data={"message": "committed input", "outcome": "reject" if mode == "reject" else "accept"},
+    )
+    response = await client.post(PATH, json=body)
+    assert (
+        response.status_code
+        == {"accept": 202, "reject": 422, "rollback": 503, "publish_failure": 202}[mode]
+    )
+    async with callback_store() as session:
+        receipt = await session.scalar(
+            select(CallbackReceipt).where(CallbackReceipt.operation_id == body["operation_id"])
+        )
+    assert (receipt is not None) == (mode != "rollback")
+    assert len(notices) == (1 if mode in {"accept", "publish_failure"} else 0)
+    if mode == "accept":
+        assert notices[0].module == "app.integrations.wms_callback.dev_callback"
+        assert (await client.post(PATH, json=body)).json()["code"] == "DUPLICATE"
+        assert len(notices) == 1

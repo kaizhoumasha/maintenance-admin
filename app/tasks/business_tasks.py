@@ -1,8 +1,7 @@
-"""Register coarse sorting's next durable intent; the application Sender delivers it."""
+"""Assemble task resources and delegate to the catalog-owned business pending entry."""
 
 from functools import partial
 
-from app.business_wakeups import enqueue_advance
 from app.businesses import catalog
 from app.businesses.runtime import build_runtime
 from app.core import get_settings
@@ -32,27 +31,16 @@ def _runtime(factory):
         outbox=outbox,
         ecs_commands=commands,
         session_factory=factory,
-        enqueue_advance=enqueue_advance,
     )
 
 
-async def advance_pending(factory) -> int:
+async def advance_pending(factory, business: str) -> int:
     runtime = _runtime(factory)
-    return await runtime.services["coarse_sorting"].scan_pending()
+    return await runtime.progressions[business]()
 
 
-async def advance_one(factory, source: str, identity: str) -> str:
-    runtime = _runtime(factory)
-    return await runtime.services["coarse_sorting"].advance_reference(source, identity)
-
-
-@celery_app.task(name="coarse_sorting.advance_one")
-def advance_coarse_sorting_one(source: str, identity: str) -> str:
+@celery_app.task(name="business.advance_pending", ignore_result=True)
+def advance_business_pending(business: str) -> int:
     return run_with_factory(
-        get_settings().DATABASE_URL, partial(advance_one, source=source, identity=identity)
+        get_settings().DATABASE_URL, partial(advance_pending, business=business)
     )
-
-
-@celery_app.task(name="coarse_sorting.advance_pending")
-def advance_coarse_sorting() -> int:
-    return run_with_factory(get_settings().DATABASE_URL, advance_pending)

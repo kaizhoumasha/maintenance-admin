@@ -106,9 +106,9 @@ PostgreSQL 的 `callback_receipt_device_idx` 哈希索引用于完整设备码�
 
 ## 验证与首个输送动作
 
-配置已有 RELIABLE_TARGETS 中唯一的 wms-decisions 目标，以及 CONVEYOR 设备的 ECS 路由。隔离验证须使用可丢弃数据库和明确的回环 MOCK 地址。正常运行主应用（唯一 Sender）、Celery worker 和唯一 Beat。扫码受理、原 WMS 决策保存、新 ECS Result 证据分别在最外层事务提交后立即投递 `coarse_sorting.advance_one(source, identity)`；正常阶段不等待下一次扫描。ECS 命令 ACK 不触发结果消费。
+配置已有 RELIABLE_TARGETS 中唯一的 wms-decisions 目标，以及 CONVEYOR 设备的 ECS 路由。隔离验证须使用可丢弃数据库和明确的回环 MOCK 地址。正常运行主应用（唯一 Sender）、Celery worker 和唯一 Beat。扫码受理、原 WMS 决策保存、新 ECS Result 证据分别在最外层事务提交后自动唤醒 coarse_sorting，投递 `business.advance_pending("coarse_sorting")`，调用其声明的 `scan_pending()`；正常阶段不等待下一次扫描。ECS 命令 ACK 不触发结果消费。
 
-具体任务 `coarse_sorting.advance_pending` 保留每 5 秒按 ID 分页扫描作为兜底，每页 100 条，阻塞的前页不会饿死后续扫码。通知或任务丢失、发布失败及进程重启时由持久待办恢复；发布失败不改变已提交的 ACK 或结果。即时任务按原结果引用定位扫码，与兜底任务共用原 `advance`；任务自己的会话工厂逐条开启新的 PostgreSQL REPEATABLE READ 事务，按工作线、设备 ID、扫码动作加锁，40001 最多尝试 3 次，失败回滚并保留原待办。部署该版本前的验收和运行状态仍以对应制品记录为准，本轮开发验证不表示新唤醒代码已部署。
+同一个 `business.advance_pending("coarse_sorting")` 任务由 Beat 每 5 秒触发，按 ID 分页扫描兜底，每页 100 条，阻塞的前页不会饿死后续扫码。通知或任务丢失、发布失败及进程重启时由持久待办恢复；发布失败不改变已提交的 ACK 或结果。即时和兜底任务共用原 `scan_pending` → `advance`，通知只含业务码；任务自己的会话工厂逐条开启新的 PostgreSQL REPEATABLE READ 事务，按工作线、设备 ID、扫码动作加锁，40001 最多尝试 3 次，失败回滚并保留原待办。部署该版本前的验收和运行状态仍以对应制品记录为准，本轮开发验证不表示新唤醒代码已部署。
 
 扫码进入原验证，发送到 WMS `POST /api/v1/wes/decisions`，例如：
 

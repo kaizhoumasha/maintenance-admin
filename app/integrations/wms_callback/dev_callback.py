@@ -33,7 +33,8 @@ handler 的约定
   `INSERT ... ON CONFLICT DO NOTHING RETURNING` 抢唯一键,写法见
   `wms_transport/service.py::_register`)。
 - 别吞数据库异常:任何异常都会整体回滚并返回 503,对端会原样重试。
-- handler 只做校验和落库,要快。耗时的事(调其他系统、复杂计算)写一条待处理行,交给 Celery 扫描;
+- handler 只做校验和落库,要快。耗时的事(调其他系统、复杂计算)写持久待办,
+  在所属 composition 声明 PROGRESSION,由平台提交后唤醒并由 Beat 兜底;
   不要在这里发 HTTP,也不要产生无法随事务回滚的外部副作用。
 
 测试怎么写:参考 `tests/controllers/test_wms_events.py`,`monkeypatch` 隔离注册表后注册你的函数,

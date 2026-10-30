@@ -74,7 +74,7 @@ class MessageStore:
         lease_margin_s: float = 5,
         lifecycles=None,
         served_snapshot_protocols=None,
-        on_result: Callable[[int, str, str], None] | None = None,
+        on_result: Callable[[str], None] | None = None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -287,9 +287,7 @@ class MessageStore:
                     session,
                     partial(
                         self.on_result,
-                        claim.message_id,
                         claim.message.operation,
-                        claim.message.operation_id,
                     ),
                 )
         if changed is not None:

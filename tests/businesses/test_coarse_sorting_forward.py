@@ -109,12 +109,12 @@ async def test_two_lines_complete_original_move_and_keep_raw_identity(coarse_for
         assert command["params"] == {"barcode": flow.event()["data"]["barcode"]}
 
 
-async def test_concrete_worker_assembles_formal_outbox_without_sender(coarse_forward, monkeypatch):
+async def test_shared_task_assembles_formal_outbox_without_sender(coarse_forward, monkeypatch):
     import asyncio
 
     from app.core import get_settings
     from app.reliable.sender import Sender
-    from app.tasks import coarse_sorting_tasks as tasks
+    from app.tasks import business_tasks as tasks
 
     flow = coarse_forward
     settings = get_settings().model_copy(
@@ -137,17 +137,17 @@ async def test_concrete_worker_assembles_formal_outbox_without_sender(coarse_for
 
     monkeypatch.setattr(Sender, "__init__", forbidden)
     assert (await flow.post(flow.event())).status_code == 200
-    assert await tasks.advance_pending(flow.factory) == 1
+    assert await tasks.advance_pending(flow.factory, "coarse_sorting") == 1
     assert (await flow.rows())[0]["validation_message_id"] is not None
     assert await flow.dispatch() == 1
-    assert await asyncio.to_thread(tasks.advance_coarse_sorting.run) == 1
+    assert await asyncio.to_thread(tasks.advance_business_pending.run, "coarse_sorting") == 1
     row = (await flow.rows())[0]
     assert row["command_code"] is not None
     assert await flow.dispatch() == 1
     assert (await flow.result(row)).status_code == 200
-    assert await asyncio.to_thread(tasks.advance_coarse_sorting.run) == 1
+    assert await asyncio.to_thread(tasks.advance_business_pending.run, "coarse_sorting") == 1
     assert (await flow.rows())[0]["wait_reason"] == "AWAITING_ALLOCATION_STAGE"
-    assert await tasks.advance_pending(flow.factory) == 0
+    assert await tasks.advance_pending(flow.factory, "coarse_sorting") == 0
 
 
 @pytest.mark.parametrize(

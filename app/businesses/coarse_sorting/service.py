@@ -57,10 +57,9 @@ class CoarseSortingService:
             ctx.note(issue)
             return
         line = await read_workline(ctx.session, binding.work_line_id)
-        scan_id = str(uuid7())
         await ctx.session.execute(
             table.insert().values(
-                id=scan_id,
+                id=str(uuid7()),
                 event_digest=ctx.digest,
                 receipt_id=ctx.receipt_id,
                 work_line_id=binding.work_line_id,
@@ -82,24 +81,6 @@ class CoarseSortingService:
                 wait_reason="AWAITING_VALIDATION_STAGE",
             )
         )
-        self.capabilities.request_advance(ctx.session, "coarse_sorting", "scan", scan_id)
-
-    async def advance_reference(self, source: str, identity: str) -> str:
-        """Locate only; result consumption stays in advance's independent RR transaction."""
-        if source == "scan":
-            return await self.advance(identity)
-        columns = {
-            "wms": self.scan_table.c.validation_message_id,
-            "ecs": self.scan_table.c.command_code,
-        }
-        if source not in columns:
-            raise ValueError("Unknown coarse sorting wakeup source")
-        reference = int(identity) if source == "wms" else identity
-        async with self.capabilities.session_factory() as session:
-            scan_id = await session.scalar(
-                select(self.scan_table.c.id).where(columns[source] == reference)
-            )
-        return "NOT_FOUND" if scan_id is None else await self.advance(scan_id)
 
     async def advance(self, scan_id: str) -> str:
         """Retry serialization failures as whole transactions on fresh sessions."""
@@ -284,21 +265,23 @@ class CoarseSortingService:
         )
 
     async def scan_pending(self, *, limit=100) -> int:
-        """Visit each current-stage pending identity once, including blocked earlier pages."""
+        """Bound this sweep to existing pending IDs; new work gets its own wakeup."""
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
+        pending = select(table.c.id).where(
+            table.c.pending.is_(True), table.c.wait_reason.not_in(NEXT_STAGES)
+        )
+        async with self.capabilities.session_factory() as session:
+            upper_id = await session.scalar(pending.order_by(table.c.id.desc()).limit(1))
+        if upper_id is None:
+            return 0
         last_id, total = "", 0
         while True:
             async with self.capabilities.session_factory() as session:
                 ids = list(
                     await session.scalars(
-                        select(table.c.id)
-                        .where(
-                            table.c.pending.is_(True),
-                            table.c.id > last_id,
-                            table.c.wait_reason.not_in(NEXT_STAGES),
-                        )
+                        pending.where(table.c.id > last_id, table.c.id <= upper_id)
                         .order_by(table.c.id)
                         .limit(limit)
                     )

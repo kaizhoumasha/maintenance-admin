@@ -9,6 +9,7 @@ ENTRY_MODULES = (
 )
 MODEL_MODULES = ("app.businesses.coarse_sorting.models",)
 COMMANDS = (MoveForward,)
+PROGRESSION = "scan_pending"
 
 
 def build_service(capabilities):

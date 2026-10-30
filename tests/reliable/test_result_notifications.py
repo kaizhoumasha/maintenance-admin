@@ -19,14 +19,14 @@ async def claim_message(storage, callback):
     return store, reference, claims[0]
 
 
-async def test_saved_result_publishes_original_identity_once(storage, delivered):
+async def test_saved_result_notifies_operation_once(storage, delivered):
     published = []
     store, reference, claim = await claim_message(storage, lambda *args: published.append(args))
     assert await store.finish(claim, delivered)
     async with storage.factory() as reader:
         row = await reader.get(ReliableMessage, reference.message_id)
         assert row.status == "DONE" and row.response_raw == b"ok"
-    assert published == [(reference.message_id, "opaque", "id")]
+    assert published == [("opaque",)]
     assert not await store.finish(claim, delivered)
     assert len(published) == 1
 
@@ -86,7 +86,7 @@ async def test_application_sender_publishes_after_result_is_visible(pg_rig, pg_u
         async with pg_rig.factory() as reader:
             row = await reader.get(ReliableMessage, reference.message_id)
             assert row.status == "DONE" and row.response_raw == b"ok"
-        assert published == [(reference.message_id, "opaque", "id")]
+        assert published == [("opaque",)]
 
 
 async def test_publish_failure_does_not_undo_saved_result(storage, delivered):

@@ -22,7 +22,7 @@ celery_app = Celery(
         "app.tasks.reliable_tasks",
         "app.tasks.callback_tasks",
         "app.tasks.transport_tasks",
-        "app.tasks.coarse_sorting_tasks",
+        "app.tasks.business_tasks",
     ],
 )
 
@@ -35,9 +35,14 @@ celery_app.conf.update(
     task_track_started=True,
     # crontab 按上面的 timezone(Asia/Shanghai)解释
     beat_schedule={
-        "advance-coarse-sorting": {
-            "task": "coarse_sorting.advance_pending",
-            "schedule": 5.0,
+        **{
+            f"advance-business-{business}": {
+                "task": "business.advance_pending",
+                "args": (business,),
+                "schedule": 5.0,
+                "options": {"ignore_result": True},
+            }
+            for business in catalog.progressions()
         },
         "cleanup-callback-snapshots": {
             "task": "callback.cleanup_snapshots",

@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 from pydantic import ValidationError
 from sqlalchemy import update
@@ -18,6 +19,7 @@ from app.integrations.callback_diagnostics import queue_diagnostics
 from app.integrations.callback_receipts import find_receipt, insert_receipt
 from app.integrations.wms_callback.receiver import CallbackResponse
 from app.models import CallbackReceipt
+from app.transactions import after_commit
 
 from .binding import BindingResolver
 from .envelope import EcsEventEnvelope, issues_from
@@ -107,6 +109,7 @@ async def receive_ecs_event(
     *,
     resolve_binding: BindingResolver | None = None,
     runtime: object | None = None,
+    on_committed=None,
 ) -> EcsResponse:
     if len(raw) > MAX_BODY_BYTES:
         return EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
@@ -209,6 +212,8 @@ async def receive_ecs_event(
         )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
+        if on_committed is not None:
+            after_commit(session, partial(on_committed, registered.registration_source))
         outcome, notes = "received", ctx.notes
     if notes:
         await session.execute(

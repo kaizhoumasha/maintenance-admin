@@ -1,8 +1,8 @@
 """Stateless business services assembled from the application's existing capabilities."""
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from functools import partial
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from inspect import iscoroutinefunction, signature
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -11,7 +11,6 @@ from app.businesses.definitions import BusinessDefinition
 from app.integrations.ecs_command import EcsCommands
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_transport import TransportService
-from app.transactions import after_commit
 
 
 @dataclass(frozen=True)
@@ -20,24 +19,16 @@ class Capabilities:
     wms: WmsRequests
     transport: TransportService
     session_factory: async_sessionmaker[AsyncSession]
-    enqueue_advance: Callable[[str, str, str], None] | None = None
-
-    def request_advance(
-        self, session: AsyncSession, business: str, source: str, identity: str
-    ) -> None:
-        if self.enqueue_advance is not None:
-            after_commit(session, partial(self.enqueue_advance, business, source, identity))
 
 
 @dataclass(frozen=True)
 class BusinessRuntime:
     definitions: Mapping[str, BusinessDefinition]
     services: Mapping[str, object]
+    progressions: Mapping[str, Callable[[], Awaitable[int]]] = field(default_factory=dict)
 
 
-def build_runtime(
-    *, outbox, ecs_commands, session_factory, enqueue_advance=None
-) -> BusinessRuntime:
+def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
     entries = catalog.validated_entries()
     if not entries:
         return BusinessRuntime(definitions={}, services={})
@@ -52,17 +43,29 @@ def build_runtime(
         WmsRequests(outbox),
         TransportService(outbox),
         session_factory,
-        enqueue_advance,
     )
-    services = {}
+    services, progressions = {}, {}
     for entry in entries:
         service = entry.build_service(capabilities)
         if service is None:
             raise ValueError(f"{entry.DEFINITION.code}: business factory must return a service")
         services[entry.DEFINITION.code] = service
+        method = getattr(entry, "PROGRESSION", None)
+        if method is not None:
+            pending = getattr(service, method, None)
+            if not iscoroutinefunction(pending):
+                raise ValueError(f"{entry.DEFINITION.code}: PROGRESSION requires an async method")
+            try:
+                signature(pending).bind()
+            except TypeError as error:
+                raise ValueError(
+                    f"{entry.DEFINITION.code}: PROGRESSION must be callable without arguments"
+                ) from error
+            progressions[entry.DEFINITION.code] = pending
     return BusinessRuntime(
         definitions={entry.DEFINITION.code: entry.DEFINITION for entry in entries},
         services=services,
+        progressions=progressions,
     )
 
 

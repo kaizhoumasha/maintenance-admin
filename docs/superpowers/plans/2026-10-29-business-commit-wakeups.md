@@ -1,5 +1,7 @@
 # 业务提交后即时唤醒 Implementation Plan
 
+> **历史快照：** 本文记录 `4b7fb80` 的逐条唤醒方案及当时验收。后续已选用[按业务唤醒方案](../specs/2026-10-29-business-pending-wakeups-design.md)；以下原设计、统计和交付边界保留，不代表当前开发用法。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 默认结果提交后即时投递 Celery，粗分三个唤醒点复用原 advance，Beat 扫描持久待办兜底。
