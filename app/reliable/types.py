@@ -91,6 +91,7 @@ class OutgoingMessage:
 class EnqueueResult:
     message_id: int
     status: MessageStatus
+    business_key: str | None = None
 
 
 @dataclass(frozen=True)

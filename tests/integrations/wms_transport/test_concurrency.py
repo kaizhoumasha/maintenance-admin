@@ -66,3 +66,63 @@ async def test_concurrent_reservation_only_enqueues_the_committed_winner(
             == 1
         )
         assert await session.scalar(select(Menu.id).where(Menu.name == rig.target.name)) is not None
+
+
+@pytest.mark.parametrize(
+    "original_owner,new_owner",
+    [(None, "first"), ("first", None), ("first", "second"), ("first", "first")],
+)
+async def test_concurrent_transport_registration_preserves_winner_owner(
+    pg_transport_rig, original_owner, new_owner, wait_for_lock
+):
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_transport import (
+        IdempotencyConflict,
+        Rack,
+        RackPosition,
+        TransportCaller,
+        TransportService,
+    )
+
+    rig = pg_transport_rig
+    first_service = TransportService(
+        rig.outbox, target=rig.target.name, clock=rig.clock, owner_domain=original_owner
+    )
+    second_service = TransportService(
+        rig.outbox, target=rig.target.name, clock=rig.clock, owner_domain=new_owner
+    )
+    arguments = dict(
+        client_request_id=str(uuid7()),
+        caller=TransportCaller(rig.target.name),
+        rack_id="rack",
+        source=Rack("rack"),
+        target=RackPosition("TARGET"),
+    )
+    async with rig.factory() as first:
+        original = await first_service.move_rack(first, **arguments)
+
+        async def compete():
+            async with rig.factory.begin() as second:
+                return await second_service.move_rack(second, **arguments)
+
+        pending = asyncio.create_task(compete())
+        try:
+            await wait_for_lock(pending)
+            await first.commit()
+            async with asyncio.timeout(5):
+                if original_owner == new_owner:
+                    assert await pending == original
+                else:
+                    with pytest.raises(IdempotencyConflict, match="owner|business"):
+                        await pending
+            async with rig.factory() as session:
+                task = await session.scalar(
+                    select(TransportTask).where(
+                        TransportTask.transport_task_id == original.transport_task_id
+                    )
+                )
+                assert task.owner_domain == original_owner
+        finally:
+            await first.rollback()
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)

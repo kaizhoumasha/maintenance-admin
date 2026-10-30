@@ -74,7 +74,7 @@ class MessageStore:
         lease_margin_s: float = 5,
         lifecycles=None,
         served_snapshot_protocols=None,
-        on_result: Callable[[str], None] | None = None,
+        on_result: Callable[[str, str | None], None] | None = None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -282,14 +282,8 @@ class MessageStore:
                 .values(**values)
                 .returning(ReliableMessage.id)
             )
-            if changed is not None and outcome.status in TERMINAL and self.on_result is not None:
-                after_commit(
-                    session,
-                    partial(
-                        self.on_result,
-                        claim.message.operation,
-                    ),
-                )
+            if changed is not None:
+                self._notify_terminal(session, claim.message, outcome.status)
         if changed is not None:
             self._log(
                 claim.message,
@@ -299,6 +293,10 @@ class MessageStore:
                 attempts=claim.attempt_no,
             )
         return changed is not None
+
+    def _notify_terminal(self, session, message, status) -> None:
+        if status in TERMINAL and self.on_result is not None:
+            after_commit(session, partial(self.on_result, message.operation, message.business_key))
 
     async def recover_expired(self, limit: int, targets: Mapping[str, TargetConfig]) -> int:
         now = utc_datetime(self.clock())
@@ -320,17 +318,22 @@ class MessageStore:
             if claims:
                 # 行已被 FOR UPDATE 锁定,无需再带租约条件;一次批量执行代替逐行往返。
                 table = ReliableMessage.__table__
+                recoveries = [
+                    (claim, self._recovery_values(claim, now, targets)) for claim in claims
+                ]
                 await session.execute(
                     update(table).where(table.c.id == bindparam("row_id")),
                     [
                         {
                             "row_id": claim.message_id,
                             "attempts": claim.attempt_no,
-                            **self._recovery_values(claim, now, targets),
+                            **values,
                         }
-                        for claim in claims
+                        for claim, values in recoveries
                     ],
                 )
+                for claim, values in recoveries:
+                    self._notify_terminal(session, claim.message, values["status"])
         for claim in claims:
             self._recovery_log(claim, now, targets)
         return len(rows)
@@ -393,6 +396,7 @@ class MessageStore:
         )
 
     async def _recover(self, session, claim, now, targets):
+        values = self._recovery_values(claim, now, targets)
         changed = await session.scalar(
             update(ReliableMessage)
             .where(
@@ -402,10 +406,12 @@ class MessageStore:
             )
             .values(
                 attempts=ReliableMessage.attempts + 1,
-                **self._recovery_values(claim, now, targets),
+                **values,
             )
             .returning(ReliableMessage.id)
         )
+        if changed is not None:
+            self._notify_terminal(session, claim.message, values["status"])
         return changed is not None
 
     async def expire_pending(self, limit: int) -> int:
@@ -439,6 +445,7 @@ class MessageStore:
                         .returning(
                             ReliableMessage.target,
                             ReliableMessage.operation,
+                            ReliableMessage.business_key,
                             ReliableMessage.operation_id,
                             ReliableMessage.trace_id,
                             ReliableMessage.attempts,
@@ -446,6 +453,8 @@ class MessageStore:
                     )
                 ).all()
             )
+            for message in changed:
+                self._notify_terminal(session, message, MessageStatus.EXPIRED)
         for message in changed:
             self._log(
                 message, MessageStatus.PENDING, MessageStatus.EXPIRED, attempts=message.attempts

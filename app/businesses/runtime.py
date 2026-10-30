@@ -40,14 +40,18 @@ def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
         raise ValueError("Business commands require the application ECS capability")
     if not callable(session_factory):
         raise ValueError("Business runtime requires an application session factory")
-    capabilities = Capabilities(
-        ecs_commands,
-        WmsRequests(outbox),
-        TransportService(outbox),
-        session_factory,
-    )
     services, progressions = {}, {}
     for entry in entries:
+        capabilities = Capabilities(
+            ecs_commands,
+            WmsRequests(
+                outbox,
+                owner_domain=entry.DEFINITION.code,
+                contract_consumers=catalog.contract_consumers,
+            ),
+            TransportService(outbox, owner_domain=entry.DEFINITION.code),
+            session_factory,
+        )
         service = entry.build_service(capabilities)
         if service is None:
             raise ValueError(f"{entry.DEFINITION.code}: business factory must return a service")

@@ -23,6 +23,7 @@ class TransportTask(Base):
     input_digest: Mapped[str] = mapped_column(String(64))
     workline_id: Mapped[str] = mapped_column(Text)
     station_id: Mapped[str | None] = mapped_column(Text)
+    owner_domain: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # 同一货架一轮生命周期(进场/换面/离场)的本地分组键,不进入 wire 与冻结请求
     cycle_id: Mapped[str | None] = mapped_column(Text)

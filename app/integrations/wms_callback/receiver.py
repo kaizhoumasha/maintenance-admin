@@ -102,6 +102,7 @@ async def _handle(
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
+    on_owner_committed=None,
 ) -> CallbackResponse:
     """保存点内执行处理器:Rejected 显式回滚其写入;先构造并校验响应,再写回收据(同一事务)。"""
     async with session.begin_nested() as savepoint:
@@ -114,6 +115,7 @@ async def _handle(
             runtime=runtime,
             registration_source=handler.registration_source,
             operation=operation,
+            on_owner_committed=on_owner_committed,
         )
         try:
             outcome = await handler.handle(context)
@@ -168,6 +170,7 @@ async def receive(
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
+    on_owner_committed=None,
 ) -> CallbackResponse:
     if len(raw) > MAX_BODY_BYTES:
         return CallbackResponse(413, None, "too_large")
@@ -243,6 +246,7 @@ async def receive(
             runtime=runtime,
             on_committed=on_committed,
             on_business_committed=on_business_committed,
+            on_owner_committed=on_owner_committed,
         )
         return response
     existing = await find_receipt(session, operation, operation_id)

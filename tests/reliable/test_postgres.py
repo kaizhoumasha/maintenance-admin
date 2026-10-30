@@ -286,3 +286,27 @@ async def test_sending_holds_no_database_connection_and_save_failure_keeps_lease
     async with rig.factory() as session:
         row = await session.get(ReliableMessage, message.message_id)
         assert row.status == "SENDING" and row.attempts == 0 and row.response_raw is None
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_concurrent_enqueue_returns_persisted_winner_business_key(pg_rig, rollback):
+    rig = pg_rig
+    async with rig.factory() as first:
+        original = await rig.outbox.enqueue(first, rig.draft(business_key="opaque:first"))
+
+        async def compete():
+            async with rig.factory.begin() as second:
+                return await rig.outbox.enqueue(second, rig.draft(business_key="opaque:second"))
+
+        pending = asyncio.create_task(compete())
+        try:
+            await wait_for_database_lock(rig.factory, pending)
+            await (first.rollback() if rollback else first.commit())
+            async with asyncio.timeout(5):
+                result = await pending
+            assert result.business_key == ("opaque:second" if rollback else "opaque:first")
+            assert (result.message_id == original.message_id) is not rollback
+        finally:
+            await first.rollback()
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)

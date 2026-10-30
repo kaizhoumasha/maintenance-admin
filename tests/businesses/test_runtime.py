@@ -30,7 +30,12 @@ def test_factories_share_platform_capabilities_without_job_state(monkeypatch):
     outbox, ecs, factory = object(), object(), lambda: None
     runtime = build_runtime(outbox=outbox, ecs_commands=ecs, session_factory=factory)
     assert set(runtime.services) == {"first", "second"}
-    assert seen[0] is seen[1]
+    assert seen[0] is not seen[1]
+    assert [capabilities.wms.owner_domain for capabilities in seen] == ["first", "second"]
+    assert [capabilities.transport.owner_domain for capabilities in seen] == ["first", "second"]
+    assert seen[1].session_factory is factory
+    assert seen[1].ecs is ecs
+    assert seen[1].wms.outbox is outbox
     assert seen[0].session_factory is factory
     assert seen[0].ecs is ecs
     assert seen[0].wms.outbox is outbox

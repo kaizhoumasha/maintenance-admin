@@ -4,6 +4,7 @@
 测试用 `monkeypatch` 替换成空 dict 隔离。装饰器只注册映射,不带 `ack_mode` 等元数据(信封合同 §6)。
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -80,6 +81,7 @@ class CallbackContext:
     runtime: object | None = field(default=None, kw_only=True)
     registration_source: object | None = field(default=None, kw_only=True)
     operation: str | None = field(default=None, kw_only=True)
+    on_owner_committed: Callable[[str], None] | None = field(default=None, kw_only=True)
     _business_binding: _CallbackBusiness = field(default_factory=_CallbackBusiness, kw_only=True)
 
     @property

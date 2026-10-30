@@ -129,7 +129,7 @@ class Outbox:
                 .returning(ReliableMessage.id)
             )
             if message_id is not None:
-                return EnqueueResult(message_id, MessageStatus.PENDING)
+                return EnqueueResult(message_id, MessageStatus.PENDING, message.business_key)
             existing = await session.scalar(query.execution_options(populate_existing=True))
             if existing is not None:
                 return self._existing(existing, draft)
@@ -140,7 +140,7 @@ class Outbox:
             raise DuplicateMessage("identity already has different delivery snapshot")
         if existing.request_raw != draft.request_raw and not self._same_request(existing, draft):
             raise DuplicateMessage("identity already has different bytes")
-        return EnqueueResult(existing.id, MessageStatus(existing.status))
+        return EnqueueResult(existing.id, MessageStatus(existing.status), existing.business_key)
 
     def _same_request(self, existing, draft) -> bool:
         """字节不同但适配器认定内容等价(例如只有时间戳变了)时,同身份重入返回原消息。"""

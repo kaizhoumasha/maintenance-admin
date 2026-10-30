@@ -70,3 +70,25 @@ async def test_adapter_may_declare_changed_bytes_equivalent_on_reentry(rig, monk
         assert await rig.outbox.enqueue(session, rig.draft(request_raw=b"B:payload")) == first
         with pytest.raises(DuplicateMessage):
             await rig.outbox.enqueue(session, rig.draft(request_raw=b"B:other"))
+
+
+async def test_enqueue_returns_original_business_key_even_when_new_metadata_differs(
+    storage, monkeypatch
+):
+    from app.models import ReliableMessage
+
+    monkeypatch.setattr(
+        storage.adapter, "same_request", lambda old, new: old[2:] == new[2:], raising=False
+    )
+    async with storage.factory.begin() as session:
+        first = await storage.outbox.enqueue(
+            session, storage.draft(request_raw=b"A:payload", business_key="opaque:first")
+        )
+        assert first.business_key == "opaque:first"
+    async with storage.factory.begin() as session:
+        again = await storage.outbox.enqueue(
+            session, storage.draft(request_raw=b"B:payload", business_key="opaque:second")
+        )
+        assert again.message_id == first.message_id and again.business_key == "opaque:first"
+        row = await session.get(ReliableMessage, first.message_id)
+        assert row.request_raw == b"A:payload" and row.business_key == "opaque:first"

@@ -47,11 +47,13 @@ class TransportService:
         target: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uuid7: Callable[[], UUID] | None = None,
+        owner_domain: str | None = None,
     ):
         """不传 `outbox` / `target` 时,首次使用从 RELIABLE_TARGETS 配置惰性取得并缓存,
         业务代码无需任何接线;显式参数用于测试和特殊装配。"""
         self._outbox, self._target = outbox, target
         self.clock, self.uuid7 = clock, uuid7
+        self.owner_domain = owner_domain
 
     @property
     def outbox(self) -> Outbox:
@@ -213,6 +215,7 @@ class TransportService:
                     input_digest=digest,
                     workline_id=caller.workline_id,
                     station_id=caller.station_id,
+                    owner_domain=self.owner_domain,
                     created_at=now,
                     cycle_id=cycle_id,
                     frozen=data,
@@ -233,10 +236,13 @@ class TransportService:
             )
         return TransportHandle(task_id, client_request_id)
 
-    @staticmethod
-    def _existing(task: TransportTask, digest: str) -> TransportHandle:
+    def _existing(self, task: TransportTask, digest: str) -> TransportHandle:
         if task.input_digest != digest:
             raise IdempotencyConflict("client_request_id already has different input")
+        if task.owner_domain != self.owner_domain:
+            raise IdempotencyConflict(
+                "client_request_id already has a different original business owner"
+            )
         return TransportHandle(task.transport_task_id, task.client_request_id)
 
 

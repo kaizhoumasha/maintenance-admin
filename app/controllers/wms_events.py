@@ -75,6 +75,7 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
                     runtime=getattr(request.app.state, "business_runtime", None),
                     on_committed=getattr(request.app.state, "business_event_committed", None),
                     on_business_committed=getattr(request.app.state, "business_committed", None),
+                    on_owner_committed=getattr(request.app.state, "business_committed", None),
                 )
     except Exception as error:
         log_exception(

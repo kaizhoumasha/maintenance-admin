@@ -392,3 +392,39 @@ def workline_business_catalog(monkeypatch):
             for code in ("test_sorting", "other_sorting")
         ),
     )
+
+
+@pytest.fixture
+def shared_wms_contract(monkeypatch):
+    """Two businesses explicitly consume one formal shared request; a third does not."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.businesses import catalog
+    from app.businesses.components import ComponentDefinition
+    from app.integrations.ecs_callback import registry as events
+    from app.integrations.wms_callback import registry as callbacks
+    from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
+    from app.integrations.wms_request import operation as requests
+    from tests.helpers import business_composition
+
+    module = "app.businesses._components.shared_wms.request.shared_ask_v1"
+    component = ComponentDefinition(key="shared_wms", entry_modules=(module,))
+    first, second, unrelated = (business_composition(code) for code in ("first", "second", "third"))
+    for entry in (first, second, unrelated):
+        entry.DEFINITION = replace(entry.DEFINITION, initial_entries=())
+        entry.ENTRY_MODULES = ()
+    first.COMPONENTS = second.COMPONENTS = (component,)
+    monkeypatch.setattr(catalog, "entries", lambda: (first, second, unrelated))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(callbacks, "_registry", {})
+    monkeypatch.setattr(requests, "_registry", {})
+
+    class Ask(RequestPayload):
+        reference: str
+
+    Ask.__module__ = module
+    request_operation("shared.ask@v1", Endpoint.DECISIONS)(Ask)
+    catalog.validate_business_contracts()
+    return SimpleNamespace(model=Ask, operation="shared.ask@v1", entries=(first, second, unrelated))
