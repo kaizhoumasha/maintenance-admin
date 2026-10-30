@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.business_wakeups import ecs_result_committed, enqueue_advance, wms_result_committed
 from app.businesses import catalog
 from app.businesses.coarse_sorting.service import read_scan
 from app.businesses.runtime import BusinessRuntime, build_runtime
@@ -61,11 +62,15 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     annexes=command_annexes,
                 )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
+        application.state.ecs_result_committed = (
+            getattr(application.state, "ecs_result_committed", None) or ecs_result_committed
+        )
         async with reliable_lifespan(
             ecs_runtime_config(settings, ecs_commands),
             getattr(application.state, "reliable_adapters", {}),
             lifecycles=getattr(application.state, "reliable_lifecycles", {}),
             client_provider=getattr(application.state, "reliable_client_provider", None),
+            on_result=wms_result_committed,
         ) as outbox:
             application.state.outbox = outbox
             if ecs_commands is not None:
@@ -73,7 +78,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             runtime = getattr(application.state, "business_runtime", None)
             if runtime is None:
                 runtime = build_runtime(
-                    outbox=outbox, ecs_commands=ecs_commands, session_factory=session_factory
+                    outbox=outbox,
+                    ecs_commands=ecs_commands,
+                    session_factory=session_factory,
+                    enqueue_advance=enqueue_advance,
                 )
                 owns_business_runtime = True
             expected = {definition.code: definition for definition in catalog.definitions()}
@@ -90,6 +98,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         if owns_business_runtime:
             application.state.business_runtime = None
         application.state.outbox = None
+        application.state.ecs_result_committed = None
         await engine.dispose()
         await get_redis().aclose()
         get_redis.cache_clear()

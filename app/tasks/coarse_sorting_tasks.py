@@ -1,5 +1,8 @@
 """Register coarse sorting's next durable intent; the application Sender delivers it."""
 
+from functools import partial
+
+from app.business_wakeups import enqueue_advance
 from app.businesses import catalog
 from app.businesses.runtime import build_runtime
 from app.core import get_settings
@@ -15,7 +18,7 @@ from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
-async def advance_pending(factory) -> int:
+def _runtime(factory):
     bindings, annexes = catalog.validate_business_contracts()
     commands = EcsCommands(None, TARGET, DeviceRoutes(bindings, annexes=annexes), annexes)
     config = ecs_runtime_config(get_settings(), commands)
@@ -25,8 +28,29 @@ async def advance_pending(factory) -> int:
         lifecycles={PROTOCOL: EcsLifecycle(commands)},
     )
     commands.outbox = outbox
-    runtime = build_runtime(outbox=outbox, ecs_commands=commands, session_factory=factory)
+    return build_runtime(
+        outbox=outbox,
+        ecs_commands=commands,
+        session_factory=factory,
+        enqueue_advance=enqueue_advance,
+    )
+
+
+async def advance_pending(factory) -> int:
+    runtime = _runtime(factory)
     return await runtime.services["coarse_sorting"].scan_pending()
+
+
+async def advance_one(factory, source: str, identity: str) -> str:
+    runtime = _runtime(factory)
+    return await runtime.services["coarse_sorting"].advance_reference(source, identity)
+
+
+@celery_app.task(name="coarse_sorting.advance_one")
+def advance_coarse_sorting_one(source: str, identity: str) -> str:
+    return run_with_factory(
+        get_settings().DATABASE_URL, partial(advance_one, source=source, identity=identity)
+    )
 
 
 @celery_app.task(name="coarse_sorting.advance_pending")

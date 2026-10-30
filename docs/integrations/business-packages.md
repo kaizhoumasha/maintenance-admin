@@ -64,7 +64,7 @@ ECS 参数/结果/错误模型必须满足[命令模型约束](ecs-command.md#�
 ## 3. 可信装配 composition.py
 
 固定入口及模型模块路径，引用同一份 `DEFINITION` 和命令模型清单。工厂只构造无作业状态的服务，
-不保存活动 session、不访问网络。平台注入 `Capabilities.ecs / wms / transport / session_factory`；不新增通用 execute。
+不保存活动 session、不访问网络。平台注入 `Capabilities.ecs / wms / transport / session_factory` 及提交后发布能力；不新增通用 execute。
 API 与 worker 分别传入自己的 session factory；composition 不能导入全局数据库工厂跨事件循环复用：
 
 ```python
@@ -102,7 +102,22 @@ def build_service(capabilities):
 原收据、受理状态和待推进依据在受理事务内一起提交。只依赖当前输入、无需前序结果的初始意图，
 才可按该业务合同在受理事务登记。处理器不 commit/rollback、不升级隔离级别，也不另开推进写事务。
 
-提交后的通知只携带原 execution_id，可丢失或重复；持久待办扫描复用同一个具体业务推进入口。
+默认在新业务事实／原结果提交成功后立即投递具体 Celery 推进任务，Beat 扫描持久待办兜底。
+业务受理时用 `capabilities.request_advance(ctx.session, business_code, source, identity)` 请求提交后唤醒，
+不自行 commit 或调用下一阶段。`app.transactions.after_commit` 只在最外层成功提交后发布；
+保存点释放仅合并通知，任何对应回滚或未提交关闭都会丢弃通知。发布异常安全记录，不改变已提交事实或 ACK。
+
+API 和具体 worker 的 `build_runtime(..., enqueue_advance=...)` 注入同一发布函数；
+独立测试可注入记录器。应用 `app/business_wakeups.py` 维护已实现业务到具体 Celery 任务的确切路由，
+新增业务同时补齐该路由、结果身份映射和具体任务。通用接收器／Sender 只调用注入的结果端口，
+不导入业务、不查询业务表、不在原事务内推进。WMS 决策由 Sender 保存 HTTP 响应后通知，ECS Result 在自身事务提交后通知。
+
+通知只携带原业务 ID 或原结果引用，可丢失或重复；发布使用 `retry=False` 和 `ignore_result=True`，
+避免结果后端订阅；独立发布连接只尝试一次，连接及 Redis socket 超时为 1 秒，失败交回持久待办，
+不等待全局生产者池或叠加投递重试器。
+即时和兜底任务复用同一个具体业务推进入口；粗分 `coarse_sorting.advance_one(source, identity)`
+按 `scan` / `wms` / `ecs` 原引用定位扫码，再调用原 `advance(scan_id)`，Beat 仅做恢复扫描。
+结果引用的定位查询只找业务 ID，不消费结果；实际推进遵循下面的独立事务要求。
 该入口创建新的 session，在任意业务定位/锁定 SQL 之前配置本事务 REPEATABLE READ：
 
 ```python

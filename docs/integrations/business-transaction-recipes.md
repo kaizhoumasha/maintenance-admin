@@ -58,8 +58,12 @@ async def callback(ctx, payload):
 
 ## 独立推进 B：新事务
 
-受理提交后才通知原 execution_id。通知可以丢失或重复，具体业务的持久待办查询负责再次找到原 ID；
-进程重建后调用同一个业务推进方法。这里不提供通用扫描器、worker、transaction runner 或第二 Sender。
+默认在受理／结果最外层提交后立即投递具体 Celery 推进任务，Beat 扫描持久待办兜底；
+`capabilities.request_advance` 通过 `app.transactions.after_commit` 注册通知，保存点释放不发布、回滚丢弃，
+发布失败不改已提交事实或 ACK。应用负责确切业务到具体任务的路由，通用接收器／Sender 仅调用注入端口。
+通知携带原 execution_id 或结果引用，可以丢失或重复；引用定位只找业务 ID，不消费结果。
+具体业务的持久待办查询负责再次找到原 ID，进程重建后调用同一个业务推进方法。
+这里不提供通用扫描器、worker、transaction runner 或第二 Sender；实际推进事务仍遵循下列隔离和锁序。
 
 1. 由具体业务服务创建新 session 和事务，复用可信注入的 session factory/连接池；在首条 SQL
    （包括定位 SQL）前设置 `REPEATABLE READ`，不修改全局 factory。结果接收/应用事务须先提交，

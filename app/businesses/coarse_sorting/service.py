@@ -57,9 +57,10 @@ class CoarseSortingService:
             ctx.note(issue)
             return
         line = await read_workline(ctx.session, binding.work_line_id)
+        scan_id = str(uuid7())
         await ctx.session.execute(
             table.insert().values(
-                id=str(uuid7()),
+                id=scan_id,
                 event_digest=ctx.digest,
                 receipt_id=ctx.receipt_id,
                 work_line_id=binding.work_line_id,
@@ -81,6 +82,24 @@ class CoarseSortingService:
                 wait_reason="AWAITING_VALIDATION_STAGE",
             )
         )
+        self.capabilities.request_advance(ctx.session, "coarse_sorting", "scan", scan_id)
+
+    async def advance_reference(self, source: str, identity: str) -> str:
+        """Locate only; result consumption stays in advance's independent RR transaction."""
+        if source == "scan":
+            return await self.advance(identity)
+        columns = {
+            "wms": self.scan_table.c.validation_message_id,
+            "ecs": self.scan_table.c.command_code,
+        }
+        if source not in columns:
+            raise ValueError("Unknown coarse sorting wakeup source")
+        reference = int(identity) if source == "wms" else identity
+        async with self.capabilities.session_factory() as session:
+            scan_id = await session.scalar(
+                select(self.scan_table.c.id).where(columns[source] == reference)
+            )
+        return "NOT_FOUND" if scan_id is None else await self.advance(scan_id)
 
     async def advance(self, scan_id: str) -> str:
         """Retry serialization failures as whole transactions on fresh sessions."""

@@ -1,7 +1,8 @@
 """Stateless business services assembled from the application's existing capabilities."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -10,6 +11,7 @@ from app.businesses.definitions import BusinessDefinition
 from app.integrations.ecs_command import EcsCommands
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_transport import TransportService
+from app.transactions import after_commit
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,13 @@ class Capabilities:
     wms: WmsRequests
     transport: TransportService
     session_factory: async_sessionmaker[AsyncSession]
+    enqueue_advance: Callable[[str, str, str], None] | None = None
+
+    def request_advance(
+        self, session: AsyncSession, business: str, source: str, identity: str
+    ) -> None:
+        if self.enqueue_advance is not None:
+            after_commit(session, partial(self.enqueue_advance, business, source, identity))
 
 
 @dataclass(frozen=True)
@@ -26,7 +35,9 @@ class BusinessRuntime:
     services: Mapping[str, object]
 
 
-def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
+def build_runtime(
+    *, outbox, ecs_commands, session_factory, enqueue_advance=None
+) -> BusinessRuntime:
     entries = catalog.validated_entries()
     if not entries:
         return BusinessRuntime(definitions={}, services={})
@@ -37,7 +48,11 @@ def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
     if not callable(session_factory):
         raise ValueError("Business runtime requires an application session factory")
     capabilities = Capabilities(
-        ecs_commands, WmsRequests(outbox), TransportService(outbox), session_factory
+        ecs_commands,
+        WmsRequests(outbox),
+        TransportService(outbox),
+        session_factory,
+        enqueue_advance,
     )
     services = {}
     for entry in entries:

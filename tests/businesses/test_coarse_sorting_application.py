@@ -157,6 +157,61 @@ async def test_debug_and_public_callback_share_configured_scan_and_projection(co
     assert other_state["business"]["id"] != original["id"]
 
 
+async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from redis.asyncio import Redis
+    from sqlalchemy import select
+
+    import app.main as main
+    from app.businesses.coarse_sorting.models import CoarseSortingScan
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import EcsCommandAdapter
+
+    e = configured_scan
+    commands = main.app.state.business_runtime.services["coarse_sorting"].capabilities.ecs
+    published = []
+    original_lifespan = main.reliable_lifespan
+    database_url = e.factory.kw["bind"].url.render_as_string(hide_password=False)
+
+    @asynccontextmanager
+    async def isolated_sender(*args, **kwargs):
+        async with original_lifespan(*args, **kwargs, database_url=database_url) as outbox:
+            yield outbox
+
+    redis_client = Redis.from_url(os.environ["TEST_REDIS_URL"])
+
+    def redis_factory():
+        return redis_client
+
+    redis_factory.cache_clear = lambda: None
+    monkeypatch.setattr(main, "get_redis", redis_factory)
+    monkeypatch.setattr(main, "engine", e.factory.kw["bind"])
+    monkeypatch.setattr(main, "session_factory", e.factory)
+    monkeypatch.setattr(main, "reliable_lifespan", isolated_sender)
+    monkeypatch.setattr(main, "enqueue_advance", lambda *args: published.append(args))
+    monkeypatch.setattr(main.app.state, "business_runtime", None)
+    monkeypatch.setattr(main.app.state, "ecs_commands", commands, raising=False)
+    monkeypatch.setattr(main.app.state, "reliable_adapters", {"ecs-command": EcsCommandAdapter()})
+    monkeypatch.setattr(
+        main.app.state,
+        "reliable_lifecycles",
+        {"ecs-command": EcsLifecycle(commands)},
+        raising=False,
+    )
+    monkeypatch.setattr(main.app.state, "reliable_client_provider", DynamicClients(), raising=False)
+    async with main.lifespan(main.app):
+        response = await e.client.post("/api/v1/callback/event", json=e.body)
+        assert response.status_code == 200
+        async with e.factory() as reader:
+            scan = await reader.scalar(
+                select(CoarseSortingScan).where(CoarseSortingScan.device_code == e.codes[0])
+            )
+            assert published == [("coarse_sorting", "scan", scan.id)]
+            assert scan.pending and scan.validation_message_id is None
+
+
 async def test_scan_projection_survives_receipt_retention_in_configured_database(configured_scan):
     from sqlalchemy import delete
 

@@ -68,7 +68,12 @@ async def result_callback(request: Request):
                 raise RuntimeError("ECS application assembly unavailable")
             factory = getattr(request.app.state, "callback_session_factory", session_factory)
             async with factory() as session, session.begin():
-                result = await receive_ecs_result(session, raw, service)
+                result = await receive_ecs_result(
+                    session,
+                    raw,
+                    service,
+                    on_result=getattr(request.app.state, "ecs_result_committed", None),
+                )
     except Exception as error:
         log_exception(
             logger, "ECS result transaction failed", error, component="http", phase="ecs_result"

@@ -35,7 +35,7 @@
 
 1. 在业务包 `ecs_event` 文件/包使用 `@ecs_event(name, device_role=ROLE, data=Payload)`，列入 `ENTRY_MODULES`。
 2. 应用注入 BindingResolver；处理器依据 `ctx.binding` 核对线、角色、当前许可和本次经过，在原事务保存待办。
-3. 收据提交后 ACK；提交后通知只携带原 execution_id，丢通知靠持久待办恢复。未知事件不自动补注册或回放。
+3. 在原受理事务用 `capabilities.request_advance(ctx.session, business_code, source, identity)` 请求提交后通知；最外层提交成功后 ACK，并立即投递具体 Celery 推进任务。通知携带原业务 ID 或结果引用，即时任务和 Beat 兜底共用原 `advance`；回滚不投递，发布失败不改变 ACK，丢通知靠持久待办恢复。新增业务补齐应用发布路由与具体任务，见[业务包默认推进约定](business-packages.md#4-子包-servicepy--modelspy)。未知事件不自动补注册或回放。
 
 ### ECS Command / Result 流程卡
 
