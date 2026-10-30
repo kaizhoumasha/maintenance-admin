@@ -58,10 +58,13 @@ async def callback(ctx, payload):
 
 ## 独立推进 B：新事务
 
-受理提交后才通知原 execution_id。通知可以丢失或重复，具体业务的持久待办查询负责再次找到原 ID；
-进程重建后调用同一个业务推进方法。这里不提供通用扫描器、worker、transaction runner 或第二 Sender。
+默认在受理／结果最外层提交后自动唤醒所属业务，调用 composition.PROGRESSION 声明的异步待办入口；Beat 每 5 秒使用同一个 `business.advance_pending(business_code)` 任务。
+平台根据可信声明归属路由，不要求业务编写通知、结果 ID 反查或 Celery 装配。
+共享 after_commit 保证保存点释放不发布、回滚丢弃，发布失败不改变已提交事实或 ACK。
+业务待办入口通过短会话只定位自己的 pending ID，不消费结果、不为整轮扫描持有推进事务，再逐条调用原独立推进方法；重复通知允许重复检查，必须保持原外部意图身份。
+公共任务只装配与委托，不提供通用业务查询、状态机、transaction runner 或第二 Sender；实际推进仍遵循下列隔离和锁序。
 
-1. 由具体业务服务创建新 session 和事务，复用可信注入的 session factory/连接池；在首条 SQL
+1. 每条记录由具体业务 `advance` 创建新 session 和事务，复用可信注入的 session factory/连接池而不跨记录复用事务；在首条 SQL
    （包括定位 SQL）前设置 `REPEATABLE READ`，不修改全局 factory。结果接收/应用事务须先提交，
    业务不能消费另一个未提交事务的 Result。
 2. 先无锁定位原执行记录中的线/设备身份，再按工作线 ID → 设备 ID → 业务动作固定顺序锁定和重读。
@@ -79,12 +82,13 @@ async def callback(ctx, payload):
    网络投递交给既有 Outbox 和唯一 Sender，不能把读取成功当作设备派发授权。
 
 以下是具体业务推进方法内部的一段事务边界，省略的业务锁定和判断须由上述步骤实现；
-`advance_pending` 是该业务的方法，不是平台 runner，也不能从受理处理器直接执行：
+`advance` 是业务单条推进入口，`_advance` 示意其事务内实现；不是平台 runner，也不能从受理处理器直接执行：
 
 ```python
-async with session_factory() as session, session.begin():
-    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-    await service.advance_pending(session, execution_id)
+async def advance(self, execution_id):
+    async with self.capabilities.session_factory() as session, session.begin():
+        await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        return await self._advance(session, execution_id)
 ```
 
 公开读接口调用示例使用业务已保存的原引用；变量须从本事务锁定的业务记录取出：

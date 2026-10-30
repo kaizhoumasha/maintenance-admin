@@ -78,6 +78,7 @@ async def receive_event_request(request: Request, background_tasks: BackgroundTa
                     raw,
                     resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
                     runtime=getattr(request.app.state, "business_runtime", None),
+                    on_committed=getattr(request.app.state, "business_event_committed", None),
                 )
     except Exception as error:  # 含提交失败:整个事务已回滚
         log_exception(

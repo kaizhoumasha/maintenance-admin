@@ -3,6 +3,7 @@ import random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 from sqlalchemy import and_, bindparam, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -11,6 +12,7 @@ from app.core.identifiers import uuid7
 from app.diagnostics import log_exception
 from app.http_client import DeliveryState, HttpResult
 from app.models.reliable import ReliableMessage
+from app.transactions import after_commit
 
 from .config import TargetConfig, positive
 from .policy import retry_delay_s
@@ -72,6 +74,7 @@ class MessageStore:
         lease_margin_s: float = 5,
         lifecycles=None,
         served_snapshot_protocols=None,
+        on_result: Callable[[str], None] | None = None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -83,6 +86,7 @@ class MessageStore:
 
         self.snapshots = SnapshotTransactions(self, lifecycles or {})
         self.served_snapshot_protocols = served_snapshot_protocols
+        self.on_result = on_result
         self._skipped_claim_cursor = None
 
     def _time(self, session, value):
@@ -278,6 +282,14 @@ class MessageStore:
                 .values(**values)
                 .returning(ReliableMessage.id)
             )
+            if changed is not None and outcome.status in TERMINAL and self.on_result is not None:
+                after_commit(
+                    session,
+                    partial(
+                        self.on_result,
+                        claim.message.operation,
+                    ),
+                )
         if changed is not None:
             self._log(
                 claim.message,

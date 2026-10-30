@@ -25,6 +25,7 @@ async def event_state(
         row = await find_receipt(session, OPERATION, digest)
         receipt = (
             DevEcsEventReceipt(
+                device_code=row.device_code,
                 status_code=row.status_code,
                 response=row.body,
                 diagnostic=row.diagnostic,

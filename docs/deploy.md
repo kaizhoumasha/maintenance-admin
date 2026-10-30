@@ -21,7 +21,7 @@
 
 [本次部署结果](#本次部署结果2026-10-27)、[后续应用更新](#后续应用更新联调服务器)及[快速修改入口](#快速修改候选入口与切换到-80-端口)见下文。
 
-此方案无需停止 WES。现有 WES 映射了 443 不代表证书或 TLS 配置可直接复用。当前正式业务清单为空，部署管理和集成基础能力不等于拣选、分拣业务已上线。WMS 目标已配置到 8285，本次只做连通性检查；业务请求、回调和 ECS 设备下发另行验收后使用，避免两套系统同时控制同一设备或处理同一业务任务。
+此方案无需停止 WES。现有 WES 映射了 443 不代表证书或 TLS 配置可直接复用。当前源码正式业务清单登记粗分扫码、WMS 验证及首个输送结果阶段；具体服务器使用的提交和阶段以固定制品清单及部署记录为准，部署成功不代表完整分拣业务或现场验收通过。既有 WMS 目标配置保留；部署验证只读检查设备 Status，业务闭环使用隔离 MOCK，不向现场设备发送测试命令。
 
 仓库基础 Compose 项目名为 `enterprise-backend`，对应数据卷为 `enterprise-backend_pgdata` 和 `enterprise-backend_redisdata`；联调服务器按第 6 节显式使用 `enterprise-backend-int`。已有部署未完成备份和数据迁移时，所有 Compose 命令须用 `-p <原项目名>` 或 `COMPOSE_PROJECT_NAME` 覆盖基础名，以继续访问原数据卷；仅改项目名不会迁移数据。
 
@@ -390,6 +390,21 @@ ssh CANTAISYS@100.94.216.118 'cat /srv/enterprise-backend/shared/database-access
 服务器记录保存在 `/srv/enterprise-backend/records/`：初次部署为 `integration-a1eccce7-amd64-20261027-01/`，直接访问变更为 `entry-18080-tailscale-20261027-01/`，已停用的静态 Swagger 为 `swagger-20261027-01/`，原生 Swagger 和 `local` 为 `fastapi-local-20261027-01/`，WMS 目标及连通性检查为 `wms-connectivity-20261027-01/`，数据库直连与认证为 `database-tailscale-20261027-01/`。后者含变更前配置、私有校验数据和 `backup/db-20261027-175322.dump`，目录权限 700；不得整目录复制到普通报告或发布包，只能单独提取不含凭据的验证结果。原始记录保留各次操作当时的状态，不因后续更新重写历史结果。旧导出脚本和静态文件仅归档，不再挂载或运行。配套前端、WMS 业务协议与真实 WMS/ECS 联动、宿主机重启恢复尚未验收。
 
 内网网页入口补充记录在 `/srv/enterprise-backend/records/entry-lan-18080-20261027-01/`，保留原覆盖配置、容器基线和切换前后 HTTP 检查。其变更仅为 nginx 增加明确内网 IP 的映射，不开放数据库内网端口。
+
+### 粗分双机的配置增量（2026-10-29）
+
+本轮范围及验收步骤见[双机设计](superpowers/specs/2026-10-29-coarse-sorting-site-configuration-design.md)和[实施计划](superpowers/plans/2026-10-29-coarse-sorting-site-configuration.md)。上节 2026-10-27 的制品及验收记录保留为历史基线；本轮具体镜像、迁移及执行结果另存 `/srv/enterprise-backend/records/`，不覆盖旧制品或记录。
+
+| 工作线 | INPUT_ARM | CONVEYOR | 出料单层货架位 OUTPUT_RACK |
+| --- | --- | --- | --- |
+| RS01 | RS-INPUT-ARM-01 | RS-CONVEYOR-01 | CLN01 |
+| RS02 | RS-INPUT-ARM-02 | RS-CONVEYOR-02 | CLN02 |
+
+ECS origin 为 `http://10.24.209.32:8080`，只读 Status 为 `/api/v1/device/status`。沿用原六台设备及路由，下料机械臂归属对应工作线，本阶段不增加其业务命令。工作线只声明 OUTPUT_RACK 位置，不配置输送线出入口或面向。具体配置通过管理员资产接口完成，使用当前 version 并保留审计；启动代码不自动创建现场绑定。
+
+新命令附录为 `coarse_sorting.move_forward/2`。事件按设备的工作线角色分发，输送设备由同一工作线 CONVEYOR 绑定选择；Result 按原 command_code + device_code 核对，SUCCESS 继续要求 actual_qty 严格整数 1，Result.data 仅声明 actual_qty，不携带 location。业务成功仍止于等待箱格分配。
+
+本轮不升级基础设施。新制品加载和备份完成后，只对 migrate、api、worker、beat 使用 `dc up --no-deps --no-build --pull never`；先等待唯一 migrate 成功退出，再启动三个常驻应用服务。原 PostgreSQL、Redis 容器、镜像及数据卷保留。nginx 仅在应用就绪后启动或重启以重新解析 API 地址，保留现有映射、共享配置及基础设施镜像。不运行会重新选择基础设施镜像的整套 `up`。校验新应用同一镜像、迁移与业务配置后才切换 current 指针。
 
 ### 联调 Swagger 的开放与更新
 

@@ -1,5 +1,7 @@
 # 业务开发唯一用法实施计划
 
+> **后续开发约定：** 本文保留原方案与验收历史。当前调度已改为[按业务唤醒、共用待办入口](../specs/2026-10-29-business-pending-wakeups-design.md)，允许仅负责资源装配与委托的共享任务壳；业务仍持有推进规则和事务。旧任务名称及禁止通用 worker 的原文属于当时范围，不作为新业务开发用法。
+
 > Task 1–4、原分支、交付授权及首轮 catalog 归属修复均保留当时记录；首轮修复已合入 develop。
 > “校验后首次导入”增量已完成，并通过 [PR #35](https://github.com/kaizhoumasha/maintenance-admin/pull/35) 合入 develop；
 > 原两份业务合同文档及 `.gitignore` 修改已通过 [PR #36](https://github.com/kaizhoumasha/maintenance-admin/pull/36) 合入 develop。

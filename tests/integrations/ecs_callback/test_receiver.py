@@ -43,6 +43,53 @@ async def receipt_count(factory) -> int:
         return await session.scalar(select(func.count()).select_from(CallbackReceipt))
 
 
+@pytest.mark.parametrize("registered", [False, True])
+async def test_receipts_are_searchable_by_original_device_without_truncation(
+    callback_store, registered
+):
+    import hashlib
+
+    if registered:
+
+        async def accept(ctx, payload):
+            pass
+
+        ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)(accept)
+    long_code = "设备-" + "".join(hashlib.sha256(str(n).encode()).hexdigest() for n in range(128))
+    for code in ("D1", long_code):
+        response = await receive(callback_store, json.dumps({**BASE, "device_code": code}).encode())
+        assert response.status_code == 200
+    before = receipt_values(await receipts(callback_store))
+    replay = await receive(callback_store, json.dumps(BASE).encode())
+    assert replay.outcome == "duplicate"
+    assert receipt_values(await receipts(callback_store)) == before
+    async with callback_store() as session:
+        for code in ("D1", long_code):
+            matches = list(
+                await session.scalars(select(CallbackReceipt).filter_by(device_code=code))
+            )
+            assert len(matches) == 1 and matches[0].device_code == code
+
+
+@pytest.mark.parametrize("code", ["D\x00", "D\ud800"])
+async def test_nonpersistable_device_text_is_rejected_before_receipt(callback_store, code):
+    response = await receive(callback_store, json.dumps({**BASE, "device_code": code}).encode())
+    assert response.status_code == 400
+    assert response.body["error_detail"]["issues"] == [
+        {"field": "device_code", "code": "INVALID_VALUE"}
+    ]
+    assert await receipt_count(callback_store) == 0
+
+
+async def test_legacy_receipt_replay_precedes_new_device_storage_validation(callback_store):
+    body = {**BASE, "device_code": "D\x00"}
+    await legacy_ecs_receipt(callback_store, body)
+    before = receipt_values(await receipts(callback_store))
+    response = await receive(callback_store, json.dumps(body).encode())
+    assert (response.status_code, response.body, response.outcome) == (200, ACK, "duplicate")
+    assert receipt_values(await receipts(callback_store)) == before
+
+
 async def test_oversize_body_is_413_with_code_and_message(callback_store):
     resp = await receive(callback_store, b" " * (MAX_BODY_BYTES + 1))
     assert (resp.status_code, resp.outcome) == (413, "too_large")

@@ -1,6 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,6 +13,7 @@ from app.core.strict_json import json_object
 from app.integrations.callback_diagnostics import queue_diagnostics
 from app.integrations.callback_receipts import LOCK_TIMEOUT, find_receipt, insert_receipt
 from app.models import CallbackReceipt
+from app.transactions import after_commit
 
 from .registry import (
     OUTCOMES,
@@ -139,7 +141,7 @@ async def _handle(
 
 
 async def receive(
-    session: AsyncSession, raw: bytes, *, runtime: object | None = None
+    session: AsyncSession, raw: bytes, *, runtime: object | None = None, on_committed=None
 ) -> CallbackResponse:
     if len(raw) > MAX_BODY_BYTES:
         return CallbackResponse(413, None, "too_large")
@@ -204,7 +206,7 @@ async def receive(
     if receipt_id is not None:
         if reason:
             return reply
-        return await _handle(
+        response = await _handle(
             session,
             handler,
             receipt_id,
@@ -214,6 +216,9 @@ async def receive(
             parsed,
             runtime=runtime,
         )
+        if response.outcome == "received" and on_committed is not None:
+            after_commit(session, partial(on_committed, handler.registration_source))
+        return response
     existing = await find_receipt(session, operation, operation_id)
     if existing is None:
         raise RuntimeError("receipt identity conflict without a visible receipt")

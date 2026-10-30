@@ -17,8 +17,8 @@ class ValidateBind(RequestPayload):
                 {
                     "workline_code": "COARSE-A",
                     "barcode": "TEST-REEL-001",
-                    "reel_diameter": 15,
-                    "reel_thickness": 20,
+                    "reel_diameter": 7,
+                    "reel_thickness": 15.3,
                 }
             ]
         }
@@ -26,5 +26,5 @@ class ValidateBind(RequestPayload):
 
     workline_code: NonemptyText
     barcode: str
-    reel_diameter: int | FiniteFloat
-    reel_thickness: int | FiniteFloat
+    reel_diameter: int | FiniteFloat = Field(description="料盘直径，单位为英寸")
+    reel_thickness: int | FiniteFloat = Field(description="料盘厚度，单位为毫米")

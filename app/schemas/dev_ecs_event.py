@@ -15,6 +15,7 @@ class DevEcsEventDelivery(BaseModel):
 
 
 class DevEcsEventReceipt(BaseModel):
+    device_code: str | None
     status_code: int
     response: dict
     diagnostic: list[dict] | None

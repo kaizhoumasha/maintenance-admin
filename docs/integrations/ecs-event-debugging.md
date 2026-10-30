@@ -17,7 +17,7 @@
 ## 操作步骤
 
 1. 对选定的验证数据库执行已有迁移流程至 head，正常启动主应用 `app.main:app`。
-2. 使用管理员入口配置粗分扫码工作线：business_code=coarse_sorting，将 INPUT_ARM、CONVEYOR 绑定到各自实际设备；设备角色和版本由已有资产配置确定。代码不会自动补建或改写绑定。
+2. 使用管理员入口配置粗分扫码工作线：business_code=coarse_sorting，将 INPUT_ARM、CONVEYOR 绑定到各自实际设备，并配置唯一位置槽 OUTPUT_RACK（出料单层货架位）。例如 RS01→CLN01、RS02→CLN02；不配置输送线入口、出口或面向。设备角色和版本由已有资产配置确定，代码不会自动补建或改写绑定。
 3. 正常登录，在 `/docs` 的 **Authorize** 填入 access_token，不加 Bearer 前缀。
 4. 展开 **dev-ecs-event → POST /api/v1/dev/ecs/events → Try it out**，选择 **INPUT_ARM / SCAN_COMPLETED**。
 5. 将 device_code 改为已配置的设备码，修改条码和 timestamp 后 Execute。新事件用新 timestamp，验证重报则保留整份请求。
@@ -26,16 +26,23 @@
 
 ```json
 {
-  "device_code": "INPUT_ARM-01",
+  "device_code": "RS-INPUT-ARM-01",
   "event_type": "SCAN_COMPLETED",
-  "timestamp": 1793206799000,
+  "timestamp": 1793313931285,
   "data": {
     "barcode": "TEST-REEL-001",
-    "reel_diameter": 15,
-    "reel_thickness": 20
+    "location": "RS-INPUT-ARM-01",
+    "scan_time": 1793313931285,
+    "size_inch": 7,
+    "thickness_mm": 15.3,
+    "result": "OK"
   }
 }
 ```
+
+测量字段按实际设备报文为 `size_inch`（英寸）、`thickness_mm`（毫米），均为严格有限 JSON number；WMS 对应字段为 `reel_diameter`、`reel_thickness`，分别原值传递 `7`、`15.3`，不做单位换算。`location`、`scan_time`、`result` 为附加元数据，业务忽略，事件时间使用外层 `timestamp`。原完整 data 仍参与摘要计算；业务投影保留既有归一事实字段，便于持久待办继续推进。
+
+以下样例对应本次合同调整后的代码；部署完成前服务器仍使用原合同，部署后以对应制品及迁移记录为准，不能仅凭本机样例验证判断服务器已支持。设计及内部验收见[实际扫码测量字段](../superpowers/plans/2026-10-29-coarse-sorting-scan-measurements.md)。
 
 ## 结果与摘要查询
 
@@ -52,13 +59,30 @@ POST 完成一次接收尝试后 HTTP 为 200；原接收器状态在 status_cod
 
 将 digest 复制到 GET 查询：
 
-- receipt 是配置数据库内已持久化的原响应及诊断。
+- receipt 是配置数据库内已持久化的原响应及诊断；`receipt.device_code` 为该 ECS 信封的原设备码，历史空值保持 `null`，不通过当前绑定猜测回填。
 - 粗分 business 投影是该数据库内的正式扫码行，核对原始条码、工作线、绑定版本、原验证/命令引用和 wait_reason。初始为 pending=true / AWAITING_VALIDATION_STAGE。
 - 同一事务读取收据和业务投影；PostgreSQL 使用 REPEATABLE READ、READ ONLY。两者均无记录返回 404，非法摘要返回 400；数据库故障不会伪装成未找到。
 - 原样重投保留原业务 ID；新事件身份或不同工作线分别受理。重启使用同一数据库后仍可查到原记录；公共收据清理不删除扫码去重和待办。
 - 未注册事件的 ACK 不会自动补业务，查询不重放事件或推进状态。
 
 当前粗分已实现扫码、验证和首个 MOVE_FORWARD / Result 消费；分配、入箱和 WMS 业务 NG 搬运仍待后续阶段。正式业务登记、MOCK/内部验证与真实对端、设备动作及现场验收是不同事实。
+
+### 按设备检索持久收据
+
+应用本轮 `ea8b20261029` 迁移后，`callback_receipt.device_code` 保存新 ECS Event 和 ECS Result 收据对应的原设备码，无设备信封的 WMS 收据及历史收据为 NULL。该字段不关联设备表外键，设备删除、重分配或事件重报不改写原值，也不改变回调摘要和幂等身份。
+
+可在已有数据库检索工具执行等值查询，例如：
+
+```sql
+SELECT id, operation, operation_id, device_code, status_code, created_at
+FROM enterprise_backend.callback_receipt
+WHERE device_code = 'RS-INPUT-ARM-01'
+ORDER BY created_at DESC, id DESC;
+```
+
+PostgreSQL 的 `callback_receipt_device_idx` 哈希索引用于完整设备码等值匹配，SQLite 使用普通索引；不截断长码，不增加前缀或范围检索接口。历史 NULL 行不会被上述设备条件命中，仍按原摘要查询。迁移升级保留原行，有非空设备字段时拒绝删除该列的降级；新列及当前应用代码须按部署流程一并更新，实际生效状态以部署记录为准。
+
+字段来源、迁移保护和内部验收记录见[设备检索设计](../superpowers/specs/2026-10-29-callback-receipt-device-code-design.md)与[实施计划](../superpowers/plans/2026-10-29-callback-receipt-device-code.md)。
 
 ## 单独调试命令样例
 
@@ -82,7 +106,9 @@ POST 完成一次接收尝试后 HTTP 为 200；原接收器状态在 status_cod
 
 ## 验证与首个输送动作
 
-配置已有 RELIABLE_TARGETS 中唯一的 wms-decisions 目标，以及 CONVEYOR 设备的 ECS 路由。隔离验证须使用可丢弃数据库和明确的回环 MOCK 地址。正常运行主应用（唯一 Sender）、Celery worker 和唯一 Beat；具体任务 `coarse_sorting.advance_pending` 每 5 秒按 ID 分页处理待办，每页 100 条，阻塞的前页不会饿死后续扫码。任务自己的会话工厂逐条开启新的 PostgreSQL REPEATABLE READ 事务，按工作线、设备 ID、扫码动作加锁；40001 最多尝试 3 次，失败回滚并保留原待办。
+配置已有 RELIABLE_TARGETS 中唯一的 wms-decisions 目标，以及 CONVEYOR 设备的 ECS 路由。隔离验证须使用可丢弃数据库和明确的回环 MOCK 地址。正常运行主应用（唯一 Sender）、Celery worker 和唯一 Beat。扫码受理、原 WMS 决策保存、新 ECS Result 证据分别在最外层事务提交后自动唤醒 coarse_sorting，投递 `business.advance_pending("coarse_sorting")`，调用其声明的 `scan_pending()`；正常阶段不等待下一次扫描。ECS 命令 ACK 不触发结果消费。
+
+同一个 `business.advance_pending("coarse_sorting")` 任务由 Beat 每 5 秒触发，按 ID 分页扫描兜底，每页 100 条，阻塞的前页不会饿死后续扫码。通知或任务丢失、发布失败及进程重启时由持久待办恢复；发布失败不改变已提交的 ACK 或结果。即时和兜底任务共用原 `scan_pending` → `advance`，通知只含业务码；任务自己的会话工厂逐条开启新的 PostgreSQL REPEATABLE READ 事务，按工作线、设备 ID、扫码动作加锁，40001 最多尝试 3 次，失败回滚并保留原待办。部署该版本前的验收和运行状态仍以对应制品记录为准，本轮开发验证不表示新唤醒代码已部署。
 
 扫码进入原验证，发送到 WMS `POST /api/v1/wes/decisions`，例如：
 
@@ -90,10 +116,10 @@ POST 完成一次接收尝试后 HTTP 为 200；原接收器状态在 status_cod
 {
   "operation_id": "019c0000-0000-7000-8000-000000000001",
   "operation": "inbound.coarse_sorting.validate_bind@v1",
-  "timestamp": 1793206800000,
+  "timestamp": 1793313932000,
   "data": {
     "workline_code": "COARSE-A", "barcode": "TEST-REEL-001",
-    "reel_diameter": 15, "reel_thickness": 20
+    "reel_diameter": 7, "reel_thickness": 15.3
   }
 }
 ```
@@ -105,7 +131,7 @@ WMS 请求包络 timestamp 为本次请求登记时间，随原请求冻结；�
 ```json
 {
   "operation_id": "019c0000-0000-7000-8000-000000000001",
-  "code": "DECIDED", "timestamp": 1793206800100,
+  "code": "DECIDED", "timestamp": 1793313932100,
   "data": {"result": "OK", "binding_id": "BIND-001"}
 }
 ```
@@ -119,7 +145,7 @@ WMS 请求包络 timestamp 为本次请求登记时间，随原请求冻结；�
   "device_code": "CONVEYOR-01",
   "command_code": "019c0000-0000-7000-8000-000000000002",
   "task_type": "MOVE_FORWARD", "priority": 1, "timeout": 30000,
-  "timestamp": 1793206800200, "params": {"barcode": "TEST-REEL-001"}
+  "timestamp": 1793313932200, "params": {"barcode": "TEST-REEL-001"}
 }
 ```
 
@@ -129,12 +155,14 @@ ECS HTTP 200 `{"code":200,"message":"ACK"}` 只确认接收。原设备通过公
 {
   "device_code": "CONVEYOR-01",
   "command_code": "019c0000-0000-7000-8000-000000000002",
-  "result": "SUCCESS", "finish_time": 1793206800500,
-  "data": {"actual_qty": 1, "location": "STATION_PIPELINE1_OUTPUT1"},
+  "result": "SUCCESS", "finish_time": 1793313932500,
+  "data": {"actual_qty": 1},
   "error_detail": null
 }
 ```
 
-接收器 HTTP 200 ACK 后，任务消费原已应用结果，保存 move_result 和 binding_id，进入 AWAITING_ALLOCATION_STAGE（pending=true 表示后续业务义务仍在）。本轮不请求箱格、不执行 PUT_TO_BIN 或 MOVE_TO_NG。FAILED 可使用空 data 和严格 error_detail；SUCCESS 缺少数量/位置同样只保存原证据，停在 MOVE_RECONCILIATION_REQUIRED，不能当作完成或另发命令。
+接收器按原 command_code + device_code 关联结果；任务消费原已应用 SUCCESS、严格整数 actual_qty=1 且无待核对项的结果，保存 move_result 和 binding_id，进入 AWAITING_ALLOCATION_STAGE（pending=true 表示后续业务义务仍在）。MOVE_FORWARD 的 Result.data 仅包含 actual_qty；执行位置由 ECS 按设备和动作管理。新正式调用使用内部附录 coarse_sorting.move_forward/2，通用调试合同仍为 v3。
 
-以上附录位置、超时和 MOCK 响应是内部开发基线；供应商合同确认、部署与现场物理验收分别记录。
+本轮不请求箱格、不执行 PUT_TO_BIN 或 MOVE_TO_NG。FAILED 可使用空 data 和严格 error_detail；SUCCESS 缺少数量仍只保存原证据，停在 MOVE_RECONCILIATION_REQUIRED，不能当作完成或另发命令。错误数量、错误字段类型或错误原命令/设备身份在原 Result 接收边界拒绝。
+
+以上超时和 MOCK 响应是内部开发基线。供应商合同确认、部署与现场物理验收分别记录。

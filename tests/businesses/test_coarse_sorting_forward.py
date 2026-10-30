@@ -5,6 +5,69 @@ import json
 import pytest
 
 
+async def test_actual_measurements_reach_wms_unchanged_after_service_rebuild(coarse_forward):
+    flow = coarse_forward
+    barcode = "P032-0561-000HF,Q2000,MCL21X106KOQNNNE,D2610,LPM37P9L,SSUPRE0012603000AUJ"
+    body = flow.event(
+        timestamp=1793313931285,
+        changes={
+            "location": flow.codes[0],
+            "barcode": barcode,
+            "scan_time": 1793313931285,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
+            "result": "OK",
+        },
+    )
+    response = await flow.post(body)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"code": 200, "message": "ACK"}
+    row = (await flow.rows())[0]
+    assert row["payload"] == {
+        "barcode": barcode,
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
+    assert row["timestamp"] == 1793313931285
+    assert (await flow.post(body)).status_code == 200
+    assert await flow.rows() == [row]
+    flow.rebuild()
+    assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
+    assert await flow.dispatch() == 1
+    request = json.loads(flow.peer.requests[0])
+    assert request["data"] == {
+        "workline_code": row["workline_code"],
+        "barcode": barcode,
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
+
+
+@pytest.mark.parametrize("device", [0, 1])
+async def test_original_role_command_completes_with_only_quantity(coarse_forward, device):
+    flow = coarse_forward
+    data = {"actual_qty": 1}
+    row = await flow.prepare_command(device=device)
+    assert row["conveyor_device_code"] == flow.conveyor_codes[device]
+    await flow.dispatch()
+    response = await flow.result(row, data=data)
+    assert response.status_code == 200, response.text
+    assert await flow.service.advance(row["id"]) == "AWAITING_ALLOCATION_STAGE"
+    saved = (await flow.rows())[0]
+    assert saved["move_result"]["result"]["data"] == data
+    assert saved["command_code"] == row["command_code"]
+
+
+async def test_other_lines_device_cannot_complete_original_role_command(coarse_forward):
+    flow = coarse_forward
+    row = await flow.prepare_command()
+    await flow.dispatch()
+    response = await flow.result(row, device_code=flow.conveyor_codes[1])
+    assert response.status_code == 404, response.text
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+    assert (await flow.rows())[0]["move_result"] is None
+
+
 async def test_two_lines_complete_original_move_and_keep_raw_identity(coarse_forward):
     flow = coarse_forward
     for device in (0, 1):
@@ -46,12 +109,12 @@ async def test_two_lines_complete_original_move_and_keep_raw_identity(coarse_for
         assert command["params"] == {"barcode": flow.event()["data"]["barcode"]}
 
 
-async def test_concrete_worker_assembles_formal_outbox_without_sender(coarse_forward, monkeypatch):
+async def test_shared_task_assembles_formal_outbox_without_sender(coarse_forward, monkeypatch):
     import asyncio
 
     from app.core import get_settings
     from app.reliable.sender import Sender
-    from app.tasks import coarse_sorting_tasks as tasks
+    from app.tasks import business_tasks as tasks
 
     flow = coarse_forward
     settings = get_settings().model_copy(
@@ -74,17 +137,17 @@ async def test_concrete_worker_assembles_formal_outbox_without_sender(coarse_for
 
     monkeypatch.setattr(Sender, "__init__", forbidden)
     assert (await flow.post(flow.event())).status_code == 200
-    assert await tasks.advance_pending(flow.factory) == 1
+    assert await tasks.advance_pending(flow.factory, "coarse_sorting") == 1
     assert (await flow.rows())[0]["validation_message_id"] is not None
     assert await flow.dispatch() == 1
-    assert await asyncio.to_thread(tasks.advance_coarse_sorting.run) == 1
+    assert await asyncio.to_thread(tasks.advance_business_pending.run, "coarse_sorting") == 1
     row = (await flow.rows())[0]
     assert row["command_code"] is not None
     assert await flow.dispatch() == 1
     assert (await flow.result(row)).status_code == 200
-    assert await asyncio.to_thread(tasks.advance_coarse_sorting.run) == 1
+    assert await asyncio.to_thread(tasks.advance_business_pending.run, "coarse_sorting") == 1
     assert (await flow.rows())[0]["wait_reason"] == "AWAITING_ALLOCATION_STAGE"
-    assert await tasks.advance_pending(flow.factory) == 0
+    assert await tasks.advance_pending(flow.factory, "coarse_sorting") == 0
 
 
 @pytest.mark.parametrize(
@@ -138,8 +201,6 @@ async def test_only_valid_original_wms_ok_creates_command(
             "error_detail": {"code": "BLOCKED", "msg": "mock failure"},
         },
         {"data": {}},
-        {"data": {"actual_qty": 1}},
-        {"data": {"location": "STATION_PIPELINE1_OUTPUT1"}},
     ],
 )
 async def test_applied_incomplete_or_failed_result_preserves_evidence_without_completion(
@@ -162,9 +223,9 @@ async def test_applied_incomplete_or_failed_result_preserves_evidence_without_co
 @pytest.mark.parametrize(
     "changes",
     [
-        {"data": {"actual_qty": True, "location": "STATION_PIPELINE1_OUTPUT1"}},
-        {"data": {"actual_qty": 2, "location": "STATION_PIPELINE1_OUTPUT1"}},
-        {"data": {"actual_qty": 1, "location": "OTHER"}},
+        {"data": {"actual_qty": True}},
+        {"data": {"actual_qty": 2}},
+        {"data": {"actual_qty": 1, "unexpected": "not part of the result contract"}},
         {"device_code": "WRONG_DEVICE"},
         {"command_code": "MISSING_COMMAND"},
     ],

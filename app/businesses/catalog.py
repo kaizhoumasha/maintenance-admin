@@ -34,6 +34,11 @@ def definitions() -> tuple[BusinessDefinition, ...]:
         if definition.code in codes:
             raise ValueError(f"duplicate business code: {definition.code}")
         codes.add(definition.code)
+        progression = getattr(entry, "PROGRESSION", None)
+        if progression is not None and (
+            not isinstance(progression, str) or not progression.isidentifier()
+        ):
+            raise ValueError(f"{entry.__name__}: PROGRESSION must name an async service method")
         for initial in definition.initial_entries:
             if initial.kind == "wms_callback" and not is_operation_name(initial.name):
                 raise ValueError(f"{definition.code}: invalid WMS operation {initial.name!r}")
@@ -88,6 +93,27 @@ def validated_entries() -> tuple[ModuleType, ...]:
     if _validated_entries is None or current != _validated_entries:
         raise RuntimeError("Business catalog must be validated before runtime assembly")
     return current
+
+
+def progressions() -> dict[str, str]:
+    """Declared pending entries, shared by API routing and Beat assembly."""
+    return {
+        entry.DEFINITION.code: entry.PROGRESSION
+        for entry in validated_entries()
+        if getattr(entry, "PROGRESSION", None) is not None
+    }
+
+
+def progression_owner(source: "RegistrationSource") -> str | None:
+    if source.local_only or not source.module.startswith("app.businesses."):
+        return None
+    validate_registration_owners((source,))
+    for entry in validated_entries():
+        if getattr(entry, "PROGRESSION", None) is not None and source.module.startswith(
+            entry.__name__.rsplit(".", 1)[0] + "."
+        ):
+            return entry.DEFINITION.code
+    return None
 
 
 def validate_registration_owners(

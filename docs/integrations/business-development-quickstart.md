@@ -3,7 +3,7 @@
 先确认业务怎样受理、等待、推进和恢复，再接入唯一的模型 API。
 示例名称、字段和测试合同不是已确认的 WMS/ECS 合同，也不会自动注册。
 正式 `catalog.entries()` 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段；新增业务或阶段须具备获准的合同、资源和实现。
-当前不兼容变化、模型约束和验证证据见[单一 API 验收记录](business-development-single-api-acceptance.md)。
+模型 API 的历史变更与验证快照见[单一 API 验收记录](business-development-single-api-acceptance.md)；当前异步调度用法见[按业务唤醒设计](../superpowers/specs/2026-10-29-business-pending-wakeups-design.md)。
 旧阶段设计、计划与验收记录已移出仓库归档，当前调用形式与验证证据统一使用上述文档。
 
 ## 最短接入路线
@@ -14,14 +14,14 @@
 | 2. 写纯声明 | `app/businesses/<business>/definition.py` 定义角色、位置槽和初始入口 | 只依赖标准库和声明类型；不可变 tuple；不访问运行设施 | [definition](business-packages.md#1-纯声明-definitionpy) |
 | 3. 写合同和薄入口 | 在业务包放 `contracts.py` 及 `ecs_event` / `callback` / `request` 文件或入口包；处理器转交具体服务 | 类型、扩展字段、文件名和来源正确；未确认名称不登记 | [注册指南](registration.md) |
 | 4. 声明命令 | 用 `@ecs_command(..., device_roles=(ROLE, ...))` 装饰参数模型 | 严格参数/结果/错误类型及超时；一个模型可供多个角色共享 | [命令声明](ecs-command.md#模型声明与显式编译) |
-| 5. 固定 composition | 列出 `DEFINITION`、`ENTRY_MODULES`、`MODEL_MODULES`、`COMMANDS=(Model, ...)`；工厂注入能力和 session factory | catalog 内部编译，只激活本业务声明角色的交集；API/worker 共用清单 | [composition](business-packages.md#3-可信装配-compositionpy) |
+| 5. 固定 composition | 列出 `DEFINITION`、`ENTRY_MODULES`、`MODEL_MODULES`、`COMMANDS=(Model, ...)`，异步业务加 `PROGRESSION="scan_pending"`；工厂注入能力和 session factory | catalog 内部编译，只激活本业务声明角色的交集；API/worker 共用清单 | [composition](business-packages.md#3-可信装配-compositionpy) |
 | 6. 实现持久业务 | 具体 `service.py/models.py` 保存执行、原身份、持久待办、等待原因和消费依据 | 原事务受理；新 session/RR 推进；进度、消费与下一 Outbox 意图原子 | [事务配方](business-transaction-recipes.md) |
 | 7. 验证后接入 | 隔离验证两线/两业务、并发和恢复；完整真实业务获准后才加入 catalog | 测试使用独立 MetaData 和 finally 清理；生产迁移保持单 head | [显式 catalog](business-packages.md#6-显式-catalog) |
 
 业务只有 `app/businesses/<business>/` 这一目录来源。将入口文件或包显式加入所属
 `composition.ENTRY_MODULES`，并由 `catalog.entries()` 列出该 composition；仅新建文件不生效。
 平台固定 Transport/本地演示入口由共享 manifest 加载，不是新增业务的目录选项。
-`accept`、`advance`、`scan_pending` 是具体业务自己的方法，平台没有通用业务 worker、execute 或第二 Sender。
+`accept`、`advance`、`scan_pending` 是具体业务自己的方法；平台提供共享任务装配与调度壳，按 composition.PROGRESSION 调用待办入口，不接管业务判断、事务或提供第二 Sender。
 
 ### WMS operation 流程卡
 
@@ -35,7 +35,7 @@
 
 1. 在业务包 `ecs_event` 文件/包使用 `@ecs_event(name, device_role=ROLE, data=Payload)`，列入 `ENTRY_MODULES`。
 2. 应用注入 BindingResolver；处理器依据 `ctx.binding` 核对线、角色、当前许可和本次经过，在原事务保存待办。
-3. 收据提交后 ACK；提交后通知只携带原 execution_id，丢通知靠持久待办恢复。未知事件不自动补注册或回放。
+3. 处理器在原事务保存事实和持久待办。需要异步推进的业务在原 composition 声明 `PROGRESSION = "scan_pending"`，实现该异步服务方法；平台依据正式声明归属，在提交后自动唤醒所属业务。即时和 5 秒 Beat 共用 `business.advance_pending(business_code)` 与原业务待办入口；回滚不投递，发布失败不改变 ACK。新增业务无需编写 Celery 任务、结果 ID 反查或平台发布路由，见[业务包默认推进约定](business-packages.md#4-子包-servicepy--modelspy)。未知事件不自动补注册或回放。
 
 ### ECS Command / Result 流程卡
 

@@ -468,8 +468,8 @@ async def coarse_scan(callback_store, monkeypatch):
     def event(*, device=0, timestamp=1793206799000, changes=None, omit=()):
         data = {
             "barcode": " P032-0561,原始条码 ",
-            "reel_diameter": 15,
-            "reel_thickness": 20,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
         }
         data.update(changes or {})
         for key in omit:
@@ -565,7 +565,7 @@ async def coarse_scan(callback_store, monkeypatch):
                 conveyor_codes.append(conveyor_code)
                 route_ids.append(conveyor_route.id)
                 line.business_code = "coarse_sorting"
-                line.position_bindings = {}
+                line.position_bindings = {"OUTPUT_RACK": "RACK_" + code}
                 codes.append(code)
                 line_ids.append(line.id)
                 route_ids.append(route.id)
@@ -681,7 +681,7 @@ async def coarse_forward(coarse_scan, monkeypatch):
                 device_code=row["conveyor_device_code"],
                 result="SUCCESS",
                 finish_time=1,
-                data={"actual_qty": 1, "location": "STATION_PIPELINE1_OUTPUT1"},
+                data={"actual_qty": 1},
                 error_detail=None,
             )
             body.update(changes)
@@ -690,8 +690,8 @@ async def coarse_forward(coarse_scan, monkeypatch):
             ) as client:
                 return await client.post("/api/v1/callback/result", json=body)
 
-        async def prepare_command():
-            assert (await flow.post(flow.event())).status_code == 200
+        async def prepare_command(*, device=0):
+            assert (await flow.post(flow.event(device=device))).status_code == 200
             row = (await flow.rows())[0]
             assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
             assert await dispatch() == 1

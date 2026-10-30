@@ -64,7 +64,7 @@ ECS 参数/结果/错误模型必须满足[命令模型约束](ecs-command.md#�
 ## 3. 可信装配 composition.py
 
 固定入口及模型模块路径，引用同一份 `DEFINITION` 和命令模型清单。工厂只构造无作业状态的服务，
-不保存活动 session、不访问网络。平台注入 `Capabilities.ecs / wms / transport / session_factory`；不新增通用 execute。
+不保存活动 session、不访问网络。平台注入 `Capabilities.ecs / wms / transport / session_factory` ；平台依据声明归属处理提交后通知；不新增通用 execute。
 API 与 worker 分别传入自己的 session factory；composition 不能导入全局数据库工厂跨事件循环复用：
 
 ```python
@@ -94,7 +94,7 @@ def build_service(capabilities):
 ## 4. 子包 service.py / models.py
 
 具体业务自己的表保存执行/动作、原设备/工作线/消息/请求/任务身份、持久待办、等待原因和消费证据。
-普通模型继承项目 Base，沿唯一 Alembic 链增加迁移；这里不提供通用流程表、补偿器或后台推进 worker。
+普通模型继承项目 Base，沿唯一 Alembic 链增加迁移；平台不提供通用流程表或补偿器；共享任务壳仅调用业务声明的待办入口。
 
 受理方法只使用 `ctx.session`：解析器已按工作线→设备加锁，再锁业务行。
 用 `business_configuration_issue(..., definition_lookup=...)` 校验线与声明；继续核对当前业务许可和合同身份。
@@ -102,16 +102,34 @@ def build_service(capabilities):
 原收据、受理状态和待推进依据在受理事务内一起提交。只依赖当前输入、无需前序结果的初始意图，
 才可按该业务合同在受理事务登记。处理器不 commit/rollback、不升级隔离级别，也不另开推进写事务。
 
-提交后的通知只携带原 execution_id，可丢失或重复；持久待办扫描复用同一个具体业务推进入口。
-该入口创建新的 session，在任意业务定位/锁定 SQL 之前配置本事务 REPEATABLE READ：
+默认在新业务事实／原结果提交成功后唤醒所属业务，统一调用该业务的待办入口；Beat 每 5 秒调用同一任务兜底。
+在原 composition 加入 `PROGRESSION = "scan_pending"`，对应 build_service 返回服务的异步方法。
+无需异步推进的业务可省略该声明；声明存在时，catalog 校验名称，runtime 校验并绑定可无参调用的异步方法（可含默认 limit 等可选参数）。
+业务只在原受理事务保存事实和 pending，不自行提交、请求通知或编写 Celery 装配。
+
+平台根据已经校验的 catalog 和 RegistrationSource 归属路由正式事件及 WMS 结果，ECS Result 使用原命令 owner_domain；正式业务命令 owner.domain 使用 DEFINITION.code 保持归属一致。
+local/平台演示及未声明推进入口的业务不触发正式调度。通知只含 business_code；统一任务
+`business.advance_pending(business_code)` 创建本次任务的会话工厂及生命周期资源，然后调用声明入口。
+即时与 Beat 都调用该入口，粗分为 `scan_pending()` → `advance(scan_id)`。
+调度壳不查询业务表、不消费结果、不接管业务事务；共享调度壳替代原来禁止通用 worker 的宽泛约束。
+
+共享 after_commit 仅在最外层提交后发布；保存点释放等待外层，回滚与关闭丢弃通知。
+发布异常不改变已提交事实或 ACK。即时发布使用 retry=False、ignore_result=True、独立连接/producer、
+0 次连接重试及 1 秒连接/Redis socket 预算。通知丢失、重复或进程重建由原持久 pending 和幂等推进处理。
+业务级通知会多检查其他等待记录；按代表性待办量和通知密度记录成本，不能把 MOCK 耗时当作现场容量保证。
+
+共享任务声明和自动 Beat 调度均忽略结果，不订阅结果后端；Beat 使用 Celery 调度器自己的发布连接。
+
+待办发现用短会话仅定位业务 ID，不消费结果或持有整轮推进事务；粗分固定每轮扫描的 ID 上界，让新增待办由下一次唤醒处理。每条记录的独立 `advance` 创建新 session，在本次推进的任何定位/锁定 SQL 之前配置 REPEATABLE READ：
 
 ```python
-async with session_factory() as session, session.begin():
-    await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-    await service.advance_pending(session, execution_id)
+async def advance(self, execution_id):
+    async with self.capabilities.session_factory() as session, session.begin():
+        await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        return await self._advance(session, execution_id)
 ```
 
-`advance_pending` 是该业务的方法，不是平台接口。先无锁定位原执行的配置，再按工作线（ID顺序）→
+`advance` 是业务单条推进入口，`_advance` 示意其事务内实现，不是平台接口。扫描调用 `advance` 时不额外包裹整轮事务。先无锁定位原执行的配置，再按工作线（ID顺序）→
 设备（ID顺序）→业务动作（固定顺序）取锁、重读和校验当前许可。不得在这些锁内改写/settle/hold
 既有命令或消息，避免和先锁命令的发送门禁构成反向等待。结果接收事务先提交，之后再独立推进。
 网络请求始终在事务外，下一意图复用原 Outbox 和唯一 Sender。

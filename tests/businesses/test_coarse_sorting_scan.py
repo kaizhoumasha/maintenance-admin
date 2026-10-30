@@ -10,7 +10,7 @@ from app.models import CallbackReceipt, WorkLine
     "changes,omit",
     [
         ({}, ()),
-        ({"reel_diameter": 15.5, "reel_thickness": 20.25}, ()),
+        ({"size_inch": 7.5, "thickness_mm": 15.35}, ()),
     ],
 )
 async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, changes, omit):
@@ -23,7 +23,11 @@ async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, chang
     rows = await scan.rows()
     assert len(rows) == 1
     row = rows[0]
-    assert row["payload"] == body["data"]
+    assert row["payload"] == {
+        "barcode": body["data"]["barcode"],
+        "reel_diameter": body["data"]["size_inch"],
+        "reel_thickness": body["data"]["thickness_mm"],
+    }
     assert row["timestamp"] == body["timestamp"]
     assert row["device_code"] == scan.codes[0]
     assert row["device_role"] == "INPUT_ARM"
@@ -43,11 +47,11 @@ async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, chang
     "changes,omit",
     [
         ({}, ("barcode",)),
-        ({}, ("reel_diameter",)),
-        ({}, ("reel_thickness",)),
+        ({}, ("size_inch",)),
+        ({}, ("thickness_mm",)),
         ({"barcode": 123}, ()),
-        ({"reel_diameter": True}, ()),
-        ({"reel_thickness": "20"}, ()),
+        ({"size_inch": True}, ()),
+        ({"thickness_mm": "15.3"}, ()),
     ],
 )
 async def test_invalid_scan_is_rejected_without_business_acceptance(coarse_scan, changes, omit):
@@ -104,10 +108,6 @@ async def test_storage_failure_rolls_back_receipt_scan_and_pending(coarse_scan):
 
 @pytest.mark.parametrize("issue", ["wrong_business", "missing_position"])
 async def test_business_configuration_rejection_is_diagnostic_only(coarse_scan, issue):
-    from dataclasses import replace
-
-    from app.businesses.definitions import PositionSlot
-
     scan = coarse_scan
     if issue == "wrong_business":
         async with scan.factory.begin() as session:
@@ -115,10 +115,9 @@ async def test_business_configuration_rejection_is_diagnostic_only(coarse_scan, 
             line.business_code = None
         reason = "WORKLINE_BUSINESS_MISMATCH"
     else:
-        scan.runtime.definitions["coarse_sorting"] = replace(
-            scan.definition,
-            position_slots=(PositionSlot(slot_key="OUTLET", display_name="出料架位"),),
-        )
+        async with scan.factory.begin() as session:
+            line = await session.get(WorkLine, scan.line_ids[0])
+            line.position_bindings = {}
         reason = "WORKLINE_CONFIGURATION_INCOMPLETE"
     response = await scan.post(scan.event())
     assert response.status_code == 200
@@ -136,11 +135,19 @@ async def test_extra_data_is_ignored_by_payload_but_retained_in_event_identity(c
     assert (await scan.post(extra)).status_code == 200
     rows = await scan.rows()
     assert len(rows) == 2
-    assert rows[0]["payload"] == rows[1]["payload"] == body["data"]
+    assert (
+        rows[0]["payload"]
+        == rows[1]["payload"]
+        == {
+            "barcode": body["data"]["barcode"],
+            "reel_diameter": 7,
+            "reel_thickness": 15.3,
+        }
+    )
     assert rows[0]["event_digest"] != rows[1]["event_digest"]
 
 
-@pytest.mark.parametrize("field", ["reel_diameter", "reel_thickness"])
+@pytest.mark.parametrize("field", ["size_inch", "thickness_mm"])
 async def test_nonfinite_scan_measurement_is_rejected(coarse_scan, field):
     import json
 

@@ -70,7 +70,10 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
         else:
             async with factory() as session, session.begin():
                 result = await receive(
-                    session, body, runtime=getattr(request.app.state, "business_runtime", None)
+                    session,
+                    body,
+                    runtime=getattr(request.app.state, "business_runtime", None),
+                    on_committed=getattr(request.app.state, "business_event_committed", None),
                 )
     except Exception as error:
         log_exception(

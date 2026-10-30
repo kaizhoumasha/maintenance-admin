@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from functools import partial
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -12,6 +13,7 @@ from app.integrations.ecs_callback.receiver import EcsResponse
 from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, ReliableMessage
 from app.reliable import Outbox
 from app.reliable.lifecycle import transaction_limits
+from app.transactions import after_commit
 
 from .contracts import ResultEnvelope
 from .protocol import OPERATION
@@ -48,7 +50,9 @@ def _block_for_reconciliation(command: EcsCommand, reason: str) -> None:
     command.hold_reason = reason
 
 
-async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsResponse:
+async def receive_ecs_result(
+    session: AsyncSession, raw: bytes, service, *, on_result=None
+) -> EcsResponse:
     if len(raw) > 262144:
         return reply(413, "PAYLOAD_TOO_LARGE")
     parsed = json_object(raw)
@@ -176,6 +180,7 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
         session,
         operation="ecs.result",
         operation_id=digest,
+        device_code=envelope.device_code,
         raw_digest=raw_digest,
         effective_digest=None,
         compare_mode="RAW",
@@ -184,4 +189,6 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
         resp_timestamp=unix_ms(now),
         created_at=now,
     )
+    if on_result is not None:
+        after_commit(session, partial(on_result, command.owner_domain))
     return response

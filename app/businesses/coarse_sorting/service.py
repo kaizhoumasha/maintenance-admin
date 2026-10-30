@@ -71,7 +71,11 @@ class CoarseSortingService:
                 work_line_version=binding.work_line_version,
                 binding_revision=binding.revision,
                 timestamp=ctx.timestamp,
-                payload=payload.model_dump(mode="json", exclude_unset=True),
+                payload={
+                    "barcode": payload.barcode,
+                    "reel_diameter": payload.size_inch,
+                    "reel_thickness": payload.thickness_mm,
+                },
                 received_at=datetime.now(UTC),
                 pending=True,
                 wait_reason="AWAITING_VALIDATION_STAGE",
@@ -183,7 +187,6 @@ class CoarseSortingService:
                     and result.get("result") == "SUCCESS"
                     and type(data.get("actual_qty")) is int
                     and data["actual_qty"] == 1
-                    and data.get("location") == "STATION_PIPELINE1_OUTPUT1"
                 )
                 return await save(
                     "AWAITING_ALLOCATION_STAGE" if complete else "MOVE_RECONCILIATION_REQUIRED",
@@ -262,21 +265,23 @@ class CoarseSortingService:
         )
 
     async def scan_pending(self, *, limit=100) -> int:
-        """Visit each current-stage pending identity once, including blocked earlier pages."""
+        """Bound this sweep to existing pending IDs; new work gets its own wakeup."""
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
+        pending = select(table.c.id).where(
+            table.c.pending.is_(True), table.c.wait_reason.not_in(NEXT_STAGES)
+        )
+        async with self.capabilities.session_factory() as session:
+            upper_id = await session.scalar(pending.order_by(table.c.id.desc()).limit(1))
+        if upper_id is None:
+            return 0
         last_id, total = "", 0
         while True:
             async with self.capabilities.session_factory() as session:
                 ids = list(
                     await session.scalars(
-                        select(table.c.id)
-                        .where(
-                            table.c.pending.is_(True),
-                            table.c.id > last_id,
-                            table.c.wait_reason.not_in(NEXT_STAGES),
-                        )
+                        pending.where(table.c.id > last_id, table.c.id <= upper_id)
                         .order_by(table.c.id)
                         .limit(limit)
                     )

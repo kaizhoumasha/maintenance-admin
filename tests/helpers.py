@@ -1292,6 +1292,7 @@ def coarse_sorting_composition(table):
     entry.ENTRY_MODULES = composition.ENTRY_MODULES
     entry.MODEL_MODULES = ()
     entry.COMMANDS = composition.COMMANDS
+    entry.PROGRESSION = composition.PROGRESSION
 
     def build_service(capabilities):
         from app.businesses.coarse_sorting.request.inbound_coarse_sorting_validate_bind_v1 import (

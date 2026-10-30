@@ -15,10 +15,13 @@ SCAN_MIGRATION = (
 def test_scan_contract_exposes_only_device_facts():
     from app.businesses.coarse_sorting.contracts import ScanCompletedData
 
-    facts = {"barcode", "reel_diameter", "reel_thickness"}
+    facts = {"barcode", "size_inch", "thickness_mm"}
     schema = ScanCompletedData.model_json_schema()
     assert set(schema["properties"]) == facts
-    assert all(set(example) == facts for example in schema["examples"])
+    for example in schema["examples"]:
+        assert ScanCompletedData.model_validate(example).model_dump() == {
+            key: example[key] for key in facts
+        }
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
@@ -96,7 +99,7 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
             conveyor_codes.append(conveyor_code)
             routes.append(conveyor_route.id)
             line.business_code = "coarse_sorting"
-            line.position_bindings = {}
+            line.position_bindings = {"OUTPUT_RACK": "RACK_" + code}
             lines.append(line.id)
             codes.append(code)
             routes.append(route.id)
@@ -106,8 +109,8 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
         "timestamp": 1793206799000,
         "data": {
             "barcode": " RAW,TEST-1 ",
-            "reel_diameter": 15,
-            "reel_thickness": 20,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
         },
     }
     try:
@@ -136,7 +139,11 @@ async def test_debug_and_public_callback_share_configured_scan_and_projection(co
     state = await e.client.get(url + "/" + digest, headers=e.headers)
     assert state.status_code == 200, state.text
     original = state.json()["business"]
-    assert original["payload"] == e.body["data"]
+    assert original["payload"] == {
+        "barcode": e.body["data"]["barcode"],
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
     assert original["pending"] is True
     assert original["work_line_id"] == e.lines[0]
     repeated = await e.client.post("/api/v1/callback/event", json=e.body)
@@ -148,6 +155,63 @@ async def test_debug_and_public_callback_share_configured_scan_and_projection(co
     other_state = (await e.client.get(url + "/" + other.json()["digest"], headers=e.headers)).json()
     assert other_state["business"]["work_line_id"] == e.lines[1]
     assert other_state["business"]["id"] != original["id"]
+
+
+async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from redis.asyncio import Redis
+    from sqlalchemy import select
+
+    import app.main as main
+    from app.businesses.coarse_sorting.models import CoarseSortingScan
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import EcsCommandAdapter
+
+    e = configured_scan
+    commands = main.app.state.business_runtime.services["coarse_sorting"].capabilities.ecs
+    published = []
+    original_lifespan = main.reliable_lifespan
+    database_url = e.factory.kw["bind"].url.render_as_string(hide_password=False)
+
+    @asynccontextmanager
+    async def isolated_sender(*args, **kwargs):
+        async with original_lifespan(*args, **kwargs, database_url=database_url) as outbox:
+            yield outbox
+
+    redis_client = Redis.from_url(os.environ["TEST_REDIS_URL"])
+
+    def redis_factory():
+        return redis_client
+
+    redis_factory.cache_clear = lambda: None
+    monkeypatch.setattr(main, "get_redis", redis_factory)
+    monkeypatch.setattr(main, "engine", e.factory.kw["bind"])
+    monkeypatch.setattr(main, "session_factory", e.factory)
+    monkeypatch.setattr(main, "reliable_lifespan", isolated_sender)
+    from app import business_wakeups
+
+    monkeypatch.setattr(business_wakeups, "enqueue_business", published.append)
+    monkeypatch.setattr(main.app.state, "business_runtime", None)
+    monkeypatch.setattr(main.app.state, "ecs_commands", commands, raising=False)
+    monkeypatch.setattr(main.app.state, "reliable_adapters", {"ecs-command": EcsCommandAdapter()})
+    monkeypatch.setattr(
+        main.app.state,
+        "reliable_lifecycles",
+        {"ecs-command": EcsLifecycle(commands)},
+        raising=False,
+    )
+    monkeypatch.setattr(main.app.state, "reliable_client_provider", DynamicClients(), raising=False)
+    async with main.lifespan(main.app):
+        response = await e.client.post("/api/v1/callback/event", json=e.body)
+        assert response.status_code == 200
+        async with e.factory() as reader:
+            scan = await reader.scalar(
+                select(CoarseSortingScan).where(CoarseSortingScan.device_code == e.codes[0])
+            )
+            assert published == ["coarse_sorting"]
+            assert scan.pending and scan.validation_message_id is None
 
 
 async def test_scan_projection_survives_receipt_retention_in_configured_database(configured_scan):

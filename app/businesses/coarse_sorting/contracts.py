@@ -12,17 +12,20 @@ class ScanCompletedData(CallbackPayload):
         json_schema_extra={
             "examples": [
                 {
+                    "location": "RS-INPUT-ARM-01",
                     "barcode": "TEST-REEL-001",
-                    "reel_diameter": 15,
-                    "reel_thickness": 20,
+                    "scan_time": 1793313931285,
+                    "size_inch": 7,
+                    "thickness_mm": 15.3,
+                    "result": "OK",
                 }
             ]
         }
     )
 
     barcode: str
-    reel_diameter: int | FiniteFloat
-    reel_thickness: int | FiniteFloat
+    size_inch: int | FiniteFloat = Field(description="料盘直径，单位为英寸")
+    thickness_mm: int | FiniteFloat = Field(description="料盘厚度，单位为毫米")
 
 
 NonemptyText = Annotated[str, Field(min_length=1)]
