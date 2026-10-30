@@ -1,6 +1,6 @@
 # WMS / Transport 原业务归属与即时唤醒：阶段二验收
 
-日期：2026-10-30。阶段二实现及隔离验收已完成；本轮按用户追加授权复审后单独提交。未部署，阶段三未实施，bin_return/SMT 未注册。
+日期：2026-10-30。阶段二实现及隔离验收已完成；已按用户追加授权复审并提交 a34b28d。未部署，阶段三未实施，bin_return/SMT 未注册。
 
 ## 实现与兼容边界
 
@@ -37,12 +37,14 @@ WMS 消费者查询由可信装配端口注入，通用集成层不依赖业务 
 
 ## 验证记录
 
-初次实现全量：3788 passed / 39 skipped（299.81 秒）。本轮使用重新创建的可丢弃 PostgreSQL 17 / Redis 7，普通测试库与四套迁移专用库相互独立。本轮全量：**3791 passed / 36 skipped，322.09 秒，exit 0**。此前未配置的三套既有迁移专用库本轮已配置并通过；36 项跳过均为 SQLite 不适用的 PostgreSQL 锁/并发分支，对应 PostgreSQL 形态已执行。
+初次实现全量：3788 passed / 39 skipped（299.81 秒）。提交前复审使用重新创建的可丢弃 PostgreSQL 17 / Redis 7，普通测试库与四套迁移专用库相互独立。提交前复审全量：**3791 passed / 36 skipped，322.09 秒，exit 0**。此前未配置的三套既有迁移专用库本轮已配置并通过；36 项跳过均为 SQLite 不适用的 PostgreSQL 锁/并发分支，对应 PostgreSQL 形态已执行。
 
-专用库串行 upgrade head、alembic check（无结构差异）、唯一 head f0b120261030 及 downgrade base 全部通过。普通测试库实际版本同为该 head；所有 schema 中本阶段组件测试表已清理。本轮两个有任务标签的测试容器及匿名卷已删除，既有服务未动。
+专用库串行 upgrade head、alembic check（无结构差异）、唯一 head f0b120261030 及 downgrade base 全部通过。普通测试库实际版本同为该 head；所有 schema 中本阶段组件测试表已清理。提交前复审的两个有任务标签的测试容器及匿名卷已删除，既有服务未动。
 
 Ruff 检查及格式检查通过（507 个文件无需重新格式化）；源码与此次全量测试使用的集合及 hash 保持一致。
 
 日志及本轮原暂存/工作树保全快照保留在 .superpowers/sdd/2026-10-30-phase2-review/；初次实现日志保留在 .superpowers/sdd/2026-10-30-business-components-phase2/。
 
 隔离验收未覆盖真实 WMS/ECS、独立生产 worker 进程或现场物理链路；内存 broker 与真实任务体不作为这些环境的验收证明。
+
+计划验收复核（2026-10-30）：P2.1～P2.4 全部满足阶段出口，逐项证据见[阶段二计划验收索引](../superpowers/plans/2026-10-30-business-components-phase2.md#按计划验收复核与当前进度2026-10-30)。本轮核对已提交源码与上次 3791/36 全量版本一致，仅同步进度，不重复全量或新增提交。

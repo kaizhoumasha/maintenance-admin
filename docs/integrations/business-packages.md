@@ -6,6 +6,7 @@
 契约变化、支持模型及实测边界见[单一 API 验收](business-development-single-api-acceptance.md)。
 原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
 这些平台能力不表示真实业务或供应商/现场已验收。
+业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；bin_return/SMT 正式接入仍未实施。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单已登记粗分扫码、WMS 验证和首个输送动作结果消费。
 隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。分配、入箱、NG 搬运和 manual-picking 仍需后续实现。
@@ -87,9 +88,56 @@ def build_service(capabilities):
 所有模型角色必须存在于显式 catalog 的 definitions；本业务仅激活与自己角色的交集。
 其他业务未列同一模型时不会获得权限。共享角色/任务冲突、冲突附录或非法来源在资源创建前失败。
 仅有文件不会注册；该 composition 必须由 `catalog.entries()` 明确列出。
-业务唯一来源是 `app.businesses.<business>.<module>`，平台固定清单仅加载平台自己拥有的入口。
+业务自有来源是 `app.businesses.<business>.<module>`；显式 COMPONENTS 还可引用 `app.businesses._components.<key>.*`。平台固定清单仅加载平台自己拥有的入口。
 应用先加载全部正式入口，再交叉校验全部合同，之后才加载 local 入口、构造资源和业务工厂，最后受理请求。
 错误业务包使整体启动失败。API 与 worker 读取同一显式清单；非 local 不加载 dev 入口。
+
+### 3.1 业务内部复用多个代码能力
+
+在 composition 中增加可选 `COMPONENTS = (first.COMPONENT, second.COMPONENT)`；其中每项必须是
+`app.businesses.components.ComponentDefinition`，key 在本业务内唯一，不允许嵌套组件。这里只说明组合方式，
+first/second 不代表已注册业务或待创建的占位包。组件声明资源、初始入口、entry_modules/model_modules、
+commands、required_methods 和 requires_progression；自身没有业务码、独立工厂或 PROGRESSION。
+
+catalog 将同键且完整相同的资源合并，资源冲突、输入双重认领、错误模块来源或缺少必要业务推进声明使启动失败。
+共享模块及同一源模型/严格合同只加载、编译一次，真正重复注册同键仍报错。合同使用关系按每个业务显式声明的
+模块和角色交集编译；命名空间相同不授予未声明入口的权限。有效定义由 catalog.get_definition/effective_definition
+返回，工作线保存、目录展示仍只面向业务。
+
+工厂签名不变，由业务工厂为自身构造内部对象，在服务的 `components: Mapping[str, object]` 中按声明 key 暴露，
+推荐只读映射；装配校验映射精确匹配和 required_methods 可调用。各业务分别构造实例，不共享活动 session。
+业务的无参 async scan_pending 分别调用各内部能力的有界扫描；每分支固定本轮上界，等待某分支不妨碍其他分支。
+平台只登记该业务一个服务和推进入口，复用现有任务及 5 秒 Beat。
+
+共享 ECS 薄入口调用 `require_component(ctx, key)`。接收器从绑定锁内的工作线解析 business_code，
+通过应用注入的 input_target 解析器核对真实来源和唯一内部目标；未声明消费者按原协议 ACK 留诊断，不执行或广播。
+正式共享 WMS 回调须先用原关联记录确定业务，再调用 `bind_callback_business(ctx, business_code)`；同归属重复绑定幂等，
+缺失、矛盾或非消费者使回调 REJECTED/INVALID_EVIDENCE，保存点内业务写回滚。不能直接相信 payload 中的业务码。
+两类共享入口的提交后通知只携带解析后的原业务码，仍由平台 after_commit 发出；组件不显式发布通知。
+
+新 ECS 意图在原身份查重之后，使用应用注入的 authorize_new 核对实际工作线业务与本业务命令消费者关系。
+已有调用同参重入保留原身份、字节、路由、附录和期限，不重跑新动作授权；Result 继续按原命令处理。
+阶段二的 WMS 出站结果与 Transport 实际应用结果已沿同一原业务通知，具体本地归属和兼容边界见下文。
+
+### 3.2 WMS / Transport 原业务归属
+
+运行时为每个业务分别构造绑定 DEFINITION.code 的 WmsRequests 和 TransportService；同一业务的内部能力复用它们。
+各业务仍共享原 Outbox、ECS 能力和 session_factory，build_service 签名和 send/get_result、Transport 四方法的调用形式不变。
+新增正式业务使用注入的 capabilities，不从 payload、组件 key 或当前工作线重建旧请求的 owner。
+
+WMS 请求的本地 business_key 保存 `business:<业务码>`，不增加 wire 字段。平台注入合同消费者查询端口；
+绑定实例发送前核对本业务使用关系，默认全局实例不能发送未绑定业务的正式共享 operation。Outbox 新建、原命中、
+并发命中返回原 business_key，业务实例拒绝同一 operation_id 换业务或接管旧 None，不重写原消息。旧业务专属/local
+默认实例的 None 行为保留；共享历史记录缺关联时只留诊断，不广播，原 pending 继续负责恢复。
+
+TransportTask.owner_domain 是 nullable 本地字段，四方法的新建与串行/并发重放都核对它；None 不回填。
+原 business_key=transport_task_id、input_digest、冻结请求、caller/cycle 和协议保持；公开结果投影增加 owner_domain，
+此字段不代替当前业务许可或物理资源门禁。新增迁移 f0b120261030 沿唯一 head；有非空原业务归属时禁止删除该列。
+
+可靠结果端口透传原 operation/business_key；有效非快照终态（含正常完成、本地过期及过期租约维护）提交后通知原业务，
+普通重试、失效旧租约完成和回滚不通知。Transport 继续原 apply_callback 规则，只有 applied_outcome_revision 真正前进时
+才以原 owner 登记 after_commit；结果先暂存时不通知，位置事实补齐并应用该结果时通知。同步提交 ACK、单独位置事实、
+重复/冲突及无归属旧任务不触发业务通知。主应用已有 business_committed 端口经 WMS 控制器注入，无新增调度器。
 
 ## 4. 子包 service.py / models.py
 
@@ -98,6 +146,8 @@ def build_service(capabilities):
 
 受理方法只使用 `ctx.session`：解析器已按工作线→设备加锁，再锁业务行。
 用 `business_configuration_issue(..., definition_lookup=...)` 校验线与声明；继续核对当前业务许可和合同身份。
+默认检查全部必需资源；本点操作可由受信代码指定 `required_device_roles`/`required_position_slots` 的固定 tuple 子集，
+只允许有效定义内的 key，未指定的类别仍执行原完整校验。该子集不改变业务归属、绑定快照或当前设备的一致性检查。
 稳定拒绝沿原协议返回 Rejected/诊断；临时存储故障向外抛出，由接收器回滚。
 原收据、受理状态和待推进依据在受理事务内一起提交。只依赖当前输入、无需前序结果的初始意图，
 才可按该业务合同在受理事务登记。处理器不 commit/rollback、不升级隔离级别，也不另开推进写事务。
@@ -107,7 +157,7 @@ def build_service(capabilities):
 无需异步推进的业务可省略该声明；声明存在时，catalog 校验名称，runtime 校验并绑定可无参调用的异步方法（可含默认 limit 等可选参数）。
 业务只在原受理事务保存事实和 pending，不自行提交、请求通知或编写 Celery 装配。
 
-平台根据已经校验的 catalog 和 RegistrationSource 归属路由正式事件及 WMS 结果，ECS Result 使用原命令 owner_domain；正式业务命令 owner.domain 使用 DEFINITION.code 保持归属一致。
+平台按已校验的新输入目标/原业务关联路由通知；WMS 结果使用原本地 business_key，旧专属 None 才沿原 RegistrationSource；Transport 使用原任务 owner_domain，ECS Result 使用原命令 owner_domain。正式业务命令 owner.domain 使用 DEFINITION.code 保持归属一致。
 local/平台演示及未声明推进入口的业务不触发正式调度。通知只含 business_code；统一任务
 `business.advance_pending(business_code)` 创建本次任务的会话工厂及生命周期资源，然后调用声明入口。
 即时与 Beat 都调用该入口，粗分为 `scan_pending()` → `advance(scan_id)`。

@@ -2,7 +2,7 @@
 
 业务首次接入见[快速开始](business-development-quickstart.md)；受理 A、推进 B、失败恢复与对应 PostgreSQL 断言见[事务配方](business-transaction-recipes.md)。
 
-本文是正式读接口参考。WMS／Transport的发送、回调、重试、TTL和终态清理保持原行为。读接口不发HTTP、不修改行、不加框架写锁、不提交／回滚／flush；调用方未提交的修改不会被隐式flush。返回冻结的数据对象外壳及独立数据副本，不返回ORM、原始响应字节或pending结果内容。数据库临时错误原样抛出，不能当作未找到或全部闭合。
+本文是正式读接口参考。WMS／Transport 的协议身份、回调应用、重试、TTL 和终态清理规则保持；本地原归属与提交后通知见下文。读接口不发HTTP、不修改行、不加框架写锁、不提交／回滚／flush；调用方未提交的修改不会被隐式flush。返回冻结的数据对象外壳及独立数据副本，不返回ORM、原始响应字节或pending结果内容。数据库临时错误原样抛出，不能当作未找到或全部闭合。
 
 ## 原身份查询
 
@@ -26,7 +26,7 @@ transport_result = await transport_service.get_result(
 | 类型 | 字段与解释 |
 | --- | --- |
 | WmsRequestResult | message_id、operation、operation_id、原target、availability；delivery_status／delivery_terminal／delivery_uncertain／fail_reason；response_state、http_status、response_code、response_timestamp、response_data |
-| TransportTaskResult | 原任务／请求／operation身份、workline_id／station_id、cycle_id、kind、availability；submission_state及原提交message_id／target／投递状态／不确定／失败原因／响应字段；outcome／outcome_revision、member_facts、has_pending_outcome／pending_revision、closure／closure_reason／closure_basis |
+| TransportTaskResult | 原任务／请求／operation身份、workline_id／station_id、owner_domain、cycle_id、kind、availability；submission_state及原提交message_id／target／投递状态／不确定／失败原因／响应字段；outcome／outcome_revision、member_facts、has_pending_outcome／pending_revision、closure／closure_reason／closure_basis |
 | PredecessorQueryResult | 原caller／cycle／rack_id或container_id、requested_ids、完整items、派生unresolved、complete；每项保留原任务／请求、成员、资源closure、task_closure、reason、outcome_revision和closure_basis |
 
 availability为FOUND／NOT_FOUND／IDENTITY_MISMATCH／INVALID。身份不符不返回另一身份的响应。response_state为NONE／VALID／INVALID／UNAVAILABLE；非终局／LOCAL_ERROR不提供业务决定，终局响应缺失为UNAVAILABLE，身份／协议／投递证据矛盾为INVALID。未知字段为None，不造PENDING。
@@ -70,9 +70,9 @@ predecessors = await transport_service.list_unclosed_predecessors(
 
 默认由事件／结果提交后立即投递具体 Celery 推进任务，Beat 扫描持久待办兜底；两者调用 composition.PROGRESSION 声明的同一业务待办入口，再由业务按原 execution_id 独立推进。通知只携带 business_code，调度壳不查询业务表或消费结果。待办扫描只用短会话定位候选业务 ID，不消费结果，也不为整轮扫描持有推进事务。每条记录的 `advance` 拥有独立的新 session 与事务，在首条 SQL 前配置 REPEATABLE READ，按工作线→设备→业务执行锁序核对当前许可和全部前序。任务内复用数据库引擎和连接不等于跨记录复用 session 或事务。平台结果读取接口不接管事务；结果接收／应用仍留在原框架事务，提交后才能被推进消费。
 
-应用装配注入结果通知端口；`MessageStore.on_result(operation)` 在非快照请求终态成功保存后的最外层提交后通知，覆盖 WMS 决策 HTTP 响应。ECS 命令 ACK 仍只是投递证据，业务唤醒来自新 Result 证据提交后的 `owner_domain`。通用机制不查询业务表或直接调用业务；平台按已校验注册源归属／原命令 owner 路由到统一业务待办任务。事务回滚、陈旧完成不通知；发布失败不撤销结果或伪装接收失败，由原 pending 扫描恢复。UNKNOWN/HELD 仍按原协议和门禁核对，不因唤醒换身份重发。
+应用装配注入结果通知端口；`MessageStore.on_result(operation, business_key)` 在非快照请求终态成功保存后的最外层提交后通知，覆盖 WMS 决策 HTTP 响应。ECS 命令 ACK 仍只是投递证据，业务唤醒来自新 Result 证据提交后的 `owner_domain`。通用机制不查询业务表或直接调用业务；平台按原本地业务关联／原命令 owner 路由到统一业务待办任务；仅旧专属 WMS 的 None 关联沿原注册源。事务回滚、陈旧完成不通知；发布失败不撤销结果或伪装接收失败，由原 pending 扫描恢复。UNKNOWN/HELD 仍按原协议和门禁核对，不因唤醒换身份重发。
 
-当前自动通知覆盖业务所属 ECS Event、Accepted WMS 入站回调、普通 WMS 请求终态和新 ECS Result。平台共享 Transport 回调没有业务归属映射，本轮仍依赖业务待办扫描，不根据 operation 名称猜归属，也不声称覆盖尚未实施的后续阶段。
+当前自动通知覆盖业务所属 ECS Event、Accepted WMS 入站回调、普通非快照 WMS 请求有效终态和新 ECS Result。WMS 请求原本地 business_key=business:<业务码> 与结果一并沿原事务处理；本地 EXPIRED（含过期租约维护）也是提交后通知，不改变原不确定性或重试规则。TransportTask 保存 nullable owner_domain；只有原回调使 applied_outcome_revision 实际前进时经 after_commit 通知原业务，位置补齐暂存结果同样覆盖。ACK、单独位置事实、重复/冲突和空归属不冒充应用，也不按 operation 名称猜测或广播；丢通知由同一业务 pending/Beat 兜底。
 
 单个Transport结果和有界前序批次各用一条SQL取得任务及全部提交关联；同一次判断需要多次分批、跨轮逐个或混合读取时，全部查询必须在同一session／同一REPEATABLE READ事务中完成。固定完整原身份和资源范围，不跨失败、事务或重启拼接片段。READ COMMITTED即使共用事务也不是统一快照。需要更新事实时换新事务重读整组；同一快照内不会看到外部新提交。快照不提供物理锁或派发时的执行授权。
 
@@ -102,3 +102,8 @@ async def wake_execution(session_factory, execution_id, advance_owned_business):
 沿用RELIABLE_RETENTION_DAYS（默认90天）。业务在窗口内保存所需结果与消费证据；清理后未保存的WMS决定／拒绝证据不能恢复，NOT_FOUND／UNAVAILABLE不等于成功或重新发送。Transport已应用事实仍从任务读取；整体确定终态与仍可变化的成员投影分别处理。本接口不增加无界档案、平台消费表、业务worker或第二个重试调度。
 
 验收用例见tests/integrations/wms_request/test_results.py、wms_transport/test_results.py、test_predecessors.py及tests/integrations/test_result_consumption.py；快照和序列化重试必须用显式独立PostgreSQL验证，SQLite不能代替。
+
+阶段二本地归属不进入 WMS/Transport 协议字段，也不改变冻结请求、input_digest、operation_id、client_request_id 或 caller/cycle。
+运行时绑定业务实例负责新请求消费者核对和原关联重放冲突；默认未绑定实例不能创建正式共享 WMS 请求。
+旧 None 不回填；公开 Transport owner_domain 只是原关联，不授权新动作。该列迁移有非空证据时阻止降级删除。
+测试与部署边界见[阶段二验收](../testing/business-components-phase2.md)，bin_return/SMT 接入仍属于未实施阶段三。
