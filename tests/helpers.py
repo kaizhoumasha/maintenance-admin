@@ -924,11 +924,12 @@ ecs_command(
 @asynccontextmanager
 async def business_flow_fixture(factory, monkeypatch):
     """Own only this temporary table; production Base and Alembic stay untouched."""
-    from types import SimpleNamespace
+    from types import MappingProxyType, SimpleNamespace
 
     from sqlalchemy import JSON, Boolean, Column, Integer, MetaData, String, Table, delete, select
 
     from app.businesses import catalog
+    from app.businesses.components import ComponentDefinition
     from app.businesses.definitions import (
         BusinessDefinition,
         DeviceRole,
@@ -985,6 +986,14 @@ async def business_flow_fixture(factory, monkeypatch):
         class Decision(RequestPayload):
             execution_id: str
 
+        shared_request_module = "app.businesses._components.flow_requests.request.seam_decision_v1"
+        Decision.__module__ = shared_request_module
+        component = ComponentDefinition(
+            key="flow_requests",
+            entry_modules=(shared_request_module,),
+            required_methods=("send", "get_result"),
+        )
+
         targets = {
             "seam-ecs": TargetConfig("seam-ecs", None, "ecs-command", address_mode="SNAPSHOT"),
             "seam-wms": TargetConfig("seam-wms", "http://127.0.0.1:45873", "wms-decisions"),
@@ -1021,7 +1030,9 @@ async def business_flow_fixture(factory, monkeypatch):
             )
 
             def factory_service(capabilities, code=code, definition=definition):
-                return FlowService(code, definition, capabilities, factory, table)
+                service = FlowService(code, definition, capabilities, factory, table)
+                service.components = MappingProxyType({"flow_requests": capabilities.wms})
+                return service
 
             def handlers(code):
                 async def on_event(ctx, data):
@@ -1050,11 +1061,12 @@ async def business_flow_fixture(factory, monkeypatch):
                     DEFINITION=definition,
                     ENTRY_MODULES=(),
                     COMMANDS=(FlowMove,),
+                    COMPONENTS=(component,),
                     build_service=factory_service,
                 )
             )
-        request_operation("seam.decision@v1", Endpoint.DECISIONS)(Decision)
         monkeypatch.setattr(catalog, "entries", lambda: tuple(entries))
+        request_operation("seam.decision@v1", Endpoint.DECISIONS)(Decision)
         monkeypatch.setattr(catalog, "_validated_entries", None)
         catalog.validate_business_contracts()
 

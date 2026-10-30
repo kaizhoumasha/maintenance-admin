@@ -18,6 +18,7 @@ class DeviceBinding:
     device_role: str
     device_bindings: dict[str, str]
     position_bindings: dict[str, str]
+    business_code: str | None = None
 
     @property
     def revision(self) -> str:

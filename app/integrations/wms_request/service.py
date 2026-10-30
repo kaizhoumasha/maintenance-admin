@@ -30,8 +30,11 @@ class WmsRequests:
         outbox: Outbox | None = None,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        owner_domain: str | None = None,
+        contract_consumers: Callable[[tuple[str, str, str | None]], frozenset[str]] | None = None,
     ):
         self._outbox, self.clock = outbox, clock
+        self.owner_domain, self.contract_consumers = owner_domain, contract_consumers
 
     @property
     def outbox(self) -> Outbox:
@@ -70,6 +73,18 @@ class WmsRequests:
             raise UnknownOperation(f"payload model {type(payload).__name__!r} is not registered")
         registered = matches[0]
         operation = registered.name
+        shared = (
+            not registered.registration_source.local_only
+            and registered.registration_source.module.startswith("app.businesses._components.")
+        )
+        if self.owner_domain is not None:
+            if self.contract_consumers is None or self.owner_domain not in self.contract_consumers(
+                ("wms_request", operation, None)
+            ):
+                raise InvalidRequestPayload("business is not an authorized request consumer")
+        elif shared:
+            raise InvalidRequestPayload("shared formal request requires a bound business")
+        business_key = None if self.owner_domain is None else "business:" + self.owner_domain
         try:
             validate_uuid7(operation_id)
             data = validated_model_payload(payload)
@@ -92,8 +107,14 @@ class WmsRequests:
             operation_id,
             raw,
             ttl=registered.ttl,
+            business_key=business_key,
         )
-        return await self.outbox.enqueue(session, draft)
+        reference = await self.outbox.enqueue(session, draft)
+        if reference.business_key != business_key:
+            raise InvalidRequestPayload(
+                "request identity already has a different original business"
+            )
+        return reference
 
 
 # 外部调用的统一入口:无需任何接线,首次使用时从配置惰性取得 Outbox 与目标。

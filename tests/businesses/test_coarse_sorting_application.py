@@ -213,6 +213,60 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
             assert published == ["coarse_sorting"]
             assert scan.pending and scan.validation_message_id is None
 
+        from datetime import UTC, datetime
+
+        from sqlalchemy import delete
+
+        from app.core.identifiers import uuid7
+        from app.models import TransportTask
+
+        task_id = "transport-" + str(uuid7())
+        async with e.factory.begin() as session:
+            session.add(
+                TransportTask(
+                    client_request_id=str(uuid7()),
+                    transport_task_id=task_id,
+                    operation_id=str(uuid7()),
+                    kind="RACK_MOVE",
+                    input_digest="a" * 64,
+                    workline_id=str(e.lines[0]),
+                    owner_domain="coarse_sorting",
+                    created_at=datetime.now(UTC),
+                    frozen={
+                        "kind": "RACK_MOVE",
+                        "rack_id": "R-WAKE",
+                        "source": {"kind": "RACK", "location_code": "R-WAKE"},
+                        "target": {"kind": "RACK_POSITION", "location_code": "KT-WAKE"},
+                        "target_face": "90",
+                        "rcs_template_id": "F01",
+                    },
+                )
+            )
+        try:
+            applied = await e.client.post(
+                "/api/v1/wms/events",
+                json={
+                    "operation_id": str(uuid7()),
+                    "operation": "transport.task.resulted@v1",
+                    "timestamp": 1,
+                    "data": {
+                        "transport_task_id": task_id,
+                        "kind": "RACK_MOVE",
+                        "outcome_revision": 1,
+                        "rack_id": "R-WAKE",
+                        "status": "SUCCEEDED",
+                        "final_position": {"kind": "RACK_POSITION", "location_code": "KT-WAKE"},
+                    },
+                },
+            )
+            assert applied.status_code == 202
+            assert published == ["coarse_sorting", "coarse_sorting"]
+        finally:
+            async with e.factory.begin() as session:
+                await session.execute(
+                    delete(TransportTask).where(TransportTask.transport_task_id == task_id)
+                )
+
 
 async def test_scan_projection_survives_receipt_retention_in_configured_database(configured_scan):
     from sqlalchemy import delete

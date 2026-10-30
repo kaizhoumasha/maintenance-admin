@@ -133,7 +133,8 @@ from app.integrations.discovery import load_formal_modules
 from app.integrations.ecs_callback.registry import events
 from app.integrations.wms_callback.registry import operations as callbacks
 from app.integrations.wms_request.operation import operations as requests
-from app.integrations.wms_request import WmsRequests
+from app.integrations.wms_request import InvalidRequestPayload, WmsRequests
+from app.reliable import EnqueueResult, MessageStatus
 from app.reliable.config import TargetConfig
 root = Path(sys.argv[1])
 businesses.__path__ = [str(root / 'businesses'), *businesses.__path__]
@@ -146,14 +147,27 @@ assert ({module!r} in sys.modules) is {owner == "other"!r}
 class CaptureOutbox:
     targets = {{'facts': TargetConfig('facts', 'http://example.test', 'wms-facts')}}
     def __init__(self): self.intents = []
-    async def enqueue(self, session, draft): self.intents.append(draft)
+    async def enqueue(self, session, draft):
+        self.intents.append(draft)
+        return EnqueueResult(len(self.intents), MessageStatus.PENDING, draft.business_key)
 outbox = CaptureOutbox()
 try:
     runtime = build_runtime(outbox=outbox, ecs_commands=None, session_factory=lambda: None)
     asyncio.run(runtime.services['probe'].advance())
 except ValueError as error:
-    assert {owner != "other"!r}, str(error)
-    assert {module!r} in str(error) and 'ENTRY_MODULES' in str(error) and '修复' in str(error)
+    if {owner == "other" and kind == "request"!r}:
+        # A valid import does not grant probe the other business's request contract.
+        assert isinstance(error, InvalidRequestPayload), str(error)
+        assert not outbox.intents
+        assert requests()['probe.done@v1'].registration_source.module == {module!r}
+        original_owner = WmsRequests(outbox, owner_domain='other',
+            contract_consumers=catalog.contract_consumers)
+        asyncio.run(original_owner.send(None, importlib.import_module({module!r}).Payload(),
+            operation_id='01900000-0000-7000-8000-000000000001'))
+        assert len(outbox.intents) == 1 and outbox.intents[0].business_key == 'business:other'
+    else:
+        assert {owner != "other"!r}, str(error)
+        assert {module!r} in str(error) and 'ENTRY_MODULES' in str(error) and '修复' in str(error)
 else:
     assert {owner == "other"!r}, 'runtime import accepted an undeclared formal registration'
     assert len(outbox.intents) == 1

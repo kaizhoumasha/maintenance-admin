@@ -34,6 +34,7 @@ class TransportTaskResult:
     workline_id: str
     station_id: str | None
     availability: str
+    owner_domain: str | None = None
     operation_id: str | None = None
     cycle_id: str | None = None
     kind: str | None = None
@@ -248,6 +249,7 @@ def project(
     result = replace(
         result,
         availability="FOUND",
+        owner_domain=task["owner_domain"],
         operation_id=task["operation_id"],
         cycle_id=task["cycle_id"],
         kind=task["kind"],

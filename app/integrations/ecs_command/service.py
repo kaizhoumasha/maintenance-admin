@@ -33,12 +33,20 @@ class CommandOwner:
 
 class EcsCommands:
     def __init__(
-        self, outbox, target, routes=None, annexes=None, *, clock=lambda: datetime.now(UTC)
+        self,
+        outbox,
+        target,
+        routes=None,
+        annexes=None,
+        *,
+        clock=lambda: datetime.now(UTC),
+        authorize_new=None,
     ):
         self.outbox, self.target = outbox, target
         self.routes = routes or UnconfiguredRoutes()
         self.annexes = annexes or {}
         self.clock = clock
+        self.authorize_new = authorize_new
 
     async def create(
         self,
@@ -55,6 +63,8 @@ class EcsCommands:
         params = validated_model_payload(command)
 
         async def resolve_route():
+            if self.authorize_new is not None:
+                await self.authorize_new(session, owner, device_code, type(command))
             route = await self.routes.resolve_declared(session, device_code, declaration)
             annex_key = (binding.annex_id, binding.annex_version)
             if annex_key != (route.annex_id, route.annex_version):

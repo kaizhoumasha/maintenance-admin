@@ -1,8 +1,12 @@
 """Route committed inputs to catalog-owned business pending entries."""
 
+import logging
+
 from app.businesses import catalog
 from app.integrations.registration import RegistrationSource
 from app.integrations.wms_request.operation import operations
+
+logger = logging.getLogger(__name__)
 
 
 def enqueue_business(business: str) -> None:
@@ -30,12 +34,34 @@ def event_committed(source: RegistrationSource) -> None:
         enqueue_business(business)
 
 
-def wms_result_committed(operation: str) -> None:
+def wms_result_committed(operation: str, business_key: str | None = None) -> None:
     registered = operations().get(operation)
-    if registered is not None:
-        event_committed(registered.registration_source)
+    if registered is None:
+        return
+    source = registered.registration_source
+    if business_key is None:
+        if source.local_only:
+            return
+        business = catalog.progression_owner(source)
+    elif isinstance(business_key, str) and business_key.startswith("business:"):
+        business = business_key.removeprefix("business:")
+        if business not in catalog.contract_consumers(("wms_request", operation, None)):
+            business = None
+    else:
+        business = None
+    if business is None or business not in catalog.progressions():
+        logger.warning(
+            "WMS result business association cannot be routed: operation=%s", registered.name
+        )
+        return
+    notify_business_committed(business)
 
 
 def ecs_result_committed(owner_domain: str) -> None:
     if owner_domain in catalog.progressions():
         enqueue_business(owner_domain)
+
+
+def notify_business_committed(business_code: str) -> None:
+    if business_code in catalog.progressions():
+        enqueue_business(business_code)

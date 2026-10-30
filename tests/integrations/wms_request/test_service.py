@@ -676,3 +676,82 @@ async def test_model_send_requires_one_exact_registered_type(sessions, wms, cloc
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=str(uuid7(clock())))
     assert await rows(sessions) == []
+
+
+async def test_shared_request_freezes_original_business_and_wire(
+    sessions, wms, clock, shared_wms_contract
+):
+    from app.businesses import catalog
+    from app.integrations.wms_request import WmsRequests
+
+    contract = shared_wms_contract
+    first = WmsRequests(
+        wms.outbox, owner_domain="first", contract_consumers=catalog.contract_consumers, clock=clock
+    )
+    second = WmsRequests(
+        wms.outbox,
+        owner_domain="second",
+        contract_consumers=catalog.contract_consumers,
+        clock=clock,
+    )
+    payload = contract.model(reference="original")
+    identity = str(uuid7(clock()))
+    async with sessions.begin() as session:
+        original = await first.send(session, payload, operation_id=identity)
+        row = await session.get(ReliableMessage, original.message_id)
+        frozen = row.request_raw
+        assert row.business_key == original.business_key == "business:first"
+        assert set(json.loads(frozen)) == {"operation_id", "operation", "timestamp", "data"}
+    clock.advance(30)
+    async with sessions.begin() as session:
+        assert (
+            await first.send(session, payload, operation_id=identity)
+        ).message_id == original.message_id
+    with pytest.raises(InvalidRequestPayload, match="business"):
+        async with sessions.begin() as session:
+            await second.send(session, payload, operation_id=identity)
+    async with sessions.begin() as session:
+        other = await second.send(session, payload, operation_id=str(uuid7(clock())))
+        assert other.business_key == "business:second"
+        row = await session.get(ReliableMessage, original.message_id)
+        assert row.business_key == "business:first" and row.request_raw == frozen
+
+
+async def test_shared_formal_request_requires_bound_consumer(
+    sessions, wms, shared_wms_contract, monkeypatch
+):
+    from app.businesses import catalog
+    from app.integrations.wms_request import WmsRequests
+    from app.integrations.wms_request.service import wms_requests
+
+    monkeypatch.setattr(wms_requests, "_outbox", wms.outbox)
+    payload = shared_wms_contract.model(reference="original")
+    for service in (
+        wms,
+        wms_requests,
+        WmsRequests(
+            wms.outbox, owner_domain="third", contract_consumers=catalog.contract_consumers
+        ),
+    ):
+        with pytest.raises(InvalidRequestPayload, match="business|consumer"):
+            async with sessions.begin() as session:
+                await service.send(session, payload, operation_id=str(uuid7()))
+    assert await rows(sessions) == []
+
+
+async def test_legacy_null_business_is_not_adopted_by_bound_facade(sessions, wms):
+    from app.integrations.wms_request import WmsRequests
+
+    payload = lookup(FACT).data_model(**DATA)
+    identity = str(uuid7())
+    async with sessions.begin() as session:
+        original = await wms.send(session, payload, operation_id=identity)
+    bound = WmsRequests(
+        wms.outbox, owner_domain="first", contract_consumers=lambda key: frozenset({"first"})
+    )
+    with pytest.raises(InvalidRequestPayload, match="business"):
+        async with sessions.begin() as session:
+            await bound.send(session, payload, operation_id=identity)
+    async with sessions() as session:
+        row = await session.get(ReliableMessage, original.message_id)
+        assert row.business_key is None

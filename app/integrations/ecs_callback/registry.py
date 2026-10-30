@@ -33,6 +33,8 @@ class EcsEventContext:
     binding: DeviceBinding
     notes: list[dict] = field(default_factory=list)
     runtime: object | None = None
+    business_code: str | None = None
+    component_key: str | None = None
 
     @property
     def device_role(self) -> str:

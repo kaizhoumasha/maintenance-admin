@@ -255,3 +255,100 @@ def test_unconfigured_error_shows_the_setting_an_example_and_what_exists(monkeyp
     with pytest.raises(RuntimeError) as other:
         _ = TransportService().target
     assert "ecs[ecs-device]" in str(other.value)  # 指出现有目标及其协议,便于发现写错协议名
+
+
+@pytest.mark.parametrize("method", ["move_rack", "rotate_rack", "move_bins", "exchange_bins"])
+@pytest.mark.parametrize("owner", [None, "first"])
+async def test_all_transport_methods_preserve_original_owner_and_frozen_identity(
+    transport_storage, transport_request, method, owner
+):
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_transport import (
+        BinExchangePair,
+        BinMove,
+        HandoffPosition,
+        RackBinSlot,
+    )
+
+    rig = transport_storage
+    service = TransportService(
+        rig.outbox, target=rig.target.name, clock=rig.clock, owner_domain=owner
+    )
+    common = {key: transport_request[key] for key in ("client_request_id", "caller")}
+    if method == "move_rack":
+        arguments = transport_request
+    elif method == "rotate_rack":
+        arguments = common | dict(
+            rack_id="rack",
+            position=RackPosition("SOURCE"),
+            target_face="90",
+            rcs_template_id="CK04",
+        )
+    elif method == "move_bins":
+        arguments = common | dict(
+            moves=[BinMove("B1", HandoffPosition("CNV"), RackBinSlot("rack", "90", "S1"))]
+        )
+    else:
+        arguments = common | dict(
+            exchange_pairs=[
+                BinExchangePair(
+                    "B1", RackBinSlot("rack", "90", "S1"), "B2", RackBinSlot("rack2", "90", "S2")
+                )
+            ]
+        )
+    cycle = str(uuid7())
+    async with rig.factory.begin() as session:
+        first = await getattr(service, method)(session, **arguments, cycle_id=cycle)
+        row = await session.scalar(
+            select(TransportTask).where(TransportTask.transport_task_id == first.transport_task_id)
+        )
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+        )
+        frozen = (row.input_digest, row.operation_id, row.frozen, message.request_raw)
+        assert row.owner_domain == owner
+        assert message.business_key == first.transport_task_id
+        assert (
+            "owner_domain" not in json.loads(message.request_raw)
+            and "owner_domain" not in row.frozen
+        )
+    async with rig.factory.begin() as session:
+        replay = await getattr(service, method)(session, **arguments, cycle_id=str(uuid7()))
+        assert replay == first
+        result = await service.get_result(
+            session, transport_task_id=first.transport_task_id, **common
+        )
+        assert result.owner_domain == owner and result.cycle_id == cycle
+        row = await session.scalar(
+            select(TransportTask).where(TransportTask.transport_task_id == first.transport_task_id)
+        )
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+        )
+        assert (row.input_digest, row.operation_id, row.frozen, message.request_raw) == frozen
+
+
+@pytest.mark.parametrize(
+    "original_owner,new_owner", [(None, "first"), ("first", None), ("first", "second")]
+)
+async def test_transport_identity_cannot_change_or_adopt_owner(
+    transport_storage, transport_request, original_owner, new_owner
+):
+    rig = transport_storage
+    original = TransportService(
+        rig.outbox, target=rig.target.name, clock=rig.clock, owner_domain=original_owner
+    )
+    other = TransportService(
+        rig.outbox, target=rig.target.name, clock=rig.clock, owner_domain=new_owner
+    )
+    async with rig.factory.begin() as session:
+        handle = await original.move_rack(session, **transport_request)
+    with pytest.raises(IdempotencyConflict, match="owner|business"):
+        async with rig.factory.begin() as session:
+            await other.move_rack(session, **transport_request)
+    async with rig.factory() as session:
+        task = await session.scalar(
+            select(TransportTask).where(TransportTask.transport_task_id == handle.transport_task_id)
+        )
+        assert task.owner_domain == original_owner
+        assert await counts(session, rig) == (1, 1)

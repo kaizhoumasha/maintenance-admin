@@ -15,6 +15,11 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 | WMS → 本项目 | `app/businesses/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
 | 本项目 → WMS | `app/businesses/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
 
+业务 composition 可通过 COMPONENTS 显式引用 `app/businesses/_components/<key>/` 内相同的三类目录；
+共享能力没有独立注册表、业务身份或任务。共享入口仍受下文文件名、formal/local、显式模块及迟注册规则约束；
+共享模块按路径去重导入，第二次真正声明同键仍失败。各业务仅消费自己显式引用的模块和角色，不能因另一个业务
+导入同命名空间就取得权限。当前生产清单没有 bin_return/SMT 占位包。
+
 ## 文件名只有一条规则
 
 一个注册项一个文件，文件名为 `name.lower().replace('.', '_').replace('@', '_') + '.py'`。
@@ -37,13 +42,13 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 
 正式合同校验会反查三类实际注册项：业务来源必须属于当前 catalog 中显式声明的正式
 `ENTRY_MODULES` 模块或其包内子模块。依赖 import 的注册副作用也受此约束；未列业务和同业务
-未声明入口均会阻止启动。跨业务共享合同须由其所属完整业务显式列出入口，不能靠被其他业务 import 启用。
+未声明入口均会阻止启动。共享合同须由每个消费业务在自有 ENTRY_MODULES 或 COMPONENTS 中显式列出入口，不能靠被其他业务 import 启用。
 API/worker 在 local 入口和运行设施前校验，静态检查失败不返回部分成功目录。
 
 正式校验成功后，工厂或业务方法的首次 import 仍受同一模块/点分包归属规则约束。
 ECS Event、WMS callback/request 在写入各自注册表之前立即拒绝清单外来源；拒绝不会占用注册键，
 也不会允许业务继续到下一意图或 WMS 入队。`probe.request` 只覆盖自身和 `probe.request.*`，
-不覆盖 `probe.request_extra`。另一个已列完整业务拥有的合法入口仍可共享。
+不覆盖 `probe.request_extra`。同一显式共享源码可以有多个业务消费者；来源归属检查不代替消费者与唯一目标校验。
 首次启动的组合模块和声明导入仍由最终合同校验统一核对；ECS 命令模型只按 `COMMANDS` 编译，
 不套用三类入口的 `ENTRY_MODULES` 规则。校验成功后的保护持续生效；再次校验失败会使运行时装配失效，
 但不会重新开放初始导入阶段。固定平台、local 和隔离非 app 夹具沿用原边界。
@@ -73,6 +78,13 @@ async def scan_completed(ctx: EcsEventContext, payload: ScanCompleted) -> None:
 处理函数只能写当前事务；返回 None 后由平台提交并 ACK。业务矛盾用 `ctx.note` 表达；普通异常会整体
 回滚并返回 503。不直接发 HTTP 或设备指令，外发意图同事务写 outbox。角色与 `data=` 必须明确声明；无需附加字段时使用 `CallbackPayload`。
 运行时通过 `include_ecs_callback(..., resolve_binding=...)` 注入绑定解析器，正式处理器缺解析器时启动失败。稳定未绑定或组合键未注册的新事件按原协议 ACK 并留诊断，无自动回放；已有 receipt 先于绑定解析。处理器通过 `ctx.binding` 读取本线上下文。完整的命令角色映射、配置停发和独立 Mock 接入见 [角色接入](ecs-roles.md)。先部署接收器／处理器及绑定，再启用对端事件。
+
+共享 ECS 正式入口还要求装配提供 `resolve_input_target`；主应用注入 catalog.input_target，通用接收器不反向导入业务目录。
+工作线绑定提供可信 business_code，编译路由提供 component_key，薄入口用 require_component 取得本业务对象。
+无消费者不执行；原 receipt 重放仍先于新绑定/分派。提交后通知只唤醒这一个业务。
+
+正式共享 WMS 回调由薄入口通过原业务关联记录确定归属，再调用 bind_callback_business，重复同归属允许，
+未绑定、矛盾或消费者不匹配拒绝且不通知。payload 不能直接指定 owner。WMS 出站和 Transport 的本地原归属/提交后通知已由阶段二实现；不增加注册表或 wire 字段，见[阶段二计划](../superpowers/plans/2026-10-30-business-components-phase2.md)。
 
 ## WMS 回调：相同的函数声明，保留业务结果
 
@@ -223,3 +235,7 @@ composition 必须由 `catalog.entries()` 列出；三类入口共用注册表�
 ## ECS Event 手工调试
 
 local 登录后可使用 `POST /api/v1/dev/ecs/events` 的 Examples 下拉，选项及样例来自唯一实际事件注册表；GET 同路径/{digest} 查看持久收据和只读业务投影。粗分扫码由正式 catalog 装配同一处理器及配置数据库，各环境不另设 local 业务入口或存储。MOCK 数据和对端由测试/部署配置准备，详见 [ECS Event Swagger 调试](ecs-event-debugging.md)。
+
+允许导入合法注册源码不等于当前业务具有发送权限。绑定业务的 WmsRequests 只允许发送其合同消费者集合内的请求；
+另一业务独有的 request 模块可合法导入，但不能以本业务 owner 发送。跨业务复用应提取为显式 COMPONENTS 共享合同。
+测试或定制 Outbox 端口同样遵守 EnqueueResult 返回约定，包含原 business_key，不能以空返回值代替持久关联。

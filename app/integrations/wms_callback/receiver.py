@@ -22,6 +22,7 @@ from .registry import (
     Conflict,
     Duplicate,
     InvalidPayload,
+    Rejected,
     lookup,
 )
 
@@ -99,16 +100,33 @@ async def _handle(
     parsed: dict,
     *,
     runtime: object | None = None,
+    on_committed=None,
+    on_business_committed=None,
+    on_owner_committed=None,
 ) -> CallbackResponse:
     """保存点内执行处理器:Rejected 显式回滚其写入;先构造并校验响应,再写回收据(同一事务)。"""
     async with session.begin_nested() as savepoint:
         context = CallbackContext(
-            session, receipt_id, operation_id, timestamp, parsed, runtime=runtime
+            session,
+            receipt_id,
+            operation_id,
+            timestamp,
+            parsed,
+            runtime=runtime,
+            registration_source=handler.registration_source,
+            operation=operation,
+            on_owner_committed=on_owner_committed,
         )
         try:
             outcome = await handler.handle(context)
         except OUTCOMES as signal:  # 处理器 raise 的结果与 return 等价
             outcome = signal
+        shared = (
+            not handler.registration_source.local_only
+            and handler.registration_source.module.startswith("app.businesses._components.")
+        )
+        if shared and isinstance(outcome, Accepted) and context.business_code is None:
+            outcome = Rejected("INVALID_EVIDENCE")
         if not isinstance(outcome, OUTCOMES):
             raise TypeError(f"handler returned {type(outcome).__name__}, not an Outcome")
         if not isinstance(outcome, (Accepted, Duplicate, Conflict)):
@@ -137,11 +155,22 @@ async def _handle(
                 for note in context.notes
             ],
         )
+    if response.outcome == "received":
+        if shared and on_business_committed is not None:
+            after_commit(session, partial(on_business_committed, context.business_code))
+        elif not shared and on_committed is not None:
+            after_commit(session, partial(on_committed, handler.registration_source))
     return response
 
 
 async def receive(
-    session: AsyncSession, raw: bytes, *, runtime: object | None = None, on_committed=None
+    session: AsyncSession,
+    raw: bytes,
+    *,
+    runtime: object | None = None,
+    on_committed=None,
+    on_business_committed=None,
+    on_owner_committed=None,
 ) -> CallbackResponse:
     if len(raw) > MAX_BODY_BYTES:
         return CallbackResponse(413, None, "too_large")
@@ -215,9 +244,10 @@ async def receive(
             timestamp,
             parsed,
             runtime=runtime,
+            on_committed=on_committed,
+            on_business_committed=on_business_committed,
+            on_owner_committed=on_owner_committed,
         )
-        if response.outcome == "received" and on_committed is not None:
-            after_commit(session, partial(on_committed, handler.registration_source))
         return response
     existing = await find_receipt(session, operation, operation_id)
     if existing is None:

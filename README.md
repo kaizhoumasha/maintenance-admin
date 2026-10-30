@@ -149,6 +149,7 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
 业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
+composition 可用静态 `COMPONENTS` 复用多个内部能力；catalog 编译显式消费者和每业务唯一输入目标，运行主体与推进仍只有业务。WMS 请求保存本地原业务关联，Transport 保存原 owner；有效结果提交后只唤醒原业务，Transport 还须实际应用结果版本前进。接入与兼容边界见[业务组合与原归属指南](docs/integrations/business-packages.md#31-业务内部复用多个代码能力)，阶段一、二验收记录见[开发测试](docs/testing/README.md)。
 最短路线见[业务开发快速开始](docs/integrations/business-development-quickstart.md)，不兼容边界与验证见[单一 API 验收记录](docs/integrations/business-development-single-api-acceptance.md)。
 正式 catalog 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段；动态 HTTP 调试字段不作为业务 SDK 形式。
 

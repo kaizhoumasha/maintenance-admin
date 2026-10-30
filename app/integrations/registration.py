@@ -83,7 +83,8 @@ def registration_source(target) -> RegistrationSource:
     local_only = _local_only.get()
     # 只拦实际注册，无论来自发现器还是普通 import；缓存或缺失模块不会触发误标。
     parts = module.split(".")
-    in_dev_entry = len(parts) > 3 and parts[3] in DEV_MODULES
+    entry_index = 4 if parts[:3] == ["app", "businesses", "_components"] else 3
+    in_dev_entry = len(parts) > entry_index and parts[entry_index] in DEV_MODULES
     if (
         local_only
         and parts[:2] in (["app", "integrations"], ["app", "businesses"])
@@ -123,10 +124,11 @@ def validate_registration_file(name: str, target) -> RegistrationSource:
 
     source = validate_registration_source(target)
     parts = source.module.split(".")
+    entry_index = 4 if parts[:3] == ["app", "businesses", "_components"] else 3
     if (
         parts[:2] in (["app", "integrations"], ["app", "businesses"])
-        and len(parts) > 4
-        and parts[3] in _entrypoints
+        and len(parts) > entry_index + 1
+        and parts[entry_index] in _entrypoints
         and parts[-1] + ".py" != registration_filename(name)
     ):
         raise ValueError(

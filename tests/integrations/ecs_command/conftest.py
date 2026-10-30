@@ -418,13 +418,14 @@ def ecs_simulators(monkeypatch, loopback_server):
             factory = simulator_client_factory(origins)
             configure = main.configure_local_ecs
 
-            def assemble(application, *, environment, routes, annexes=None):
+            def assemble(application, *, environment, routes, annexes=None, authorize_new=None):
                 return configure(
                     application,
                     environment=environment,
                     history_annexes=history_annexes,
                     client_factory=factory,
                     routes=routes,
+                    authorize_new=authorize_new,
                     annexes=annexes,
                 )
 

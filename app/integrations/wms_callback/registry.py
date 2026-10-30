@@ -4,6 +4,7 @@
 测试用 `monkeypatch` 替换成空 dict 隔离。装饰器只注册映射,不带 `ack_mode` 等元数据(信封合同 §6)。
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -63,6 +64,12 @@ class Rejected(Outcome):
 OUTCOMES = (Accepted, Duplicate, Conflict, Rejected)
 
 
+@dataclass
+class _CallbackBusiness:
+    business_code: str | None = None
+    component_key: str | None = None
+
+
 @dataclass(frozen=True)
 class CallbackContext:
     session: AsyncSession
@@ -72,6 +79,18 @@ class CallbackContext:
     parsed: dict
     notes: list = field(default_factory=list)
     runtime: object | None = field(default=None, kw_only=True)
+    registration_source: object | None = field(default=None, kw_only=True)
+    operation: str | None = field(default=None, kw_only=True)
+    on_owner_committed: Callable[[str], None] | None = field(default=None, kw_only=True)
+    _business_binding: _CallbackBusiness = field(default_factory=_CallbackBusiness, kw_only=True)
+
+    @property
+    def business_code(self) -> str | None:
+        return self._business_binding.business_code
+
+    @property
+    def component_key(self) -> str | None:
+        return self._business_binding.component_key
 
     def note(self, reason_code: str, **detail) -> None:
         """附上诊断:返回 202 但没有(完全)应用的事实(未知任务、事实矛盾等),随收据同事务持久化。"""
