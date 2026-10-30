@@ -339,3 +339,45 @@ def test_component_dev_commands_cannot_enter_formal_compilation(dev_entry):
     )(Move)
     with pytest.raises(ValueError, match="local-only command"):
         compile_commands(Move)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"entry_modules": ["app.businesses._components.shared_scan.ecs_event"]},
+        {"model_modules": ("same", "same")},
+        {"required_methods": ("invalid method",)},
+        {"commands": (object(),)},
+        {"requires_progression": 1},
+    ],
+)
+def test_invalid_component_declarations_are_rejected(values):
+    from app.businesses.components import ComponentDefinition
+
+    with pytest.raises(ValueError):
+        ComponentDefinition(key="shared_scan", **values)
+
+
+@pytest.mark.parametrize("problem", ["business", "target", "assembly"])
+def test_component_lookup_requires_its_business_target_and_assembly(problem):
+    from app.businesses.runtime import BusinessRuntime, require_component
+
+    part = object()
+    service = SimpleNamespace(components={"shared_scan": part})
+    context = SimpleNamespace(
+        runtime=BusinessRuntime(definitions={}, services={"first": service}),
+        business_code=None if problem == "business" else "first",
+        component_key="other" if problem == "target" else "shared_scan",
+    )
+    if problem == "assembly":
+        service.components = {}
+    with pytest.raises(RuntimeError):
+        require_component(context, "shared_scan")
+
+
+def test_component_models_cannot_escape_the_declared_component_namespace(shared_component):
+    shared_component.first.COMPONENTS = (
+        replace(shared_component.component, model_modules=("app.businesses.other.models",)),
+    )
+    with pytest.raises(ValueError, match="component MODEL_MODULES path"):
+        catalog.load_business_models()

@@ -399,3 +399,78 @@ async def test_component_local_entries_keep_local_acceptance_without_formal_busi
         assert sources == []
     assert handled and sources == [source]
     assert flow.callbacks == []
+
+
+@pytest.mark.parametrize("resolver_problem", ["missing", "different_source"])
+async def test_shared_event_requires_trusted_matching_input_target(
+    component_flow, resolver_problem
+):
+    flow = component_flow
+    target = catalog.input_target("first", ("ecs_event", "SCAN_COMPLETED", "SHARED_SCAN"))
+
+    def different_source(business, key):
+        return replace(target, source=replace(target.source, symbol="different_handler"))
+
+    resolver = None if resolver_problem == "missing" else different_source
+    raw = json.dumps(
+        {
+            "device_code": "COMP-0",
+            "event_type": "SCAN_COMPLETED",
+            "timestamp": 1,
+            "data": {"bin_code": "UNTRUSTED-TARGET"},
+        }
+    ).encode()
+    async with flow.factory() as session, session.begin():
+        arguments = dict(
+            resolve_binding=resolve_binding,
+            resolve_input_target=resolver,
+            runtime=flow.runtime,
+            on_business_committed=flow.callbacks.append,
+        )
+        if resolver_problem == "missing":
+            from fastapi import FastAPI
+
+            from app.controllers.ecs_callback import include_ecs_callback
+
+            with pytest.raises(ValueError, match="input target resolver"):
+                include_ecs_callback(
+                    FastAPI(), environment="production", resolve_binding=resolve_binding
+                )
+            with pytest.raises(RuntimeError, match="trusted input target resolver"):
+                await receive_ecs_event(session, raw, **arguments)
+        else:
+            response = await receive_ecs_event(session, raw, **arguments)
+            assert response.body == {"code": 200, "message": "ACK"}
+            assert response.outcome == "unregistered"
+            assert response.diagnostic[0]["reason_code"] == "UNREGISTERED_EVENT_TYPE"
+    async with flow.factory() as session:
+        assert (await session.execute(select(flow.table))).all() == []
+    assert flow.callbacks == []
+
+
+async def test_shared_callback_rejects_a_different_registration_source(component_flow, monkeypatch):
+    flow = component_flow
+    registered = callbacks._registry["shared.notice@v1"]
+    monkeypatch.setitem(
+        callbacks._registry,
+        "shared.notice@v1",
+        replace(
+            registered,
+            registration_source=replace(registered.registration_source, symbol="different_handler"),
+        ),
+    )
+    raw = json.dumps(
+        {
+            "operation_id": str(uuid7()),
+            "operation": "shared.notice@v1",
+            "timestamp": 1,
+            "data": {"reference": "ref-a"},
+        }
+    ).encode()
+    async with flow.factory() as session, session.begin():
+        response = await receive(
+            session, raw, runtime=flow.runtime, on_business_committed=flow.callbacks.append
+        )
+        assert response.status_code == 422
+        assert response.body["data"]["reason_code"] == "INVALID_EVIDENCE"
+    assert flow.callbacks == []
