@@ -51,3 +51,5 @@ review-red.log、review-green.log、progress.md 及逐步 RED/GREEN 记录；该
 删除 catalog 两处恒定/冗余分支，功能行为保持。提交前复测为 3697 passed、39 skipped，298.72 秒；静态检查通过。
 
 进度复核（2026-10-30）：P1.1～P1.4 按计划出口逐项通过，详见[阶段一计划验收索引](../superpowers/plans/2026-10-30-business-components-phase1.md#按计划验收复核与当前进度2026-10-30)。后续联合全量 3791 passed / 36 skipped 已补齐原三套未配置迁移库；上述阶段一历史计数保留，不改写为新的阶段一重跑结果。当前 Alembic head 随阶段二迁移变为 f0b120261030；本轮仅同步文档，未重复测试或新增提交。
+
+联合 ship 验证（2026-10-30）：补充共享入口与组件声明拒绝覆盖（提交 f14edbc）后，全量为 **3806 passed / 36 skipped**。此前 3791/36 是补充这 15 项用例前的历史结果；四套独立迁移库及串行 upgrade/check/唯一 head f0b120261030/downgrade 均通过。此处记录联合验证，不改写阶段一历史验收，也不代表部署或现场验收。
