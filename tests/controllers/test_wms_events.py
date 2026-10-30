@@ -57,6 +57,17 @@ async def test_unknown_operation_replays_its_original_rejection(client, callback
     assert "Retry-After" not in first.headers
 
 
+async def test_wms_receipt_does_not_infer_device_from_payload(client, callback_store, envelope):
+    body = envelope | {"data": {"device_code": "UNTRUSTED-DEVICE"}}
+    assert (await client.post(PATH, json=body)).status_code == 422
+    async with callback_store() as session:
+        unknown_device = list(
+            await session.scalars(select(CallbackReceipt).filter_by(device_code=None))
+        )
+        assert len(unknown_device) == 1
+        assert unknown_device[0].operation_id == envelope["operation_id"]
+
+
 @pytest.mark.parametrize("changes", [{"timestamp": 2}, {"data": {"changed": True}}, {"extra": 1}])
 async def test_changed_message_conflicts_without_replacing_receipt(
     client, callback_store, envelope, changes

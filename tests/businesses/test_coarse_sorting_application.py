@@ -15,10 +15,13 @@ SCAN_MIGRATION = (
 def test_scan_contract_exposes_only_device_facts():
     from app.businesses.coarse_sorting.contracts import ScanCompletedData
 
-    facts = {"barcode", "reel_diameter", "reel_thickness"}
+    facts = {"barcode", "size_inch", "thickness_mm"}
     schema = ScanCompletedData.model_json_schema()
     assert set(schema["properties"]) == facts
-    assert all(set(example) == facts for example in schema["examples"])
+    for example in schema["examples"]:
+        assert ScanCompletedData.model_validate(example).model_dump() == {
+            key: example[key] for key in facts
+        }
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
@@ -106,8 +109,8 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
         "timestamp": 1793206799000,
         "data": {
             "barcode": " RAW,TEST-1 ",
-            "reel_diameter": 15,
-            "reel_thickness": 20,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
         },
     }
     try:
@@ -136,7 +139,11 @@ async def test_debug_and_public_callback_share_configured_scan_and_projection(co
     state = await e.client.get(url + "/" + digest, headers=e.headers)
     assert state.status_code == 200, state.text
     original = state.json()["business"]
-    assert original["payload"] == e.body["data"]
+    assert original["payload"] == {
+        "barcode": e.body["data"]["barcode"],
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
     assert original["pending"] is True
     assert original["work_line_id"] == e.lines[0]
     repeated = await e.client.post("/api/v1/callback/event", json=e.body)

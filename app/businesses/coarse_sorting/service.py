@@ -71,7 +71,11 @@ class CoarseSortingService:
                 work_line_version=binding.work_line_version,
                 binding_revision=binding.revision,
                 timestamp=ctx.timestamp,
-                payload=payload.model_dump(mode="json", exclude_unset=True),
+                payload={
+                    "barcode": payload.barcode,
+                    "reel_diameter": payload.size_inch,
+                    "reel_thickness": payload.thickness_mm,
+                },
                 received_at=datetime.now(UTC),
                 pending=True,
                 wait_reason="AWAITING_VALIDATION_STAGE",

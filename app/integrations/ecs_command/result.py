@@ -176,6 +176,7 @@ async def receive_ecs_result(session: AsyncSession, raw: bytes, service) -> EcsR
         session,
         operation="ecs.result",
         operation_id=digest,
+        device_code=envelope.device_code,
         raw_digest=raw_digest,
         effective_digest=None,
         compare_mode="RAW",

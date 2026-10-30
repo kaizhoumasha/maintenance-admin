@@ -20,6 +20,7 @@ class CallbackReceipt(Base):
     __table_args__ = (
         UniqueConstraint("operation", "operation_id"),
         Index("callback_receipt_retention_idx", "created_at", "id"),
+        Index("callback_receipt_device_idx", "device_code", postgresql_using="hash"),
         CheckConstraint(
             "(compare_mode = 'RAW' AND effective_digest IS NULL) OR "
             "(compare_mode = 'EFFECTIVE' AND effective_digest IS NOT NULL)",
@@ -30,6 +31,7 @@ class CallbackReceipt(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     operation: Mapped[str] = mapped_column(String(256))
     operation_id: Mapped[str] = mapped_column(String(64))
+    device_code: Mapped[str | None] = mapped_column(Text)
     raw_digest: Mapped[str] = mapped_column(String(64))
     effective_digest: Mapped[str | None] = mapped_column(String(64))
     compare_mode: Mapped[str] = mapped_column(String(9))

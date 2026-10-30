@@ -77,6 +77,7 @@ async def test_debug_preserves_original_data_identity_receipt_and_diagnostics(ev
     assert state.status_code == 200, state.text
     assert state.json()["receipt"]["response"] == delivered["response"]
     assert state.json()["receipt"]["diagnostic"] == delivered["diagnostic"]
+    assert state.json()["receipt"].get("device_code") == e.body["device_code"]
     assert state.json()["business"] is None
     async with e.factory() as session:
         assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 1

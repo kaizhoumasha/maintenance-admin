@@ -47,7 +47,7 @@
 - 验证、分配、重新分配、完成反馈及旧架离场决定请求均在 `data` 中显式携带必填、非空字符串 `workline_code`。工作线标识具体粗分执行单元，多台粗分机及其 A/B 独立执行单元须通过可信绑定明确区分；`COARSE-A` 仅为示例，不是全场共用默认值。WES 从原扫码受理时的可信设备绑定取得并保存该编码，后续业务请求沿用原工作线上下文，不根据条码、当前设备配置或最近一次作业重新猜测。Transport 提交沿用既有合同，不增加工作线字段，工作线关联保留在 WES 内部。
 - 货架工作点位由 WES 根据原 `workline_code`，从数据库中的 `WorkLine.position_bindings["OUTPUT_RACK"]` 取得；联调配置为 RS01→CLN01、RS02→CLN02，不配置输送线出入口或面向。WMS 分配响应使用工作线编码，不另返位置编码。后续架位使用阶段须保存首次使用时的配置版本及具体位置编码，同一作业后续搬运、重试和结果核对沿用原值；位置绑定缺失时停止推进。配置只表示预期架位，不证明货架已在位或已到位。
 - 粗分机架位不涉及换面，不要求货架面向；共用离场请求的必填 `current_face` 显式为 `null`，Transport 提交省略可选的 `target_face`，到位判断不依赖 `arrival_face`。是否到位仍以原任务已应用成功、货架及具体工作位匹配为准。
-- 本盘厚度和直径统一使用数值字段 `reel_thickness`、`reel_diameter`，示例分别为 `20`、`15`。ECS 上报后由 WES 原样转交 WMS，不改名、不转字符串、不自行换算单位；测量单位和精度见第 7 节。
+- ECS 以数值字段 `size_inch`、`thickness_mm` 上报本盘直径和厚度，单位分别为英寸、毫米。WES 向 WMS 显式映射为 `reel_diameter`、`reel_thickness`，原值传递，不转字符串或换算单位；示例为 `7`、`15.3`。该字段及单位约定已按 2026-10-29 实际报文和用户决定确认，测量精度等剩余事项见第 7 节。
 - 本系统目标草案将 `reel_totalthickness` 定义为数值类型，表示**料格内当前已存储物料的总高度，不包含本次待放入物料**。空料格为 `0`；相对设备 v3.3 的类型调整、数值语义、单位和精度均待 ECS 确认，本文示例按 mm 表示，见第 5 节差异说明。
 - WMS 已掌握工作点位的货架在位信息：无架则补架，有架但无可用箱格则换架，有架且可分配才返回有效箱格。WES 不根据条码缺失、超时或本地状态猜测无架；箱格分配不依赖扫码时的旧料箱清单。
 - WES 负责补/换架的业务顺序和 Transport 请求关联；RCS/MCS 与 ECS 负责 AGV 执行、门禁及现场互锁。WES 不管理入口/出口缓存数量、不实现 AGV 路径调度、硬件恢复或自动补偿。
@@ -224,8 +224,8 @@ WES 原样转交料盘条码；WMS 解析条码、验证收货条件并完成 GR
 | ------------------ | ------------------------------------------------------------------------------------------------------------- |
 | `workline_code`  | 必填非空字符串，原扫码设备可信绑定的作业工作线；示例 `COARSE-A` 标识本例 A 区执行单元，多机现场使用各自编码 |
 | `barcode`        | ECS 上报的原始料盘条码                                                                                        |
-| `reel_diameter`  | ECS 上报的本盘直径，数值类型；单位和精度待 ECS 确认                                                           |
-| `reel_thickness` | ECS 上报的本盘厚度，数值类型；示例按 mm 表示，单位和精度待 ECS 确认                                           |
+| `reel_diameter`  | ECS `size_inch` 的原数值，单位为英寸；`7` 原值传递，不换算为毫米 |
+| `reel_thickness` | ECS `thickness_mm` 的原数值，单位为毫米；示例为 `15.3` |
 
 请求：
 
@@ -237,8 +237,8 @@ WES 原样转交料盘条码；WMS 解析条码、验证收货条件并完成 GR
   "data": {
     "workline_code": "COARSE-A",
     "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
-    "reel_diameter": 15,
-    "reel_thickness": 20
+    "reel_diameter": 7,
+    "reel_thickness": 15.3
   }
 }
 ```
@@ -786,16 +786,19 @@ WES 收据受理响应（HTTP 202）：
 {
   "device_code": "RS-INPUT-ARM-01",
   "event_type": "SCAN_COMPLETED",
-  "timestamp": 1793206799000,
+  "timestamp": 1793313931285,
   "data": {
-    "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
-    "reel_diameter": 15,
-    "reel_thickness": 20
+    "location": "RS-INPUT-ARM-01",
+    "barcode": "P032-0561-000HF,Q2000,MCL21X106KOQNNNE,D2610,LPM37P9L,SSUPRE0012603000AUJ",
+    "scan_time": 1793313931285,
+    "size_inch": 7,
+    "thickness_mm": 15.3,
+    "result": "OK"
   }
 }
 ```
 
-`timestamp` 为原扫码事件时间。`data.barcode` 为原始料盘条码。WES 从受信任的设备绑定确定 `workline_code`，将原条码及检测值用于第 3.1 节。箱格分配以 WMS 掌握的当前在位架及其箱格信息为准，ECS 扫码事件不提供箱码清单。
+`timestamp` 为原扫码事件时间。`data.barcode` 为原始料盘条码。WES 从受信任的设备绑定确定 `workline_code`，将原条码及检测数值用于第 3.1 节：`size_inch → reel_diameter`、`thickness_mm → reel_thickness`，单位及数值保持原样。箱格分配以 WMS 掌握的当前在位架及其箱格信息为准，ECS 扫码事件不提供箱码清单。
 
 WES 可靠保存原收据、业务受理及持久待办后响应（HTTP 200）：
 
@@ -808,9 +811,9 @@ WES 可靠保存原收据、业务受理及持久待办后响应（HTTP 200）�
 
 ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创建验证请求。如何区分同一事件重传和同码真实重入，属于第 7 节待确认合同，不能只按条码字符串判断。
 
-#### 扫码受理基线 v1（2026-10-29 冻结）
+#### 当前扫码测量合同（2026-10-29 实际报文增量）
 
-按本轮用户决定，以当前文档作为本阶段实现依据，采用以下落地规则；不等待第 7 节相关项的对端确认后才开展隔离实现。
+用户已确认按实际上报字段同步实施，WMS 直径也使用英寸。该增量替代此前 ECS 入站测量字段约定；首阶段及双机部署的原设计、实施和验收记录保持原范围，见[本轮设计](../superpowers/specs/2026-10-29-coarse-sorting-scan-measurements-design.md)与[原双机计划](../superpowers/plans/2026-10-29-coarse-sorting-site-configuration.md)。该增量在内部开发验收时仅完成 MOCK、内部验证，未更新服务器制品；后续环境生效状态以对应制品的部署记录为准。
 
 | 字段                    | 本阶段类型与必填性                    | 受理规则                                                                   |
 | ----------------------- | ------------------------------------- | -------------------------------------------------------------------------- |
@@ -818,10 +821,11 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 | `event_type`          | 必填，string，固定 `SCAN_COMPLETED` | 沿用按角色分发的公共接收器                                                 |
 | `timestamp`           | 必填，integer，`0..2**63-1`         | 原事件 UTC Unix 毫秒；沿用公共信封严格校验，不接受 bool 或字符串转换       |
 | `data.barcode`        | 必填，string                          | 原样保存；不解析、修剪、拆分或增加文档未规定的业务格式/长度约束            |
-| `data.reel_diameter`  | 必填，有限 JSON number                | 接受整数或小数，拒绝 bool、字符串和非有限数；不换算单位或新增范围/精度约束 |
-| `data.reel_thickness` | 必填，有限 JSON number                | 同上；单位按原设备值保留，不将示例单位升级为换算规则                       |
+| `data.size_inch`      | 必填，有限 JSON number                | 直径，英寸；接受整数或小数，拒绝 bool、字符串和非有限数；原值映射至 WMS `reel_diameter`，不换算或新增范围/精度约束 |
+| `data.thickness_mm`   | 必填，有限 JSON number                | 厚度，毫米；同样严格校验，原值映射至 WMS `reel_thickness` |
+| `data.location`、`data.scan_time`、`data.result` | 实际报文附加字段，非业务必填 | 沿用额外字段忽略策略；不参与角色选择、业务判定或 WMS data，事件时间使用外层 `timestamp` |
 
-入站 Payload 沿用 `CallbackPayload` 的严格类型及 `extra="ignore"`：额外字段不进入业务 Payload；公共事件摘要仍按原完整 `data` 计算，不能用忽略额外字段后的模型重新计算身份。请求体大小沿用公共接收器的 256 KiB 上限。
+入站 Payload 沿用 `CallbackPayload` 的严格类型及 `extra="ignore"`：额外字段不进入业务 Payload；公共事件摘要仍按原完整 `data` 计算，不能用忽略额外字段后的模型重新计算身份。请求体大小沿用公共接收器的 256 KiB 上限。受理时将三个业务事实归一为既有持久字段 `barcode`、`reel_diameter`、`reel_thickness`，既有待办及 WMS 请求格式保持不变；公共输入不提供旧字段别名或两套入口，不改写历史记录或重放旧事件。
 
 本阶段业务 code 固定为 `coarse_sorting`，入料角色 key 固定为 `INPUT_ARM`；A/B 区使用各自工作线的可信设备绑定，样例设备码不构成配置。当前增量同时声明输送线角色 CONVEYOR 和唯一必需位置槽 OUTPUT_RACK（出料单层货架位）；其余角色及完整业务随后续阶段交付。
 
@@ -1048,7 +1052,7 @@ WES 在受理事务内可靠保存原收据、业务受理和持久待办；业�
 | P05  | WMS / ECS       | 无可补入新架或暂时不能绑定等不可执行情况如何响应；补/换架期间如何稳定方案、协调同工作点位的并发决定，以及目标和原高度的有效性                                                                                                                                                                                                                                                                                                                       |
 | P06  | ECS             | 三类命令 params.barcode 原样透传及其长度/字符约束，以及命令与当前实物的对应保证                                                                                                                                                                                                                                                                                                                                                                     |
 | P07  | ECS             | 事件重传与同码真实重入如何区分，原 timestamp/正文重报是否稳定                                                                                                                                                                                                                                                                                                                                                                             |
-| P08  | ECS             | 确认第 5 节相对 v3.3 的协议调整：三类命令统一使用 params.barcode 透传原始料盘条码；省略固定位置字段后由 ECS 按设备/动作/A/B 单元确定位置及映射失败语义；reel_totalthickness 从 string 改为 JSON number、当前高度不含本盘的语义及单位/精度。冻结三类命令的严格参数/结果附录、cell_id 末位到设备格位的映射及箱型/格位范围及 SUCCESS 完成范围，尤其 PUT_TO_BIN 的 SUCCESS 是否保证原指定箱格已放料；同时确认 reel_thickness、reel_diameter 的单位/精度 |
+| P08  | ECS             | 确认第 5 节相对 v3.3 的协议调整：三类命令统一使用 params.barcode 透传原始料盘条码；省略固定位置字段后由 ECS 按设备/动作/A/B 单元确定位置及映射失败语义；reel_totalthickness 从 string 改为 JSON number、当前高度不含本盘的语义及单位/精度。冻结三类命令的严格参数/结果附录、cell_id 末位到设备格位的映射及箱型/格位范围及 SUCCESS 完成范围，尤其 PUT_TO_BIN 的 SUCCESS 是否保证原指定箱格已放料；同时确认扫码测量精度与误差范围；扫码直径按英寸、厚度按毫米及其 WMS 映射已在第 4.1 节明确 |
 | P09  | ECS             | 命令持久接纳、同号同载荷去重、同号异载荷拒绝、去重与结果保留窗口、原结果重报、跨重启保证及失败/未知后的核对/纠正规则；期限及状态冲突保护须满足 ECS 合同                                                                                                                                                                                                                                                                                             |
 | P10  | WMS             | 确认按 workline_code + binding_id 对一次正常入箱完成去重、相同目标/完成事实幂等收妥、冲突拒绝的规则；原命令及设备关联仅保存在 WES 内部；RECORDED 的确切内部业务效果                                                                                                                                                                                                                                                                                 |
 | P11  | ECS / WES       | 正式设备角色、工作线与 A/B 执行单元绑定、来源认证，以及设备 → ECS → WES → WMS 上报链路的端点和转发配置                                                                                                                                                                                                                                                                                                                                           |

@@ -47,6 +47,43 @@ async def test_unknown_result_does_not_negative_cache(ecs):
         assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
 
 
+async def test_result_receipts_keep_device_for_applied_and_conflicting_results(ecs):
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.reliable.store import MessageStore
+
+    async with ecs.factory.begin() as session:
+        command = await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="device-receipt",
+            device_code="D1",
+            timeout_ms=1000,
+            command=EcsMove(qty=1),
+        )
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    body = dict(
+        command_code=command.command_code,
+        device_code="D1",
+        result="SUCCESS",
+        finish_time=1,
+        data={"qty": 1},
+    )
+    for changes, status in (({}, 200), ({"finish_time": 2}, 409), ({}, 200)):
+        async with ecs.factory.begin() as session:
+            result = await receive_ecs_result(
+                session, json.dumps(body | changes).encode(), ecs.service
+            )
+            assert result.status_code == status
+    async with ecs.factory() as session:
+        rows = list(await session.scalars(select(CallbackReceipt).filter_by(device_code="D1")))
+        assert len(rows) == 2
+        assert {row.status_code for row in rows} == {200, 409}
+        assert {row.operation for row in rows} == {"ecs.result"}
+
+
 async def test_result_transaction_rollback_removes_evidence_and_projection(ecs):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL

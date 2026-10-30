@@ -468,8 +468,8 @@ async def coarse_scan(callback_store, monkeypatch):
     def event(*, device=0, timestamp=1793206799000, changes=None, omit=()):
         data = {
             "barcode": " P032-0561,原始条码 ",
-            "reel_diameter": 15,
-            "reel_thickness": 20,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
         }
         data.update(changes or {})
         for key in omit:

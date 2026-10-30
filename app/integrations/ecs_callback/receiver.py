@@ -149,6 +149,12 @@ async def receive_ecs_event(
             historical.append(receipt)
     if historical:
         return duplicate(min(historical, key=lambda receipt: (receipt.created_at, receipt.id)))
+    try:
+        if "\x00" in device_code:
+            raise ValueError("device_code must not contain NUL")
+        device_code.encode("utf-8")
+    except ValueError:
+        return _invalid([{"field": "device_code", "code": "INVALID_VALUE"}], envelope)
     binding = await resolve_binding(session, device_code) if resolve_binding else None
     if binding is not None and binding.device_code != device_code:
         raise RuntimeError("ECS binding does not match event device")
@@ -164,6 +170,7 @@ async def receive_ecs_event(
         session,
         operation=OPERATION,
         operation_id=identity,
+        device_code=envelope.device_code,
         raw_digest=raw_digest,
         effective_digest=None,
         compare_mode="RAW",

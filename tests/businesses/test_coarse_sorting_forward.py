@@ -5,6 +5,44 @@ import json
 import pytest
 
 
+async def test_actual_measurements_reach_wms_unchanged_after_service_rebuild(coarse_forward):
+    flow = coarse_forward
+    barcode = "P032-0561-000HF,Q2000,MCL21X106KOQNNNE,D2610,LPM37P9L,SSUPRE0012603000AUJ"
+    body = flow.event(
+        timestamp=1793313931285,
+        changes={
+            "location": flow.codes[0],
+            "barcode": barcode,
+            "scan_time": 1793313931285,
+            "size_inch": 7,
+            "thickness_mm": 15.3,
+            "result": "OK",
+        },
+    )
+    response = await flow.post(body)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"code": 200, "message": "ACK"}
+    row = (await flow.rows())[0]
+    assert row["payload"] == {
+        "barcode": barcode,
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
+    assert row["timestamp"] == 1793313931285
+    assert (await flow.post(body)).status_code == 200
+    assert await flow.rows() == [row]
+    flow.rebuild()
+    assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
+    assert await flow.dispatch() == 1
+    request = json.loads(flow.peer.requests[0])
+    assert request["data"] == {
+        "workline_code": row["workline_code"],
+        "barcode": barcode,
+        "reel_diameter": 7,
+        "reel_thickness": 15.3,
+    }
+
+
 @pytest.mark.parametrize("device", [0, 1])
 async def test_original_role_command_completes_with_only_quantity(coarse_forward, device):
     flow = coarse_forward
