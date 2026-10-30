@@ -833,7 +833,7 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 
 扫码接收事务只原子保存原收据、扫码记录和持久待办，不在该事务发送网络请求。由后续独立任务登记原验证及命令。扫码记录与持久去重依据不随公共收据清理删除，本阶段不增加业务清理作业。完整流程、真实设备上报及现场验收不在本轮内部开发验收范围内。
 
-2026-10-29 当前实施范围（含双机配置增量）：唯一正式 SCAN_COMPLETED 入口保存事实，具体推进任务每 5 秒处理持久待办。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，新调用使用内部附录 coarse_sorting.move_forward/2）。按原 command_code + device_code 关联的已应用 SUCCESS 须含严格整数 actual_qty=1 且无待核对项，才进入 AWAITING_ALLOCATION_STAGE；MOVE_FORWARD 的 Result.data 仅包含 actual_qty，执行位置由 ECS 根据设备及动作管理。FAILED、缺数量或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围；原附录 /1 的历史设计及验收结论保持原时间范围。
+2026-10-29 当前实施范围（含双机配置与按业务唤醒增量）：唯一正式 SCAN_COMPLETED 入口保存事实；扫码事实、原 WMS 决策和新 ECS Result 提交后唤醒 coarse_sorting，统一 `business.advance_pending("coarse_sorting")` 任务调用声明的 `scan_pending()`，Beat 每 5 秒调用同一任务兜底。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，新调用使用内部附录 coarse_sorting.move_forward/2）。按原 command_code + device_code 关联的已应用 SUCCESS 须含严格整数 actual_qty=1 且无待核对项，才进入 AWAITING_ALLOCATION_STAGE；MOVE_FORWARD 的 Result.data 仅包含 actual_qty，执行位置由 ECS 根据设备及动作管理。FAILED、缺数量或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围；原附录 /1 的历史设计及验收结论保持原时间范围。
 
 ## 5. ECS 命令与结果示例
 
