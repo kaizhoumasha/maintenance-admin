@@ -1,6 +1,6 @@
 # BIN_Roller Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。B1～B5 已按授权完成本地实现及分项验证；B6 文档边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产接入与整体验收未完成；组件及测试已提交本分支，未合并、未部署。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。B1～B5 已按授权完成本地实现及分项验证；B6 文档边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产接入与整体验收未完成；组件及测试已随 [PR #42](https://github.com/kaizhoumasha/maintenance-admin/pull/42) 合入 develop（`e265ad7`），未部署。
 
 **Goal:** 交付一个 BIN_Roller 组件处理完整滚筒箱流与五层架流，生产业务只提供任务/供箱/接续上下文及 SCAN2 业务接缝。
 
@@ -153,7 +153,7 @@
 
 ## 可编码基线
 
-本轮完成设计收口，B1～B7 按既有顺序执行；不再将未运行的并发/提交未知/重启测试拆成后续小尺度设计审查或启用前置。实现时将这些已列行为直接写入对应测试，再完成最小实现；只有真实代码/合同冲突或验收失败才局部调整，不预加协调状态或平台兜底。B1～B5 可按测试装配推进，B7 的首个真实生产包仍是明确的外部交付依赖，不反向阻挡前面编码。B1～B5 已完成并通过分项复核，B6 文档边界核对完成；B7 共享声明和隔离测试装配已完成，正式生产接入与整体验收仍未完成；组件及测试已提交本分支，未合并、未部署。
+本轮完成设计收口，B1～B7 按既有顺序执行；不再将未运行的并发/提交未知/重启测试拆成后续小尺度设计审查或启用前置。实现时将这些已列行为直接写入对应测试，再完成最小实现；只有真实代码/合同冲突或验收失败才局部调整，不预加协调状态或平台兜底。B1～B5 可按测试装配推进，B7 的首个真实生产包仍是明确的外部交付依赖，不反向阻挡前面编码。B1～B5 已完成并通过分项复核，B6 文档边界核对完成；B7 共享声明和隔离测试装配已完成，正式生产接入与整体验收仍未完成；组件及测试已随 [PR #42](https://github.com/kaizhoumasha/maintenance-admin/pull/42) 合入 develop（`e265ad7`），未部署。
 
 ## 实施进度
 
@@ -162,3 +162,9 @@ B1～B5 已完成本地实现与分项复核；B6 仅核对正常 FIFO 与独立
 B7 本次三文件专项为 **20 passed / 3 skipped**；与原并发、架流、组件、Transport 唤醒及事务回归一起为 **173 passed / 6 skipped**。所有跳过均为 SQLite 不适用的隔离/并发项，PostgreSQL 对应项已执行。Ruff check/format（39 files）、diff check 通过，唯一 Alembic head 为 f0b220261031。此次未运行全量；控制会话后续单独记录全量结果。
 
 B7 剩余：真实完整生产包与正式 catalog 注册、随首个消费包的组件状态迁移、实际宿主的生产 WAIT/整单确认/生产与六类待办公平轮换/事务规则接入、真实 worker 与现场整体验收。现有声明与测试装配不证明这些已交付。维护端点独立交付，不作为 B7 前置；未部署、未真实发送、未取得供应商/现场物理验收。
+
+## 2026-10-31 合并后状态核对
+
+PR #42 已以 Squash 合入 develop（`e265ad725b6401d17174886c05be90fded0bc92c`）。[develop CI #41244757673](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41244757673) 已通过 Ruff 检查、格式检查及 pytest：4366 passed、47 skipped。CI 不替代真实 WMS/ECS/RCS/设备及现场验收。
+
+B1～B5 组件本地实现及分项验证、B6 FIFO 与独立维护 TODO 边界核对保持完成；B7 仅共享声明、隔离测试装配及原 owner 提交后通知等已交付部分完成。真实生产宿主/roller_ports/catalog 消费方、15 张组件状态表的生产迁移与迁移验收、实际业务推进接线及真实系统验收仍未完成。Transport 的 nullable `position_observation` 列已由 `f0b220261031` 交付，后续组件状态迁移不得重复添加。本次只整理文档，未部署、未执行线上迁移。
