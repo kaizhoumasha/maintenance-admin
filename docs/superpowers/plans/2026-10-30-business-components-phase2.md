@@ -1,6 +1,6 @@
 # 阶段二：WMS/Transport 原业务归属与即时唤醒 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans；2026-10-30 采用 executing-plans；阶段一复审提交 90861b7 后实施，经追加授权复审后已提交 a34b28d。Steps use checkbox (`- [ ]`) syntax for tracking。本阶段实现与隔离验收完成，已提交；不部署，不进入阶段三。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans；2026-10-30 采用 executing-plans；阶段一复审提交 90861b7 后实施，经追加授权复审后已提交 a34b28d。Steps use checkbox (`- [ ]`) syntax for tracking。本阶段实现与隔离验收完成，已随 PR #41 合入 develop（f7a9628）；未部署。BIN_Roller 组件已随 PR #42 合入 develop，阶段三正式生产接入尚未完成，当前进度见 [B1～B7](2026-10-30-bin-roller-implementation.md)。
 
 **Goal:** 同一共享 operation/Transport 被多个业务使用时，结果只唤醒创建它的原业务，且通知发生在有效事实提交之后。
 

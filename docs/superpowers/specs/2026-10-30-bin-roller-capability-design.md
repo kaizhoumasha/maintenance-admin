@@ -519,7 +519,7 @@ U01～U08 保留为原讨论编号，均不再列作首版业务未决。规则�
 
 **非离场公开读口的最小实施范围。** 现有 get_result 已公开已应用 outcome/outcome_revision、member_facts 和 pending 的存在/版本。CTU01/02 无额外位置前置，合法到位及已应用失败的明确终位直接读 outcome，不再复制正常结果或等待独立位置事件。BIN_MOVE 回架仍使用现有原已应用结果/相关成员/目标与 TARGET_PLACED 结算；不公开 pending 正文、不改暂存/结算规则，也不借架位置适配创建箱位账。扫码本点事实立即保存，不受 Transport pending/读口是否可用影响。
 
-**唯一存储增量及原因。** 目标/面向不符的 SUCCEEDED 架结果目前只存原收据诊断，原公开口读不到；它不能满足原目标，但身份正确、终位明确时仍须立即保存/更新物理事实，不能改为等待 WMS 更正。仅此分支在原 TransportTask 增 nullable JSON position_observation，保存已严格规范化的原架结果 data（内含原 outcome_revision），由原 get_result 返回独立副本；不重复存 applied outcome/pending，不扩到箱成员/任意诊断，不新增 reason/version 类型、位置总线或“最新已知位置”合并器。只纳入 RACK_MOVE/RACK_ROTATE、原 task/kind/rack 身份匹配且实际终位明确的 TARGET_MISMATCH/FACE_MISMATCH；身份/种类错误、位置未知、原重复/旧版本和终态冲突沿原规则，不制造新观察。原目标/面成功校验及 applied outcome/closure 不变。
+**唯一存储增量及原因。** 目标/面向不符的 SUCCEEDED 架结果曾只存原收据诊断，原公开口无法读取。B1 现已交付下述窄观察读口。此类结果不能满足原目标，但身份正确、终位明确时仍须立即保存/更新物理事实，不能改为等待 WMS 更正。仅此分支在原 TransportTask 增 nullable JSON position_observation，保存已严格规范化的原架结果 data（内含原 outcome_revision），由原 get_result 返回独立副本；不重复存 applied outcome/pending，不扩到箱成员/任意诊断，不新增 reason/version 类型、位置总线或“最新已知位置”合并器。只纳入 RACK_MOVE/RACK_ROTATE、原 task/kind/rack 身份匹配且实际终位明确的 TARGET_MISMATCH/FACE_MISMATCH；身份/种类错误、位置未知、原重复/旧版本和终态冲突沿原规则，不制造新观察。原目标/面成功校验及 applied outcome/closure 不变。
 
 组件用原任务及原 revision 消费该明确位置，与当前原动作履约分别记录；同一原任务已有较新原事实时不回退，不比较跨 Transport revision，不把观察当下一动作许可。新异常位置快照提交只复用现有 after_commit/owner_domain 唤醒，5 秒同一业务 Beat 兜底；不新加观察任务/进度等待。WMS 后续合法原更正负责原动作结算；其未到不阻挡本点扫码或独立新架到位。B1 已以 f0b220261031 迁移交付这一个必需 nullable 列；B7 随首个真实消费包迁移组件状态，不重复添加该列，不从诊断回填历史，不修改 pending/结果结算矩阵。
 
