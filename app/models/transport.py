@@ -35,3 +35,4 @@ class TransportTask(Base):
     applied_outcome_revision: Mapped[int | None] = mapped_column(BigInteger)
     outcome_digests: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     pending_outcome: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    position_observation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
