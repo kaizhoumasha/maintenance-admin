@@ -1,6 +1,6 @@
 import logging
 import random
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -75,6 +75,7 @@ class MessageStore:
         lifecycles=None,
         served_snapshot_protocols=None,
         on_result: Callable[[str, str | None], None] | None = None,
+        on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[None]] | None = None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -87,6 +88,7 @@ class MessageStore:
         self.snapshots = SnapshotTransactions(self, lifecycles or {})
         self.served_snapshot_protocols = served_snapshot_protocols
         self.on_result = on_result
+        self.on_delivered = on_delivered
         self._skipped_claim_cursor = None
 
     def _time(self, session, value):
@@ -283,6 +285,8 @@ class MessageStore:
                 .returning(ReliableMessage.id)
             )
             if changed is not None:
+                if outcome.status == MessageStatus.DONE and self.on_delivered is not None:
+                    await self.on_delivered(session, claim.message)
                 self._notify_terminal(session, claim.message, outcome.status)
         if changed is not None:
             self._log(

@@ -1,10 +1,18 @@
 """Route committed inputs to catalog-owned business pending entries."""
 
 import logging
+from functools import partial
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.businesses import catalog
 from app.integrations.registration import RegistrationSource
 from app.integrations.wms_request.operation import operations
+from app.integrations.wms_transport import OPERATION
+from app.models.transport import TransportTask
+from app.reliable import OutgoingMessage
+from app.transactions import after_commit
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +73,16 @@ def ecs_result_committed(owner_domain: str) -> None:
 def notify_business_committed(business_code: str) -> None:
     if business_code in catalog.progressions():
         enqueue_business(business_code)
+
+
+async def transport_submit_delivered(session: AsyncSession, message: OutgoingMessage) -> None:
+    if message.operation != OPERATION or message.business_key is None:
+        return
+    owner = await session.scalar(
+        select(TransportTask.owner_domain).where(
+            TransportTask.transport_task_id == message.business_key,
+            TransportTask.operation_id == message.operation_id,
+        )
+    )
+    if owner is not None and owner in catalog.progressions():
+        after_commit(session, partial(notify_business_committed, owner))
