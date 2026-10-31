@@ -4,6 +4,12 @@
 
 各 API 直接携带本次业务对象、动作所需参数或观察事实。精简以去掉无关字段和无意义嵌套为准，不通过引用前序请求来补全 payload；`operation_id` 用于本次请求的幂等处理。
 
+本工作段在 SCAN2 完成逐盘义务后，按原 arrival 通过 BIN_Roller 决定释放，由组件创建并履约原放行；后续 **SCAN3 → SCAN4 → FIFO → Return_Batch、回架及尾箱清退**统一引用[公共料箱回流能力](workline-bin-return-api.md)，不另建自动线退箱 API、FIFO 或回架报告。BIN_Roller B1～B5 本地实现及分项验证、B6 边界核对已完成，B7 共享声明与隔离测试装配已完成；正式生产宿主/catalog、组件状态迁移及现场整体验收仍未完成。
+
+公共入站采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：SCAN1 本点扫码直接证明到位，仅 -B 且本线当前任务有效时前进，否则旁路 SCAN3；不匹配原投箱成员、不等待原投箱回调。SCAN2 自动拣料准入沿本文，由 BIN_Roller 唯一受理并同事务委托生产业务；原放行由组件执行。普通/drain 共用组件内部一套架流，无组件手工锁/占位。迟到上游只补原履约；U01/U02/U03 及 ECS/物理推进规则已确认；U04 沿已验证 manual-picking 适配，CTU03 明确接纳即释放 WES 周期；U05 各生产接缝沿自身合同，U08 同任务接续沿已实现基线；首版明确不做跨任务/跨普通-drain 目的留场复用及早到完工自动补绑；U01～U08 不再列首版业务未决，非离场正常/失败终位复用现有公开结果，B1/B7 只补身份正确、终位明确的目标/面向不符架位置及原 owner 通知，不复制正常/pending 结果，本系统验收另行落实。
+
+实现归属约定：本文“WES 创建/登记 SCAN2 MOVE_FORWARD”表示生产业务按原本次到位决定释放，再调用 BIN_Roller 登记并履约原命令；业务不另注册 SCAN2 事件或发送路径。WMS 报文字段及各业务准入/完成条件不因代码归属调整改变。
+
 ## 目录
 
 - [完整交互顺序](#完整交互顺序)
@@ -30,6 +36,7 @@
 | BIN | B8 | ECS → WES | [原 ARM02 命令结果](#331-目标放盘成功回调) | 保存实际放盘结果 | 物理成功且位置确定后才能报告完成 |
 | BIN | B9 | WES → WMS | [outbound.material.movement_report@v1](#23-物料位置上报) | 上报本盘实际移动事实 | RECORDED / DUPLICATE 仅闭合本次交付；后继取料条件见 B6 |
 | BIN | B10 | WES → ECS | [点 2 / MOVE_FORWARD](#35-整箱放行) | 整箱正常放行 | 明确 NO_WORK，或无后继、无待消费授权且本箱义务结清 |
+| 公共回流 | C1 | ECS → WES → WMS / RCS | [SCAN3 / SCAN4 / FIFO / Return_Batch](workline-bin-return-api.md#return-sequence) | 实际下游交接后统一分流、回架及尾箱清退 | 不以 B10 命令创建或 ACK 证明已接到箱；按公共事实及原身份推进 |
 | RackSlot | R1 | WMS → WES | [outbound.picking_task.plan_delta@v1](#24-退料货架前置计划) | 安排有序来源货架及面 | 计划连续应用；不提前安排全部 SLOT |
 | RackSlot | R2 | WES → WMS → RCS | [来源架 Transport](#272-按前置计划推进来源) | 编排当前计划架面进场 | 按既有 Transport 合同执行，提交接纳不代表到位 |
 | RackSlot | R3 | WMS → WES | [原 Transport 结果](#272-按前置计划推进来源) | 保存来源架真实到位事实 | 原成功结果、实际工作位及面向匹配并已可靠应用 |
@@ -999,7 +1006,7 @@ REJECT 不返回 `SOURCE_CELL_MISMATCH` 或 `CONTINUE`，不套用 Cell 的异�
 
 换面或换架后不沿用上一面的 `READY` 或 `next_source_action`。新作业请求完整携带新的实际 `rack_id + rack_face + arrived_at`，不引用上一面请求 ID。
 源架换面和搬运通过 WMS/Transport 执行，不作为 ARM02 的 ECS 指令。`target_preparation` 只用于当前盘的目标货架准备，不能用它指挥来源架换面或换架。
-离场决定为 `WAIT` 时按该决定等待；搬运仅接纳或结果未知时，保留原身份、正文和直接依赖，不以 ACK 推断工作位已清空，也不换身份重建等价搬运。下一架的作业仍必须以其自己的真实到位事实为依据。
+离场决定为 `WAIT` 时按该决定等待；五层架 CTU03 原请求明确接纳即释放 WES 周期，不等最终位置/Result；接纳未知则保留原身份及直接义务，不换身份重建搬运。该释放不代替下一架自身实际到位，也不改变其他动作成功判据。下一架的作业仍必须以其自己的真实到位事实为依据。
 
 #### 2.7.3 没有下一架面与整单完成
 

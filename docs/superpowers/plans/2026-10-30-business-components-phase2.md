@@ -8,6 +8,8 @@
 
 **Tech Stack:** 原 WmsRequests/Outbox/MessageStore/Transport、SQLAlchemy/Alembic、Celery、pytest；仅 Transport 原归属需本阶段新增 schema。
 
+**Spec:** [组件/原业务推进合同](../../integrations/business-packages.md)、[当前 BIN_Roller 事务与归属](../specs/2026-10-30-bin-roller-capability-design.md)、[总计划](2026-10-30-business-components-bin-roller.md)、[阶段一接口](2026-10-30-business-components-phase1.md)。
+
 **参考：** [业务组合与原归属指南](../../integrations/business-packages.md)、[阶段一计划](2026-10-30-business-components-phase1.md)、[阶段二验收](../../testing/business-components-phase2.md)。
 
 ## Global Constraints

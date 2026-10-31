@@ -37,6 +37,8 @@ WMS仅读取原消息的终局响应，沿用facts／decisions的适配器信封
 
 Transport只返回有效已应用结果及版本；pending只提供存在标记和版本，回调使提交DONE也不证明搬运完成。member_facts是原任务累积的历史里程碑，可能在更新UNKNOWN后继续保留TARGET_PLACED；不能据此覆盖较新已应用UNKNOWN、绕过pending、推导当前占用或创建下一动作。原回调前置条件不变。只有拒绝证据而没有已应用结果时，同任务已接纳的SOURCE_PICKED／与冻结目标匹配的TARGET_PLACED会使拒绝闭合变为UNDETERMINED／INVALID_EVIDENCE，保留原拒绝及历史里程碑供核对；不据此推导当前完成。原POSITION_UNKNOWN事件仅记诊断，不存为里程碑。后续有效已应用结果仍按矩阵优先，不把历史冲突变成永久阻塞。
 
+**BIN_Roller B1/B7 窄适配已实现：** [实现计划](../superpowers/plans/2026-10-30-bin-roller-implementation.md)直接复用 outcome/member_facts；原 TransportTask 新增 nullable JSON 字段 position_observation，公开结果读口返回其原 task/kind/rack 身份正确、终位明确但目标/面向不符的架结果 data 副本及原 outcome_revision。读口不解析诊断或生成“最新位置”；身份/位置未知及原终态冲突不提升为事实。观察只更新位置，不授权动作或改变 outcome/closure，也不构成额外等待；新异常架位置保存后经既有 after_commit 唤醒原 owner。组件本地行为与测试宿主已验证，正式生产接入及组件状态迁移仍未交付。
+
 Transport提交关联按原operation_id＋transport.task.submit@v1＋business_key=transport_task_id跨target查询，零条UNAVAILABLE、多条AMBIGUOUS，不能挑最新。有效已应用终态不依赖提交消息继续保留。
 
 ## 闭合与前序范围
@@ -68,13 +70,15 @@ predecessors = await transport_service.list_unclosed_predecessors(
 
 受理处理器继续用原ctx.session，同事务保存原收据、受理状态和持久待推进依据；原协议与稳定拒绝／临时回滚语义保持。不得在已执行SQL的处理器中换隔离、提交／回滚，或另开写事务尝试推进。只依赖本次输入及当前许可的初始意图可按业务合同登记。
 
-默认由事件／结果提交后立即投递具体 Celery 推进任务，Beat 扫描持久待办兜底；两者调用 composition.PROGRESSION 声明的同一业务待办入口，再由业务按原 execution_id 独立推进。通知只携带 business_code，调度壳不查询业务表或消费结果。待办扫描只用短会话定位候选业务 ID，不消费结果，也不为整轮扫描持有推进事务。每条记录的 `advance` 拥有独立的新 session 与事务，在首条 SQL 前配置 REPEATABLE READ，按工作线→设备→业务执行锁序核对当前许可和全部前序。任务内复用数据库引擎和连接不等于跨记录复用 session 或事务。平台结果读取接口不接管事务；结果接收／应用仍留在原框架事务，提交后才能被推进消费。
+默认由事件／结果提交后立即投递具体 Celery 推进任务，Beat 扫描持久待办兜底；两者调用 composition.PROGRESSION 声明的同一业务待办入口，再由业务按原 execution_id 独立推进。通知只携带 business_code，调度壳不查询业务表或消费结果。待办扫描只用短会话定位候选业务 ID，不消费结果，也不为整轮扫描持有推进事务。每条记录的 `advance` 拥有独立的新 session 与事务，通用基线在首条 SQL 前配置 REPEATABLE READ，按工作线→设备→业务执行锁序核对当前许可和全部前序。任务内复用数据库引擎和连接不等于跨记录复用 session 或事务。平台结果读取接口不接管事务；结果接收／应用仍留在原框架事务，提交后才能被推进消费。
 
 应用装配注入结果通知端口；`MessageStore.on_result(operation, business_key)` 在非快照请求终态成功保存后的最外层提交后通知，覆盖 WMS 决策 HTTP 响应。ECS 命令 ACK 仍只是投递证据，业务唤醒来自新 Result 证据提交后的 `owner_domain`。通用机制不查询业务表或直接调用业务；平台按原本地业务关联／原命令 owner 路由到统一业务待办任务；仅旧专属 WMS 的 None 关联沿原注册源。事务回滚、陈旧完成不通知；发布失败不撤销结果或伪装接收失败，由原 pending 扫描恢复。UNKNOWN/HELD 仍按原协议和门禁核对，不因唤醒换身份重发。
 
-当前自动通知覆盖业务所属 ECS Event、Accepted WMS 入站回调、普通非快照 WMS 请求有效终态和新 ECS Result。WMS 请求原本地 business_key=business:<业务码> 与结果一并沿原事务处理；本地 EXPIRED（含过期租约维护）也是提交后通知，不改变原不确定性或重试规则。TransportTask 保存 nullable owner_domain；只有原回调使 applied_outcome_revision 实际前进时经 after_commit 通知原业务，位置补齐暂存结果同样覆盖。ACK、单独位置事实、重复/冲突和空归属不冒充应用，也不按 operation 名称猜测或广播；丢通知由同一业务 pending/Beat 兜底。
+当前自动通知覆盖业务所属 ECS Event、Accepted WMS 入站回调、普通非快照 WMS 请求有效终态和新 ECS Result。WMS 请求原本地 business_key=business:<业务码> 与结果一并沿原事务处理；本地 EXPIRED（含过期租约维护）也是提交后通知，不改变原不确定性或重试规则。TransportTask 保存 nullable owner_domain；原 submit 有效 RECEIVED/202 或 DUPLICATE/200 保存 DONE 时，平台在同事务按原 operation_id 和 business_key=transport_task_id 精确读取原 owner，经 after_commit 通知原业务。原回调使 applied_outcome_revision 实际前进或新明确异常架位置保存时也通知，位置补齐暂存结果同样覆盖。接纳通知不冒充 applied outcome 或物理完成；失败/未知、重复完成、失效租约、回滚及无已知归属不猜测或广播。原消息身份/字节和既有终态通知不变；丢通知由同一业务 pending/Beat 兜底。
 
-单个Transport结果和有界前序批次各用一条SQL取得任务及全部提交关联；同一次判断需要多次分批、跨轮逐个或混合读取时，全部查询必须在同一session／同一REPEATABLE READ事务中完成。固定完整原身份和资源范围，不跨失败、事务或重启拼接片段。READ COMMITTED即使共用事务也不是统一快照。需要更新事实时换新事务重读整组；同一快照内不会看到外部新提交。快照不提供物理锁或派发时的执行授权。
+**BIN_Roller 目标业务的隔离例外（测试宿主已验证，正式生产宿主未交付）：** 仅会进入组件架流/正常求架检查的原宿主单条独立 advance 在首 SQL 前设 SERIALIZABLE，复用原 session_factory、业务幂等及 Outbox/after_commit。集合判定、登记和业务消费均在该入口整笔执行，不能只升 DRAIN 分支；RR/请求级待决唯一不足以覆盖旧快照跨 WAIT/READY 消费的首登。receiver 原受理/结果应用、短扫描、已有无关纯生产及其他业务保持原隔离，不修改共享 factory/engine/池默认，不新增选择器/执行器。既有 40001 重试须包住外层 commit；非 40001 提交未知沿原待办进入完整 SERIALIZABLE 推进，查空不证明回滚也不直接授权新登记；原业务判定/唯一性、集合依赖及最终提交共同校验，不换已提交身份或新增确认状态。原连接执行选项关闭/归还时恢复，不新增重置钩子。结果读口仍只用调用方 session。见[BIN_Roller U06 范围及恢复](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#roller-u06-minimal-transaction)。
+
+单个Transport结果和有界前序批次各用一条SQL取得任务及全部提交关联；同一次判断需要多次分批、跨轮逐个或混合读取时，全部查询必须在同一 session／同一统一快照事务中完成：通用基线 REPEATABLE READ，上述 BIN_Roller 相关独立 advance 采用 SERIALIZABLE。固定完整原身份和资源范围，不跨失败、事务或重启拼接片段。READ COMMITTED即使共用事务也不是统一快照。需要更新事实时换新事务重读整组；同一快照内不会看到外部新提交。快照不提供物理锁或派发时的执行授权。
 
 下面是独立推进入口的事务示意；advance_owned_business是具体业务自己的服务，并非平台新增接口。次数3仅用于说明有界重试，真实业务计划须明确策略和耗尽后的待办恢复／受控失败行为。
 
@@ -106,4 +110,4 @@ async def wake_execution(session_factory, execution_id, advance_owned_business):
 阶段二本地归属不进入 WMS/Transport 协议字段，也不改变冻结请求、input_digest、operation_id、client_request_id 或 caller/cycle。
 运行时绑定业务实例负责新请求消费者核对和原关联重放冲突；默认未绑定实例不能创建正式共享 WMS 请求。
 旧 None 不回填；公开 Transport owner_domain 只是原关联，不授权新动作。该列迁移有非空证据时阻止降级删除。
-测试与部署边界见[阶段二验收](../testing/business-components-phase2.md)，bin_return/SMT 接入仍属于未实施阶段三。
+测试与部署边界见[阶段二验收](../testing/business-components-phase2.md)，BIN_Roller 阶段三已完成本地组件及隔离测试装配，正式生产宿主/catalog、组件状态迁移及 SMT 接入仍未完成。

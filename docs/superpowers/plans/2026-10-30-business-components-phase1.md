@@ -8,6 +8,8 @@
 
 **Tech Stack:** 现有 Python/FastAPI/SQLAlchemy/Celery/pytest；无数据库迁移或新依赖。
 
+**Spec:** [组件框架合同](../../integrations/business-packages.md)、[当前 BIN_Roller 边界](../specs/2026-10-30-bin-roller-capability-design.md)、[总计划](2026-10-30-business-components-bin-roller.md)。
+
 **参考：** [业务组合与原归属指南](../../integrations/business-packages.md)、[阶段一计划](2026-10-30-business-components-phase1.md)、[阶段二验收](../../testing/business-components-phase2.md)。
 
 ## Global Constraints

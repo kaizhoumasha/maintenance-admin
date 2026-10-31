@@ -504,7 +504,7 @@ WMS 根据原绑定、目标及完成事实处理内部落库，不要求返回�
 
 ### 3.4 换架前复用旧架离场去向决定
 
-通过 `POST /api/v1/wes/decisions` 调用本系统拟议的共用货架离场决定 `rack.departure_decide@v1`，供人工、粗分和自动线草案共同采用。名称和字段约束尚待 WMS/WES 确认，未注册、未实施，见[共用合同说明](workline-business-api.md#货架离场决定的拟议共用合同)。请求 data 包含 `workline_code`、`rack_id`、`current_location`、`current_face`；WMS 核对货架和当前位置属于该工作线上下文后决定离场去向。响应为 READY 及目的地，或 WAIT 及等待间隔。
+通过 `POST /api/v1/wes/decisions` 调用本系统拟议的共用货架离场决定 `rack.departure_decide@v1`，供人工、粗分和自动线草案共同采用。本方名称、字段、公共错误/重放、WAIT 续问及唯一搬离关联已按 [共用离场合同](workline-business-api.md#rack-departure-confirmed-wire)固定；BIN_Roller 严格组件声明与本地实现已完成，正式消费业务尚未注册，仍需对端签认及现场验证。请求 data 包含 `workline_code`、`rack_id`、`current_location`、`current_face`；WMS 核对货架和当前位置属于该工作线上下文后决定离场去向。响应为 READY 及目的地，或 WAIT 及等待间隔。
 
 上述四个请求字段均须存在；`workline_code` 为原业务保存的工作线编码，`current_location` 必须是已确认的 `RACK_POSITION`；粗分机架位不要求面向，`current_face` 显式为 `null`，不省略该共用字段或补造面向值。
 
@@ -1060,7 +1060,7 @@ WES 在受理事务内可靠保存原收据、业务受理和持久待办；业�
 | P13  | WMS / WES       | 旧架可交出条件与既有入箱/完成报告义务如何衔接，以及何时允许离场                                                                                                                                                                                                                                                                                                                                                                                     |
 | P14  | WMS / RCS / ECS | 本业务架型对应的 Transport 模板、实际工作点位、门禁互锁、已应用结果与 WMS 在位信息更新的衔接；到位后新分配不得继续使用旧架信息。示例 F01 不是现场验收结论                                                                                                                                                                                                                                                                                           |
 | P15  | WMS / WES       | 旧架/新架确定失败或取消后的业务恢复与重新决定条件、当前物理位置依据、同一工作点位的并发补换架去重；结果未知时保留原身份，不自动创建替代动作                                                                                                                                                                                                                                                                                                         |
-| P16  | WMS / WES       | 确认拟议共用 `rack.departure_decide@v1` 的名称、workline_code / rack_id / current_location / current_face 四个必填请求字段及 READY/WAIT、幂等和错误规则；与人工/自动线采用同一目标合同，确认前不注册                                                                                                                                                                                                                                              |
+| P16 | WMS / WES | 共用 rack.departure_decide 的名称、四字段/READY/WAIT、公共错误/幂等、WAIT 续问及唯一搬离关联已按本方共用合同固定；BIN_Roller 严格组件声明与本地实现已完成，正式消费业务尚未注册，仍需对端签认及现场验证；人工/粗分/自动线共用同一目标合同 |
 
 ## 8. 对接验收范围
 
