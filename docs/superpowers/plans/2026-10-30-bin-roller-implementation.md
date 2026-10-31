@@ -1,6 +1,6 @@
 # BIN_Roller Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。B1～B5 已按授权完成本地实现及分项验证；B6 文档边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产接入与整体验收未完成；未提交。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。B1～B5 已按授权完成本地实现及分项验证；B6 文档边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产接入与整体验收未完成；组件及测试已提交本分支，未合并、未部署。
 
 **Goal:** 交付一个 BIN_Roller 组件处理完整滚筒箱流与五层架流，生产业务只提供任务/供箱/接续上下文及 SCAN2 业务接缝。
 
@@ -153,7 +153,7 @@
 
 ## 可编码基线
 
-本轮完成设计收口，B1～B7 按既有顺序执行；不再将未运行的并发/提交未知/重启测试拆成后续小尺度设计审查或启用前置。实现时将这些已列行为直接写入对应测试，再完成最小实现；只有真实代码/合同冲突或验收失败才局部调整，不预加协调状态或平台兜底。B1～B5 可按测试装配推进，B7 的首个真实生产包仍是明确的外部交付依赖，不反向阻挡前面编码。B1～B5 已完成并通过分项复核，B6 文档边界核对完成；B7 共享声明和隔离测试装配已完成，正式生产接入与整体验收仍未完成；未提交。
+本轮完成设计收口，B1～B7 按既有顺序执行；不再将未运行的并发/提交未知/重启测试拆成后续小尺度设计审查或启用前置。实现时将这些已列行为直接写入对应测试，再完成最小实现；只有真实代码/合同冲突或验收失败才局部调整，不预加协调状态或平台兜底。B1～B5 可按测试装配推进，B7 的首个真实生产包仍是明确的外部交付依赖，不反向阻挡前面编码。B1～B5 已完成并通过分项复核，B6 文档边界核对完成；B7 共享声明和隔离测试装配已完成，正式生产接入与整体验收仍未完成；组件及测试已提交本分支，未合并、未部署。
 
 ## 实施进度
 
