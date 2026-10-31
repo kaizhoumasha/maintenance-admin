@@ -158,3 +158,13 @@ async def test_committed_expiry_notifies_original_association_once(storage, tran
         assert row.business_key == "opaque:deadline"
         if claim is not None:
             assert row.delivery_uncertain
+
+
+async def test_native_delivery_hook_leaves_opaque_terminal_callback_unchanged(storage, delivered):
+    from app.business_wakeups import transport_submit_delivered
+
+    published = []
+    store, _, claim = await claim_message(storage, lambda *args: published.append(args))
+    store.on_delivered = transport_submit_delivered
+    assert await store.finish(claim, delivered)
+    assert published == [("opaque", "opaque:original")]

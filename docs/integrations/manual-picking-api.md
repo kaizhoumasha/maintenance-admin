@@ -2,6 +2,8 @@
 
 状态：**人工分拣接口接入参考，业务尚未接入本系统。** 先读[共用规则](workline-business-api.md)。这里的“人工”指 WMS/PDA 完成人工作业，WES 编排货架、料箱和滚筒命令，不给人工线机械臂下发 PICK_AND_PUT。
 
+公共滚筒入站采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：四点由组件唯一受理；SCAN2 在原受理事务内委托人工生产接缝，准入/WAIT/完工与释放许可仍由原生产业务决定，组件登记并履约原放行命令。后续 SCAN3 → SCAN4 → FIFO → Return_Batch、回架及尾箱清退统一引用[公共料箱回流能力](workline-bin-return-api.md)，不在人工业务复制第二套回流状态或发送路径。组件已有本地实现与隔离测试，人工正式生产接入仍属 B7 未完成依赖。
+
 ## 1. 输入、资源和业务边界
 
 初始触发是 WMS 的 `outbound.picking_task.issued@v1`。`task_type=MANUAL` 表示执行模式，必填的 `business_type=inbound|outbound` 表示业务方向；两者不是同一概念。入库和出库共用该 operation 及队列、计划、人工处理和退箱生命周期。

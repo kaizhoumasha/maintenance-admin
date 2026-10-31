@@ -7,6 +7,8 @@
 | [人工分拣](manual-picking-api.md) | 单据驱动，货架供料、人工处理、退箱、换面及离场 | 参考旧系统流程；共用离场合同等调整待确认，业务未接入 |
 | [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 已实现扫码、验证绑定、MOVE_FORWARD 及原 Result 消费，成功后等待箱格分配；后续阶段未实现，对端合同及设备附录待确认 |
 | [自动线](automatic-picking-wms-api.md) | BIN / RackSlot 逐盘取料、决定、放置及来源架面推进 | 本系统对接草案；简化 wire、盘次关联及设备边界待确认，业务未接入 |
+| [BIN_Roller](../superpowers/specs/2026-10-30-bin-roller-capability-design.md) | 四点、完整供箱/回流及架生命周期；生产业务提供上下文与 SCAN2 接缝 | B1～B5 本地实现及分项验证、B6 边界核对已完成；B7 共享声明/隔离测试装配已完成，正式生产宿主/catalog、组件状态迁移及现场验收未完成，不加锁/占位 |
+| [公共料箱回流](workline-bin-return-api.md) | SCAN3 → SCAN4 → 工作线 FIFO → Return_Batch、回架及尾箱清退 | C01～C07 本方边界及组件本地实现已完成；正式生产宿主/catalog、组件状态迁移及供应商/现场验收仍属 B7 |
 | [业务开发唯一用法设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md) | 唯一公开模型 API、命令声明、业务目录及迁移边界 | 已实现；MOCK 与内部验证结果见当前验收说明 |
 
 业务使用模型 send/create、`@ecs_command(..., device_roles=(...))` 及 composition `COMMANDS`，catalog 内部编译；业务目录唯一为 `app/businesses/<business>/`。
@@ -57,7 +59,132 @@ WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合
 
 人工、粗分和自动线草案统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `workline_code`、`rack_id`、`current_location`、`current_face`；`workline_code` 为原业务保存的非空工作线编码，须与货架及工作点位上下文一致；当前位置为已确认的 `RACK_POSITION`，面向不适用或无法确认时显式为 `null`。粗分架位不涉及面向，使用 `current_face=null`；人工及自动线仍按各自业务要求核对面向。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
 
-这是本系统**拟议的新共用合同，尚待 WMS/WES 确认，未注册、未实施**。旧系统来源基线的离场 operation 带 `outbound` 前缀，且要求 `task_id` 字段存在（可为 null）；不能把本文的改名和字段裁剪当作旧 DTO 已支持的原样复用。三份草案仅保留上述目标用法，不增加兼容入口；对端确认名称、请求/响应、幂等及错误规则后，才能交付本系统的正式 DTO 和业务入口。这里的历史来源说明不改变第 1 节所列核对基线。
+这是本系统**本方已确认的共用目标合同，严格组件声明与本地实现已完成，正式消费业务尚未注册，仍需对端签认及现场验证**。旧系统来源基线的离场 operation 带 `outbound` 前缀，且要求 `task_id` 字段存在（可为 null）；本文改名和字段裁剪不表示旧 DTO 已支持。人工、粗分及自动线采用下述同一目标合同，不增加兼容入口；历史来源说明不改变第 1 节的核对基线。
+
+<a id="rack-departure-confirmed-wire"></a>
+#### 已确认：共用离场决定、重放与唯一搬离
+
+本方已确认。WES → WMS，POST /api/v1/wes/decisions；四个 data 字段均必填，不增加 task_id/外部到位号。仅在本架满足所属业务交出条件时请求，当前位置/面向必须沿原可靠事实，单层架面向不适用为 null。完整请求：
+
+```json
+{
+  "operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee940",
+  "operation": "rack.departure_decide@v1",
+  "timestamp": 1793378000000,
+  "data": {
+    "workline_code": "SORTING-LINE-01",
+    "rack_id": "COARSE-RACK-001",
+    "current_location": {
+      "type": "RACK_POSITION",
+      "location_code": "SORTING-LINE-01-LEFT"
+    },
+    "current_face": null
+  }
+}
+```
+
+HTTP 200 / DECIDED 的 READY：
+
+```json
+{
+  "operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee940",
+  "code": "DECIDED",
+  "timestamp": 1793378000100,
+  "data": {
+    "result": "READY",
+    "rack_destination": {
+      "type": "RACK_POSITION",
+      "location_code": "EMPTY-RACK-BUFFER-01"
+    }
+  }
+}
+```
+
+READY 的 rack_destination 支持 ZONE/RACK_POSITION，沿 Transport 位置结构映射；保存原去向，不固定库区或根据其它决定猜测。WAIT 与 READY 为同一请求的互斥示例：
+
+```json
+{
+  "operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee940",
+  "code": "DECIDED",
+  "timestamp": 1793378000100,
+  "data": {
+    "result": "WAIT",
+    "retry_after_ms": 1000
+  }
+}
+```
+
+retry_after_ms 为整数 1～60000。保存有效 WAIT 和固定到期点，到期或出现与本次离场相关的新业务事实时用新 operation_id/timestamp 求值；重复唤醒/相同旧事实不另建请求。同次在位最多一条未决离场求值。响应未知或 503 只恢复原身份/完整正文；这里的“到期或新事实”是共用离场 WAIT，不改变逐盘物料 WAIT 的最早续问时点。
+
+| HTTP / code | data 与处理 |
+| --- | --- |
+| 400 / 无 | 空响应体；非法 JSON 或不能提取合法请求身份 |
+| 413 / 无 | 空响应体；正文超过公共 256 KiB 上限 |
+| 422 / REJECTED | reason_code=INVALID_ENVELOPE/UNSUPPORTED_OPERATION/INVALID_DATA，仅 INVALID_DATA 可带 field_path |
+| 409 / CONFLICT | reason_code=IDEMPOTENCY_CONFLICT/REFERENCE_CONFLICT/STATE_CONFLICT |
+| 503 / UNAVAILABLE | 固定 {}，沿原身份恢复，不形成离场许可 |
+
+同号原内容已经处理后，再修改 timestamp/当前位置等已定义字段，HTTP 409：
+
+```json
+{
+  "operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee940",
+  "code": "CONFLICT",
+  "timestamp": 1793378000300,
+  "data": {
+    "reason_code": "IDEMPOTENCY_CONFLICT"
+  }
+}
+```
+
+工作线/架/当前位置等引用不成立或不匹配用 REFERENCE_CONFLICT；引用成立但当前业务状态不允许离场（如仍有在途搬运）用 STATE_CONFLICT。422/409 不自动换号绕过，不解释成 WAIT；正常暂不能分配去向使用 WAIT。
+
+同一 (operation,operation_id)、相同有效内容重放首次完整 READY/WAIT 及原响应时间，不返回 DUPLICATE、不重新分配目的地。有效 WAIT 后的新身份是重新求值，可以得到新结果；已有 READY 后不得另领去向。旧响应只处理原在位/离场记录，不能作为同码新架的许可。
+
+READY 对应的唯一 RACK_MOVE 示例，WES → WMS，POST /api/v1/wes/transport-requests：
+
+```json
+{
+  "operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee941",
+  "operation": "transport.task.submit@v1",
+  "timestamp": 1793378000200,
+  "data": {
+    "transport_task_id": "TRANSPORT-PA-LEFT-OUT-002",
+    "kind": "RACK_MOVE",
+    "rack_id": "COARSE-RACK-001",
+    "rcs_template_id": "F01",
+    "source": {
+      "kind": "RACK_POSITION",
+      "location_code": "SORTING-LINE-01-LEFT"
+    },
+    "target": {
+      "kind": "RACK_POSITION",
+      "location_code": "EMPTY-RACK-BUFFER-01"
+    }
+  }
+}
+```
+
+F01 仅为该示例模板，模板选择仍沿业务架型/动作映射；本条不单独冻结其它架型模板。WES 内部将原架同次在位、本次离场意图、原 READY 和原 Transport 关联，保存消费及唯一出站意图，重复推进只取得原 transport_task_id/submit 身份，不增加 wire 关联字段。不以 rack_id 全局唯一代替本次在位关联。
+
+Transport 提交未知继续原任务/原正文，不重新申请去向或换号搬架。READY 和 submit ACK 都不证明已搬离；原搬离流程按匹配结果收口；独立后续新架已有可靠到位事实时更新当前架位，不等旧离场结果，原历史/未决义务保留，不作为物理占位许可。已取出盘的放盘/报告及另一侧合法动作沿各自直接依赖继续，现场互锁归设备。新架真实再次到位使用独立原进场事实，旧 READY/旧结果不能搬走或清空新架。
+
+<a id="common-bin-return"></a>
+### BIN_Roller 的职责与 SCAN2 接缝
+
+四类业务 SCAN1 统一按实际扫码原文末尾 -B 和本线当前执行任务有效性分流：满足进入 SCAN2，否则旁路 SCAN3；不匹配投箱清单、不等投箱位置/最终结果。SCAN2 准入/作业及释放决定归各生产业务。BIN_Roller 唯一受理四点：SCAN2 先保存到位再同事务委托业务，由组件执行原释放命令；每个本点经过的 SCAN2 委托不因恢复重复，迟到旧完成只关联原命令；普通/纯回收架、投回箱及 CTU01/02/03 统一内部处理，无双组件交还或外置架面服务。新有效架到位替换旧在位数据，不等旧离场，物理/RCS 互斥直接作为约束，不建跨 Transport 排序器。技术幂等保留，本线本点连续相同业务扫码归原经过，有其他有效本点扫码/原 Result 才新进站；其他点位/线、ACK/心跳不切分。ECS/物理按明确 Result 推进，WES 不另加跨点等待；本地在制段取消后按实际到位继续请求 WMS。扫码直接证明本点到位，旧结果只补原履约、不回退下游事实。无组件手工锁、物理预占/释放或通道租约，平台原事务/幂等保持。
+
+设计、接口与未决项唯一见[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)，实施只按[统一计划 B1～B7](../superpowers/plans/2026-10-30-bin-roller-implementation.md)，旧 E/P3 仅作索引。本方规则不表示供应商签认、代码注册或现场验收。
+
+### 公共料箱回流的职责与接入边界
+
+人工、自动拣料和后续自动上架业务各自负责 SCAN2 生产工作段及原释放决定，实际原放行与 SCAN3/4、FIFO、return_batch、回架/drain 都由同一业务内 BIN_Roller 执行。公共逻辑从实际 SCAN3 到位独立判断，不回查 SCAN1/2、WMS 作业决定、上游任务/计划或 Result；这里的独立是本点事实判断边界，状态和动作仍归原业务。原释放命令和 ACK 不证明下游接箱，父任务完成不清空 FIFO，原物理与报告义务继续。
+
+完整消息、分支、结果门槛及集中冲突见[公共料箱回流文档](workline-bin-return-api.md)。[C01 已确认](workline-bin-return-api.md#return-fifo)按物理 FIFO 连续前缀处理，人工搬离并确认接管后本系统不再承担该箱本次回流责任，维护端点列入 TODO；[C02 已确认](workline-bin-return-api.md#return-scan3)为 SCAN3 按到位事实独立处理、不向前追溯；[C03 已确认](workline-bin-return-api.md#return-no-batch)每段投料成功后可回箱一次、收口后续投；无候选/NO_BATCH 则续投，后段成功是新的回箱机会；NO_BATCH 为当前面无法承接 FIFO 队首的确定决定且不带 retry_after_ms，原机会不轮询；[C04 已确认](workline-bin-return-api.md#return-handoff)为 SCAN4 SUCCESS 进入下游缓存，CNV0302/CNV0402 是统一交接入口，CTU/滚筒自动连续取箱，WES 不逐箱放行；[C05 已确认](workline-bin-return-api.md#return-drain-supply)为 drain 只申请可用架、到位后动态回架，本批原服务及已创建整架动作收口后仍有待回箱就继续申请直到排空，不绑定固定箱集合或建立容量预留账。[C06 的基础能力组合及即时唤醒方向](workline-bin-return-api.md#return-capability)已确认、实施入 TODO；[C07 已确认](workline-bin-return-api.md#return-rescan)明确 FAILED 后本点真实重扫可产生同轮新尝试，超时/未知不重发，SCAN4 保留首次 FIFO 顺序；旧轮正常结束或人工移出接管后新实际 SCAN3 才建新轮，旧事件/结果不影响新轮。设备附录与重报供应商确认见 [TODO](../../TODOS.md#公共回流设备附录与事件重报约定)。`RETURN_RACK` 是 PDA 直接取料资源，禁止作为滚筒退箱目标；`RETURN_BUFFER` 是每线回程语义，不是由本文新建的位置码。[KT16/KT18 配置](manual-picking-api.md)来自用户提供及只读核对记录，不能当作设备在线或物理到位证据。
+
+公共回流按已确认 C06 作为业务子包内部复用的代码能力，一个业务可组合多个内部能力；WORKLINE、运行时服务、owner、progression 及 Celery/Beat 都只归业务子包。KT20 选择 SMT 手工上下料业务后使用本线明确绑定。共享事件/operation/命令合同唯一注册，目录编译业务使用关系，新事件按受信工作线业务分派，结果按原命令/请求/Transport 的持久业务归属通知。Transport 实际应用结果后也经 after_commit 即时唤醒原业务，由其统一 scan_pending，5 秒 Beat 兜底；不设组件间任务或事件总线。[TODO](../../TODOS.md#业务子包组合接入与即时唤醒)与[实现设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)已按此修订；B1～B5 本地实现、B6 边界核对及 B7 共享声明/隔离测试装配已完成，正式生产宿主/catalog、组件状态迁移及现场整体验收仍未完成。
+
+[R01 已确认](workline-bin-return-api.md#return-drain-empty)：drain 提前真实排空后，已到位架无其他直接义务时正常申请离场，不为空回架逐一换面；未到位架沿原动作收口，不自动撤销。此规则不将候选暂为 0 当作排空，也不替代离场许可及原物理结果。
 
 ### ECS 消息信封
 
@@ -78,7 +205,7 @@ WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合
 }
 ```
 
-**不使用 is_debug 选择业务逻辑，debug 状态由 ECS 自行决定。** 该新系统约定与旧人工代码中仍存在的过滤规则是迁移差异。真实设备的每个命令参数、结果 data、错误枚举和超时界限仍要形成已确认附录，不能将旧实现中的 `params={}` 直接当成完整供应商合同。
+**不使用 is_debug 选择业务逻辑，debug 状态由 ECS 自行决定。** 该新系统约定与旧人工代码中仍存在的过滤规则是迁移差异。滚筒扫码采用用户确认已联调验证的 wes_backend manual-picking 参数/Result/原绑定基线，含 params={}，见 BIN_Roller U04；在本系统提取声明和绑定，不再将该空参数列为供应商未确认。该参考不自动覆盖机械臂动作，也不改本系统既定 debug 规则。
 
 Result 不是另一个业务 Event，也不为每个业务增加一个 Result URL。通用接收器保存、验证与结算原命令；业务通过 `EcsCommands.get_command/get_by_call` 读取关联结果。
 
@@ -90,6 +217,7 @@ Result 不是另一个业务 Event，也不为每个业务增加一个 Result UR
 | WMS `PREPARE_ACCEPTED` / `RECORDED` | 准备请求被受理 / 事实报告被收妥 | 已有计划 / 搬运完成 |
 | WMS 有效 `DECIDED` | 原请求得到了某个业务决定 | ECS/RCS 已执行该决定 |
 | ECS 命令 ACK | 设备侧已接纳该命令 | 原命令物理执行成功 |
+| 原 CTU03 submit 的有效接纳 | WES 原架周期/工作位业务释放，可继续本批或后续供架 | 不要求 WES 确认最终库位；目的地运输仍归 WMS/RCS |
 | ECS Result / 已应用 Transport 结果 | 原动作的确定结果，按合同解释 | 当前业务仍有执行许可；其他动作或整单必然完成 |
 
 因此不能把 HTTP 200、消息 DONE、命令已创建、历史 TARGET_PLACED、业务任务 COMPLETED 互相替代。
@@ -112,7 +240,7 @@ Python 集中声明描述“这个业务需要什么”；静态 catalog 与简�
 1. 受理使用接收器的 `ctx.session`，同事务保存收据、业务受理和持久待办。处理器不提交、不换隔离级别，不在事务内调用网络。
 2. 需要组合前序事实时，由**该业务的独立推进入口**新建 session，在第一条 SQL 前建立 REPEATABLE READ；核对当前工作线许可和完整前序。提交后通知可丢/可重，持久待办仍须可恢复。
 3. WMS 按原 message_id + operation + operation_id 读取，严格解析终局响应 data 并核对原请求。Transport 按原 transport_task_id + client_request_id + caller 读取。ECS 保存原 owner/call_key/command_code，不按“设备最近一条”猜测。
-4. 明确当前直接前序集合和 caller/cycle/资源范围；分批或跨轮逐个读取仍处在同一快照。闭合需要 complete 且 unresolved 为空；CLOSED 仍需另查成功与业务许可。
+4. 明确当前直接前序集合和 caller/cycle/资源范围；分批或跨轮逐个读取仍处在同一快照。闭合需要 complete 且 unresolved 为空；CLOSED 仍需另查成功与业务许可；CTU03 原接纳已结束 WES 周期的，后续独立周期不把其最终未闭合 Transport 重新列为业务前序，不伪造平台 CLOSED。
 5. member_facts 是历史里程碑，不能覆盖更新已应用 UNKNOWN；不以某个旧 TARGET_PLACED 永久移除仍可变化的相关成员。
 6. 推进状态、消费原身份/准确版本/成员范围、下一 Outbox 意图同事务提交。40001 重试由具体业务独立入口负责：关闭旧 session，新 session 重读整组及许可；耗尽保留待办。Outbox 只负责已提交意图的投递。
 

@@ -8,6 +8,7 @@ from app.business_wakeups import (
     ecs_result_committed,
     event_committed,
     notify_business_committed,
+    transport_submit_delivered,
     wms_result_committed,
 )
 from app.businesses import catalog
@@ -84,6 +85,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             lifecycles=getattr(application.state, "reliable_lifecycles", {}),
             client_provider=getattr(application.state, "reliable_client_provider", None),
             on_result=wms_result_committed,
+            on_delivered=transport_submit_delivered,
         ) as outbox:
             application.state.outbox = outbox
             if ecs_commands is not None:

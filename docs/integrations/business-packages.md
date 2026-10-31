@@ -6,7 +6,7 @@
 契约变化、支持模型及实测边界见[单一 API 验收](business-development-single-api-acceptance.md)。
 原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
 这些平台能力不表示真实业务或供应商/现场已验收。
-业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；bin_return/SMT 正式接入仍未实施。
+业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；BIN_Roller/SMT 正式接入仍未实施。目标边界见[设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单已登记粗分扫码、WMS 验证和首个输送动作结果消费。
 隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。分配、入箱、NG 搬运和 manual-picking 仍需后续实现。
@@ -119,6 +119,8 @@ catalog 将同键且完整相同的资源合并，资源冲突、输入双重认
 已有调用同参重入保留原身份、字节、路由、附录和期限，不重跑新动作授权；Result 继续按原命令处理。
 阶段二的 WMS 出站结果与 Transport 实际应用结果已沿同一原业务通知，具体本地归属和兼容边界见下文。
 
+本方后续业务统一采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：只声明 bin_roller.COMPONENT，四点只有组件一个输入目标，SCAN2 同原事务委托本业务生产接缝；业务决定释放、组件登记原命令。普通/drain 都由 RACK_CYCLE 待办推进同一 CTU 生命周期，DRAIN 只管理供架批次/周期引用，不再声明旧两个组件或外置架面模型；生产业务提供任务/供箱/接续上下文，原 progression 不变。物理扫码/原 Transport 结果更新当前事实，旧记录不阻挡新到位；组件不增加手工锁或占位控制。B1～B5 组件本地实现与分项验证、B6 边界核对及 B7 共享声明/隔离测试装配已完成；正式生产宿主/catalog、组件状态迁移及现场整体验收仍未交付，前文框架/下文其他业务事务要求不因此被重写。
+
 ### 3.2 WMS / Transport 原业务归属
 
 运行时为每个业务分别构造绑定 DEFINITION.code 的 WmsRequests 和 TransportService；同一业务的内部能力复用它们。
@@ -135,9 +137,12 @@ TransportTask.owner_domain 是 nullable 本地字段，四方法的新建与串�
 此字段不代替当前业务许可或物理资源门禁。新增迁移 f0b120261030 沿唯一 head；有非空原业务归属时禁止删除该列。
 
 可靠结果端口透传原 operation/business_key；有效非快照终态（含正常完成、本地过期及过期租约维护）提交后通知原业务，
-普通重试、失效旧租约完成和回滚不通知。Transport 继续原 apply_callback 规则，只有 applied_outcome_revision 真正前进时
-才以原 owner 登记 after_commit；结果先暂存时不通知，位置事实补齐并应用该结果时通知。同步提交 ACK、单独位置事实、
-重复/冲突及无归属旧任务不触发业务通知。主应用已有 business_committed 端口经 WMS 控制器注入，无新增调度器。
+普通重试、失效旧租约完成和回滚不通知。Transport 原 submit 的有效 RECEIVED/202 或 DUPLICATE/200 接纳保存为 DONE 时，
+主应用注入的事务回调以原 operation_id 与 business_key=transport_task_id 精确读取原 owner_domain，
+经 after_commit 通知原业务；仅外层提交后发布 business_code，不改变原身份、冻结请求或终态回调语义。
+接纳只证明提交已受理，不证明运输完成。Transport 继续原 apply_callback 规则，applied_outcome_revision 真正前进时
+或新的明确异常架位置保存时也通知原 owner；结果先暂存时不通知，位置事实补齐并应用该结果时通知。
+重复/冲突、失败/未知接纳及无已知归属旧任务不猜测或广播；通知失败保留原 pending，由同入口 Beat 恢复，无新增调度器。
 
 ## 4. 子包 service.py / models.py
 
@@ -179,6 +184,10 @@ async def advance(self, execution_id):
         return await self._advance(session, execution_id)
 ```
 
+**BIN_Roller 的目标隔离例外（测试宿主已验证，正式生产宿主未交付）：** 仅会进入其架流/正常求架检查的原宿主单条独立 advance 首 SQL 前设 SERIALIZABLE，复用原 session_factory/业务幂等/Outbox。判定、登记和消费整笔同入口，不按内部 DRAIN 分支拆事务或另建隔离选择器；原 40001 有界重试包括外层 commit，提交未知仍由原 work 进入完整 SERIALIZABLE 推进，已见原引用就恢复；暂时查空不证明回滚，登记须经完整业务判定/唯一性/集合依赖及最终提交，不新增确认状态。receiver 保留事实/待办及 SCAN2 合法即时意图受理，不消费 drain 业务进度/收批/新求架；短扫描、已有无关纯生产及其他业务不一律升级。不改共享 factory/引擎/连接池默认，沿原连接执行选项关闭后恢复，不复制手工锁或新增任务/连接重置钩子。见[U06 范围及恢复](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#roller-u06-minimal-transaction)。
+
+以下锁序描述现有基线，不要求为 BIN_Roller 目标业务复制锁；其专项遵循“不新增组件/宿主手工锁”的边界。
+
 `advance` 是业务单条推进入口，`_advance` 示意其事务内实现，不是平台接口。扫描调用 `advance` 时不额外包裹整轮事务。先无锁定位原执行的配置，再按工作线（ID顺序）→
 设备（ID顺序）→业务动作（固定顺序）取锁、重读和校验当前许可。不得在这些锁内改写/settle/hold
 既有命令或消息，避免和先锁命令的发送门禁构成反向等待。结果接收事务先提交，之后再独立推进。
@@ -187,7 +196,7 @@ async def advance(self, execution_id):
 只通过 `WmsRequests.get_result`、`TransportService.get_result` 和
 `list_unclosed_predecessors` 按原身份读取结果，不读取 ReliableMessage/TransportTask 列或 response_raw。
 每次前序判断固定完整身份集合及 caller/cycle/资源范围；超过100条分批，跨轮逐个或混合读取也在同一
-REPEATABLE READ 事务内进行。快照保证事实曾同时成立，不替代当前许可或物理资源门禁。
+统一快照事务内进行（通用基线 REPEATABLE READ；上述目标业务相关独立 advance SERIALIZABLE）。快照保证事实曾同时成立，不替代当前许可或物理资源门禁。
 
 在同一推进事务内保存业务更新、已消费的原身份/结果版本/成员范围/必要决定，再登记下一意图。
 40001 序列化失败必须回滚并关闭失败 session，新 session 重读完整尚需集合及当前许可，整事务有界重试。

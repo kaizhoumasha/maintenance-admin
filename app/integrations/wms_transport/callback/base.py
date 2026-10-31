@@ -30,11 +30,14 @@ async def apply_callback(
         ctx.note("FROZEN_MISSING", transport_task_id=ack["transport_task_id"], data=data)
         return ack
     previous = task.applied_outcome_revision
+    previous_observation = task.position_observation
     apply(TaskCallbacks(task, ctx), data, ack)  # 判重为 Duplicate/Conflict 时直接抛出
     applied = task.applied_outcome_revision
     if (
-        applied is not None
-        and (previous is None or applied > previous)
+        (
+            (applied is not None and (previous is None or applied > previous))
+            or task.position_observation != previous_observation
+        )
         and task.owner_domain is not None
         and ctx.on_owner_committed is not None
     ):

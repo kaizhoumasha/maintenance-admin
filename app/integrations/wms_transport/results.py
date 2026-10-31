@@ -51,6 +51,7 @@ class TransportTaskResult:
     submission_response_data: dict | None = None
     outcome: dict | None = None
     outcome_revision: int | None = None
+    position_observation: dict | None = None
     member_facts: dict | None = None
     has_pending_outcome: bool = False
     pending_revision: int | None = None
@@ -210,6 +211,34 @@ def validate_outcome(task: dict, raw: dict, revision: int, *, applied: bool) -> 
     return data, status
 
 
+def validate_position_observation(task: dict, raw: dict) -> dict:
+    data = Resulted.model_validate(raw).model_dump(mode="json")
+    frozen = task["frozen"]
+    if (
+        raw != data
+        or task["kind"] not in {"RACK_MOVE", "RACK_ROTATE"}
+        or data["transport_task_id"] != task["transport_task_id"]
+        or data["kind"] != task["kind"]
+        or data["rack_id"] != frozen["rack_id"]
+        or data["status"] != "SUCCEEDED"
+        or data["final_position"] is None
+        or data["position_unknown"]
+        or not (
+            (
+                frozen["target"]["kind"] == "RACK_POSITION"
+                and data["final_position"] != frozen["target"]
+            )
+            or (
+                frozen.get("target_face")
+                and data["arrival_face"]
+                and data["arrival_face"] != frozen["target_face"]
+            )
+        )
+    ):
+        raise ValueError("invalid rack position observation")
+    return data
+
+
 def has_position_milestones(task: dict) -> bool:
     """Historical execution evidence can contradict a refusal, but cannot prove completion."""
     facts = task["member_positions"] or {}
@@ -269,6 +298,9 @@ def project(
             outcome is None and task["applied_outcome_revision"] is not None
         ):
             raise ValueError("applied outcome state mismatch")
+        observation = task.get("position_observation")
+        if observation is not None:
+            observation = validate_position_observation(task, observation)
         pending = task["pending_outcome"]
         if pending is not None:
             validate_outcome(task, pending["data"], pending["revision"], applied=False)
@@ -281,6 +313,7 @@ def project(
     result = replace(
         result,
         outcome=deepcopy(outcome),
+        position_observation=deepcopy(observation),
         outcome_revision=task["applied_outcome_revision"],
         member_facts=deepcopy(facts or {}),
         has_pending_outcome=pending is not None,

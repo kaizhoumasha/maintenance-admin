@@ -133,7 +133,11 @@ async def test_shared_wms_result_wakes_and_advances_only_original_business(wms_f
                 )
             )
             identities[business] = identity
-    store = MessageStore(flow.factory, on_result=business_wakeups.wms_result_committed)
+    store = MessageStore(
+        flow.factory,
+        on_result=business_wakeups.wms_result_committed,
+        on_delivered=business_wakeups.transport_submit_delivered,
+    )
     claims = await store.claim(2, flow.targets)
     claim = next(claim for claim in claims if claim.message.operation_id == identities["first"])
     raw = json.dumps(

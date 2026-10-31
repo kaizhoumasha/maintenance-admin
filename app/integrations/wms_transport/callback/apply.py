@@ -65,6 +65,15 @@ class TaskCallbacks:
             return self._skip("TERMINAL_CONFLICT", data=data)
         reason = self._mismatch(data)
         if reason:
+            if (
+                reason in {"TARGET_MISMATCH", "FACE_MISMATCH"}
+                and self.task.kind in {"RACK_MOVE", "RACK_ROTATE"}
+                and data["final_position"] is not None
+                and not data["position_unknown"]
+            ):
+                previous = self.task.position_observation
+                if previous is None or revision > previous["outcome_revision"]:
+                    self.task.position_observation = dict(data)
             return self._skip(reason, data=data)
         if not self._prerequisites_met(data):
             pending = self.task.pending_outcome

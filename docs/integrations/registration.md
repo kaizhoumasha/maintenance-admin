@@ -18,7 +18,7 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 业务 composition 可通过 COMPONENTS 显式引用 `app/businesses/_components/<key>/` 内相同的三类目录；
 共享能力没有独立注册表、业务身份或任务。共享入口仍受下文文件名、formal/local、显式模块及迟注册规则约束；
 共享模块按路径去重导入，第二次真正声明同键仍失败。各业务仅消费自己显式引用的模块和角色，不能因另一个业务
-导入同命名空间就取得权限。当前生产清单没有 bin_return/SMT 占位包。
+导入同命名空间就取得权限。当前生产清单没有 BIN_Roller/SMT 占位包。
 
 ## 文件名只有一条规则
 
@@ -84,7 +84,7 @@ async def scan_completed(ctx: EcsEventContext, payload: ScanCompleted) -> None:
 无消费者不执行；原 receipt 重放仍先于新绑定/分派。提交后通知只唤醒这一个业务。
 
 正式共享 WMS 回调由薄入口通过原业务关联记录确定归属，再调用 bind_callback_business，重复同归属允许，
-未绑定、矛盾或消费者不匹配拒绝且不通知。payload 不能直接指定 owner。WMS 出站和 Transport 的本地原归属/提交后通知已由阶段二实现；不增加注册表或 wire 字段，见[阶段二计划](../superpowers/plans/2026-10-30-business-components-phase2.md)。
+未绑定、矛盾或消费者不匹配拒绝且不通知。payload 不能直接指定 owner。WMS 出站和 Transport 的本地原归属/提交后通知已由阶段二实现；不增加注册表或 wire 字段，见[分阶段计划](../superpowers/plans/2026-10-30-business-components-bin-roller.md)。
 
 ## WMS 回调：相同的函数声明，保留业务结果
 

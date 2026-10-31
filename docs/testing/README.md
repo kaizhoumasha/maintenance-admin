@@ -32,6 +32,7 @@ uv run ruff format --check .
 | 出站结果与消费恢复 | `tests/integrations/test_result_consumption.py`、WMS/Transport 的 `test_results.py` 与 `test_predecessors.py`；原身份和可信终局响应、拒绝与里程碑冲突、更新 UNKNOWN 优先、分批/逐个统一快照和读取后失败整组重读；[读接口契约](../integrations/outbound-results.md) |
 | 工作线业务公共接缝 | `tests/businesses/`、`tests/controllers/test_workline_business.py`、`tests/services/test_workline_business.py`；模型 send/create、COMMANDS 角色交集、catalog/固定平台来源保护、正式冷启动、合同交叉校验、两线绑定、受理/独立推进事务、消费与 Outbox 原子性；[业务包开发指南](../integrations/business-packages.md)。真实业务仍待独立确认 |
 | 业务多能力组合与原归属唤醒 | [阶段一验收](business-components-phase1.md)、[阶段二验收](business-components-phase2.md)；共享合同消费者/唯一输入目标、新动作授权与原重放、WMS 原关联、Transport 原 owner 及实际应用后通知；测试组件不进入生产 catalog |
+| BIN_Roller 箱流、架流与记录适配 | `tests/businesses/bin_roller/`；四点与 SCAN2 接缝、FIFO、原身份/恢复、统一架生命周期及隔离并发；[WES 记录适配验证](bin-roller-wes-recorded-cases.md)区分原始事实与受控刺激。B7 正式生产接入、组件状态迁移及真实 worker/现场验收未完成 |
 | ECS 命令与结果 | [ECS 测试说明](ecs-command-verification.md)，复用实际装配、原期限、当前许可和消费者锁序，不增加独立验收平台 |
 | 安全诊断 | `tests/core/test_global_diagnostics.py`、`tests/reliable/test_sender_logging.py`、delivery/snapshot 与 `tests/tasks/`；安全字段、取消/落库失败传播，各任务独立降噪/恢复；[日志说明](../logging.md) |
 
