@@ -412,6 +412,14 @@ SQLite限制已对基线HEAD复现：receiver无法先于调用方已执行的SQ
 
 原WES历史案例17项、独立复核443 passed/6 skipped分别是共享切片和修复前的阶段证据；4617/52及4634/52也保留为历史快照，不能替代上述修复后4654/52。案例来源、转换与逐项范围见[工程评审及验收矩阵](../reviews/2026-10-31-sorting-task-st1-st2-review.md)。
 
+### PR #45 文档合入与主目录整理
+
+交付状态文档已随 [PR #45](https://github.com/kaizhoumasha/maintenance-admin/pull/45)合入 develop，合并提交为 `d73f66f510ac3c39d5b4a948d9865b0ef4dbe985`，受审 head 为 `062b681`。该 PR 仅涉及 8 份文档；合并前 [pull_request CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41293703904)与 [push CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41293658257)均为 4654 passed/52 skipped，最新云端评审完成且无发现、无未解决问题；这些 CI 是 PR #45 的自动验证，不是本次主目录整理手动重跑的产品测试，也不增加真实宿主或现场验收覆盖。
+
+2026-11-01 主目录文档整理以该 develop 版本为基线，保留草稿中有效的业务划分、归档说明、组件进度映射及历史验收记录；本节及宿主文档的“已交付/路径已存在”均按 develop 基线解读。该轮整理时主目录保留 `feature/smt-manual-design-alignment` 分支及 `19082e3` 代码基线，仅更新文档，未提交或推送；这是历史工作区快照。
+
+随后按用户另行授权，主目录已切换并同步到 `d73f66f`，21 项文档内容及原删除状态逐项恢复，5 份与 develop 相同，当前仅 16 项文档差异。现基于该提交创建文档分支，按授权整理提交并创建合入 develop 的 PR；原分支、恢复备份和原有 stash 保留。本次只交付文档，不新增产品代码或产品测试，不实施后续宿主、不执行迁移、不部署或发送真实业务请求。
+
 ### 尚未交付或验收
 
 - `smt_manual` M1～M6、`smt_auto` S1～S7及I/O方向宿主仍未实施：任务/终态摘要、准入、成员/连续版本、精确重验资格、完成资格及原结果消费仍归各宿主。正式catalog消费者、宿主/组件生产表迁移及完整组合验收未完成，不因共享源码合入而提前启用。

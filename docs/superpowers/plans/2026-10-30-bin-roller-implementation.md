@@ -4,11 +4,13 @@
 
 **Goal:** 交付一个 BIN_Roller 组件处理完整滚筒箱流与五层架流，生产业务只提供任务/供箱/接续上下文及 SCAN2 业务接缝。
 
-**Architecture:** 只声明 bin_roller.COMPONENT；SCAN1～4 唯一受理，SCAN2 先存事实再在原事务委托本业务，释放决定由业务给出、原放行由组件执行。普通/drain 共用一套内部架生命周期；架面、供箱及回流是内部方法，不是子组件。原业务仍只有一个 progression/scan_pending。
+**Architecture:** 公共箱流只声明 bin_roller.COMPONENT，宿主可另组合 sorting_task 任务合同能力；SCAN1～4 唯一受理，SCAN2 先存事实再在原事务委托本业务，释放决定由业务给出、原放行由组件执行。普通/drain 共用一套内部架生命周期；架面、供箱及回流是内部方法，不是子组件。原业务仍只有一个 progression/scan_pending。
 
 **Tech Stack:** 既有 ComponentDefinition/Capabilities、SQLAlchemy/Alembic、Pydantic、公开结果读口、Outbox/after_commit、pytest 与独立 PostgreSQL；不新增依赖。
 
 **Spec:** [BIN_Roller 当前设计](../specs/2026-10-30-bin-roller-capability-design.md)、[C01～C07/R01](../../integrations/workline-bin-return-api.md)、[总计划/历史框架验收](2026-10-30-business-components-bin-roller.md)。旧进箱/回箱设计和 E/P3 计划索引已删除；阶段三只有 B1～B7，阶段一、二历史验收另存。
+
+消费宿主划分已统一：smt_manual 承接 MANUAL 两方向，smt_auto 承接 AUTO 的 inbound/outbound；自动总计划由[S2接缝](2026-10-31-smt-auto-implementation.md#common-ports)、[S6装配/迁移/恢复](2026-10-31-smt-auto-implementation.md#common-runtime)各交付一份共同能力，S5统一释放/确认，I/O任务仅补方向行为，不分别创建上架/拣料组件或迁移。本计划公共状态、首宿主顺序与验收边界保持；方向合同及完成条件仍在统一自动API的对应分支。
 
 ## Global Constraints
 
@@ -52,7 +54,7 @@
 - CurrentTask(task_id:str|None, is_valid:bool)；宿主按原本地执行上下文提供有效性，上游取消不直接抹掉本地在制段；本地已结束/排队任务不当当前有效任务。
 - SourceFaceRef(plan_revision:int, rack_id:str, rack_face:str)；精确原成员，面原样保留。
 - SupplyChange(work_line_id:int, task_id:str, change_id:str, added:tuple[SourceFaceRef,...], withdrawn:tuple[SourceFaceRef,...])；change_id 关联业务已受理原消息，不新发外部 ID；重报原有效内容不重复需求。
-- SupplyProgress(task_id:str, source:SourceFaceRef, feed_complete:bool, pending:bool, original_ids:tuple[str,...])；pending 包含原未决请求/完整清单/搬运及失败待处置，feed_complete 只按原成功/最终空清单；不由取消/技术闭合推导。`get_supply_progress(session,*,work_line_id:int,task_id:str)->tuple[SupplyProgress,...]` 返回原业务只读进度，不返回 ORM；空查询/缺关联不授予任务完成。生产业务用自己原来源引用及 SCAN2 arrival 查原义务，不等待全局 FIFO/架流结束。
+- SupplyProgress(task_id:str, source:SourceFaceRef, feed_complete:bool, pending:bool, original_ids:tuple[str,...])；pending 包含原未决请求/完整清单/搬运及失败待处置，feed_complete 只按原成功/最终空清单；不由取消/技术闭合推导。`get_supply_progress(session,*,work_line_id:int,task_id:str)->tuple[SupplyProgress,...]` 返回原业务只读进度，不返回 ORM；空查询/缺关联不授予任务完成。生产业务用自己原来源引用及 SCAN2 arrival 查原义务，不等待全局 FIFO/架流结束。未开始撤销可返回 feed_complete=false/pending=false，须结合宿主原成员撤销事实结清，不要求补造投箱成功；已开始/原 pending 继续，缺预期关联不视为完成。DTO 不携带 withdrawn，宿主不直读组件表；人工映射见 [SMT 设计 §7.1](../specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)。
 - SuccessorContext(state:str, evidence:dict)；state 仅 UNKNOWN/CHECKING/AVAILABLE/NONE，evidence 来自原业务准备/队列事实，不是占位或协调锁版本。
 - Scan2Arrival(arrival_id:str, work_line_id:int, device_code:str, raw_bin_code:str, bin_code:str|None, scanned_at:int)；arrival_id 是本线本点事件流产生的持久本地经过关联，连续重报不刷新首次 scanned_at；分隔事件后的合法新消息形成新经过，完整旧消息身份始终技术幂等。
 - 业务生产对象公开 async `read_current_task(session, *, work_line_id:int)->CurrentTask`、`read_successor(session, *, work_line_id:int)->SuccessorContext`、`accept_scan2(ctx, arrival:Scan2Arrival)->None`。工厂直接注入本业务对象，不创建通用策略引擎。read 方法使用本事务；accept 保存业务准入/生产状态及原意图，已有合法即时释放决定时可同事务调用组件唯一 release_scan2；不发 HTTP。组件不先套人工准入条件，也不对无任务扫码统一放行；各生产合同决定，普通不准入用状态表达而不回滚事实。
@@ -132,6 +134,8 @@
 **当前状态：部分完成，正式接入保持未完成。** 可独立交付的 `composition.COMPONENT` 已引用 B2～B5 单份严格合同；只声明 SCAN1～4 与既有 FIVE_RACK/INLET/OUTLET，不引入生产硬件别名。测试消费者通过真实 catalog/runtime/receiver 验两原 owner 的独立生产对象、原经过释放、提交通知和恢复。测试宿主验证六类候选有界轮换（跨页/等待/单条失败/新工作下一轮）、整笔 SERIALIZABLE 的 commit 40001 新会话重试/耗尽，以及同一 PostgreSQL 连接回到 receiver RR/其他普通事务默认隔离。测试表均独立 MetaData、显式清理。
 
 正式生产包仍未交付，因此以下原整体验收步骤不整体勾选：生产 WAIT 到期/整单确认与生产待办轮换、实际宿主 `scan_pending`/事务规范、正式 catalog 消费者和组件状态迁移、真实 worker/现场仍未完成。测试消费者不是生产包。
+
+首个完整手工宿主按 [SMT 手工计划 M1～M6](2026-10-31-smt-manual-implementation.md)推进；共享任务合同已按 [sorting_task ST1～ST2](2026-10-31-sorting-task-implementation.md#sorting-task-merged)随 PR #44 合入 develop，宿主直接复用。M5 与本 B7 对接正式装配和组件状态表迁移，M6 记录真实任务链/联合验证；组件迁移仅首宿主交付一次，后续自动宿主引用，不重新实施 B1～B5，也不因新增计划提前勾选 B7。
 
 **原提交接纳通知已补：** Transport submit 保留原 business_key=task_id；MessageStore.finish 的可选协议中立 on_delivered 事务端口只在当前有效 DONE 保存时调用。主应用原生装配按原 operation_id 与 task_id 精确读取 TransportTask.owner_domain，经既有 after_commit/业务 pending 发布原业务码。有效 RECEIVED/202 与 DUPLICATE/200 覆盖；失效租约、重复完成、失败/未知、无已知 owner 和回滚不误通知。发布失败不回滚接纳，原 RACK_CYCLE 持久待办仍可在重启/同入口 Beat 后恢复并释放，不等最终 Result。原身份/请求和既有 on_result 终态语义不变，无新调度器；组件尚无正式生产宿主。
 

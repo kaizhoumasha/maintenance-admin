@@ -29,7 +29,7 @@
 
 - GOOD：`good_cases/KT16-A950FC259A78C43DB8D6D82FC110C8B03/evidence.json`，取已归档issued、prepare响应、plan_delta和completion响应。保存六来源面`510001/90、510002/270、510017/270、510024/90、510027/90、510034/90`及目标`610017/90`。
 - BAD：`workline_plugins/manual-picking/tests/fixtures/kt16_a087_a000002121_cancelled_source_scan2.json`，取明确的`510002/90/revision 1`选择器；来源取消不能抹去已入线事实的完整业务断言留给宿主。
-- 本仓样本：[kt16_task_cases.json](../../../tests/businesses/sorting_task/fixtures/kt16_task_cases.json)，保存来源路径、任务与材料标识、源文件SHA-256；本轮对两个原文件重新计算摘要，均与样本一致。
+- 本仓样本：[kt16_task_cases.json](https://github.com/kaizhoumasha/maintenance-admin/blob/463f43d698f7a15f999f88014f6425fbae4e1ee6/tests/businesses/sorting_task/fixtures/kt16_task_cases.json)，保存来源路径、任务与材料标识、源文件SHA-256；本轮对两个原文件重新计算摘要，均与样本一致。
 
 新测试生成新task_id、operation_id和时间，operation明确转换为`sorting.task.*@v1`，issued显式补`business_type=outbound`，隔离工作线用KT16配置。取消请求由原selector按当前合同重建，不伪装成保留旧operation/旧wire的直接回放。资源数组及顺序不裁剪、不重排；不增加兼容入口。不向现场发送历史身份或冻结请求。旧operation名仍明确拒绝。
 
@@ -37,7 +37,7 @@ GOOD归档声明尚未接入可执行Mock replay runner；旧`data/kt16_manual_p
 
 ## 案例验收矩阵
 
-测试入口：[test_recorded_cases.py](../../../tests/businesses/sorting_task/test_recorded_cases.py)。真实运行本仓receiver、合同、catalog/runtime、共享适配及数据库；仅宿主受理/重验为隔离测试端口，不声称真实宿主状态已实现。
+测试入口：[test_recorded_cases.py](https://github.com/kaizhoumasha/maintenance-admin/blob/463f43d698f7a15f999f88014f6425fbae4e1ee6/tests/businesses/sorting_task/test_recorded_cases.py)。真实运行本仓receiver、合同、catalog/runtime、共享适配及数据库；仅宿主受理/重验为隔离测试端口，不声称真实宿主状态已实现。
 
 | 来源/规则 | 本轮执行 | 结论与边界 |
 | --- | --- | --- |
