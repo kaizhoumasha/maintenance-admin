@@ -384,6 +384,13 @@ SQLite限制已对基线HEAD复现：receiver无法先于调用方已执行的SQ
 
 本授权不包含合并、部署、生产迁移、真实WMS/ECS/RCS请求或现场操作。真实宿主、正式catalog、worker/Beat运行恢复及完整WES BAD/GOOD CASE业务闭环仍按后续计划分别验收。
 
+<a id="sorting-task-pr44-fix"></a>
+## 10. PR #44 线上复审修复
+
+线上评审新增P2：guard返回5xx CallbackResponse会被当作可保存拒绝，冻结首次消息身份。已复现并修复为走既有_UnstoredUnavailable保存点回滚路径，统一503/UNAVAILABLE/{}；不新建收据，不改已有响应，保留外层事实，恢复后继续原身份。细节见[评审补充](../reviews/2026-10-31-sorting-task-st1-st2-review.md#pr-44-线上复审补充guard-暂不可用不得冻结收据)。
+
+专项回归扩展为SQLite/PostgreSQL共24项，覆盖返回500/503与抛Unavailable、首次/成功历史及有无recheck；修复前16项行为断言失败，修复后24项通过。修复后的全仓、CI及重新评审结果以[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)为准。用户授权全部通过后合入develop，不包含部署或真实请求。
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |

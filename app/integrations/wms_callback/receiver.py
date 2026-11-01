@@ -145,6 +145,8 @@ async def _guard(handler, context: CallbackContext) -> CallbackResponse | None:
         return _answer(signal, context.operation_id)
     except Unavailable:
         raise _UnstoredUnavailable(_unavailable(context.operation_id)) from None
+    if isinstance(response, CallbackResponse) and 500 <= response.status_code < 600:
+        raise _UnstoredUnavailable(_unavailable(context.operation_id))
     if response is not None and (
         not isinstance(response, CallbackResponse) or response.status_code < 400
     ):

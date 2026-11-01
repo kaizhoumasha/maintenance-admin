@@ -2,7 +2,9 @@
 
 评审对象：复核时`feature/sorting-task-shared`尚未提交的ST1/ST2实现，基线`19082e3`；依据[共享计划](../plans/2026-10-31-sorting-task-implementation.md)。本轮授权包含复核、案例验收及实际缺陷修复，不包含宿主功能扩展、提交、部署或真实发送。
 
-## 结论
+## 实现再评审阶段结论
+
+本节及下列4634/52结果对应PR线上复审前的验收快照；线上评审新增问题及处置见文末补充。
 
 在当前共享层范围内，计划符合性、原收据重验/稳定重放、可信原归属及事务回滚边界均通过复核。新增发现：Critical 0、Important 0、Minor 0；没有可复现产品缺陷，故本轮未改产品源码。新增维护性验收测试及最小历史案例样本。
 
@@ -66,3 +68,13 @@ GOOD归档声明尚未接入可执行Mock replay runner；旧`data/kt16_manual_p
 执行前后摘要及完整日志位于本工作树`.superpowers/sdd/2026-10-31-sorting-task-rereview/`：`recorded-cases.log`、`independent-review.md`及`full-suite.log`。独立评审曾因忽略目录缺少导入路径而出现一次收集错误，补`PYTHONPATH=.`并显式加载既有fixture插件后探针6项通过；该次不是产品RED，也未作为产品修复依据。
 
 本轮未修改产品源码。后续真实宿主的准入、成员、版本、重验资格和完成状态仍必须在M1/S1及正式组合阶段单独验证。跨宿主task_id全局唯一性仍由WMS保证，不因归属扫描通过而宣称数据库已提供全局约束。
+
+## PR #44 线上复审补充：guard 暂不可用不得冻结收据
+
+线上评审在`7a5ee9f`指出P2：archive_guard直接返回503或其他5xx CallbackResponse时，原校验仅排除小于400的响应，首次接收会把暂不可用写成固定收据，条件恢复后仍可能重放旧503。此前只测试了抛出Unavailable，未覆盖返回5xx的形式。
+
+修复将guard返回的5xx统一转换到既有_UnstoredUnavailable路径：撤销本次receiver保存点的新收据和写入，返回503/UNAVAILABLE/data={}；保留调用方原事实与已有收据，恢复后沿原身份重新受理/重放。guard只读且没有保存可重验输入，是否登记recheck不授予保存此类503的资格。既有4xx拒绝及无guard的旧登记行为不变。
+
+扩展现有公开入口回归：首次/已有成功收据、有无recheck、抛Unavailable/返回500/返回503，均在SQLite和独占PostgreSQL运行；先提交接收事务再检查存储结果，确保能发现真正落库的错误收据。修复前16 failed/8 passed，修复后24 passed（1.74秒）；同时断言外层事实、通知次数、已有响应及恢复后同身份受理。
+
+最终全仓及最新提交的线上CI/复审结论由[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)记录；本文件原4634/52为修复前历史证据，不能替代修复后验证。仍不部署、不发送真实业务请求，宿主/现场未验收边界保持。

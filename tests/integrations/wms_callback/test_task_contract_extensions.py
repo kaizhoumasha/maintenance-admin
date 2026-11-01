@@ -562,19 +562,36 @@ async def test_guard_business_refusal_precedes_success_replay(extension, guard, 
 
 
 @pytest.mark.parametrize("existing", [False, True])
-async def test_guard_unavailable_does_not_freeze_receipts(extension, existing):
+@pytest.mark.parametrize("rechecking", [False, True])
+@pytest.mark.parametrize("guard_status", [None, 500, 503])
+async def test_guard_unavailable_does_not_freeze_receipts(
+    extension, existing, rechecking, guard_status
+):
     ext = extension
     ext.state.ready = True
     first = await ext.send(ext.body) if existing else None
-    ext.register(guarding=True)
-    ext.state.guard = Unavailable()
+    ext.register(guarding=True, rechecking=rechecking)
+    ext.state.guard = (
+        Unavailable()
+        if guard_status is None
+        else CallbackResponse(
+            guard_status,
+            {
+                "operation_id": ext.body["operation_id"],
+                "code": "UNAVAILABLE",
+                "timestamp": 123,
+                "data": {"reason_code": "GUARD_BACKEND"},
+            },
+            "error",
+        )
+    )
     async with ext.factory() as session, session.begin():
         await session.execute(insert(ext.table).values(kind="outer"))
         response = await ext.send(ext.body, session)
-        assert response.status_code == 503 and response.body["data"] == {}
     async with ext.factory() as session:
         saved = await find_receipt(session, OPERATION, ext.body["operation_id"])
         assert (saved.body if saved else None) == (first.body if first else None)
+    assert response.status_code == 503 and response.body["data"] == {}
     assert (await ext.kinds()).count("outer") == 1
     ext.state.guard = None
     assert (await ext.send(ext.body)).status_code == (200 if existing else 202)
