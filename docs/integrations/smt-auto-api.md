@@ -2,6 +2,8 @@
 
 版本日期：2026-10-31。本文统一维护smt_auto的AUTO/inbound和AUTO/outbound合同：共同项只定义一次，方向差异使用严格字段联合、差异表与专属子节。交付状态：**本方合同/设计，共享任务ST1/ST2已在隔离分支实现并验证；正式SMT业务实施、生产注册、部署、真实对端联调和现场验收仍未完成。** 示例仅供对接，不表示已发送或设备已接受。
 
+跨仓库资料引用中，已提交且本地未改动的实现/附录/Markdown说明固定到源仓库已发布提交；尚未提交的WMS合同修订和未纳入源仓库提交的PDF仅保留明确来源路径，不作为可下载链接。本PR不发布这些源工作区材料，本方字段/响应仍以本文为准，对端签认及真实联调仍待独立验收。
+
 ## 目录
 
 - [1. 业务范围、主体与方向](#business-scope)
@@ -537,7 +539,7 @@ AUTO/outbound：
 <a id="plan-early"></a>
 #### 3.5.2 计划早于 prepare 结果
 
-沿[既有 prepare 未定规则](../../../wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md#821-prepare-未定与自动修正联调实现合同)，复用原消息恢复，不增加字段、接口或自动激活早到计划的流程。
+沿既有 prepare 未定规则（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md#821-prepare-未定与自动修正联调实现合同`），复用原消息恢复，不增加字段、接口或自动激活早到计划的流程。
 
 | 到达条件 | 响应及边界 |
 | --- | --- |
@@ -1979,7 +1981,7 @@ source_rack_exhausted 只允许在 SOURCE_ABSENT 有整架肯定结论时发送 
 <a id="outbound-empty"></a>
 #### 4.5.2 outbound：outbound.source.empty_decide@v1
 
-方向：WES → WMS，`POST /api/v1/wes/decisions`。operation 及 RETRY/WAIT/SOURCE_DONE 联合沿用[既有空取合同](../../../wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md#122-空取决定请求和响应)，请求继续使用既有字段名；BIN_CELL 来源按料箱解绑后的本稿字段表裁剪，不携带原架号/面；不套用上架的 SOURCE_ABSENT 名称，不增加复检接口、空取 Event 或重试计数字段。本方已确认的同箱/同面异常接续见 §5.9.2。
+方向：WES → WMS，`POST /api/v1/wes/decisions`。operation 及 RETRY/WAIT/SOURCE_DONE 联合沿用既有空取合同（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md#122-空取决定请求和响应`），请求继续使用既有字段名；BIN_CELL 来源按料箱解绑后的本稿字段表裁剪，不携带原架号/面；不套用上架的 SOURCE_ABSENT 名称，不增加复检接口、空取 Event 或重试计数字段。本方已确认的同箱/同面异常接续见 §5.9.2。
 
 只有原来源命令及权威设备事实明确证明指定来源无料时才请求。普通 FAILED、PICK_FAILED、actual_qty=0、超时、online/IDLE 均不证明空取；结果未知继续原身份恢复。设备如何承载明确无料及其时间、补报保证属于严格附录交付，不以占位错误码或新造 Result 枚举触发。
 
@@ -2781,7 +2783,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | RackSlot 生产来源架 | RETURN / RETURN_RACK，RACK_POSITION | 复用供应商场景5：ARM02 从 FIVE_LAYER_RACK 取单盘到扫码台；来源层/列及本盘厚度/直径由 WMS 在原取盘授权中预先提供，P03 已本方确认 | F01 / CK04 / F01，沿现有 RackRole.RETURN 搬运场景；生产授权及面级收口归本业务 |
 | 物料接料目标架 | TRANSFER / TRANSFER_RACK，RACK_POSITION | 自动机械臂附录已确认 ECS location_type=FIVE_LAYER_RACK；它与料箱供箱架的业务用途不同 | F01 / CK04 / F01，沿现有 RackRole.TRANSFER 搬运场景；由原 target_rack/ACCEPT 触发准备 |
 
-依据为[旧 AUTO 资源声明](../../../wes_backend/workline_plugins/automatic-picking/src/automatic_picking/definition.py)、[自动机械臂附录 §3](../../../wes_backend/docs/integration/device-annex-automatic-picking-arms.md#3-设备分工)及[本仓库 RackScenarios](../../app/integrations/wms_transport/rack_scenarios.py)。旧附录“typed RACK_ROTATE 只支持 CTU02”的实施限制不适用于本仓库现有 CK04 读写能力；对端合同同步及现场接受仍按[Transport 差异说明](wms-transport.md#仍需确认的合同差异)交付，不重新设计模板或改用 CTU02。
+依据为[旧 AUTO 资源声明](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/workline_plugins/automatic-picking/src/automatic_picking/definition.py)、[自动机械臂附录 §3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md#3-%E8%AE%BE%E5%A4%87%E5%88%86%E5%B7%A5)及[本仓库 RackScenarios](../../app/integrations/wms_transport/rack_scenarios.py)。旧附录“typed RACK_ROTATE 只支持 CTU02”的实施限制不适用于本仓库现有 CK04 读写能力；对端合同同步及现场接受仍按[Transport 差异说明](wms-transport.md#仍需确认的合同差异)交付，不重新设计模板或改用 CTU02。
 
 三处逻辑绑定分别取原 WORKLINE 配置，不硬编码 KT16/KT18 或 STATION_A/B，也不凭示例将不同角色合并成同一服务周期。机械臂目标 location_id 与原 TRANSFER_RACK 绑定对应；RackSlot 来源具体定位沿 P03。公共供箱/回流执行只通过 §8 接入，不将生产来源架或物料目标架交给公共投回箱流程。
 
@@ -2794,9 +2796,9 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | 设备执行 | ARM02 `PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id` 取 TRANSFER_RACK 实际绑定；架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度/直径用本盘原取盘冻结的 JSON 数值（毫米/寸）。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
 | 实际位置报告 | `movement_report.data.to_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id` | 本盘确定放置成功且实际位置与最终授权一致后，报告原业务目标四字段；不报告设备层/列，不用报告 ACK 证明物理成功，不改变原报告匹配与去重规则 |
 
-依据为[现有 WMS 自动拣料合同 §8.1、§10.3、§12.4](../../../wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md)、[自动机械臂附录 §3/§4.2.2/§4.3](../../../wes_backend/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](../../../wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿已确认的 `params` 信封、`rack_face`、整数层列转设备字符串及尺寸数值规则，不复制旧示例的顶层 source/target、rack_side 或尺寸字符串。
+依据为现有 WMS 自动拣料合同 §8.1、§10.3、§12.4（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md`）、[自动机械臂附录 §3/§4.2.2/§4.3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿已确认的 `params` 信封、`rack_face`、整数层列转设备字符串及尺寸数值规则，不复制旧示例的顶层 source/target、rack_side 或尺寸字符串。
 
-原始[供应商 PDF](../../../wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf)已补充核对：第 10 页场景4和第 12 页场景6均由 ARM02 从 SCAN_PLATFORM 放到 FIVE_LAYER_RACK；第 37 页 PDF §8.1 列出目标架号、面、层、列及本盘尺寸；第 42 页 PDF §9.6 的出库图明确画出“SCAN2 流水线料箱 → 机器人1 → 扫码平台 → 机器人2 → STATION_A/B 五层料架”。该页 PDF §9.7 只有移库标题，没有对应流程图，不将缺失图示作为移库依据；RackSlot 路径仍以已确认分工及场景5/6为依据。原 PDF 场景4示例漏列 rack_id，沿 PDF §8.1 必填表和已确认附录保留；旧 rack_side、顶层 source/target、尺寸字符串也不覆盖本稿合同。
+原始供应商 PDF（源仓库本地附件：`wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf`）已补充核对：第 10 页场景4和第 12 页场景6均由 ARM02 从 SCAN_PLATFORM 放到 FIVE_LAYER_RACK；第 37 页 PDF §8.1 列出目标架号、面、层、列及本盘尺寸；第 42 页 PDF §9.6 的出库图明确画出“SCAN2 流水线料箱 → 机器人1 → 扫码平台 → 机器人2 → STATION_A/B 五层料架”。该页 PDF §9.7 只有移库标题，没有对应流程图，不将缺失图示作为移库依据；RackSlot 路径仍以已确认分工及场景5/6为依据。原 PDF 场景4示例漏列 rack_id，沿 PDF §8.1 必填表和已确认附录保留；旧 rack_side、顶层 source/target、尺寸字符串也不覆盖本稿合同。
 
 正常目标统一为转运货架储位，机械臂到五层目标架的路径及参数结构已有说明书和现有合同依据，本项术语及目标映射已确认关闭，不增加字段或另设映射交付项。工作线实际绑定、严格附录实现及真实设备验收仍沿第10章原交付依赖，不因本项关闭视为已经实施或现场通过。
 
@@ -3297,7 +3299,7 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 | `params.target.location_id` | 本工作线扫码台绑定，如 `STATION_SCAN` |
 | `params.target.location_type` | `SCAN_PLATFORM` |
 
-货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](../../../wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书V1-20260318.md)，沿本系统公共信封、rack_face 及数值类型，不复制原文的顶层 source/target、旧 rack_side 或数字字符串尺寸。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
+货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)，沿本系统公共信封、rack_face 及数值类型，不复制原文的顶层 source/target、旧 rack_side 或数字字符串尺寸。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
 
 **P03 已本方确认。** rack_layer、rack_column、reel_thickness、reel_diameter 均由 WMS 在本次取盘前提供：首盘置于 return_rack.work_plan.READY，后继置于 RackSlot material.decide 的 next_source_action，沿现有字段名、类型和单位。WMS 负责原授权储位与本盘参数的正确对应；WES 不从 slot_id 推算层列、不借用 BIN 参数，不增加本地储位/尺寸映射、查询 API 或参数兜底流程。
 
@@ -3494,7 +3496,7 @@ WES 将本盘 target 按 §7.3 组装为以下完整 params；设备位置由本
 <a id="putaway-parameter-mapping"></a>
 ### 7.7 inbound 动态参数与放盘前占用口径
 
-来源：[《SMT分拣机ECS接口调用说明书》PDF](../../../wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf)，版本历史 1.0.0（2026-03-18）；PDF §2.2、PDF §3.1.5 入库场景 1/2、PDF §8.1，对应 PDF 第 4、7～9、37～38 页。PDF §9.5 的单层架布局另见第 41 页。本节参数依据该 PDF 文本及页面对应条款，不以另一份 Markdown 的字段变化替代该文件。
+来源：《SMT分拣机ECS接口调用说明书》PDF（源仓库本地附件：`wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf`），版本历史 1.0.0（2026-03-18）；PDF §2.2、PDF §3.1.5 入库场景 1/2、PDF §8.1，对应 PDF 第 4、7～9、37～38 页。PDF §9.5 的单层架布局另见第 41 页。本节参数依据该 PDF 文本及页面对应条款，不以另一份 Markdown 的字段变化替代该文件。
 
 | ECS 动作及参数 | 动态数据来源 / WMS 响应字段 | WES 处理边界 |
 | --- | --- | --- |
