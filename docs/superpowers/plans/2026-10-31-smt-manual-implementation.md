@@ -1,6 +1,6 @@
 # SMT 手工分拣、入库业务子包实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本轮仅整理实施计划，所有步骤均未实施；不写产品代码、迁移、配置或测试，不执行产品测试/运行库操作，不提交、不推送、不部署或真实发送。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本计划M1～M6仍未实施，依赖的共享ST1/ST2已随PR #44合入develop；本轮仅同步交付状态，不写产品代码、迁移、配置或测试，不执行产品测试/运行库操作，不提交、不推送、不部署或真实发送。
 
 **Goal:** 交付一个 smt_manual 正式业务，支持手工入库/出库共用任务生命周期、箱级人工准入/完工、出库直接取料及可选转运架，并复用已合并 BIN_Roller 完成公共箱架流程。
 
@@ -41,11 +41,11 @@
 | 组件组合/唯一输入/原业务WMS与Transport通知 | 框架已合并 | 复用，不新建运行时或通知器 |
 | BIN_Roller四点、供箱/回流/FIFO/drain/统一架流、原结果消费 | PR #42/e265ad7 已合并，本地实现和隔离验证已交付 | 只消费公开接口和原声明；缺陷另以具体证据处理，不重做B1～B5 |
 | Transport提交接纳与应用结果通知、异常明确架位置 | 已有公开读口和原owner通知 | M5/M6 验真实宿主链路，ACK/接纳不冒充物理完成 |
-| sorting_task | 隔离分支已实现ST1/ST2并验证，尚未正式接入 | [共享交付证据](2026-10-31-sorting-task-implementation.md#sorting-task-delivery)；手工和自动引用相同源码，M1及正式装配仍待实施 |
+| sorting_task | [PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入develop（380aeba），共享软件验收通过，尚无正式宿主 | [最新交付及4654/52验收](2026-10-31-sorting-task-implementation.md#sorting-task-merged)；专项24 passed；手工M1及正式装配仍待实施 |
 | smt_manual任务/准入/完工/出库自有架/完成 | 未实现 | M1→M2→M3→M4 |
 | BIN_Roller组件状态表迁移、正式生产消费者/catalog、整体验收 | B7未完成 | M5与B7对接首个完整生产宿主，M6分层验收；不以测试消费者代替 |
 
-固定顺序：**ST1 → ST2 → M1 → M2 → M3 → M4 → M5 → M6**。共享合同/类型固定后，各业务才消费；SMT 不等待自动两方向逐盘业务交付。若自动计划已先交付 ST1/ST2，只核对同一接口/验收并复用，不复制实现；反之自动 S1 消费本共享交付。
+固定顺序：**ST1（完成）→ ST2（完成）→ M1 → M2 → M3 → M4 → M5 → M6**。共享合同/类型及原归属接缝已单份合入；手工M1和自动S1直接复用同一源码及验收证据，各自验证真实宿主状态与原子性，不重复实施ST1/ST2。SMT不等待自动两方向逐盘业务交付。
 
 共享阶段按[唯一交付归属](2026-10-31-sorting-task-implementation.md#sorting-task-ownership)验收：ST1仅验证隔离operation及旧默认行为，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；M1不提前承担这些正式登记断言。
 
@@ -189,7 +189,7 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 | 依赖/门槛 | 责任与不满足时的结论 |
 | --- | --- |
-| ST1/ST2单份合同/错误/重验/原归属接缝 | [共享分工](2026-10-31-sorting-task-implementation.md#sorting-task-ownership)独立交付：ST1隔离验收及收据保护/冻结合同，ST2真实登记/分派；M1消费并验宿主原子性，自动S1复用，不要求自动生产先交付 |
+| ST1/ST2单份合同/错误/重验/原归属接缝 | PR #44/380aeba已合入，专项24及全仓4654/52通过；[共享分工](2026-10-31-sorting-task-implementation.md#sorting-task-ownership)独立交付：ST1隔离验收及收据保护/冻结合同，ST2真实登记/分派；M1消费并验宿主原子性，自动S1复用，不要求自动生产先交付 |
 | BIN_Roller已合并组件及公开进度/结果/通知 | M1～M4测试装配可用；不做B1～B5第二实现，不把测试生产口替代人工逻辑 |
 | B7组件状态迁移/首个真实消费者 | M5与B7共同闭合一次；无表/无真实宿主不标正式装配完成，后续自动宿主不重复建组件表 |
 | manual_bin新名称、共享task_id原归属及各严格wire | 正式WMS集成前落实；本方测试不代表对端已接受，未知字段和错误策略按每operation保留 |
@@ -199,4 +199,4 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 覆盖自查：设计§1～4/§9→ST1/ST2/M1；§5→M2；§6→M3；§7→M4；§8/§10/§11→M5；§12→M5/M6。API六类任务、新人工接口、三类出库专属接口、供箱撤销/完工关联/确认竞态均有对应命名验收，C07/Transport接纳使用合并基线。
 
-本计划交付后先审阅，不进入执行。所有步骤未勾选、不执行任何RED/GREEN或数据库操作，不提交或创建PR；后续实际实施授权和软件/对端/现场验收分别记录。
+共享ST1/ST2交付与最新评审/CI结果见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本计划M1～M6保持未勾选，真实宿主、正式catalog/迁移、SMT运行恢复及WES完整物理闭环仍未验收。本轮仅同步文档，未执行新的RED/GREEN、产品测试、数据库操作、部署或真实请求；后续宿主实施另需授权。
