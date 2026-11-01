@@ -25,10 +25,13 @@ async def insert_receipt(
 
 
 async def find_receipt(
-    session: AsyncSession, operation: str, operation_id: str
+    session: AsyncSession, operation: str, operation_id: str, *, for_update: bool = False
 ) -> CallbackReceipt | None:
-    return await session.scalar(
-        select(CallbackReceipt).where(
-            CallbackReceipt.operation == operation, CallbackReceipt.operation_id == operation_id
-        )
+    statement = select(CallbackReceipt).where(
+        CallbackReceipt.operation == operation, CallbackReceipt.operation_id == operation_id
     )
+    if for_update:
+        if session.get_bind().dialect.name == "postgresql":
+            await session.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+        statement = statement.with_for_update().execution_options(populate_existing=True)
+    return await session.scalar(statement)

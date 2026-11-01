@@ -17,7 +17,8 @@ Transport 固定事件仍在 wms_transport.callback。
   - 202 `RECEIVED`:处理成功。
   - 200 `DUPLICATE`:同身份、同内容重发。
   - 409:同身份、不同内容。
-  - 503:处理器抛出普通异常,或 PostgreSQL 行锁等待超过 5 秒。整个事务回滚,WMS 应用原身份重发。
+  - 503:业务显式 Unavailable，或处理器抛出普通异常/PostgreSQL 行锁等待超过 5 秒。
+    系统异常整个事务回滚，业务待定的保存边界见下文；WMS 应沿原身份重发。
 - 内容比较先比原文摘要,再比 DTO 规范化后的摘要,所以对端多发的冗余字段不会被当成内容变了。
 - 处理器在保存点里执行。返回 Rejected 时它写的行全部回滚,收据里仍保存这次拒绝,
   重发会得到同样的拒绝。
@@ -47,7 +48,19 @@ Transport 固定事件仍在 wms_transport.callback。
 可选 title= 声明 Swagger 标题。注册项直接保存函数和模型，Transport 业务共用普通函数。
 完整接入步骤与注册清单排障见 docs/integrations/registration.md。
 
-结果类型是 Accepted、Duplicate、Conflict、Rejected,`return` 和 `raise` 效果相同。
+结果类型是 Accepted、Duplicate、Conflict、Rejected、Unavailable，`return` 和 `raise` 效果相同。
+
+新合同可显式登记不可变 CallbackErrors(invalid_data, invalid_envelope, identity_conflict)；
+省略时保留旧错误及回显。可选 async recheck(ctx, payload, original_response) 只用于原未成功
+收据：receiver 锁定并刷新原行后传入深层只读原响应，返回 None 保留历史响应，成功历史不重验。
+Unavailable 固定返回 503/UNAVAILABLE/{}；仅显式登记 recheck 且已绑定原业务时保存待定输入，
+否则回滚本次收据及处理写入，保留调用方既有外层事实。它不授权业务应用成员或版本。
+可选 async archive_guard(ctx, payload) 返回拒绝 CallbackResponse 或 None；在身份比较后、
+历史重放或处理前执行，旧收据不被 guard 改写。guard 抛出 Rejected/Conflict 沿原拒绝响应，
+抛出 Unavailable 返回 503 且不保存新收据；普通异常继续传播。归档政策及重验资格始终由原业务提供。
+已有同身份同内容收据在身份比较后通过 ctx.original_response 提供深层只读原响应；
+首次为 None，guard 与 recheck 使用同一原响应快照，不授权业务修改收据。
+
 写处理函数要注意:
 
 - 不要自己 commit 或 rollback。需要留下的诊断用 `ctx.note(reason_code, ...)`,它随收据
@@ -67,7 +80,7 @@ Transport 的两个 operation 见 `wms_transport/callback/` 和
 docs/superpowers/specs/2026-10-22-transport-callback-design.md。
 """
 
-from .operation import CallbackPayload
+from .operation import CallbackErrors, CallbackPayload
 from .receiver import MAX_BODY_BYTES, CallbackResponse, receive, unavailable
 from .registry import (
     Accepted,
@@ -77,6 +90,7 @@ from .registry import (
     InvalidPayload,
     Outcome,
     Rejected,
+    Unavailable,
     callback_operation,
 )
 
@@ -87,6 +101,8 @@ __all__ = [
     "Duplicate",
     "CallbackContext",
     "CallbackPayload",
+    "CallbackErrors",
+    "Unavailable",
     "CallbackResponse",
     "InvalidPayload",
     "Outcome",
