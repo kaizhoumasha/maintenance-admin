@@ -1,0 +1,110 @@
+{
+  "provenance": {
+    "good": {
+      "path": "tests/mock/good_cases/KT16-A950FC259A78C43DB8D6D82FC110C8B03/evidence.json",
+      "sha256": "9e9a860f889ef5f45493ed4fc5cf262f6401f386ed3e601c9bc6b4e5b5f3cc50",
+      "task_id": "A950FC259A78C43DB8D6D82FC110C8B03"
+    },
+    "bad": {
+      "path": "workline_plugins/manual-picking/tests/fixtures/kt16_a087_a000002121_cancelled_source_scan2.json",
+      "sha256": "f09ae797b43d48d5f31278121f502c62a6a75a128b7ed63f8b746c939c49b843",
+      "task_id": "A0878D74053AD4116871A6BACAFA3BB6F",
+      "bin_code": "A000002121"
+    },
+    "adaptation": "New isolated task/message identities and timestamps; sorting.task operation names; issued business_type=outbound. Resources remain literal archive values. BAD cancellation reconstructed from archived source selector; no physical replay."
+  },
+  "good": {
+    "issued": {
+      "data": {
+        "task_id": "A950FC259A78C43DB8D6D82FC110C8B03",
+        "task_type": "MANUAL",
+        "workline_code": "KT16",
+        "queue_revision": 1,
+        "dispatch_sequence": 100
+      },
+      "operation": "outbound.picking_task.issued@v1",
+      "timestamp": 1790371007667,
+      "operation_id": "01a0da6d-8cb3-71bd-9966-f810ca25a76c"
+    },
+    "plan_delta": {
+      "data": {
+        "task_id": "A950FC259A78C43DB8D6D82FC110C8B03",
+        "target_rack": {
+          "rack_id": "610017",
+          "rack_face": "90"
+        },
+        "plan_revision": 1,
+        "added_bin_source_racks": [
+          {
+            "rack_id": "510001",
+            "rack_face": [
+              "90"
+            ]
+          },
+          {
+            "rack_id": "510002",
+            "rack_face": [
+              "270"
+            ]
+          },
+          {
+            "rack_id": "510017",
+            "rack_face": [
+              "270"
+            ]
+          },
+          {
+            "rack_id": "510024",
+            "rack_face": [
+              "90"
+            ]
+          },
+          {
+            "rack_id": "510027",
+            "rack_face": [
+              "90"
+            ]
+          },
+          {
+            "rack_id": "510034",
+            "rack_face": [
+              "90"
+            ]
+          }
+        ]
+      },
+      "operation": "outbound.picking_task.plan_delta@v1",
+      "timestamp": 1790371044623,
+      "operation_id": "01a0da6e-1d0f-7761-98ea-681663532ddc"
+    },
+    "prepare_response": {
+      "code": "PREPARE_ACCEPTED",
+      "data": {},
+      "timestamp": 1790371008599,
+      "operation_id": "01a0da6d-8d50-7744-85a2-dfe1b75b13e9"
+    },
+    "completion_response": {
+      "code": "DECIDED",
+      "data": {
+        "result": "COMPLETED"
+      },
+      "timestamp": 1790372222021,
+      "operation_id": "01a0da7f-fef5-7587-8b33-8a767c27625d"
+    }
+  },
+  "bad": {
+    "cancel": {
+      "task_id": "A0878D74053AD4116871A6BACAFA3BB6F",
+      "cancel_scope": "PLAN_MEMBERS",
+      "bin_source_racks": [
+        {
+          "plan_revision": 1,
+          "rack_id": "510002",
+          "rack_face": [
+            "90"
+          ]
+        }
+      ]
+    }
+  }
+}

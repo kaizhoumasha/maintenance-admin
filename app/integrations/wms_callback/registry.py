@@ -4,7 +4,9 @@
 测试用 `monkeypatch` 替换成空 dict 隔离。装饰器只注册映射,不带 `ack_mode` 等元数据(信封合同 §6)。
 """
 
-from collections.abc import Callable
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,7 +28,7 @@ class InvalidPayload(Exception):
 
 
 class Outcome(Exception):
-    """处理结果的基类。四种结果既可以 `return`,也可以在任意深的调用里 `raise`,效果相同。"""
+    """处理结果的基类。结果可以 `return` 或在任意深的调用里 `raise`,效果相同。"""
 
 
 class Accepted(Outcome):
@@ -61,7 +63,11 @@ class Rejected(Outcome):
         self.reason_code = reason_code
 
 
-OUTCOMES = (Accepted, Duplicate, Conflict, Rejected)
+class Unavailable(Outcome):
+    """503 UNAVAILABLE: original input cannot yet be applied."""
+
+
+OUTCOMES = (Accepted, Duplicate, Conflict, Rejected, Unavailable)
 
 
 @dataclass
@@ -81,6 +87,7 @@ class CallbackContext:
     runtime: object | None = field(default=None, kw_only=True)
     registration_source: object | None = field(default=None, kw_only=True)
     operation: str | None = field(default=None, kw_only=True)
+    original_response: Mapping | None = field(default=None, kw_only=True)
     on_owner_committed: Callable[[str], None] | None = field(default=None, kw_only=True)
     _business_binding: _CallbackBusiness = field(default_factory=_CallbackBusiness, kw_only=True)
 
@@ -98,10 +105,11 @@ class CallbackContext:
 
 
 if TYPE_CHECKING:
-    from .operation import Registered
+    from .operation import CallbackErrors, Registered
+    from .receiver import CallbackResponse
 
 
-_registry: dict[str, "Registered"] = {}
+_registry: dict[str, Registered] = {}
 
 
 def callback_operation(
@@ -110,6 +118,11 @@ def callback_operation(
     data: type[BaseModel],
     title: str | None = None,
     echo_keys: tuple[str, ...] = (),
+    errors: CallbackErrors | None = None,
+    recheck: Callable[[CallbackContext, BaseModel, Mapping], Awaitable[Outcome | None]]
+    | None = None,
+    archive_guard: Callable[[CallbackContext, BaseModel], Awaitable[CallbackResponse | None]]
+    | None = None,
 ):
     """注册 async handler(ctx, payload);返回原函数，Payload 校验及结果转换由注册项完成。"""
 
@@ -123,15 +136,17 @@ def callback_operation(
         from .operation import Registered
 
         validate_function(target, data)
-        _registry[name] = Registered(target, data, title, echo_keys, source)
+        _registry[name] = Registered(
+            target, data, title, echo_keys, source, errors, recheck, archive_guard
+        )
         return target
 
     return register
 
 
-def lookup(name: str) -> "Registered | None":
+def lookup(name: str) -> Registered | None:
     return _registry.get(name)
 
 
-def operations() -> dict[str, "Registered"]:
+def operations() -> dict[str, Registered]:
     return dict(_registry)
