@@ -1,5 +1,7 @@
 # 业务多能力组合：阶段一验收记录
 
+> **历史时点说明：** 本文执行、测试、迁移 head 及“本轮”状态按各节标明的 2026-10-30 时点解读；“当时未实施阶段三”等记录不代表当前 BIN_Roller 状态。当前交付边界统一见 [BIN_Roller B1～B7 实施计划](../superpowers/plans/2026-10-30-bin-roller-implementation.md)。
+
 日期：2026-10-30。范围：业务子包多能力组合、唯一注册与分派（P1.1～P1.4）。
 本次实现位于 feature/business-components-phase1；经阶段一独立复审后已提交 90861b7（代码、测试与本记录），原暂存文档保留，不部署。
 
@@ -44,12 +46,16 @@ review-red.log、review-green.log、progress.md 及逐步 RED/GREEN 记录；该
 实施期间外部操作合入 PR #40 并切回 develop，仅提交了既有 ECS 重启测试及验收文档；本轮没有提交这些外部变化。
 随后在相同 HEAD 创建 feature/business-components-phase1，逻辑暂存区逐条核对保持一致，最终测试期间 Python 文件哈希保持一致。
 
-阶段一验收时阶段二尚未实施；当前阶段二已提交 a34b28d，见[阶段二验收](business-components-phase2.md)。阶段三 bin_return/SMT 仍未接入。
+阶段一验收时阶段二尚未实施；截至 2026-10-30 后续核对，阶段二已提交 a34b28d，见[阶段二验收](business-components-phase2.md)，当时阶段三 bin_return/SMT 尚未接入。
 本次无真实 WMS/ECS 发送、现场数据库访问或物理业务验收，不能据此启用回流业务。
 
 阶段一提交前复审：独立审查检查组合、来源、唯一目标、命令权限/重放、回调保存点与装配；
 删除 catalog 两处恒定/冗余分支，功能行为保持。提交前复测为 3697 passed、39 skipped，298.72 秒；静态检查通过。
 
-进度复核（2026-10-30）：P1.1～P1.4 按计划出口逐项通过，详见[阶段一计划验收索引](../superpowers/plans/2026-10-30-business-components-phase1.md#按计划验收复核与当前进度2026-10-30)。后续联合全量 3791 passed / 36 skipped 已补齐原三套未配置迁移库；上述阶段一历史计数保留，不改写为新的阶段一重跑结果。当前 Alembic head 随阶段二迁移变为 f0b120261030；本轮仅同步文档，未重复测试或新增提交。
+进度复核（2026-10-30）：P1.1～P1.4 按计划出口逐项通过，详见[阶段一计划验收索引](../superpowers/plans/2026-10-30-business-components-phase1.md#按计划验收复核与当前进度2026-10-30)。后续联合全量 3791 passed / 36 skipped 已补齐原三套未配置迁移库；上述阶段一历史计数保留，不改写为新的阶段一重跑结果。该次核对时 Alembic head 已随阶段二迁移变为 f0b120261030；当轮仅同步文档，未重复测试或新增提交。
 
 联合 ship 验证（2026-10-30）：补充共享入口与组件声明拒绝覆盖（提交 f14edbc）后，全量为 **3806 passed / 36 skipped**。此前 3791/36 是补充这 15 项用例前的历史结果；四套独立迁移库及串行 upgrade/check/唯一 head f0b120261030/downgrade 均通过。此处记录联合验证，不改写阶段一历史验收，也不代表部署或现场验收。
+
+## PR #41 合并核验（2026-10-30）
+
+历史记录（2026-10-30）：阶段一、二已随 [PR #41](https://github.com/kaizhoumasha/maintenance-admin/pull/41) 合入 develop（`f7a9628`）。该次源码树比对、原提交身份、联合本地全量、合并后 CI、跳过原因及未覆盖范围统一见 [PR #41 联合合并核验证据](business-components-phase2.md#pr41-merge-verification)；本页原阶段验收数据按各自时点保留。

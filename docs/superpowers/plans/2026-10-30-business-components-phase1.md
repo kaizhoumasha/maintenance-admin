@@ -1,6 +1,8 @@
 # 阶段一：业务多能力组合、唯一注册与分派 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans；2026-10-30 按 executing-plans 原位串行实施，经追加授权复审后已提交 90861b7；当前按 ship 准备阶段一、二联合 PR，不部署，原共享目录及其外部修改保留。Steps use checkbox (`- [ ]`) syntax for tracking。
+> **历史时点说明：** 本文执行、测试、迁移 head 及“本轮”状态按各节标明的 2026-10-30 时点解读；“当时未实施阶段三”等记录不代表当前 BIN_Roller 状态。当前交付边界统一见 [BIN_Roller B1～B7 实施计划](2026-10-30-bin-roller-implementation.md)。
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans；2026-10-30 按 executing-plans 原位串行实施，经追加授权复审后已提交 90861b7；阶段一、二已随 PR #41 合入 develop（f7a9628），未部署，保留原暂存和其他工作区内容。Steps use checkbox (`- [ ]`) syntax for tracking。
 
 **Goal:** 业务可组合多个内部能力，共享合同唯一注册，新输入准确分派到本业务唯一处理目标。
 
@@ -14,7 +16,7 @@
 
 ## Global Constraints
 
-- 本阶段不新增正式 bin_return/SMT 业务、组件 owner、组件任务或占位合同。
+- 总计划 Global Constraints 全部适用；本阶段不新增正式 bin_return/SMT 业务、组件 owner、组件任务或占位合同。
 - 保持 build_service(capabilities)、PROGRESSION="scan_pending" 和 business.advance_pending(business_code)；根业务清单仍显式。
 - 同业务每输入键唯一目标；真正第二次注册同键仍失败；不可把“相同名称忽略”当去重。
 
@@ -109,7 +111,7 @@ ECS 通用接收器通过应用注入的 resolve_input_target 端口解析目标
 
 ## 按计划验收复核与当前进度（2026-10-30）
 
-结论：**P1.1～P1.4 全部通过隔离验收，代码已提交 90861b7**。当前分支已接续阶段二提交 a34b28d。
+结论：**P1.1～P1.4 全部通过隔离验收，代码已提交 90861b7**。该次核对所用分支已接续阶段二提交 a34b28d。
 
 | 任务 | 复核的完成门槛 | 具体行为测试索引 |
 |---|---|---|
@@ -121,6 +123,10 @@ ECS 通用接收器通过应用注入的 resolve_input_target 端口解析目标
 上述测试函数均以 test_ 为前缀，文件位于 tests/businesses、tests/services 或 tests/integrations/ecs_command。
 P1.3 的有界公平覆盖是业务扫描分别给各内部能力固定预算的隔离样例；平台不另造组件调度器，未来消费业务仍须验收其自身扫描预算。
 
-阶段一提交前全量 3697 passed / 39 skipped；后续阶段二提交前联合全量 3791 passed / 36 skipped，补齐原来未配置的三套既有迁移回归库。阶段一无新增迁移；当前项目唯一 head 已随阶段二变为 f0b120261030，不能继续把 ea8b20261029 写成当前 head。
+阶段一提交前全量 3697 passed / 39 skipped；后续阶段二提交前联合全量 3791 passed / 36 skipped，补齐原来未配置的三套既有迁移回归库。阶段一无新增迁移；截至该次阶段二验收，项目唯一 head 已变为 f0b120261030，当时不再沿用 ea8b20261029。
 
-前次进度复核已核对提交、源码未漂移、逐步 RED/GREEN/全量日志及测试实现；本次 ship 另行验证并提交相关文档。部署/现场、生产 bin_return/SMT 接入仍未验收。
+前次进度复核核对提交、源码未漂移、逐步 RED/GREEN/全量日志及测试实现，只同步文档，未重复全量、未新增提交；随后 ship 另行验证并提交相关文档。部署/现场、生产 bin_return/SMT 接入仍未验收。
+
+## PR #41 合并核验（2026-10-30）
+
+历史记录（2026-10-30）：阶段一、二已随 [PR #41](https://github.com/kaizhoumasha/maintenance-admin/pull/41) 合入 develop（`f7a9628`）。该次源码树比对、原提交身份、联合本地全量、合并后 CI、跳过原因及未覆盖范围统一见 [PR #41 联合合并核验证据](../../testing/business-components-phase2.md#pr41-merge-verification)；本页原阶段验收数据按各自时点保留。

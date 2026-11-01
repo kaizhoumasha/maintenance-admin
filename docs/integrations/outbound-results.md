@@ -105,6 +105,14 @@ async def wake_execution(session_factory, execution_id, advance_owned_business):
 
 沿用RELIABLE_RETENTION_DAYS（默认90天）。业务在窗口内保存所需结果与消费证据；清理后未保存的WMS决定／拒绝证据不能恢复，NOT_FOUND／UNAVAILABLE不等于成功或重新发送。Transport已应用事实仍从任务读取；整体确定终态与仍可变化的成员投影分别处理。本接口不增加无界档案、平台消费表、业务worker或第二个重试调度。
 
+### 任务业务归档与平台保存期的区别
+
+[自动上架任务合同](smt-auto-api.md#inbound-retention)已本方确认按 issued.task_id 归档：任务结束且相关直接义务收口后保留 7 天业务明细，未决内容继续保留，清理后持续保留最小任务终态摘要以阻止已完成/已取消任务重新执行。明细仍在时仅重放历史结果，不重新授予作业权；清理后旧终态请求返回 STATE_CONFLICT，不新建 WES 核对流程，由上游 WMS 自行处理。该业务窗口与本读口的默认 90 天平台终态保存期、发送 TTL 分别管理，不通过修改全局保存期实现，也不删除公共回流或原未决义务。
+
+自动上架归 smt_auto/inbound，上述7天合同及只读归档准入仅作用于该方向；同包 outbound 自动拣料不因此采用相同清理/拒绝政策。两个方向的新请求均沿 business:smt_auto/原任务方向恢复，现有历史 owner、冻结请求及公共结果不改；统一业务边界见[设计](../superpowers/specs/2026-10-31-smt-auto-business-design.md)。
+
+当前 WMS 请求模块仍按默认无 TTL、对端幂等记录不过期的既有前提运行；自动上架的有限明细窗口及终态拒绝是待对端签认和实施的新业务合同，不表示现有读口/适配器已经支持按任务清理或其他 operation 已切换。业务必须独立保存防重开和消费依据，不能因平台读口 NOT_FOUND/UNAVAILABLE 重建投递或把旧响应用于新作业。
+
 验收用例见tests/integrations/wms_request/test_results.py、wms_transport/test_results.py、test_predecessors.py及tests/integrations/test_result_consumption.py；快照和序列化重试必须用显式独立PostgreSQL验证，SQLite不能代替。
 
 阶段二本地归属不进入 WMS/Transport 协议字段，也不改变冻结请求、input_digest、operation_id、client_request_id 或 caller/cycle。

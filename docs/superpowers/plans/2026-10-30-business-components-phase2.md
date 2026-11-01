@@ -1,5 +1,7 @@
 # 阶段二：WMS/Transport 原业务归属与即时唤醒 Implementation Plan
 
+> **历史时点说明：** 本文执行、测试、迁移 head 及“本轮”状态按各节标明的 2026-10-30 时点解读；“当时未实施阶段三”等记录不代表当前 BIN_Roller 状态。当前交付边界统一见 [BIN_Roller B1～B7 实施计划](2026-10-30-bin-roller-implementation.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans；2026-10-30 采用 executing-plans；阶段一复审提交 90861b7 后实施，经追加授权复审后已提交 a34b28d。Steps use checkbox (`- [ ]`) syntax for tracking。本阶段实现与隔离验收完成，已随 PR #41 合入 develop（f7a9628）；未部署。BIN_Roller 组件已随 PR #42 合入 develop，阶段三正式生产接入尚未完成，当前进度见 [B1～B7](2026-10-30-bin-roller-implementation.md)。
 
 **Goal:** 同一共享 operation/Transport 被多个业务使用时，结果只唤醒创建它的原业务，且通知发生在有效事实提交之后。
@@ -111,4 +113,8 @@ P2.3 含专用 PostgreSQL/SQLite 迁移 170 passed；P2.4 专项 327 passed / 5 
 
 提交前最终联合全量：**3791 passed / 36 skipped（322.09 秒，exit 0）**；此前三项独立迁移库回归已补齐。36 项仅是 SQLite 不适用的 PG 分支，其 PG 形态已执行。迁移 upgrade/check/唯一 head f0b120261030/downgrade 已在独立 PG 串行通过；运行环境未应用迁移。
 
-本次核对源码与上述测试版本一致，沿用已完成验收证据；前次进度复核未重复全量；本次 ship 另行验证并提交相关文档。详细范围及剩余环境边界见[阶段二验收记录](../../testing/business-components-phase2.md)。阶段三、生产业务注册、部署和现场验收保持未完成。
+前次核对源码与上述测试版本一致，沿用已完成验收证据；当轮未重复全量、未新增提交；随后 ship 另行验证并提交相关文档。详细范围及剩余环境边界见[阶段二验收记录](../../testing/business-components-phase2.md)。上述复核时点，阶段三、生产业务注册、部署和现场验收仍未完成。
+
+## PR #41 合并核验（2026-10-30）
+
+历史记录（2026-10-30）：阶段一、二已随 [PR #41](https://github.com/kaizhoumasha/maintenance-admin/pull/41) 合入 develop（`f7a9628`）。该次源码树比对、原提交身份、联合本地全量、合并后 CI、跳过原因及未覆盖范围统一见 [PR #41 联合合并核验证据](../../testing/business-components-phase2.md#pr41-merge-verification)；本页原阶段验收数据按各自时点保留。
