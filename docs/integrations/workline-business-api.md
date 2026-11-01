@@ -250,7 +250,7 @@ Result 不是另一个业务 Event，也不为每个业务增加一个 Result UR
 
 ## 4. WORKLINE 如何关联业务
 
-新工作线选的是业务 code（例如拟议 `manual_picking`、`coarse_sorting`），不是插件包路径、operation 字符串或事件脚本。业务声明列出角色、位置槽和初始入口；WORKLINE 保存业务选择及实际设备/位置绑定。
+新工作线选的是业务 code（例如待实施的 `smt_manual`、`smt_auto` 或已登记的 `coarse_sorting`），不是插件包路径、operation 字符串或事件脚本。业务声明列出角色、位置槽和初始入口；WORKLINE 保存业务选择及实际设备/位置绑定。
 
 - 单据驱动：`workline_code → 当前工作线 → 已选业务 → 该业务正式 WMS 入口`。需校验单据和当前业务匹配，不因 operation 相同跨线处理。
 - 设备驱动：`device_code → 当前绑定设备/工作线/角色 → 已选业务的角色 Event 入口`。同名 SCAN_COMPLETED 可以在两个业务中拥有不同 data 模型。

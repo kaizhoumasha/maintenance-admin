@@ -46,7 +46,7 @@
 | app/businesses/_components/bin_roller/service.py | BinRoller 单入口及原业务绑定；消费本次原事实后同事务委托统一架生命周期/正常求架检查；有界待办发现，无独立调度或事务执行器 |
 | app/businesses/_components/bin_roller/scan_flow.py、feed_flow.py、return_flow.py、rack_flow.py | 四点事实/方向/释放、供箱、回流/drain、统一架生命周期；不得各建扫描器或 CTU 状态机 |
 | app/businesses/_components/bin_roller/composition.py、contracts.py、ecs_command.py、ecs_event/scan_completed.py、request/ | 严格事件/命令合同在 B2、供箱请求在 B3、回架请求在 B4、drain/departure 请求在 B5 单份定义；文件遵循 registration_filename。B7 仅编译/加载这些声明并装配真实消费业务，不重复定义 operation |
-| 首个完整生产包的 roller_ports.py、composition.py、service.py 及 catalog | 优先人工生产包适配任务/供箱/接续及 SCAN2；当前仓库仅 coarse_sorting，manual_picking 包尚不存在，不把完整人工业务交付混入本组件或用空壳接入 |
+| 首个完整生产包的 roller_ports.py、composition.py、service.py 及 catalog | 优先人工生产包适配任务/供箱/接续及 SCAN2；当前正式清单仅 coarse_sorting，目标宿主 smt_manual 尚未实施，不把完整人工业务交付混入本组件或用空壳接入 |
 | tests/businesses/bin_roller/ | 公共行为、两业务生产接缝、四点及架流、FIFO 与重启验收；共用 fixture 在 conftest.py，测试文件不互相导入；维护端点单列 TODO |
 
 固定本地数据与方法（接口目标，不是新增 wire）：
@@ -139,7 +139,7 @@
 
 **原提交接纳通知已补：** Transport submit 保留原 business_key=task_id；MessageStore.finish 的可选协议中立 on_delivered 事务端口只在当前有效 DONE 保存时调用。主应用原生装配按原 operation_id 与 task_id 精确读取 TransportTask.owner_domain，经既有 after_commit/业务 pending 发布原业务码。有效 RECEIVED/202 与 DUPLICATE/200 覆盖；失效租约、重复完成、失败/未知、无已知 owner 和回滚不误通知。发布失败不回滚接纳，原 RACK_CYCLE 持久待办仍可在重启/同入口 Beat 后恢复并释放，不等最终 Result。原身份/请求和既有 on_result 终态语义不变，无新调度器；组件尚无正式生产宿主。
 
-**Files:** Create bin_roller/composition.py；核对/装配 B2～B5 已有的 contracts.py、ecs_command.py、ecs_event/scan_completed.py 和四个 request/ 严格声明（含唯一 departure），不重复创建同一 operation。接入另行交付的首个完整生产包时 Create/Modify 其 roller_ports.py、composition.py、service.py 及 catalog（优先 manual_picking；当前尚无该包）；接首个真实消费包时 Create migrations/versions/2026-10-30_bin_roller_state.py（组件状态；异常架位置 nullable 列已由 B1 的 f0b220261031 单独交付，不重复迁移，无派发停止列或旧数据重算）、tests/migrations/test_bin_roller_state.py；Test tests/businesses/bin_roller/test_application.py、test_production_integration.py、test_recovery.py。
+**Files:** 核对既有 bin_roller/composition.py；核对/装配 B2～B5 已有的 contracts.py、ecs_command.py、ecs_event/scan_completed.py 和四个 request/ 严格声明（含唯一 departure），不重复创建同一 operation。接入另行交付的首个完整生产包时 Create/Modify 其 roller_ports.py、composition.py、service.py 及 catalog（按 SMT 手工计划接入 smt_manual；当前尚无该包）；接首个真实消费包时 Create migrations/versions/2026-10-30_bin_roller_state.py（组件状态；异常架位置 nullable 列已由 B1 的 f0b220261031 单独交付，不重复迁移，无派发停止列或旧数据重算）、tests/migrations/test_bin_roller_state.py；Test tests/businesses/bin_roller/test_application.py、test_production_integration.py、test_recovery.py。
 
 **Interfaces:** B1～B5 正常主流程验证、B6 文档边界核对、首个真实完整生产业务及分项边界；组件复用用测试环境两种生产适配器证明，不以四类生产包全部交付或第二个正式业务作为首版前置；U04 来源为设计 §9.4 已验证 manual-picking，对应源码/本项目声明逐项映射，不重新询问已验证字段。COMPONENT key=bin_roller，required_methods=(accept_scan,get_pending_upper_id,list_pending,advance,apply_supply_change,get_supply_progress,release_scan2,get_scan2_release_result)，requires_progression=True。业务工厂注入自己生产对象；框架仍只有业务 scan_pending，正式四点仅组件一个输入目标。所有组件模型随一个 MODEL_MODULES 加载；本任务迁移依执行时唯一 head 衔接，组件表含上述必要业务唯一约束，平台只附 B1 已限定的异常架位置列；不加父后继/本点流控制表或框架幂等改造，B6 仅边界核对且维护端点独立 TODO，不运行两套旧组件迁移。
 
