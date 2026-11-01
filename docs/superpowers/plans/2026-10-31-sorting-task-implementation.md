@@ -1,6 +1,6 @@
 # sorting_task 共享任务合同与分派实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。计划编制时仅审文档；后续用户已单独授权实施ST1/ST2。当前共享组件已在隔离分支实现并验证，见[实施交付](#sorting-task-delivery)；真实宿主、正式catalog、迁移、部署及真实发送仍未交付；后续用户已另行授权整理提交并创建合入develop的PR，见[交付范围](#sorting-task-pr-delivery)。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。计划编制时仅审文档；后续用户已单独授权实施ST1/ST2。共享ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入`develop`，合并提交[380aeba](https://github.com/kaizhoumasha/maintenance-admin/commit/380aeba327e12effddb153e5a55578f162b7761e)；最新验收与未验收边界见[§11](#sorting-task-merged)。本轮只同步文档，不实施后续宿主、不部署或真实发送。
 
 **Goal:** 为 smt_manual 和 smt_auto 交付一份 sorting.task.* 严格合同及可信原业务分派，任务状态和推进继续归各宿主。
 
@@ -150,7 +150,7 @@ ST1 → ST2 → 首个完整宿主正式接入。ST1仅靠隔离operation即可�
 
 设计任务族/无损规范化/响应/错误/重验→ST1；原归属/组件唯一来源→ST2；任务状态、执行位、WAIT、完成→宿主计划；BIN_Roller 内部流程→已合并组件/B7正式接入。Review Focus 五项均有对应命名验收。类型签名沿本计划第1节，不在宿主计划再定义另一组。
 
-计划编制及§4～§6为历史文档评审记录。随后用户明确授权实施ST1/ST2；当前勾选与证据以[§7](#sorting-task-delivery)为准。宿主任务、迁移及正式启用仍待各自阶段；整理提交及PR交付范围见[§9](#sorting-task-pr-delivery)。
+计划编制及§4～§6为历史文档评审记录。随后用户明确授权实施ST1/ST2；当前勾选与交付证据以[§11](#sorting-task-merged)为准。宿主任务、迁移及正式启用仍待各自阶段；整理提交及PR交付范围见[§9](#sorting-task-pr-delivery)。
 
 ## 4. 工程评审记录（2026-10-31）
 
@@ -334,9 +334,9 @@ R1～R3均为待采纳建议，尚未修改原实施步骤或增加已批准任�
 本轮新增问题0项、未决设计选择0项；实施顺序仍为ST1→ST2→首个完整宿主，手工M1/自动S1不重复公共实现，不要求两宿主同时交付。本轮不新增TODO或实现任务，没有新的持久规则需要记忆。外部复核本轮探针仍返回CODEX_MODE: not_installed，未启动外部进程；指定的Plan/TaskOutput/TaskStop回退组合不可用，不计独立外部覆盖。
 
 <a id="sorting-task-delivery"></a>
-## 7. ST1/ST2 实施交付（隔离分支）
+## 7. ST1/ST2 初次实施与验收快照
 
-当前范围：`feature/sorting-task-shared`，基于`develop@19082e3`；ST1及ST2全部步骤完成；本节记录初次实现验收时的状态，后续提交及PR交付范围见[§9](#sorting-task-pr-delivery)。原设计工作区的文档和暂存区保持原样。本节更新共享交付状态，不将后续宿主步骤勾选为完成。
+历史实现范围：`feature/sorting-task-shared`，基于`develop@19082e3`；ST1及ST2全部步骤完成。本节保留初次验收快照，后续提交范围见[§9](#sorting-task-pr-delivery)，当前已合入状态及修复后结果见[§11](#sorting-task-merged)。原设计工作区的文档和暂存区保持原样。本节更新共享交付状态，不将后续宿主步骤勾选为完成。
 
 - ST1：MANUAL/AUTO四分支无损合同、严格原模式校验、两份decisions请求及响应解析器；可选错误合同、Unavailable、原收据重验锁/刷新、成功不降级和只读guard。未新增依赖或收据列。
 - ST2：固定ComponentDefinition、TaskOwnerRef/宿主协议、四份callback、可信消费者内原归属解析与薄委托。只有plan登记recheck；组件无任务表、命令、progression或调度器，未加入正式catalog。
@@ -346,7 +346,7 @@ R1～R3均为待采纳建议，尚未修改原实施步骤或增加已批准任�
 
 ### 验证与评审证据
 
-| 检查 | 最终结果 | 证明范围 |
+| 检查 | 初次实施阶段结果 | 证明范围 |
 | --- | --- | --- |
 | 共享组件/receiver聚焦回归 | 483 passed，6 skipped，22.82秒 | 合同、两隔离宿主、登记、重放、重验、事务及旧默认 |
 | 全仓`uv run pytest -q -rs` | 4617 passed，52 skipped，441.15秒，退出0 | 最终修复后全树；独占PostgreSQL 16/Redis，非产品存储 |
@@ -359,7 +359,7 @@ R1～R3均为待采纳建议，尚未修改原实施步骤或增加已批准任�
 
 SQLite限制已对基线HEAD复现：receiver无法先于调用方已执行的SQL补原生事务。新增receiver自身保存点路径已作窄BEGIN保护；SQLite先有真实外层写入和PostgreSQL新调用方保存点的回滚路径均通过。不改全局引擎来掩盖该既有边界。
 
-本地RED/GREEN、任务评审、最终修复/复审及完整日志保留在本工作树`.superpowers/sdd/2026-10-31-sorting-task-implementation/`，便于未提交期间复核。专用测试容器用后移除，证据和工作树保留。
+本地RED/GREEN、任务评审、最终修复/复审及完整日志保留在本工作树`.superpowers/sdd/2026-10-31-sorting-task-implementation/`，作为本地历史证据保留，不进入Git；可共享的CI及合入证据见[§11](#sorting-task-merged)。专用测试容器已移除。
 
 ### 后续边界
 
@@ -368,10 +368,10 @@ SQLite限制已对基线HEAD复现：receiver无法先于调用方已执行的SQ
 <a id="sorting-task-rereview"></a>
 ## 8. ST1/ST2 实现再评审与 WES 案例验收
 
-用户随后要求重新工程评审，并用wes_backend的BAD/GOOD CASE验收，实际缺陷直接修复。本轮复核没有发现可复现产品缺陷（Critical/Important/Minor均0），产品源码未改；新增历史案例测试与带来源摘要的最小样本。详细证据及逐项范围见[工程复核报告](../reviews/2026-10-31-sorting-task-st1-st2-review.md)。§7保留初次交付结果，最新复核以本节为准。
+用户随后要求重新工程评审，并用wes_backend的BAD/GOOD CASE验收，实际缺陷直接修复。本轮复核没有发现可复现产品缺陷（Critical/Important/Minor均0），产品源码未改；新增历史案例测试与带来源摘要的最小样本。详细证据及逐项范围见[工程复核报告](../reviews/2026-10-31-sorting-task-st1-st2-review.md)。§7～§8保留线上P2修复前的历史结果，最新复核及合入状态以[§11](#sorting-task-merged)为准。
 
 - 历史案例验收17 passed：六来源面及目标保真、原响应稳定重放、身份漂移冲突、工作线改配后原宿主、精确取消选择器、Unavailable保留外层事实、异常沿原身份恢复、原计划重验外层回滚、严格响应及旧operation拒绝。
-- 独立复核443 passed/6 skipped；最终全仓4634 passed/52 skipped（443.65秒，退出0），Ruff/578文件格式/diff检查通过，466份最终app/tests输入摘要一致。跳过分类及PostgreSQL执行范围见报告。
+- 独立复核443 passed/6 skipped；该阶段全仓4634 passed/52 skipped（443.65秒，退出0），Ruff/578文件格式/diff检查通过，466份最终app/tests输入摘要一致。跳过分类及PostgreSQL执行范围见报告。
 - WES六箱GOOD归档未接入可执行完整回放器；BAD来源取消样本本轮只验共享选择器/分派/事务。真实成员取消、已入线箱SCAN2、SupplyChange、SCAN3/SCAN4、Return/Rack、worker恢复及物理闭环未执行，不能以这17项替代M1/S1及正式组合验收。
 - 未修改wes_backend或原设计工作区，未提交、推送、部署或真实发送。专用测试资源用后清理；工作树及本地完整证据保留。
 
@@ -382,27 +382,56 @@ SQLite限制已对基线HEAD复现：receiver无法先于调用方已执行的SQ
 
 §7～§8及评审报告保留各阶段的测试结果与未验收边界，阶段记录中的“未提交/未推送”指当时状态。提交和PR身份以Git历史及PR为准。本次未修改产品/测试源码来整理提交，沿用最终4634 passed/52 skipped对应的验收快照；另核对Ruff、格式、暂存差异及文件清单。临时SDD执行目录/原始本地日志不进入提交，维护性评审结论和验收矩阵随文档交付。
 
-本授权不包含合并、部署、生产迁移、真实WMS/ECS/RCS请求或现场操作。真实宿主、正式catalog、worker/Beat运行恢复及完整WES BAD/GOOD CASE业务闭环仍按后续计划分别验收。
+本节记录的提交授权当时不包含合并；用户后续已单独授权且PR已合入，见[§11](#sorting-task-merged)。部署、生产迁移、真实WMS/ECS/RCS请求及现场操作仍未执行。真实宿主、正式catalog、worker/Beat运行恢复及完整WES BAD/GOOD CASE业务闭环仍按后续计划分别验收。
 
 <a id="sorting-task-pr44-fix"></a>
 ## 10. PR #44 线上复审修复
 
 线上评审新增P2：guard返回5xx CallbackResponse会被当作可保存拒绝，冻结首次消息身份。已复现并修复为走既有_UnstoredUnavailable保存点回滚路径，统一503/UNAVAILABLE/{}；不新建收据，不改已有响应，保留外层事实，恢复后继续原身份。细节见[评审补充](../reviews/2026-10-31-sorting-task-st1-st2-review.md#pr-44-线上复审补充guard-暂不可用不得冻结收据)。
 
-专项回归扩展为SQLite/PostgreSQL共24项，覆盖返回500/503与抛Unavailable、首次/成功历史及有无recheck；修复前16项行为断言失败，修复后24项通过。修复后的全仓、CI及重新评审结果以[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)为准。用户授权全部通过后合入develop，不包含部署或真实请求。
+专项回归扩展为SQLite/PostgreSQL共24项，覆盖返回500/503与抛Unavailable、首次/成功历史及有无recheck；修复前16项行为断言失败，修复后24项通过。修复后本地全仓4654 passed/52 skipped，最新提交两项CI成功、Codex复审无发现且无线程未解决，随后PR已合入develop；最终证据见[§11](#sorting-task-merged)。未部署或发送真实业务请求。
+
+<a id="sorting-task-merged"></a>
+## 11. 当前交付状态：PR #44 已合入 develop
+
+状态核对日期：2026-11-01（America/Los_Angeles）。[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入`develop`，合并提交[380aeba](https://github.com/kaizhoumasha/maintenance-admin/commit/380aeba327e12effddb153e5a55578f162b7761e)；已测试并复审的head为`463f43d`。GitHub记录的合并时间为2026-11-01 05:32:14 UTC，对应2026-10-31 22:32:14 PDT。合并文件树与该已验收head一致。
+
+| 交付/验证项 | 最新已核对结果 | 证据与范围 |
+| --- | --- | --- |
+| ST1/ST2共享交付 | 已实现、评审通过并合入develop | 四callback、两decisions及严格四分支合同；原收据重验/稳定重放、可信原归属与事务接缝；不包含真实宿主 |
+| 线上P2 | 已在463f43d修复并复审闭合 | guard返回5xx走原保存点回滚路径，不冻结首次收据或改写已有响应，恢复后继续原身份 |
+| P2专项回归 | 24 passed；修复前16 failed/8 passed | SQLite/PostgreSQL，首次/成功历史、有无recheck、抛Unavailable/返回500/503 |
+| 修复后本地全仓 | **4654 passed，52 skipped，438.69秒，退出0** | 466份app/tests输入摘要一致；独占测试PostgreSQL16/Redis7 |
+| 合并前pull_request CI | **SUCCESS：4654 passed，52 skipped** | [run 41276299843](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41276299843)，head463f43d |
+| 合并前push CI | **SUCCESS：4654 passed，52 skipped** | [run 41276296419](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41276296419)，head463f43d |
+| 最新提交Codex复审 | completed，0 findings，0 unresolved；所有原评审线程已解决 | [PR评审记录](https://github.com/kaizhoumasha/maintenance-admin/pull/44#issuecomment-6553631719)，对应463f43d |
+| 合并后develop CI | **SUCCESS：4654 passed，52 skipped，821.30秒** | [run 41277318469](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41277318469)，对应合并提交380aeba |
+| 静态检查 | Ruff、579文件格式检查及diff检查通过 | 本地提交前检查与CI记录；本次文档同步未重跑产品测试 |
+
+52项跳过仍为46项SQLite不支持的PostgreSQL并发/锁语义镜像、1项既有SQLite调用方在原生BEGIN前创建根SAVEPOINT的提前提交限制，以及5项需额外独占数据库的既有迁移用例。对应PostgreSQL并发路径已运行；跳过不计为通过。本轮没有迁移变更，不将这5项旧迁移用例算作已验收。
+
+原WES历史案例17项、独立复核443 passed/6 skipped分别是共享切片和修复前的阶段证据；4617/52及4634/52也保留为历史快照，不能替代上述修复后4654/52。案例来源、转换与逐项范围见[工程评审及验收矩阵](../reviews/2026-10-31-sorting-task-st1-st2-review.md)。
+
+### 尚未交付或验收
+
+- `smt_manual` M1～M6、`smt_auto` S1～S7及I/O方向宿主仍未实施：任务/终态摘要、准入、成员/连续版本、精确重验资格、完成资格及原结果消费仍归各宿主。正式catalog消费者、宿主/组件生产表迁移及完整组合验收未完成，不因共享源码合入而提前启用。
+- SMT宿主级非eager worker/Beat、漏唤醒补扫、重启恢复、原结果串联及生产负载/锁竞争未验收。WMS仍负责跨宿主task_id全局唯一性；共享层只拒绝已可见歧义，不提供跨业务表全局唯一约束。
+- WES BAD/GOOD CASE仅验共享合同、选择器、原归属、重放和事务切片；真实成员取消、已入线箱SCAN2、SupplyChange、SCAN3/SCAN4、Return/Rack及六箱物理闭环未执行。未验真实WMS/ECS/RCS、供应商联调或现场，ACK/测试通过不证明物理完成。
+- PR #44未部署、未执行生产迁移、未发送真实业务请求；专用测试容器已清理。本次状态同步只改文档，不实施后续宿主、不新增产品验证或运行操作。
 
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 | --- | --- | --- | --- | --- | --- |
 | Eng Review | 本轮plan-eng-review；用户指定修订后文档 | 三项闭合及跨文档一致性 | 2累计 | CLEAR (PLAN，限本轮复核范围) | R1/R2/R3均计划闭合；新增问题0，未决0 |
-| Document Revision | 前轮用户明确采纳三项建议 | 文档约束及宿主引用 | 1 | DOCUMENTS REVISED；历史复核通过 | 旧评审快照保留；当前实施见§7 |
+| Document Revision | 前轮用户明确采纳三项建议 | 文档约束及宿主引用 | 1 | DOCUMENTS REVISED；历史复核通过 | 旧评审快照保留；当前已合入状态见§11 |
 | Implementation Review | 用户后续授权ST1/ST2 | 任务规格/质量及最终整体修复 | 2任务评审+1整体+1定向复审 | CLEAR（共享范围） | 全部发现闭合；4617 passed，52 skipped；宿主/生产验收未完成 |
 | Outside Review | 本轮Claude Code可用性检查 | 独立复核 | 0 completed | unavailable | CLI未找到；不计外部覆盖 |
 | Implementation Re-review | 用户本轮要求 | 四项工程边界及WES历史案例共享切片 | 1独立复核+全仓 | CLEAR（ST1/ST2范围） | 无新增缺陷；17案例验收，4634 passed/52 skipped；真实宿主及物理未验收 |
+| PR #44 / Delivery Closeout | 线上评审、CI及本次状态核对 | P2修复与合入证据 | 1次最新head复审、2次合并前CI、1次develop CI | MERGED / SUCCESS（共享范围） | P2闭合；专项24及全仓4654/52；真实宿主及现场未验收 |
 
-**OUTSIDE COVERAGE:** host=codex；provider=claude-code；phase=plan-review；outside_status=unavailable。
+**OUTSIDE COVERAGE:** host=codex；provider=claude-code；phase=plan-review；outside_status=unavailable（历史计划评审记录，不代表PR最新Codex复审状态）。
 
-**VERDICT:** 历史文档工程复核通过，三项问题及对应引用在计划层面闭合。用户随后单独授权的ST1/ST2实现、测试及独立评审已完成，当前最新复核以§8为准；正式SMT宿主、生产启用及现场验收仍未完成。
+**VERDICT:** 历史文档工程复核通过，三项问题及对应引用在计划层面闭合。用户随后单独授权的ST1/ST2实现、测试及独立评审已完成，[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入develop（380aeba），最新验收以§11为准；正式SMT宿主、生产启用及现场验收仍未完成。
 
 NO UNRESOLVED DECISIONS

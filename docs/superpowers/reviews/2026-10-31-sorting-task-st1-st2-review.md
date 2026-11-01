@@ -2,6 +2,8 @@
 
 评审对象：复核时`feature/sorting-task-shared`尚未提交的ST1/ST2实现，基线`19082e3`；依据[共享计划](../plans/2026-10-31-sorting-task-implementation.md)。本轮授权包含复核、案例验收及实际缺陷修复，不包含宿主功能扩展、提交、部署或真实发送。
 
+状态核对：2026-11-01。[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入develop（380aeba），线上P2已在463f43d修复并复审闭合；最新合入及验收见[文末记录](#sorting-task-merged-review)。以下各节保留历史评审与故障复现过程。
+
 ## 实现再评审阶段结论
 
 本节及下列4634/52结果对应PR线上复审前的验收快照；线上评审新增问题及处置见文末补充。
@@ -77,4 +79,13 @@ GOOD归档声明尚未接入可执行Mock replay runner；旧`data/kt16_manual_p
 
 扩展现有公开入口回归：首次/已有成功收据、有无recheck、抛Unavailable/返回500/返回503，均在SQLite和独占PostgreSQL运行；先提交接收事务再检查存储结果，确保能发现真正落库的错误收据。修复前16 failed/8 passed，修复后24 passed（1.74秒）；同时断言外层事实、通知次数、已有响应及恢复后同身份受理。
 
-最终全仓及最新提交的线上CI/复审结论由[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)记录；本文件原4634/52为修复前历史证据，不能替代修复后验证。仍不部署、不发送真实业务请求，宿主/现场未验收边界保持。
+线上P2已修复并随PR #44合入develop，修复后全仓及最新CI/复审结论见[下节](#sorting-task-merged-review)；本文件原4634/52为修复前历史证据，不能替代修复后验证。仍不部署、不发送真实业务请求，宿主/现场未验收边界保持。
+
+<a id="sorting-task-merged-review"></a>
+## PR #44 合入记录与最终验收
+
+[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入`develop`，合并提交[380aeba](https://github.com/kaizhoumasha/maintenance-admin/commit/380aeba327e12effddb153e5a55578f162b7761e)，对应已测试/复审head463f43d；合并文件树与该head一致。修复后guard5xx专项24 passed，本地全仓**4654 passed、52 skipped、438.69秒、退出0**；Ruff、579文件格式及diff检查通过。最新提交Codex复审completed、0 findings、0 unresolved，所有原线程已解决。
+
+合并前[PR CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41276299843)与[push CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41276296419)均SUCCESS、各4654 passed/52 skipped；合并后[develop CI](https://github.com/kaizhoumasha/maintenance-admin/actions/runs/41277318469)同样SUCCESS、4654 passed/52 skipped（821.30秒）。完整交付/跳过分类与未验收边界统一见[共享计划§11](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)。
+
+此结论仅覆盖ST1/ST2共享软件交付。真实SMT宿主、正式catalog/迁移、宿主级worker/Beat与重启/漏唤醒恢复、WES完整BAD/GOOD物理闭环、真实对端及现场仍未验收；跨宿主task_id全局唯一性仍由WMS保证。PR未部署、未执行生产迁移或真实业务请求。本次文档同步只核对既有GitHub/本地记录，不实施宿主或重跑产品/现场验收。

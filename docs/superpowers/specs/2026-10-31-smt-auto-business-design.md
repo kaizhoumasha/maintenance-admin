@@ -1,6 +1,6 @@
 # SMT 自动上架、拣料业务子包设计
 
-状态：2026-10-31 已确认统一业务划分；本轮仅同步文档，**未实施、未注册、未部署**，不执行迁移、不提交、不发送真实请求。文档确认不代表 WMS/ECS/RCS 合同签认、联调或现场验收。
+设计基线：2026-10-31已确认统一业务划分；交付状态核对：2026-11-01。**smt_auto宿主未实施、未注册、未部署**；共享ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）。本轮仅同步文档，不执行迁移、不提交、不发送真实请求。文档确认不代表 WMS/ECS/RCS 合同签认、联调或现场验收。
 
 ## 1. 目标与已选择方案
 
@@ -41,7 +41,7 @@
 
 task_id、task_type、business_type、workline_code 与原 issued.timestamp 首次受理后冻结，不能换 operation_id 改向/改线。已有任务重报先沿原收据、原任务及保留终态摘要解析；摘要保留TaskOwnerRef所需的原模式/方向/工作线ID及code，不随业务明细清理，当前工作线改配不能改变原 owner。WMS负责task_id在sorting_task显式消费者范围唯一；读口拒绝可见缺失/歧义，不承诺跨宿主任务表的全局数据库唯一性，不广播或按任务号前缀猜测。
 
-queue_changed、plan_delta、cancel 沿 task_id 读取原业务/模式/方向；prepare 与 completion_confirm 保持各 API 规定的最小字段，不额外增加 business_code 或方向字段。统一注册仍遵循 [sorting_task 单份合同与可信归属](2026-10-31-smt-manual-business-design.md#9-sorting_task-单份合同与分派)；该组件与归属接缝的ST1/ST2已在隔离分支实现并验证，见[共享交付§7](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-delivery)；完整SMT宿主任务执行仍待实施。
+queue_changed、plan_delta、cancel 沿 task_id 读取原业务/模式/方向；prepare 与 completion_confirm 保持各 API 规定的最小字段，不额外增加 business_code 或方向字段。统一注册仍遵循 [sorting_task 单份合同与可信归属](2026-10-31-smt-manual-business-design.md#9-sorting_task-单份合同与分派)；该组件与归属接缝的ST1/ST2已随PR #44合入develop，专项24 passed及全仓4654 passed/52 skipped、最新复审和CI证据见[共享交付§11](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；完整SMT宿主任务执行仍待实施。
 
 ### 3.2 一份队列与版本
 
@@ -66,7 +66,7 @@ queue_changed、plan_delta、cancel 沿 task_id 读取原业务/模式/方向；
 
 首个正式宿主接入前完整交付MANUAL/AUTO四分支；发布后遵守[共享计划1.4](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，冻结@v1有效字段、规范化及未知字段策略。自动方向晚接入不收紧同一@v1或重解析旧输入，新语义须独立设计显式新版本，既定guard只接入原方向政策。本轮不新增版本框架或新版本operation。
 
-ST1以隔离operation验证公共扩展/旧默认及并发兼容；ST2创建四个真实callback后才验errors、仅plan的recheck和可选guard登记，再回归ST1。总计划S1消费[同一交付分工](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)，不重复公共测试或提前注册产品占位消费者；文档修订不代表代码或验收完成。
+ST1以隔离operation验证公共扩展/旧默认及并发兼容；ST2创建四个真实callback后才验errors、仅plan的recheck和可选guard登记，再回归ST1。总计划S1消费[同一交付分工](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)，不重复公共测试或提前注册产品占位消费者；共享交付已完成，不代表自动宿主、运行恢复或现场验收完成。
 
 ## 4. 生产分派与原执行关联
 

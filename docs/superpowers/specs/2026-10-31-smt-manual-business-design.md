@@ -1,8 +1,8 @@
 # SMT 手工分拣、入库业务子包设计
 
-状态：2026-10-31 按本次讨论整理的设计稿，供审阅；**未实施、未注册、未部署**。本稿及关联 API 已同步人工两方向与 smt_auto 统一业务划分；本轮只改文档，不实施代码、迁移、配置、提交或真实请求。文档确认不代表 WMS/ECS/RCS 对端签认、联调或现场验收。
+设计基线：2026-10-31；交付状态核对：2026-11-01。**smt_manual宿主未实施、未注册、未部署**；共享sorting_task ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba），见[已合入状态与验收](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本稿及关联 API 已同步人工两方向与 smt_auto 统一业务划分；本轮只改文档，不实施代码、迁移、配置、提交或真实请求。文档确认不代表 WMS/ECS/RCS 对端签认、联调或现场验收。
 
-实施顺序与验收见 [SMT 手工实施计划](../plans/2026-10-31-smt-manual-implementation.md)；任务合同/可信分派按 [sorting_task 共享计划](../plans/2026-10-31-sorting-task-implementation.md)独立交付一次，手工与自动宿主复用。计划均未执行，不因文档链接获得实施授权。
+实施顺序与验收见 [SMT 手工实施计划](../plans/2026-10-31-smt-manual-implementation.md)；任务合同/可信分派按 [sorting_task 共享计划](../plans/2026-10-31-sorting-task-implementation.md)独立交付一次，手工与自动宿主复用。共享ST1/ST2已完成并合入；手工M1～M6尚未执行，不因状态同步获得后续宿主实施授权。
 
 ## 1. 目标与依据
 
@@ -202,7 +202,7 @@ STALE 还须连续补齐原响应要求的版本；BUSINESS_IN_PROGRESS 的下�
 
 ## 8. 目录与装配职责
 
-以下是目标目录，尚未创建代码。按真实职责组织，不要求为了凑目录给简单逻辑再加层；模块继续增长时才按已有模式细分。
+下表中的宿主目录为后续目标，已交付的sorting_task/BIN_Roller组件继续复用。按真实职责组织，不要求为了凑目录给简单逻辑再加层；模块继续增长时才按已有模式细分。
 
 | 目标文件/目录 | 责任 |
 | --- | --- |
@@ -257,7 +257,7 @@ queue_changed/plan_delta/cancel 的 wire 只有原任务引用，不能靠当前
 
 发布后遵守[共享计划1.4](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)：@v1有效字段、规范化和未知字段策略冻结，后到宿主不收紧或重解析历史输入；新语义经独立设计采用显式新版本，本轮不新增版本框架。历史成功/确定拒绝/待定计划均按原合同恢复。
 
-验收按[共享计划1.3](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)：ST1以隔离operation验证扩展/旧默认，ST2完成四个真实callback后验证errors、仅plan的recheck及可选guard登记，再回归ST1；正式catalog仍等待完整真实宿主。共享ST1/ST2已在隔离分支实现并验证，证据见[共享交付§7](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-delivery)；真实宿主原子性及正式接入仍待实施。
+验收按[共享计划1.3](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)：ST1以隔离operation验证扩展/旧默认，ST2完成四个真实callback后验证errors、仅plan的recheck及可选guard登记，再回归ST1；正式catalog仍等待完整真实宿主。共享ST1/ST2已随PR #44合入develop，修复后专项24 passed、全仓4654 passed/52 skipped及CI证据见[共享交付§11](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；真实宿主原子性及正式接入仍待实施。
 
 ## 10. SMT 自有接口注册
 
@@ -327,7 +327,7 @@ Transport 提交接纳与实际结果应用是两条已实现的原业务唤醒�
 
 实施依赖为 sorting_task 共享严格合同/归属分派、SMT 完整业务、BIN_Roller B1～B7、既有公开结果/原业务通知和实际资源绑定；缺任一项不能把完整组合标为已交付。当前仓库已有 BIN_Roller 组件本地实现、共享声明及隔离验证，但无 SMT 正式生产业务与 BIN_Roller 正式消费方，组件状态迁移及整体验收仍属 B7；本稿不将组件或框架能力等同于完整生产业务。
 
-自动上架/拣料现统一为 smt_auto，[业务设计](2026-10-31-smt-auto-business-design.md)、统一API和[总实施计划](../plans/2026-10-31-smt-auto-implementation.md)均按共同规则与方向差异维护。自动计划共同步骤各一份，I1～I4/O1～O4保留专属生产，验收编号统一追踪；sorting.task.* 六类声明唯一归 sorting_task，两宿主显式消费，不在方向包重复注册，也不把自动/人工任务状态推进搬进组件。统一 API 的第3章仍定义方向计划与完成差异。共享归属和错误/重验接缝只交付一次，ST1/ST2已在隔离分支实现并验证；完整SMT宿主和正式接入仍未交付。
+自动上架/拣料现统一为 smt_auto，[业务设计](2026-10-31-smt-auto-business-design.md)、统一API和[总实施计划](../plans/2026-10-31-smt-auto-implementation.md)均按共同规则与方向差异维护。自动计划共同步骤各一份，I1～I4/O1～O4保留专属生产，验收编号统一追踪；sorting.task.* 六类声明唯一归 sorting_task，两宿主显式消费，不在方向包重复注册，也不把自动/人工任务状态推进搬进组件。统一 API 的第3章仍定义方向计划与完成差异。共享归属和错误/重验接缝只交付一次，ST1/ST2已随PR #44合入develop（380aeba）；完整SMT宿主和正式接入仍未交付。
 
 新 manual_bin.* 名称、任务号在共享消费者范围的唯一归属要求、首批计划等待配置、供应商合同及现场绑定须在正式集成前逐项落实；这些属于交付依赖，不能用本地测试或文档状态代替对端签认。准入 WAIT 的 1～60000 毫秒范围已按旧 wire 固定，本稿不将其列为新的业务未决。
 
@@ -335,4 +335,4 @@ Transport 提交接纳与实际结果应用是两条已实现的原业务唤醒�
 
 本稿已固定业务/组件边界、任务引用、人工资源联合、箱级语义、原释放与任务完成关系，以及确认期间新到箱规则。实施者可按现有风格确定表名/索引、私有方法和文件的适度拆分、分页大小和有界事务重试常量，但不能改变 wire、归属、唯一原意图和业务完成条件。
 
-先完成设计审阅；获得后续实施规划授权时再细化步骤与检查。当前仅交付设计/API/计划文档对齐，不创建产品代码、模型、迁移、测试、配置或占位 catalog，不提交、不推送、不部署、不进行真实发送。
+共享ST1/ST2复用PR #44已合入交付；手工M1～M6仍需后续实施授权。本轮只同步设计/API/计划交付状态，不创建产品代码、模型、迁移、测试、配置或占位 catalog，不提交、不推送、不部署、不进行真实发送。

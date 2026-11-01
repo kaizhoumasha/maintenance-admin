@@ -1,6 +1,6 @@
 # SMT 自动上架与拣料统一实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本轮仅整理文档，不实施代码、不运行产品测试或迁移、不提交、不部署或真实发送；所有实施与验收步骤保持未勾选。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本计划S1～S7及I/O方向任务仍未实施；共享ST1/ST2已随PR #44合入develop。本轮仅同步文档，不实施代码、不运行产品测试或迁移、不提交、不部署或真实发送；宿主实施与验收步骤保持未勾选。
 
 **Goal:** 交付一个 `smt_auto` 业务子包，共用任务、队列、原归属和恢复入口，按冻结的 `business_type` 运行 inbound/outbound，分别满足资源、逐盘、异常及完成合同。
 
@@ -46,11 +46,11 @@
 <a id="scope-and-files"></a>
 ## 1. 当前基线、文件与固定接口
 
-2026-10-31工作区核对：catalog只装配coarse_sorting；smt_auto、smt_manual正式生产包尚无实现；sorting_task的ST1/ST2已在隔离分支实现并验证，见[共享交付](2026-10-31-sorting-task-implementation.md#sorting-task-delivery)，S1等宿主任务仍待实施。BIN_Roller已有组件本地实现、共享声明与隔离验证，正式消费方/组件状态迁移仍属B7。本轮不以文档或隔离验证声称生产交付。
+2026-11-01交付状态核对：smt_auto、smt_manual正式生产包尚无实现；sorting_task的ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba），专项24 passed、修复后全仓4654 passed/52 skipped，合并前两项及合并后develop CI均成功，见[共享合入记录](2026-10-31-sorting-task-implementation.md#sorting-task-merged)；S1等宿主任务仍待实施。BIN_Roller已有组件本地实现、共享声明与隔离验证，正式消费方/组件状态迁移仍属B7。本轮不以文档或隔离验证声称生产交付。
 
-现有catalog/runtime/Capabilities、receiver收据及raw/effective digest、WmsRequests、EcsCommands、TransportService公开结果、after_commit和5秒Beat均复用。ST1/ST2补共享任务合同/分派及必要receiver接缝；B7交付公共模型/组件迁移与正式接入。wes_backend只作已确认合同/设备参考，不移植其运行时、旧锁/容量窗口、入线成员门槛、失败报告或跨点等待。
+现有catalog/runtime/Capabilities、receiver收据及raw/effective digest、WmsRequests、EcsCommands、TransportService公开结果、after_commit和5秒Beat均复用。ST1/ST2的共享任务合同/分派及必要receiver接缝已合入，S1只消费；B7交付公共模型/组件迁移与正式接入。wes_backend只作已确认合同/设备参考，不移植其运行时、旧锁/容量窗口、入线成员门槛、失败报告或跨点等待。
 
-下表是唯一文件责任表。路径均为后续实施位置，各目录含__init__.py；实际存在性与迁移日期/head在实施时再核对。
+下表是唯一文件责任表。共享ST1/ST2路径已存在，其余宿主路径为后续实施位置，各目录含__init__.py；实际存在性与迁移日期/head在实施时再核对。
 
 | 文件/目录 | 唯一责任与交付任务 |
 | --- | --- |
@@ -452,7 +452,7 @@ ST1原收据锁/刷新/5秒等待、历史@v1冻结及ST2正式callback登记只
 
 | 原计划位置 | 现唯一交付位置 |
 | --- | --- |
-| 原S1、上架任务1、拣料AP1的共同任务/receiver要求 | ST1/ST2交共享能力；S1交根生命周期及实际版本/成员/状态校验，不重建共享字段校验 |
+| 原S1、上架任务1、拣料AP1的共同任务/receiver要求 | ST1/ST2已随PR #44交付共享能力；S1交根生命周期及实际版本/成员/状态校验，不重建共享字段校验 |
 | 上架任务2、拣料AP2 | I1、O1各自的生产架差异；公共搬架/离场能力沿B计划 |
 | 上架任务3、拣料AP3 | S2交公共接缝/命令合同；I2、O2交专属正常生产，S7交共同原关联回归 |
 | 上架任务4、拣料AP4 | 第2节一份共同授权/WAIT约束；I3、O3交异常差异 |
@@ -460,8 +460,8 @@ ST1原收据锁/刷新/5秒等待、历史@v1冻结及ST2正式callback登记只
 | 上架任务6、拣料AP6及原S4 | S6交唯一catalog/工厂/pending/事务/迁移/恢复 |
 | 拣料AP7及两方向综合回归/交付记录 | S7、一张验收矩阵、一份D1～D8和docs/testing/smt-auto.md |
 
-实施顺序：ST1→ST2→S1→S2→I1～I4→O1～O4→S5→S6→S7。I/O的完成资格可用原事实输入独立测试，S5再验真实共同协议组合；S6以实际交付依赖为正式装配门槛。共享文件按此顺序修改，不安排两个方向并行重建共同能力，不增加新的规划或通用引擎阶段。
+实施顺序：ST1（完成）→ST2（完成）→S1→S2→I1～I4→O1～O4→S5→S6→S7。I/O的完成资格可用原事实输入独立测试，S5再验真实共同协议组合；S6以实际交付依赖为正式装配门槛。共享文件按此顺序修改，不安排两个方向并行重建共同能力，不增加新的规划或通用引擎阶段。
 
 设计§2/§6→S1/S2/S6声明/文件/注册；§3→S1共同任务/严格计划；§4→S2/I/O/S6原关联；§5→2.1/I/O/S5方向合同/完成/保留；§7→S6/S7事务/恢复/证据。API§3字段/响应合同→ST1/ST2，宿主任务/确认→S1/S5，§4～7→S2/I/O/S7，§8→S2/S5/S6，§9→S1/I4/S7，§10→统一矩阵及D1～D8。所有72项API编号及G01～G04运行接入均有任务/测试定位，原细节以API正文为准。
 
-本轮仅交付计划整理、相关引用和文档检查；全部复选框为未来事项，未运行任何RED/GREEN、产品测试、迁移、服务或真实请求，不修改产品代码/暂存内容，不提交。
+共享ST1/ST2已合入状态、P2闭合、24项专项和4654/52全仓及CI证据统一见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本计划S1～S7及I/O复选框仍为未来事项，真实宿主/正式catalog和迁移、SMT worker/Beat恢复、完整WES BAD/GOOD CASE及对端/现场未验收。本轮只同步文档和检查引用，不运行新的产品测试、迁移、服务或真实请求，不修改产品代码/暂存内容，不提交。

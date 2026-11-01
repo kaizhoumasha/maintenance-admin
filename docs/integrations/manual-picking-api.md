@@ -1,14 +1,14 @@
 # SMT 手工分拣、入库 WES 与 WMS API 对接文档
 
-状态：**本系统 SMT 手工业务的当前对接设计，生产业务未注册、未实施。** 本文与 [SMT 手工子包设计](../superpowers/specs/2026-10-31-smt-manual-business-design.md)一致：一个 smt_manual 业务承接 MANUAL 入库/出库，通过不可变的 `business_type=inbound/outbound` 区分方向。AUTO 两方向统一归 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md)；两宿主复用同源 sorting_task 合同组件，并各自装配一份 BIN_Roller，生产合同与完成条件分别维护。BIN_Roller 组件已合并并有隔离验证，正式生产消费方、组件状态表迁移和 B7 整体验收尚未交付；文档不代表对端签认、部署或现场验收。
+状态核对：2026-11-01。**SMT手工宿主仍为对接设计，生产业务未注册、未实施；共享sorting_task ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）。** 本文与 [SMT 手工子包设计](../superpowers/specs/2026-10-31-smt-manual-business-design.md)一致：一个 smt_manual 业务承接 MANUAL 入库/出库，通过不可变的 `business_type=inbound/outbound` 区分方向。AUTO 两方向统一归 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md)；两宿主复用同源 sorting_task 合同组件，并各自装配一份 BIN_Roller，生产合同与完成条件分别维护。BIN_Roller 组件已合并并有隔离验证，正式生产消费方、组件状态表迁移和 B7 整体验收尚未交付；文档不代表对端签认、部署或现场验收。
 
 本文统一采用[统一自动线文档](smt-auto-api.md)的组织方式。公共信封和平台边界见[工作线交互索引](workline-business-api.md)；**SCAN3 → SCAN4 → FIFO → Return_Batch、回架和尾箱清退由[公共料箱回流能力](workline-bin-return-api.md)统一描述**，不再由人工线维护第二套规则。
 
-本文新任务报文统一采用 `sorting.task.*@v1`，公共规则引用[自动 API 3 节](smt-auto-api.md#tasks)，人工资源联合及完成条件在本文细化。人工箱级准入/完工统一为 `manual_bin.work_admission_decide@v1`、`manual_bin.work_completed@v1`，同时用于入库/出库；出库直接取料架等专属 operation 保留其 outbound 名称，公共供箱/回流名称也不批量替换。历史冻结的 outbound.picking_task.*、outbound.manual_bin.* 请求仍沿原合同、身份和正文履约，不因本文改写、换号或增加兼容入口。所有报文均为对接示例，不表示接口已经注册或现场通过。
+本文新任务报文统一采用 `sorting.task.*@v1`，公共规则引用[自动 API 3 节](smt-auto-api.md#tasks)，人工资源联合及完成条件在本文细化。人工箱级准入/完工统一为 `manual_bin.work_admission_decide@v1`、`manual_bin.work_completed@v1`，同时用于入库/出库；出库直接取料架等专属 operation 保留其 outbound 名称，公共供箱/回流名称也不批量替换。历史冻结的 outbound.picking_task.*、outbound.manual_bin.* 请求仍沿原合同、身份和正文履约，不因本文改写、换号或增加兼容入口。所有报文均为对接示例；共享声明已实现，仍不表示真实宿主已正式接入或现场通过。
 
 实现归属约定：sorting_task 只提供六类任务合同、单份注册和可信分派，任务表/状态/队列/推进归 smt_manual。BIN_Roller 唯一受理四点扫码并执行公共箱流、五层架流；本文“WES 创建/登记 SCAN2 MOVE_FORWARD”表示生产业务按原本次到位决定释放，再调用组件登记并履约唯一原命令，不另注册 SCAN2 事件或发送路径。一个业务只有一个 scan_pending，公平推进生产与组件原待办。
 
-实施安排见 [SMT 手工实施计划](../superpowers/plans/2026-10-31-smt-manual-implementation.md)和 [sorting_task 共享计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：先共享任务合同/分派，再人工业务，最后正式装配/迁移及分层验收。共享ST1/ST2已在隔离分支实现并验证，见[共享交付§7](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-delivery)；人工宿主及正式接入仍待实施。
+实施安排见 [SMT 手工实施计划](../superpowers/plans/2026-10-31-smt-manual-implementation.md)和 [sorting_task 共享计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：先共享任务合同/分派，再人工业务，最后正式装配/迁移及分层验收。共享ST1/ST2已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；人工宿主及正式接入仍待实施。
 
 共享任务的[原消息重验保护](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-recheck)保证并发重报只应用一次，成功收妥不被迟到失败覆盖，原身份及创建信息保留；不新增wire字段。首个正式接入前完整交付四分支，发布后按[冻结兼容规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)恢复旧成功/确定拒绝/待定计划，不能以新模型改变原有效内容。ST1隔离扩展、ST2真实登记与宿主验收的分工见[共享交付归属](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)，不将文档要求当作已通过证据。
 
@@ -677,7 +677,7 @@ RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个�
 | M05 | WMS / RCS / 现场 | 架型、模板、面向、位置容量及人工干预事实；数据库配置与现场实物的一致性 | 用户配置用于文档定位，不代表已配置或实际到位；差异独立记录 |
 | M06 | WMS / WES | 共用 rack.departure_decide 的四字段/READY/WAIT/公共错误/重放和单份声明已随组件交付 | SMT 自有生产架消费、对端签认及正式装配仍待交付，不改写旧 outbound 前缀及 task_id 的历史 DTO |
 | M07 | WES / WMS | 取消后本地在制段到位继续按原上下文请求 WMS 已确认；合法直达 SCAN2、非法码及原完工处理沿 M01/M03 源基线适配 | 不因上游取消或缺原投箱回调否认到位，不把取消扩大为在制段停机；实际业务准入由 WMS 原决定处理，未决请求原身份恢复 |
-| M08 | WMS / WES | 本文已采用 sorting.task.*、两方向人工资源联合及统一队列/版本/取消规则；sorting_task 共享合同和可信原任务分派已在隔离分支实现并验证，尚未接入正式宿主 | 按 SMT 设计落地单份声明，不在三个生产包重复注册；历史冻结身份保持，不新增兼容入口 |
+| M08 | WMS / WES | 本文已采用 sorting.task.*、两方向人工资源联合及统一队列/版本/取消规则；sorting_task共享合同和可信原任务分派已随PR #44合入develop（380aeba），尚未接入正式宿主 | 复用已交付的单份声明，M1/S1只补真实宿主，不在方向重复注册；历史冻结身份保持，不新增兼容入口 |
 | M09 | WMS / WES | 版本 0、人工不等待 SCAN2 放行 Result、确认未决时新到箱暂缓首次准入均已确定；首批等待实际时长待双方配置 | 未配置保持 PREPARING，不猜超时；原尾箱 Result 迟到不等同新增作业，旧终局不覆盖新计划/暂存箱；原义务独立履约 |
 | M10 | WMS / WES | 各 operation 的额外字段、幂等有效内容、受理前置及错误组合逐项冻结 | 不套用单一宽松/严格模型；准备、同步决定、通知及 facts 的重放语义分别保留 |
 
