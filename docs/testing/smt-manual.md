@@ -1,5 +1,27 @@
 # SMT 手工正式组合软件验收
 
+<a id="current-delivery"></a>
+## 2026-11-02 提交交付与最终全仓验证
+
+当前源码已在 `feature/smt-manual-m1` 提交并推送：实现 `e8e0782`、合同/设计/验收文档 `9d61af6`、交付元数据 `bc999b6`。本节记录这批提交的最终软件门槛；下方各日期/阶段的“未提交”、旧表数、旧 head 和测试数字保留当时快照含义，不作为当前交付状态。PR、合并、部署及运行库升级仍须分别记录。
+
+| 最终门槛 | 结果与可复查入口 |
+| --- | --- |
+| 全仓测试 | **5206 passed / 47 conditional skipped / 0 failed，981.79 秒，exit 0**；在上述已提交内容上执行，运行前后 673 个源码/测试/迁移/配置路径无漂移 |
+| 迁移 | 全仓内 198 项迁移用例全部通过；本分支六份迁移沿唯一 head `fiveracklimit`，当前 SMT 7 表、BIN_Roller 10 表；`tests/migrations/test_smt_manual_persistence.py`、`test_bin_roller_persistence.py`、`test_five_rack_request_limit.py` 等保留数据与拒绝有损降级断言 |
+| 实际进程 | 全仓内 `tests/tasks/test_smt_manual_worker.py` 两例通过，覆盖原 owner 通知、真实 worker/Beat、WAIT/完工/公共待办及丢通知补位；peer 为本机模拟服务 |
+| 静态检查 | 全仓 Ruff check、647 文件格式检查及 diff check 通过 |
+| 跳过与警告 | 47 项均为 SQLite 不具备 PostgreSQL 锁/隔离/连接语义的条件变体，没有因未配置集成环境而跳过；不计作通过。两条既有 `record_property` 与 xunit2 导出格式警告未造成断言失败 |
+| 独立审查 | 本轮原生主审、API/数据审查及对抗复核已闭合；Claude CLI 未安装，外部跨模型覆盖为 UNAVAILABLE，不记作已通过 |
+
+原始 `full-tests.log`、`full-tests.xml`、`full-tests-summary.json` 及逐文件一致性记录保存在本机外部目录 `/Users/kaizhou/.codex/tmp/ship-smt-manual-zgg3oxwk/`，不随仓库分发。下方 `.superpowers` 路径同样是本地历史证据；本节使最终结论可随源码交付，但不代替原始日志。
+
+当前正式源码 [catalog](../../app/businesses/catalog.py) 同时登记 `coarse_sorting` 与完整 `smt_manual`；[手工 composition](../../app/businesses/smt_manual/composition.py) 组合同源 sorting_task/BIN_Roller，API 与 worker 使用同一声明和 `scan_pending`。这证明正式装配源码已就绪，不表示运行环境已部署该版本。接口、配置与迁移用法以[人工 API](../integrations/manual-picking-api.md)、[业务包指南](../integrations/business-packages.md)及本页下方分项说明为准。
+
+同任务同箱再次作业按真实 **A → 其他箱实际 WORK_REQUIRED/完成 → A** 验证，见 `tests/businesses/smt_manual/test_completion_notifications.py::test_original_completion_retry_stays_with_first_work_after_another_bin`：原完工重试保持原 operation_id/有效内容和首次消费依据，同号改内容冲突，第二次作业使用自己的新完成。NORMAL/NG 是最终结果。先前 A1 的“换新身份、改相反最终结果、沿用旧完成时间”情形已撤回为无效正常重试场景；没有据此修改 WMS/ECS/API 代码，也不将其列作已修缺陷或接受风险。
+
+本轮覆盖审计为最多 30 个行为组加 6 条流程的范围映射，映射 100% 不是实测行覆盖率。N1 仍为非阻断补充：新模型已选 service/feed 的专门降级往返样本未单列，已有填数双向迁移与运行时验证不等于该专门样本。未部署、未迁移旧 wes_backend 数据；供应商 1.1、Status 10 秒及现场物理验收不在本次软件通过结论内。
+
 <a id="rack-cancellation-fixes"></a>
 ## 2026-11-02 取消与离场修复：新专项通过
 

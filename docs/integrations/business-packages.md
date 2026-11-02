@@ -6,7 +6,7 @@
 契约变化、支持模型及实测边界见[单一 API 验收](business-development-single-api-acceptance.md)。
 原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
 这些平台能力不表示真实业务或供应商/现场已验收。
-业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；手工正式宿主已在未提交本地增量中接入 BIN_Roller，证据见[手工验收](../testing/smt-manual.md)，未部署。目标边界见[设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
+业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；手工正式宿主已提交并推送 BIN_Roller 接入源码，最终软件门槛见[手工验收](../testing/smt-manual.md#current-delivery)，未部署。目标边界见[设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
 
 当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单包含粗分与完整 smt_manual；后者组合同源 sorting_task 和 BIN_Roller，软件交付边界见[手工验收](../testing/smt-manual.md)。
 隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。粗分分配、入箱和 NG 搬运仍需后续实现。
