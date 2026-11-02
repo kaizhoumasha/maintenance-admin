@@ -1,6 +1,6 @@
 # SMT 自动上架与拣料 API 对接文档
 
-合同版本日期：2026-10-31；交付状态核对：2026-11-01。本文统一维护smt_auto的AUTO/inbound和AUTO/outbound合同：共同项只定义一次，方向差异使用严格字段联合、差异表与专属子节。交付状态：**本方合同/设计，共享任务ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）；正式SMT业务实施、生产注册、部署、真实对端联调和现场验收仍未完成。** 示例仅供对接，不表示已发送或设备已接受。
+合同版本日期：2026-10-31；交付状态核对：2026-11-01。本文统一维护smt_auto的AUTO/inbound和AUTO/outbound合同：共同项只定义一次，方向差异使用严格字段联合、差异表与专属子节。交付状态：**本方合同/设计，共享任务ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）；smt_auto业务实施、正式注册及部署仍未完成；人工首宿主M1～M6已完成未提交的本地软件验收，见[手工记录](../testing/smt-manual.md)，真实对端联调和现场验收仍未执行。** 示例仅供对接，不表示已发送或设备已接受。
 
 跨仓库资料引用中，已提交且本地未改动的实现/附录/Markdown说明固定到源仓库已发布提交；尚未提交的WMS合同修订和未纳入源仓库提交的PDF仅保留明确来源路径，不作为可下载链接。本PR不发布这些源工作区材料，本方字段/响应仍以本文为准，对端签认及真实联调仍待独立验收。
 
@@ -313,7 +313,7 @@ flowchart TB
 
 本章与smt_manual共用[sorting_task计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：[ST1](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st1)交付任务模型、任务响应合同及必要receiver适配；[ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st2)交付可信原归属、按原模式/方向调用严格分支校验及单份注册/薄分派。具体归属见[共享计划唯一分工](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)。自动宿主只核对准入/实际连续版本/成员及状态，任务表、队列、原输入及prepare/完成确认推进由总计划S1/S5实现；方向资源、逐盘接口、机械臂/生产架流、完成资格和入库归档政策仍归smt_auto。共享组件只提供合同与分派，不承接这些业务状态。
 
-共享验收先由ST1用隔离operation验证公共接缝、旧默认及收据重验保护，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；不反向要求ST1依赖这些正式入口。首个真实宿主可独立接入，但其前置共享合同须完整包含MANUAL/AUTO四分支并遵守[发布后冻结规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，无需等待另一宿主生产流程；共享部分已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；实际宿主与正式组合仍待实施/验证。
+共享验收先由ST1用隔离operation验证公共接缝、旧默认及收据重验保护，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；不反向要求ST1依赖这些正式入口。首个真实宿主可独立接入，但其前置共享合同须完整包含MANUAL/AUTO四分支并遵守[发布后冻结规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，无需等待另一宿主生产流程；共享部分已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；自动宿主与正式组合仍待实施/验证；人工首宿主已完成未提交的本地M1～M6软件验收，见[手工统一验收](../testing/smt-manual.md)。
 
 <a id="task-envelope"></a>
 ### 3.1 任务命名、字段与原归属
@@ -4141,7 +4141,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 <a id="delivery"></a>
 ## 10 交付依赖、验收与已确认边界
 
-本文是合同及设计；sorting_task的ST1/ST2已随PR #44合入develop（380aeba），不表示smt_auto已实施或二者已正式注册、部署、现场通过。已完成的软件验收、52项跳过及未验收边界统一见[共享计划§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)。共享任务合同/接收适配/分派按[sorting_task计划ST1～ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md)，宿主状态、方向生产及正式组合按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)，共享交付只验收一份，各宿主仍验证自己的实际接入。软件运行的非eager worker/Beat、原结果唤醒及公共宿主接入另按[总计划G01～G04](../superpowers/plans/2026-10-31-smt-auto-implementation.md#integration-acceptance)验证；只连独占测试资源/对端替身的worker证据与真实WMS/ECS/RCS、现场物理分别记录；ACK、启动、文档或单项Mock不能代替物理完成。
+本文是合同及设计；sorting_task的ST1/ST2已随PR #44合入develop（380aeba），smt_auto正式业务与组合仍未实施、部署或现场通过；人工首宿主已完成未提交的本地正式接入与软件验收，见[手工记录](../testing/smt-manual.md)。已完成的软件验收、52项跳过及未验收边界统一见[共享计划§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)。共享任务合同/接收适配/分派按[sorting_task计划ST1～ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md)，宿主状态、方向生产及正式组合按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)，共享交付只验收一份，各宿主仍验证自己的实际接入。软件运行的非eager worker/Beat、原结果唤醒及公共宿主接入另按[总计划G01～G04](../superpowers/plans/2026-10-31-smt-auto-implementation.md#integration-acceptance)验证；只连独占测试资源/对端替身的worker证据与真实WMS/ECS/RCS、现场物理分别记录；ACK、启动、文档或单项Mock不能代替物理完成。
 
 <a id="delivery-dependencies"></a>
 ### 10.1 一份共同交付清单与方向差异
@@ -4149,7 +4149,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | 交付物 | 共同要求 | inbound差异 | outbound差异 |
 | --- | --- | --- | --- |
 | 业务/任务合同 | sorting_task单份六操作与可信分派、显式重验/错误/可选guard已随PR #44合入；smt_auto任务/队列/归属/服务/推进仍待宿主实现，旧接口默认不变 | 单层架/接料生产与7天归档、五通知只读guard按9.3落实 | BIN/RackSlot生产、面级终局与目标架；不采用入库归档政策 |
-| BIN_Roller及结果接缝 | B1～B5本地组件/分项验证、B6文档边界、B7共享声明/隔离装配已有；正式宿主/catalog、组件状态迁移/整体验收仍待交付。两方向只接第8章，不复制公共表/状态机/发送器，首宿主顺序沿B7 | 原五层供箱/arrival/释放及单层架原位置读口 | 原供箱/arrival/释放与RETURN/TRANSFER原位置，RackSlot不套feed_complete |
+| BIN_Roller及结果接缝 | B1～B5本地组件/分项验证、B6文档边界、B7共享声明/隔离装配已有；人工首宿主/catalog与组件状态迁移已本地交付，见[手工验收](../testing/smt-manual.md)；自动宿主组合及对端/现场整体验收仍待交付。两方向只接第8章，不复制公共表/状态机/发送器，首宿主顺序沿B7 | 原五层供箱/arrival/释放及单层架原位置读口 | 原供箱/arrival/释放与RETURN/TRANSFER原位置，RackSlot不套feed_complete |
 | WMS实现 | 任务族/严格方向联合、连续版本/精确取消、完整授权/决定、同键唯一未闭合授权、报告去重/入账事务、三分支完成确认及原等待配置 | 最新source_racks续问、仅正常成功报告、SOURCE_ABSENT及箱格/深度由WMS保证 | BIN空取locator仅type/bin_code/cell_id；NG必报收妥后续问、SOURCE_DONE仅闭原Cell/SLOT，四项RackSlot取盘参数完整 |
 | ECS严格附录 | 原命令/Result/完整barcode-scanned_at、数量/阶段、ACK先后/重报、稳定原厂code/msg及重启补报；现场动作/恢复证据独立 | 两臂params及FAILED/0/PICK_EMPTY、STATION_NG完整映射与NG不报告；数值/放盘前口径保持 | 明确无料权威载体/observed_at、NG_ZONE→真实ECS位置/执行设备/完整params仍须交付；不猜PICK_EMPTY/错误码或直接用NG_ZONE当location_type |
 | 资源/RCS配置 | 工作线实际设备/位置、模板/地址、超时/首批等待均显式配置，示例不默认；真实到位/面向与物理互锁验证 | STATION_A/B单层架F01、两臂SCAN平台/SCAN2/NG | RETURN/TRANSFER的F01/CK04/F01、供箱CTU；CK04对端支持同步，不把CTU03规则扩到F01 |

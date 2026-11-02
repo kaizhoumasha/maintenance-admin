@@ -1,6 +1,8 @@
 # SMT 手工分拣、入库业务子包实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本计划M1～M6仍未实施，依赖的共享ST1/ST2已随PR #44合入develop；本轮仅同步交付状态，不写产品代码、迁移、配置或测试，不执行产品测试/运行库操作，不提交、不推送、不部署或真实发送。
+2026-11-02 后续增量：原 M/B 任务和下文数字保持原日期范围；[模型收敛与额度实施计划](2026-11-02-smt-persistence-and-capacity-implementation.md) Task1～3 已本地实现并通过分项独立复审。当前 SMT/BIN_Roller 为 7/10 张表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit` 单 head；管理字段 `five_rack_request_limit` 与开始前 WITHDRAWN 服务的兼容边界见[当前设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。永久 KT16/KT18 专项已 12 passed / 0 skipped，当前最终全仓及整体复核待执行；[当前结果和旧失败](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)分开保存。无提交或部署。
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after implementation authorization. M1～M6已按后续授权完成本地实现及分项复核；当前软件证据和最终全仓门槛见[统一验收](../../testing/smt-manual.md)，M1/M2原数字分别保留在历史页。共享ST1/ST2与BIN_Roller复用已合入源码；手工增量不提交、不推送、不部署、不操作运行库或真实发送。
 
 **Goal:** 交付一个 smt_manual 正式业务，支持手工入库/出库共用任务生命周期、箱级人工准入/完工、出库直接取料及可选转运架，并复用已合并 BIN_Roller 完成公共箱架流程。
 
@@ -41,15 +43,15 @@
 | 组件组合/唯一输入/原业务WMS与Transport通知 | 框架已合并 | 复用，不新建运行时或通知器 |
 | BIN_Roller四点、供箱/回流/FIFO/drain/统一架流、原结果消费 | PR #42/e265ad7 已合并，本地实现和隔离验证已交付 | 只消费公开接口和原声明；缺陷另以具体证据处理，不重做B1～B5 |
 | Transport提交接纳与应用结果通知、异常明确架位置 | 已有公开读口和原owner通知 | M5/M6 验真实宿主链路，ACK/接纳不冒充物理完成 |
-| sorting_task | [PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)已合入develop（380aeba），共享软件验收通过，尚无正式宿主 | [最新交付及4654/52验收](2026-10-31-sorting-task-implementation.md#sorting-task-merged)；专项24 passed；手工M1及正式装配仍待实施 |
-| smt_manual任务/准入/完工/出库自有架/完成 | 未实现 | M1→M2→M3→M4 |
-| BIN_Roller组件状态表迁移、正式生产消费者/catalog、整体验收 | B7未完成 | M5与B7对接首个完整生产宿主，M6分层验收；不以测试消费者代替 |
+| sorting_task | PR #44/380aeba 已合入，手工正式消费者已本地接入 | 共享原证据复用；宿主原子性和正式任务链见[当前验收](../../testing/smt-manual.md) |
+| smt_manual任务/准入/完工/出库自有架/完成 | M1～M6已本地实现及软件验收，未提交 | 统一证据见[手工验收](../../testing/smt-manual.md)；对端/现场独立 |
+| BIN_Roller组件状态表迁移、正式生产消费者/catalog、整体验收 | M5完成正式装配/迁移，M6完成本地运行验证 | B7对端/现场保持未验，后续自动宿主复用组件revision |
 
-固定顺序：**ST1（完成）→ ST2（完成）→ M1 → M2 → M3 → M4 → M5 → M6**。共享合同/类型及原归属接缝已单份合入；手工M1和自动S1直接复用同一源码及验收证据，各自验证真实宿主状态与原子性，不重复实施ST1/ST2。SMT不等待自动两方向逐盘业务交付。
+固定顺序：**ST1（完成）→ ST2（完成）→ M1（本地软件验收完成，未提交）→ M2（本地软件验收完成，未提交）→ M3（完成）→ M4（完成）→ M5（完成）→ M6（本地软件验收完成，未提交）**。共享合同/类型及原归属接缝已单份合入；手工M1和自动S1直接复用同一源码及验收证据，各自验证真实宿主状态与原子性，不重复实施ST1/ST2。SMT不等待自动两方向逐盘业务交付。
 
 共享阶段按[唯一交付归属](2026-10-31-sorting-task-implementation.md#sorting-task-ownership)验收：ST1仅验证隔离operation及旧默认行为，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；M1不提前承担这些正式登记断言。
 
-M1先交付真实任务读口及生产适配的任务部分，M2补accept_scan2；测试fixture在各阶段将真实flow/端口与已合并BinRoller装配，按已交付模块使用独立测试catalog和收发能力，不等待M5正式工厂，也不以固定PERMIT或假任务替代真实状态。M1～M4由这些装配验证，不向默认正式catalog注册半成品。M5 需要完整手工业务和组件状态迁移一同就绪，才增加真实生产消费者。M6之前不能宣称完整生产接入/真实worker/现场已验收。
+M1先交付真实任务读口及生产适配的任务部分，M2补accept_scan2；测试fixture在各阶段将真实flow/端口与已合并BinRoller装配，按已交付模块使用独立测试catalog和收发能力，不等待M5正式工厂，也不以固定PERMIT或假任务替代真实状态。M1～M4由这些装配验证，不向默认正式catalog注册半成品。M5 需要完整手工业务和组件状态迁移一同就绪，才增加真实生产消费者。M5完成本地正式装配，M6完成本地真实worker验证；现场物理验收独立且未执行。
 
 ## 2. 文件责任与本地接口
 
@@ -67,7 +69,7 @@ M1先交付真实任务读口及生产适配的任务部分，M2补accept_scan2�
 | 同包 callback/outbound_manual_rack_direct_pick_completed_v1.py、outbound_return_rack_task_completed_v1.py | 出库架面完成、整架截止版本完成薄入口 |
 | 同包 request/outbound_return_rack_arrival_report_v1.py | 出库原到位报告，facts |
 | app/businesses/catalog.py | 完整真实smt_manual的显式消费项；不加入sorting_task/bin_roller独立业务 |
-| migrations/versions/2026-10-31_bin_roller_state.py、2026-10-31_smt_manual_state.py | M5/B7一次交付组件和宿主必要表，实施日期/文件名按当时基线调整，版本由Alembic生成；不手写固定revision或复制另一宿主已交付的组件迁移 |
+| migrations/versions/2026-11-01_bin_roller_state.py、2026-11-01_smt_manual_state.py | M5/B7一次交付组件和宿主必要表，实施日期/文件名按当时基线调整，版本由Alembic生成；不手写固定revision或复制另一宿主已交付的组件迁移 |
 | app/core/config.py、.env.example | M4增加可选SMT_MANUAL_FIRST_PLAN_WAIT_MS并显式注入宿主；默认None保持等待，只修改配置示例、不覆盖现有.env |
 | tests/businesses/smt_manual/conftest.py、test_*.py | 本计划各任务公开行为及两线/两方向接缝；独立MetaData与finally清理，测试文件不互相导入 |
 | tests/migrations/test_bin_roller_state.py、test_smt_manual_state.py | 正式表加载、迁移升级/约束/既有数据保留和单head |
@@ -114,12 +116,12 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费ST1/ST2原归属与模型、已合并SupplyChange/SourceFaceRef/apply_supply_change；产出宿主任务真相源、原prepare/计划输入及成员、可靠供箱变化、read_current_task/read_successor，供M2～M4的真实组件装配读取。单线在办约束与版本属于本业务表。
 
-- [ ] **步骤1：写任务RED。** test_manual_directions_share_one_execution_slot：混合inbound/outbound同线同优先级，按原时间/task_id领取一个原prepare；queue_changed与领取并发按提交先后裁决。test_task_identity_and_direction_never_change：模式/方向/工作线冻结、重复task_id不重开；缺失/非法business_type拒绝，合法AUTO不归本宿主处理。test_not_before_and_successor_read_original_queue 验not_before未到不领取、原issued时间不刷新；读口不领取/造意图，CHECKING/AVAILABLE/NONE须有实际准备/队列依据，查询故障为UNKNOWN/错误而非无后继。
-- [ ] **步骤2：写计划/撤销RED。** test_manual_plan_resources_follow_original_direction：入库仅供箱、出库三类资源与首版限制、直接取料-only有效、后续非空增量、跨方向已定义字段拒绝；test_pending_plan_requires_original_retry：准备早到/缺版/停用、成功重放/同版新身份/确定冲突分开；test_supply_change_and_member_cancel_commit_together：精确原版本追加/撤销与组件同事务，任务取消只QUEUED/PREPARING未应用首版，不删除在制义务。test_queue_rejection_is_stable_but_plan_recheck_is_limited 验queue无实际变化/同版新身份/领取后更新的409及首次时间稳定，成功重放即使任务已准备仍DUPLICATE；plan当前同版新身份只比完整data，旧版新身份/同版异内容拒绝，顺序变化不等价。test_exact_member_cancellation_skips_only_requested_members 验未知/已取消/不可取消成员跳过且全跳仍成功、slot_ids省略覆盖本版本本面、指定仅精确SLOT、父任务终态仍可撤销保留成员，不改变plan_revision或原动作。
-- [ ] **步骤2a：写停用RED。** test_disabled_workline_preserves_original_obligations 验首次缺线REFERENCE_CONFLICT、停用/不匹配STATE_CONFLICT；在办时停用暂停领取/新prepare/新设备作业、新plan不应用，取消/原结果/既发报告/历史确认继续。恢复启用仅允许WMS原plan重试，不自动应用，不解除HELD/UNKNOWN、不改原owner/绑定；M5正式链路复验。
-- [ ] **步骤2b：写共享接入RED。** test_plan_recheck_keeps_manual_changes_atomic通过真实共享入口验证原待定计划并发重报后成员/版本/SupplyChange及下一意图只一次，成功收据不降级；外层回滚不留业务或通知。使用ST1锁后刷新/5秒超时及冻结兼容验收证据，不在宿主重写收据保护或字段排列组合；恢复读取原@v1有效输入，后到消费者不改变其含义。
-- [ ] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_tasks.py tests/businesses/smt_manual/test_plans.py tests/businesses/smt_manual/test_cancellation.py tests/businesses/smt_manual/test_task_routing.py -q`；领取竞争及回滚使用独立PostgreSQL，不能以缺库跳过当通过。
-- [ ] **步骤4：最小实现并GREEN。** 保存原输入、不可变属性、原prepare身份、未应用原因及连续版本，原接收事实与业务/组件需求一起提交；准备结果只从公开get_result消费，不能由计划反推；回滚不留下执行位/供箱需求。重跑步骤3和共享ST1/ST2宿主接缝回归。先不进入生产catalog，不引入自动入库归档政策。
+- [x] **步骤1：写任务RED。** test_manual_directions_share_one_execution_slot：混合inbound/outbound同线同优先级，按原时间/task_id领取一个原prepare；queue_changed与领取并发按提交先后裁决。test_task_identity_and_direction_never_change：模式/方向/工作线冻结、重复task_id不重开；缺失/非法business_type拒绝，合法AUTO不归本宿主处理。test_not_before_and_successor_read_original_queue 验not_before未到不领取、原issued时间不刷新；读口不领取/造意图，CHECKING/AVAILABLE/NONE须有实际准备/队列依据，查询故障为UNKNOWN/错误而非无后继。
+- [x] **步骤2：写计划/撤销RED。** test_manual_plan_resources_follow_original_direction：入库仅供箱、出库三类资源与首版限制、直接取料-only有效、后续非空增量、跨方向已定义字段拒绝；test_pending_plan_requires_original_retry：准备早到/缺版/停用、成功重放/同版新身份/确定冲突分开；test_supply_change_and_member_cancel_commit_together：精确原版本追加/撤销与组件同事务，任务取消只QUEUED/PREPARING未应用首版，不删除在制义务。test_queue_rejection_is_stable_but_plan_recheck_is_limited 验queue无实际变化/同版新身份/领取后更新的409及首次时间稳定，成功重放即使任务已准备仍DUPLICATE；plan当前同版新身份只比完整data，旧版新身份/同版异内容拒绝，顺序变化不等价。test_exact_member_cancellation_skips_only_requested_members 验未知/已取消/不可取消成员跳过且全跳仍成功、slot_ids省略覆盖本版本本面、指定仅精确SLOT、父任务终态仍可撤销保留成员，不改变plan_revision或原动作。
+- [x] **步骤2a：写停用RED。** test_disabled_workline_preserves_original_obligations 验首次缺线REFERENCE_CONFLICT、停用/不匹配STATE_CONFLICT；在办时停用暂停领取/新prepare/新设备作业、新plan不应用，取消/原结果/既发报告/历史确认继续。恢复启用仅允许WMS原plan重试，不自动应用，不解除HELD/UNKNOWN、不改原owner/绑定；M5正式链路复验。
+- [x] **步骤2b：写共享接入RED。** test_plan_recheck_keeps_manual_changes_atomic通过真实共享入口验证原待定计划并发重报后成员/版本/SupplyChange及下一意图只一次，成功收据不降级；外层回滚不留业务或通知。使用ST1锁后刷新/5秒超时及冻结兼容验收证据，不在宿主重写收据保护或字段排列组合；恢复读取原@v1有效输入，后到消费者不改变其含义。
+- [x] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_tasks.py tests/businesses/smt_manual/test_plans.py tests/businesses/smt_manual/test_cancellation.py tests/businesses/smt_manual/test_task_routing.py -q`；领取竞争及回滚使用独立PostgreSQL，不能以缺库跳过当通过。
+- [x] **步骤4：最小实现并GREEN。** 保存原输入、不可变属性、原prepare身份、未应用原因及连续版本，原接收事实与业务/组件需求一起提交；准备结果只从公开get_result消费，不能由计划反推；回滚不留下执行位/供箱需求。重跑步骤3和共享ST1/ST2宿主接缝回归。先不进入生产catalog，不引入自动入库归档政策。
 
 <a id="smt-manual-m2"></a>
 ## Task M2：两方向共用人工准入、WAIT和箱级完工
@@ -128,11 +130,11 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费M1原任务、组件Scan2Arrival及release_scan2；产出原arrival人工作业、原准入/等待/完工消费依据、业务释放决定和原command_code。不注册SCAN2事件，不直发方向命令。
 
-- [ ] **步骤1：写准入RED。** test_both_manual_directions_use_bin_admission 验raw=A000000001-C而请求bin_code=A000000001，data仅原task_id/bin_code/scanned_at三个字段；WORK_REQUIRED核对task后等待、NO_WORK唯一释放、WAIT保存固定到期点。test_invalid_scan_or_missing_context_keeps_arrival 验不可读/朝向错/原上下文不成立留证不请求不放行；合法直达SCAN2不要求SCAN1/投箱回调或原供箱成员匹配。
-- [ ] **步骤2：写WAIT/身份RED。** test_wait_expiry_creates_one_original_evaluation 验严格1～60000、到期前不求值、重复扫码/重启不刷新首次时间；并发即时/Beat到期仅一条新求值，旧WAIT不覆盖后续终局。test_uncertain_admission_keeps_original_identity 验未知/503只恢复原请求；不是每次唤醒重新uuid/send。有效WAIT的固定到期点取首次可靠保存该决定的本地时间+retry_after_ms，原响应/到期依据一同持久化。test_invalid_admission_response_never_releases 验WORK_REQUIRED错task、已知分支字段混发/null、错误HTTP/code、NOT_FOUND/UNAVAILABLE/IDENTITY_MISMATCH均不授权，真正未知备注沿响应策略。
-- [ ] **步骤3：写完工RED。** test_completed_receipt_precedes_application 验先可靠保存再独立应用；test_completion_binds_only_unique_original_work_required 验原消费判重后唯一经过、task匹配、NORMAL/NG均原释放；歧义/冲突/NO_WORK后新完工不覆盖；test_early_completion_is_never_autobound 验早到后到准入也不自动释放。test_new_arrival_does_not_inherit_old_release 验同码新经过及迟到旧完成/Result不释放新箱。test_manual_callback_error_and_field_policy 验有效内容重复、身份漂移、类型/null/时间越界及旧接口默认不变；
-- [ ] **步骤4：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_scan2.py tests/businesses/smt_manual/test_admission.py tests/businesses/smt_manual/test_completion_notifications.py tests/businesses/smt_manual/test_waits.py -q`；独立PostgreSQL验证准入/完工/原释放与外层回滚以及到期竞争。
-- [ ] **步骤5：实现并GREEN。** 原arrival为唯一生产经过关联，保留raw/bin/scanned_at、原task、每次原请求和已消费决定；WAIT计时/通知应用归本业务pending。完成通知不以completed_at/最新等待猜匹配；成功消费、首次完工、释放决定和组件原命令同事务。完工薄入口先按原任务绑定smt_manual，不按当前任务/箱码猜owner；显式使用ST1的CallbackErrors及必要Unavailable，沿人工API保留真正未知字段，completed_at严格为正且不晚于信封timestamp。本接口不启用plan的recheck/archive清理策略。重跑步骤4与现有组件test_scan2_port/test_scan2_release，不能用组件测试端口的PERMIT/WAIT冒充人工业务闭环。
+- [x] **步骤1：写准入RED。** test_both_manual_directions_use_bin_admission 验raw=A000000001-C而请求bin_code=A000000001，data仅原task_id/bin_code/scanned_at三个字段；WORK_REQUIRED核对task后等待、NO_WORK唯一释放、WAIT保存固定到期点。test_invalid_scan_or_missing_context_keeps_arrival 验不可读/朝向错/原上下文不成立留证不请求不放行；合法直达SCAN2不要求SCAN1/投箱回调或原供箱成员匹配。
+- [x] **步骤2：写WAIT/身份RED。** test_wait_expiry_creates_one_original_evaluation 验严格1～60000、到期前不求值、重复扫码/重启不刷新首次时间；并发即时/Beat到期仅一条新求值，旧WAIT不覆盖后续终局。test_uncertain_admission_keeps_original_identity 验未知/503只恢复原请求；不是每次唤醒重新uuid/send。有效WAIT的固定到期点取首次可靠保存该决定的本地时间+retry_after_ms，原响应/到期依据一同持久化。test_invalid_admission_response_never_releases 验WORK_REQUIRED错task、已知分支字段混发/null、错误HTTP/code、NOT_FOUND/UNAVAILABLE/IDENTITY_MISMATCH均不授权，真正未知备注沿响应策略。
+- [x] **步骤3：写完工RED。** test_completed_receipt_precedes_application 验先可靠保存再独立应用；test_completion_binds_only_unique_original_work_required 验原消费判重后唯一经过、task匹配、NORMAL/NG均原释放；歧义/冲突/NO_WORK后新完工不覆盖；test_early_completion_is_never_autobound 验早到后到准入也不自动释放。test_new_arrival_does_not_inherit_old_release 验同码新经过及迟到旧完成/Result不释放新箱。test_manual_callback_error_and_field_policy 验有效内容重复、身份漂移、类型/null/时间越界及旧接口默认不变；
+- [x] **步骤4：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_scan2.py tests/businesses/smt_manual/test_admission.py tests/businesses/smt_manual/test_completion_notifications.py tests/businesses/smt_manual/test_waits.py -q`；独立PostgreSQL验证准入/完工/原释放与外层回滚以及到期竞争。
+- [x] **步骤5：实现并GREEN。** 原arrival为唯一生产经过关联，保留raw/bin/scanned_at、原task、每次原请求和已消费决定；WAIT计时/通知应用归本业务pending。完成通知不以completed_at/最新等待猜匹配；成功消费、首次完工、释放决定和组件原命令同事务。完工薄入口先按原任务绑定smt_manual，不按当前任务/箱码猜owner；显式使用ST1的CallbackErrors及必要Unavailable，沿人工API保留真正未知字段，completed_at严格为正且不晚于信封timestamp。本接口不启用plan的recheck/archive清理策略。重跑步骤4与现有组件test_scan2_port/test_scan2_release，不能用组件测试端口的PERMIT/WAIT冒充人工业务闭环。
 
 <a id="smt-manual-m3"></a>
 ## Task M3：出库直接取料与可选转运架
@@ -141,10 +143,10 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费M1原SLOT/架面版本与首版target、既有TransportService的move_rack/rotate_rack/get_result/list_unclosed_predecessors和组件唯一DepartureRequest模型；产出原到位报告、精确成员完成、原生产架流转/未决引用。五层供箱与回箱不进入本模块。
 
-- [ ] **步骤1：写RED。** test_direct_pick_requires_original_rack_arrival 验原rack/工作位/面向可靠到位才报告，ACK不制造事实；test_face_and_through_revision_completion_do_not_cover_new_members 验面级精确版本、整架截止版本连续补齐后只闭对应范围，父任务终态不代替成员判断；明确验证整架task_completed在原任务未可靠保存时503原身份重试，无成功ACK/无无归属成员更新；按ST1非recheck的Unavailable路径回滚本次收据，原任务保存后同一通知可202，再重报DUPLICATE，不能永久缓存早到503。test_rack_callback_contracts_remain_operation_specific 验direct_pick_completed的data严格拒绝未知字段且timestamp为正；整架通知和其他通知沿各自未知字段策略，completed_at均为正且不晚于信封；两薄入口绑定原任务和outbound方向，使用ST1错误/Unavailable支持，不批量采用plan重验。
-- [ ] **步骤2：写资源/门槛RED。** test_optional_transfer_rack_does_not_gate_unrelated_work：未指定不要求绑定/不编排，首版指定才要求；test_return_rack_never_receives_roller_bins：RETURN_RACK不作回箱目标；test_arrival_report_obligation_is_separate_from_rack_motion：原报告未收妥参与整单必报，不把ACK设成所有合法换面/离场的统一门禁。入库使用直接取料通知/资源拒绝且无动作。test_departure_wait_and_unknown_keep_original_context 验四字段current_face不可知显式null、WAIT固定到期点/新事实合法新求值、未知恢复原身份、READY冻结去向只建原Transport，ACK不等于离场成功。test_wrong_target_observation_never_authorizes_production 验公开position_observation只补原实际位置，目标/面向不符不报告到位、不续执行，迟到旧结果不清新架。
-- [ ] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_direct_pick.py tests/businesses/smt_manual/test_transfer_rack.py tests/businesses/smt_manual/test_rack_reports.py -q`。
-- [ ] **步骤4：实现并GREEN。** 原Transport/caller/cycle及定位引用保持；使用共享DepartureRequest/DECISION与原capabilities，不重注册；转运架需本任务COMPLETED、原进场成功和当前在位后求离场，不等独立来源架全部离场。重跑步骤3及受影响Transport公开结果/通知回归；未知不重授/改址/换号，不复制组件CTU状态机。
+- [x] **步骤1：写RED。** test_direct_pick_requires_original_rack_arrival 验原rack/工作位/面向可靠到位才报告，ACK不制造事实；test_face_and_through_revision_completion_do_not_cover_new_members 验面级精确版本、整架截止版本连续补齐后只闭对应范围，父任务终态不代替成员判断；明确验证整架task_completed在原任务未可靠保存时503原身份重试，无成功ACK/无无归属成员更新；按ST1非recheck的Unavailable路径回滚本次收据，原任务保存后同一通知可202，再重报DUPLICATE，不能永久缓存早到503。test_rack_callback_contracts_remain_operation_specific 验direct_pick_completed的data严格拒绝未知字段且timestamp为正；整架通知和其他通知沿各自未知字段策略，completed_at均为正且不晚于信封；两薄入口绑定原任务和outbound方向，使用ST1错误/Unavailable支持，不批量采用plan重验。
+- [x] **步骤2：写资源/门槛RED。** test_optional_transfer_rack_does_not_gate_unrelated_work：未指定不要求绑定/不编排，首版指定才要求；test_return_rack_never_receives_roller_bins：RETURN_RACK不作回箱目标；test_arrival_report_obligation_is_separate_from_rack_motion：原报告未收妥参与整单必报，不把ACK设成所有合法换面/离场的统一门禁。入库使用直接取料通知/资源拒绝且无动作。test_departure_wait_and_unknown_keep_original_context 验四字段current_face不可知显式null、WAIT固定到期点/新事实合法新求值、未知恢复原身份、READY冻结去向只建原Transport，ACK不等于离场成功。test_wrong_target_observation_never_authorizes_production 验公开position_observation只补原实际位置，目标/面向不符不报告到位、不续执行，迟到旧结果不清新架。
+- [x] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_direct_pick.py tests/businesses/smt_manual/test_transfer_rack.py tests/businesses/smt_manual/test_rack_reports.py -q`。
+- [x] **步骤4：实现并GREEN。** 原Transport/caller/cycle及定位引用保持；使用共享DepartureRequest/DECISION与原capabilities，不重注册；转运架需本任务COMPLETED、原进场成功和当前在位后求离场，不等独立来源架全部离场。重跑步骤3及受影响Transport公开结果/通知回归；未知不重授/改址/换号，不复制组件CTU状态机。
 
 <a id="smt-manual-m4"></a>
 ## Task M4：人工整单完成、撤销进度与新到箱时序
@@ -153,11 +155,11 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费M1～M3原任务/成员/作业/报告及get_supply_progress；使用共享CompletionConfirm/CompletionDecision合同和原WmsRequests；配置SMT_MANUAL_FIRST_PLAN_WAIT_MS为可选正整数毫秒，默认None，构造参数注入（无新增wire/数据库列）。产出当前版本确认、有效终态或等待、暂存箱可恢复依据，不以SCAN2 Result作人工统一门槛。
 
-- [ ] **步骤1：写供箱RED。** test_unstarted_withdrawal_closes_demand_without_feed_success 验原撤销事实+匹配false/false可结清，不伪造成功；test_started_withdrawal_keeps_original_pending 验已开始尚无feed也不据查空结束；test_completed_started_withdrawal_uses_actual_progress 验已撤销原需求true/false按实际收口；test_missing_progress_or_withdrawal_evidence_never_implies_completion 验缺关联/无撤销依据false/false不完成，不直查组件表或要求全局架流结束。
-- [ ] **步骤2：写人工完成RED。** test_manual_completion_does_not_wait_for_scan2_result 验最后一箱完工/NO_WORK及唯一原释放提交后可确认，COMPLETED先于放行Result仍合法；公共FIFO/回架/drain/独立离场不加门槛；反向用例验放行Result先到也不能替代WMS COMPLETED。test_target_only_outbound_requires_reliable_transfer_arrival 验无供箱来源但指定目标架的可靠到位前置；未指定不增条件。必报未知/原准入WAIT/待核对完工不漏计。
-- [ ] **步骤3：写确认竞态RED。** test_new_arrival_waits_for_original_confirmation_resolution 验确认未决新箱事实/原任务关联保存且仅暂缓首次准入，原WAIT/完工/释放/公共流程继续；test_stale_or_in_progress_resumes_saved_arrival 验有效非终局及当前条件成立后才启动准入，原scanned_at不变；test_old_completed_never_discards_new_plan_or_arrival 验矛盾留证、不关单/直放/换号。并发只一条未决确认，未知原身份；revision=0只有显式首批等待期/无待定计划才可发，未配置继续PREPARING。test_first_plan_deadline_is_explicit_and_durable 验正整数配置/None、布尔值/零/负值非法，期限从原PREPARE_ACCEPTED首次可靠保存起算；重启/重报不刷新，存在早到/缺版/其他本段义务不确认0。test_confirmation_branches_keep_original_retry_rules 验STALE严格大于原请求版且无混合字段，本地已补齐不重复等版；BUSINESS_IN_PROGRESS在无新事实且未到期时不再确认，有效新事实或到期才按合同新身份确认；畸形分支/错误HTTP/未知只留原阶段。
-- [ ] **步骤4：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_task_completion.py tests/businesses/smt_manual/test_supply_completion.py tests/businesses/smt_manual/test_confirmation_races.py tests/businesses/smt_manual/test_first_plan_config.py -q`；独立PostgreSQL验新计划/到箱与COMPLETED应用的提交顺序。
-- [ ] **步骤5：实现并GREEN。** 发起与消费都重验当前版本/原直接义务；有效非终局按合同等待/补版后重新确认，原尾箱Result迟到不制造新增工作。完成/取消/切换只停止新需求，原pending不只筛当前任务/EXECUTING；保留终态任务号/原owner，重报不复活。重跑步骤4并回归M1/M2，不新增全线清场、七天清理或补绑恢复器。
+- [x] **步骤1：写供箱RED。** test_unstarted_withdrawal_closes_demand_without_feed_success 验原撤销事实+匹配false/false可结清，不伪造成功；test_started_withdrawal_keeps_original_pending 验已开始尚无feed也不据查空结束；test_completed_started_withdrawal_uses_actual_progress 验已撤销原需求true/false按实际收口；test_missing_progress_or_withdrawal_evidence_never_implies_completion 验缺关联/无撤销依据false/false不完成，不直查组件表或要求全局架流结束。
+- [x] **步骤2：写人工完成RED。** test_manual_completion_does_not_wait_for_scan2_result 验最后一箱完工/NO_WORK及唯一原释放提交后可确认，COMPLETED先于放行Result仍合法；公共FIFO/回架/drain/独立离场不加门槛；反向用例验放行Result先到也不能替代WMS COMPLETED。test_target_only_outbound_requires_reliable_transfer_arrival 验无供箱来源但指定目标架的可靠到位前置；未指定不增条件。必报未知/原准入WAIT/待核对完工不漏计。
+- [x] **步骤3：写确认竞态RED。** test_new_arrival_waits_for_original_confirmation_resolution 验确认未决新箱事实/原任务关联保存且仅暂缓首次准入，原WAIT/完工/释放/公共流程继续；test_stale_or_in_progress_resumes_saved_arrival 验有效非终局及当前条件成立后才启动准入，原scanned_at不变；test_old_completed_never_discards_new_plan_or_arrival 验矛盾留证、不关单/直放/换号。并发只一条未决确认，未知原身份；revision=0只有显式首批等待期/无待定计划才可发，未配置继续PREPARING。test_first_plan_deadline_is_explicit_and_durable 验正整数配置/None、布尔值/零/负值非法，期限从原PREPARE_ACCEPTED首次可靠保存起算；重启/重报不刷新，存在早到/缺版/其他本段义务不确认0。test_confirmation_branches_keep_original_retry_rules 验STALE严格大于原请求版且无混合字段，本地已补齐不重复等版；BUSINESS_IN_PROGRESS在无新事实且未到期时不再确认，有效新事实或到期才按合同新身份确认；畸形分支/错误HTTP/未知只留原阶段。
+- [x] **步骤4：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_task_completion.py tests/businesses/smt_manual/test_supply_completion.py tests/businesses/smt_manual/test_confirmation_races.py tests/businesses/smt_manual/test_first_plan_config.py -q`；独立PostgreSQL验新计划/到箱与COMPLETED应用的提交顺序。
+- [x] **步骤5：实现并GREEN。** 发起与消费都重验当前版本/原直接义务；有效非终局按合同等待/补版后重新确认，原尾箱Result迟到不制造新增工作。完成/取消/切换只停止新需求，原pending不只筛当前任务/EXECUTING；保留终态任务号/原owner，重报不复活。重跑步骤4并回归M1/M2，不新增全线清场、七天清理或补绑恢复器。
 
 <a id="smt-manual-m5"></a>
 ## Task M5：正式装配、唯一推进与B7状态迁移
@@ -166,12 +168,12 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费ST1/ST2和M1～M4全部真实业务方法，完成第2节服务接口与components精确映射；承接B7首宿主装配/组件表迁移，不将公共内部实现重新列为任务。生产源码使用组件默认正式表，tables注入仅限隔离测试。
 
-- [ ] **步骤1：写装配RED。** test_catalog_loads_real_manual_and_shared_inputs_once 验API/worker同一显式清单，组件资源/模型唯一、宿主COMMANDS为空、共享六任务/四点唯一目标、原business:smt_manual与Transport/ECS owner不变；可选RETURN/TRANSFER仅计划使用时要求。sorting_task无模型/任务；没有真实自动业务时不注册其占位包。
-- [ ] **步骤2：写推进/事务RED。** test_pending_pages_cover_production_and_all_roller_kinds 验固定本轮上界、各类轮换、跨页/等待/单条失败继续、后来新项留下一轮；test_terminal_task_keeps_original_pending 验原释放/回流/生产架在任务结束仍扫描。test_serialization_retries_whole_advance_in_new_session 验相关架流入口首SQL前SERIALIZABLE、commit40001整笔最多3次、耗尽保留待办、同连接回到receiver/无关业务隔离；提交未知重读原记录，不用暂时查空换身份。test_unassigned_scan4_reaches_drain_through_original_scan_pending 验尚无DRAIN/RACK_CYCLE记录的合格SCAN4也能从原SCAN发现求架，不等先造协调记录。
-- [ ] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_assembly.py tests/businesses/smt_manual/test_pending.py tests/businesses/smt_manual/test_transactions.py tests/businesses/smt_manual/test_recovery.py -q`。使用真实receiver/runtime与组件公开方法；独立PostgreSQL覆盖事务/并发，不能仅以方法返回数断言物理完成。
-- [ ] **步骤4：最小正式装配。** 纯声明、固定ENTRY/MODEL模块，两组件各一个实例，components键精确为sorting_task/bin_roller，唯一scan_pending/advance；工厂注入原capabilities/session_factory，read方法不领取任务。复用M1/M2真实任务读口及SCAN2端口，并按原锁序重验。组件架流相关的原单条统一advance整笔按专项隔离，不查询后再升隔离或拆DRAIN执行器；无关纯生产仍沿既有RR。真实宿主和必要表齐全才列catalog，不修改共享任务壳以查询业务表。用公开get_pending_upper_id/list_pending遍历六类组件待办；
-- [ ] **步骤5：迁移RED→实现→GREEN。** `rtk uv run pytest tests/migrations/test_bin_roller_state.py tests/migrations/test_smt_manual_state.py -q`。测试当前基线head（本次为f0b220261031，执行时重新确认）→组件状态→宿主状态，干净逻辑库与已有平台数据保留、必要业务唯一约束和唯一head；组件迁移若已由其他正式宿主交付则只引用其revision，不再建一次。迁移由Alembic生成真实revision，MODEL_MODULES和数据库实际表一致，不在启动create_all。数据库操作仅限后续授权的可丢弃测试库，不运行用户运行库迁移。
-- [ ] **步骤6：GREEN。** 重跑步骤3/5和 `rtk uv run pytest tests/businesses/smt_manual tests/businesses/sorting_task -q`，以及受影响catalog/runtime/WMS回调/Transport/ECS/业务任务回归。阶段结论只记录正式模型/装配和独立库行为，不把它当真实worker或现场证据。
+- [x] **步骤1：写装配RED。** test_catalog_loads_real_manual_and_shared_inputs_once 验API/worker同一显式清单，组件资源/模型唯一、宿主COMMANDS为空、共享六任务/四点唯一目标、原business:smt_manual与Transport/ECS owner不变；可选RETURN/TRANSFER仅计划使用时要求。sorting_task无模型/任务；没有真实自动业务时不注册其占位包。
+- [x] **步骤2：写推进/事务RED。** test_pending_pages_cover_production_and_all_roller_kinds 验固定本轮上界、各类轮换、跨页/等待/单条失败继续、后来新项留下一轮；test_terminal_task_keeps_original_pending 验原释放/回流/生产架在任务结束仍扫描。test_serialization_retries_whole_advance_in_new_session 验相关架流入口首SQL前SERIALIZABLE、commit40001整笔最多3次、耗尽保留待办、同连接回到receiver/无关业务隔离；提交未知重读原记录，不用暂时查空换身份。test_unassigned_scan4_reaches_drain_through_original_scan_pending 验尚无DRAIN/RACK_CYCLE记录的合格SCAN4也能从原SCAN发现求架，不等先造协调记录。
+- [x] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_manual/test_assembly.py tests/businesses/smt_manual/test_pending.py tests/businesses/smt_manual/test_transactions.py tests/businesses/smt_manual/test_recovery.py -q`。使用真实receiver/runtime与组件公开方法；独立PostgreSQL覆盖事务/并发，不能仅以方法返回数断言物理完成。
+- [x] **步骤4：最小正式装配。** 纯声明、固定ENTRY/MODEL模块，两组件各一个实例，components键精确为sorting_task/bin_roller，唯一scan_pending/advance；工厂注入原capabilities/session_factory，read方法不领取任务。复用M1/M2真实任务读口及SCAN2端口，并按原锁序重验。组件架流相关的原单条统一advance整笔按专项隔离，不查询后再升隔离或拆DRAIN执行器；无关纯生产仍沿既有RR。真实宿主和必要表齐全才列catalog，不修改共享任务壳以查询业务表。用公开get_pending_upper_id/list_pending遍历六类组件待办；
+- [x] **步骤5：迁移RED→实现→GREEN。** `rtk uv run pytest tests/migrations/test_bin_roller_state.py tests/migrations/test_smt_manual_state.py -q`。测试当前基线head（M1前为f0b220261031；M1平台启停增量为a39a1988a81a，M5执行时重新确认）→组件状态→宿主状态，干净逻辑库与已有平台数据保留、必要业务唯一约束和唯一head；组件迁移若已由其他正式宿主交付则只引用其revision，不再建一次。迁移由Alembic生成真实revision，MODEL_MODULES和数据库实际表一致，不在启动create_all。数据库操作仅限后续授权的可丢弃测试库，不运行用户运行库迁移。
+- [x] **步骤6：GREEN。** 重跑步骤3/5和 `rtk uv run pytest tests/businesses/smt_manual tests/businesses/sorting_task -q`，以及受影响catalog/runtime/WMS回调/Transport/ECS/业务任务回归。阶段结论只记录正式模型/装配和独立库行为，不把它当真实worker或现场证据。
 
 <a id="smt-manual-m6"></a>
 ## Task M6：真实任务链、两线恢复及交付证据
@@ -180,10 +182,10 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 **Interfaces:** 消费M5正式catalog/唯一服务与现有business.advance_pending、after_commit和5秒Beat。只验证/记录真实组合；修复若涉及生产代码，则回到对应任务补回归，不在本阶段引入第二任务路径。
 
-- [ ] **步骤1：写唤醒/两线RED并运行。** test_transport_acceptance_wakes_original_manual_owner 验有效RECEIVED/202与DUPLICATE/200落DONE、仅外层提交通知，失效租约/重复完成/失败未知/无owner/回滚不误通知；test_ctu03_acceptance_releases_cycle_without_final_outcome 验原RACK_CYCLE恢复不等最终位置。test_two_lines_keep_tasks_arrivals_and_returns_separate 验设备/位置/同箱码/两方向交错不串线，旧结果不改挂新arrival或清新架。运行 `rtk uv run pytest tests/businesses/smt_manual/test_owner_wakeups.py tests/businesses/smt_manual/test_two_worklines.py -q`，优先复用既有通知实现。test_manual_host_preserves_new_scan3_round_and_old_obligations与test_scan4_retry_keeps_original_fifo_under_manual_host通过正式手工receiver/runtime验新SCAN3不等旧轮/上游Result、旧命令/分配/Transport保留、本轮SCAN4 SUCCESS资格及失败重扫原FIFO；使用已有组件公开行为，不复制算法；同一命令补入 `tests/businesses/smt_manual/test_roller_boundaries.py`。test_wms_ecs_and_transport_result_wake_original_manual_owner 验原WMS决定保存、ECS实际应用及Transport有效outcome_revision推进后才唤醒原业务，回滚/无新应用不误通知；与submit接纳分开，旧终态任务的原义务仍由同一宿主推进。
-- [ ] **步骤2：真实worker验收。** `rtk uv run pytest tests/tasks/test_smt_manual_worker.py -q`。使用显式TEST_DATABASE_URL/TEST_REDIS_URL的独占测试资源，关闭eager，由真实broker/worker执行原business.advance_pending任务；一个Beat调用同一已声明入口，原输入/结果提交唤醒及通知失败后的周期兜底都能推进持久待办。test_manual_worker_advances_wait_completion_and_roller_pending用真实人工WAIT到期/WORK_REQUIRED完工/完成确认响应与公共pending混合队列验证有界轮换，重复唤醒无重复请求，停用/恢复按M1保持原门禁；不能只测CTU03就把B7人工闭环勾选。进程停止/重建不换请求/命令/Transport身份。无配置跳过须记为未验，不用eager/直接调用service充当worker证据；不触及现场或发送真实设备请求。
-- [ ] **步骤3：最终软件检查。** 在最终代码快照运行本计划专项、受影响框架/组件/通知/任务测试和一次适当全量 `rtk uv run pytest -q`；`rtk uv run ruff check .`、`rtk uv run ruff format --check .`、`rtk git diff --check`，可丢弃库内核对 `rtk uv run alembic heads` 一个head。无后续影响变更不重复完整测试/审计，缺项保留未完成。
-- [ ] **步骤4：登记分层证据。** docs/testing/smt-manual.md逐项记录ST/M任务、schema/head、共享源码/附录、两线绑定、请求/命令原关联和各验证环境；本地/独立DB/真实worker/WMS/ECS/RCS/现场分别列状态。公共C07复用合并的新SCAN3独立建轮规则，旧履约保留/本轮SCAN4资格不串，不为宿主重新造一套组件测试。真实供应商签认/联调/现场物理验收未做则明确未验。
+- [x] **步骤1：写唤醒/两线RED并运行。** test_transport_acceptance_wakes_original_manual_owner 验有效RECEIVED/202与DUPLICATE/200落DONE、仅外层提交通知，失效租约/重复完成/失败未知/无owner/回滚不误通知；test_ctu03_acceptance_releases_cycle_without_final_outcome 验原RACK_CYCLE恢复不等最终位置。test_two_lines_keep_tasks_arrivals_and_returns_separate 验设备/位置/同箱码/两方向交错不串线，旧结果不改挂新arrival或清新架。运行 `rtk uv run pytest tests/businesses/smt_manual/test_owner_wakeups.py tests/businesses/smt_manual/test_two_worklines.py -q`，优先复用既有通知实现。test_manual_host_preserves_new_scan3_round_and_old_obligations与test_scan4_retry_keeps_original_fifo_under_manual_host通过正式手工receiver/runtime验新SCAN3不等旧轮/上游Result、旧命令/分配/Transport保留、本轮SCAN4 SUCCESS资格及失败重扫原FIFO；使用已有组件公开行为，不复制算法；同一命令补入 `tests/businesses/smt_manual/test_roller_boundaries.py`。test_wms_ecs_and_transport_result_wake_original_manual_owner 验原WMS决定保存、ECS实际应用及Transport有效outcome_revision推进后才唤醒原业务，回滚/无新应用不误通知；与submit接纳分开，旧终态任务的原义务仍由同一宿主推进。
+- [x] **步骤2：真实worker验收。** `rtk uv run pytest tests/tasks/test_smt_manual_worker.py -q`。使用显式TEST_DATABASE_URL/TEST_REDIS_URL的独占测试资源，关闭eager，由真实broker/worker执行原business.advance_pending任务；一个Beat调用同一已声明入口，原输入/结果提交唤醒及通知失败后的周期兜底都能推进持久待办。test_manual_worker_advances_wait_completion_and_roller_pending用真实人工WAIT到期/WORK_REQUIRED完工/完成确认响应与公共pending混合队列验证有界轮换，重复唤醒无重复请求，停用/恢复按M1保持原门禁；不能只测CTU03就把B7人工闭环勾选。进程停止/重建不换请求/命令/Transport身份。无配置跳过须记为未验，不用eager/直接调用service充当worker证据；不触及现场或发送真实设备请求。
+- [x] **步骤3：最终软件检查。** 在最终代码快照运行本计划专项、受影响框架/组件/通知/任务测试和一次适当全量 `rtk uv run pytest -q`；`rtk uv run ruff check .`、`rtk uv run ruff format --check .`、`rtk git diff --check`，可丢弃库内核对 `rtk uv run alembic heads` 一个head。无后续影响变更不重复完整测试/审计，缺项保留未完成。
+- [x] **步骤4：登记分层证据。** docs/testing/smt-manual.md逐项记录ST/M任务、schema/head、共享源码/附录、两线绑定、请求/命令原关联和各验证环境；本地/独立DB/真实worker/WMS/ECS/RCS/现场分别列状态。公共C07复用合并的新SCAN3独立建轮规则，旧履约保留/本轮SCAN4资格不串，不为宿主重新造一套组件测试。真实供应商签认/联调/现场物理验收未做则明确未验。
 
 ## 3. 依赖与验收映射
 
@@ -199,4 +201,8 @@ kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组
 
 覆盖自查：设计§1～4/§9→ST1/ST2/M1；§5→M2；§6→M3；§7→M4；§8/§10/§11→M5；§12→M5/M6。API六类任务、新人工接口、三类出库专属接口、供箱撤销/完工关联/确认竞态均有对应命名验收，C07/Transport接纳使用合并基线。
 
-共享ST1/ST2交付与最新评审/CI结果见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本计划M1～M6保持未勾选，真实宿主、正式catalog/迁移、SMT运行恢复及WES完整物理闭环仍未验收。本轮仅同步文档，未执行新的RED/GREEN、产品测试、数据库操作、部署或真实请求；后续宿主实施另需授权。
+共享 ST1/ST2 已合入证据见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。M1/M2历史数字分别保留于原验收页；M3～M6、正式 catalog/迁移、真实 worker 与最终软件检查统一见[SMT 手工验收](../../testing/smt-manual.md)。当前未提交、未部署、未执行运行库迁移或真实请求；现场物理闭环未验。
+
+## 4. M1实施时发现的必要前置
+
+现有WorkLine没有停用状态，故本轮M1补最小is_enabled字段、既有严格CRUD/省略保持/审计及兼容平台迁移a39a1988a81a；默认true保留原线行为，组件/宿主状态表迁移仍属M5。真实共享入口同时暴露首次任务投向非消费者工作线时错误503，已按既有准入合同修正为409/STATE_CONFLICT，暂不可用消费者仍503。接续无权威NONE依据时保持UNKNOWN，不新增查询接口或默认无后继。此外已闭合跨线首次task_id竞争，任务原输入使用(operation, operation_id)完整身份，避免合法跨操作同UUID覆盖原待定计划。详细裁定、修复及验收范围见M1记录。
