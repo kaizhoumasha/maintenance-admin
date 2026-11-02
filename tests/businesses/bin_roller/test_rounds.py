@@ -7,9 +7,9 @@ async def test_removed_round_does_not_block_new_round(roller_scans):
     await flow.scan("SCAN4", "A000000001-B", timestamp=11)
     async with flow.factory.begin() as session:
         original = (await flow.rows(session, "return_round"))[0]
-        table = flow.store.tables["return_round"]
+        table = flow.store.tables["scan_arrival"]
         await session.execute(
-            table.update().where(table.c.id == original["id"]).values(removed=True)
+            table.update().where(table.c.id == original["scan3_arrival_id"]).values(removed=True)
         )
     await flow.scan("SCAN3", "A000000002-B", timestamp=20)
     await flow.scan("SCAN3", "A000000001-B", timestamp=30)
@@ -34,8 +34,10 @@ async def test_old_result_cannot_reopen_new_round(roller_return):
         await flow.decide(session, batch_id)
         await flow.consume_return(session, batch_id)
         old = (await flow.rows(session, "return_round"))[0]
-        table = flow.store.tables["return_round"]
-        await session.execute(table.update().where(table.c.id == old["id"]).values(removed=True))
+        table = flow.store.tables["scan_arrival"]
+        await session.execute(
+            table.update().where(table.c.id == old["scan3_arrival_id"]).values(removed=True)
+        )
     await flow.scan("SCAN3", "A000000002-B", timestamp=20)
     await flow.scan("SCAN3", "A000000001-B", timestamp=30)
     await flow.scan("SCAN4", "A000000002-B", timestamp=31)

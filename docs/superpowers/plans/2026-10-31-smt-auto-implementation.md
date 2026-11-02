@@ -46,7 +46,7 @@
 <a id="scope-and-files"></a>
 ## 1. 当前基线、文件与固定接口
 
-2026-11-01交付状态核对：smt_auto、smt_manual正式生产包尚无实现；sorting_task的ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba），专项24 passed、修复后全仓4654 passed/52 skipped，合并前两项及合并后develop CI均成功，见[共享合入记录](2026-10-31-sorting-task-implementation.md#sorting-task-merged)；S1等宿主任务仍待实施。BIN_Roller已有组件本地实现、共享声明与隔离验证，正式消费方/组件状态迁移仍属B7。本轮不以文档或隔离验证声称生产交付。
+2026-11-01交付状态核对：smt_auto 的 S1～S7/I/O 仍待实施；手工 M1～M6 已完成本地正式宿主、组件/宿主状态迁移与软件运行验收，见[手工统一验收](../../testing/smt-manual.md)，仍未提交、未部署。sorting_task ST1/ST2 已随 PR #44/380aeba 合入，原证据见[共享合入记录](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。BIN_Roller 组件表已由首个手工宿主交付 ac980eb32c52，自动 S6 应引用实际已合入的组件 revision，不能重复建表；自动宿主自身状态迁移仍按实施时唯一 head 衔接。
 
 现有catalog/runtime/Capabilities、receiver收据及raw/effective digest、WmsRequests、EcsCommands、TransportService公开结果、after_commit和5秒Beat均复用。ST1/ST2的共享任务合同/分派及必要receiver接缝已合入，S1只消费；B7交付公共模型/组件迁移与正式接入。wes_backend只作已确认合同/设备参考，不移植其运行时、旧锁/容量窗口、入线成员门槛、失败报告或跨点等待。
 
@@ -464,4 +464,4 @@ ST1原收据锁/刷新/5秒等待、历史@v1冻结及ST2正式callback登记只
 
 设计§2/§6→S1/S2/S6声明/文件/注册；§3→S1共同任务/严格计划；§4→S2/I/O/S6原关联；§5→2.1/I/O/S5方向合同/完成/保留；§7→S6/S7事务/恢复/证据。API§3字段/响应合同→ST1/ST2，宿主任务/确认→S1/S5，§4～7→S2/I/O/S7，§8→S2/S5/S6，§9→S1/I4/S7，§10→统一矩阵及D1～D8。所有72项API编号及G01～G04运行接入均有任务/测试定位，原细节以API正文为准。
 
-共享ST1/ST2已合入状态、P2闭合、24项专项和4654/52全仓及CI证据统一见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本计划S1～S7及I/O复选框仍为未来事项，真实宿主/正式catalog和迁移、SMT worker/Beat恢复、完整WES BAD/GOOD CASE及对端/现场未验收。本轮只同步文档和检查引用，不运行新的产品测试、迁移、服务或真实请求，不修改产品代码/暂存内容，不提交。
+共享 ST1/ST2 已合入证据见[共享计划§11](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。本计划 S1～S7/I/O 复选框保持未来事项；手工正式消费者、组件迁移与真实 worker 本地证据另见[手工验收](../../testing/smt-manual.md)，不替代自动生产、完整 WES BAD/GOOD CASE、对端或现场验收。本轮自动计划仅同步引用，不实施自动业务。

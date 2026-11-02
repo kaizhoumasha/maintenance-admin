@@ -658,6 +658,6 @@ async def test_buffer_empty_records_only_original_opportunity(roller_return):
         original = await flow.roller.original_record(session, "return_opportunity", opportunity)
         assert original["ended"] and original["end_reason"] == "BUFFER_EMPTY"
         assert (await flow.roller.original_record(session, "face_service", service_id))[
-            "status"
+            "service_state"
         ] == "READY"
         assert await flow.rows(session, "return_batch") == []

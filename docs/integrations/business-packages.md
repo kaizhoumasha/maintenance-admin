@@ -6,10 +6,10 @@
 契约变化、支持模型及实测边界见[单一 API 验收](business-development-single-api-acceptance.md)。
 原阶段设计与验收保留历史事实，当前接入以本指南和[快速开始](business-development-quickstart.md)为准。
 这些平台能力不表示真实业务或供应商/现场已验收。
-业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；BIN_Roller/SMT 正式接入仍未实施。目标边界见[设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
+业务内多代码能力复用已完成[阶段一](../superpowers/plans/2026-10-30-business-components-phase1.md)框架实现：COMPONENTS、共享合同唯一注册和新输入分派，验收证据见该计划末尾。工作线仍只选业务，内部能力不成为运行主体。阶段二已实现 WMS 出站逐请求原业务关联、Transport 原归属与提交后通知，隔离验收通过，见[阶段二记录](../testing/business-components-phase2.md)；手工正式宿主已提交并推送 BIN_Roller 接入源码，最终软件门槛见[手工验收](../testing/smt-manual.md#current-delivery)，未部署。目标边界见[设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
 
-当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单已登记粗分扫码、WMS 验证和首个输送动作结果消费。
-隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。分配、入箱、NG 搬运和 manual-picking 仍需后续实现。
+当前已实现公共声明、发现、合同校验、工作线配置和受限运行时接缝，正式业务清单包含粗分与完整 smt_manual；后者组合同源 sorting_task 和 BIN_Roller，软件交付边界见[手工验收](../testing/smt-manual.md)。
+隔离测试中的两份示例业务不进入生产清单。粗分成功消费原 MOVE_FORWARD Result 后停在待分配，WMS 业务 NG 停在待 NG 搬运。粗分分配、入箱和 NG 搬运仍需后续实现。
 
 以下按 definition → 严格合同 → composition → 子包 service/model → 薄入口 → catalog →
 模型加载 → 两线测试说明最小接入方式。示例中的 `<已确认…>`、`Confirmed…` 都是待替换的标记，
@@ -119,11 +119,11 @@ catalog 将同键且完整相同的资源合并，资源冲突、输入双重认
 已有调用同参重入保留原身份、字节、路由、附录和期限，不重跑新动作授权；Result 继续按原命令处理。
 阶段二的 WMS 出站结果与 Transport 实际应用结果已沿同一原业务通知，具体本地归属和兼容边界见下文。
 
-本方后续业务统一采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：公共箱流部分只声明 bin_roller.COMPONENT，任务合同另组合同源 sorting_task；四点只有组件一个输入目标，SCAN2 同原事务委托本业务生产接缝；业务决定释放、组件登记原命令。普通/drain 都由 RACK_CYCLE 待办推进同一 CTU 生命周期，DRAIN 只管理供架批次/周期引用，不再声明旧两个组件或外置架面模型；生产业务提供任务/供箱/接续上下文，原 progression 不变。物理扫码/原 Transport 结果更新当前事实，旧记录不阻挡新到位；组件不增加手工锁或占位控制。B1～B5 组件本地实现与分项验证、B6 边界核对及 B7 共享声明/隔离测试装配已完成；正式生产宿主/catalog、组件状态迁移及现场整体验收仍未交付，前文框架/下文其他业务事务要求不因此被重写。
+本方后续业务统一采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：公共箱流部分只声明 bin_roller.COMPONENT，任务合同另组合同源 sorting_task；四点只有组件一个输入目标，SCAN2 同原事务委托本业务生产接缝；业务决定释放、组件登记原命令。普通/drain 都由 RACK_CYCLE 待办推进同一 CTU 生命周期，DRAIN 只管理供架批次/周期引用，不再声明旧两个组件或外置架面模型；生产业务提供任务/供箱/接续上下文，原 progression 不变。物理扫码/原 Transport 结果更新当前事实，旧记录不阻挡新到位；组件不增加手工锁或占位控制。B1～B5 组件本地实现与分项验证、B6 边界核对及 B7 共享声明/隔离测试装配已完成；手工正式宿主/catalog、组件状态迁移已本地交付，供应商/现场整体验收仍未执行，前文框架/下文其他业务事务要求不因此被重写。
 
 BIN_Roller 的 `get_supply_progress` 必须与宿主自己保存的原成员有效/撤销事实一起使用：有效需求要求 feed_complete=true 且 pending=false；未开始撤销可返回 false/false，不要求补造成功。已开始/原 pending 不因撤销跳过，缺预期关联不视为结清；DTO 不提供 withdrawn，宿主不查组件内部表。该进度不等于全局回流或全部架离场，人工完成映射见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)。
 
-人工两方向统一为 [smt_manual](../superpowers/specs/2026-10-31-smt-manual-business-design.md)，自动两方向统一为 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md)。各宿主分别组合同源 sorting_task 与一份 bin_roller，共用本宿主任务表/队列/服务/工厂/scan_pending；inbound/outbound 只是冻结任务方向及内部生产分支，无独立业务码或 owner。smt_auto 共享任务注册/平台适配/迁移和最终组合由[总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)一次交付，保留两个方向各自合同与完成条件。首次 issued 先核对可信工作线业务，后续沿原 task/arrival/动作，不按当前方向重新路由。以上是待实施业务设计，不改本指南前述已交付平台能力或正式 catalog 范围。
+人工两方向统一为 [smt_manual](../superpowers/specs/2026-10-31-smt-manual-business-design.md)，自动两方向统一为 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md)。各宿主分别组合同源 sorting_task 与一份 bin_roller，共用本宿主任务表/队列/服务/工厂/scan_pending；inbound/outbound 只是冻结任务方向及内部生产分支，无独立业务码或 owner。smt_auto 共享任务注册/平台适配/迁移和最终组合由[总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)一次交付，保留两个方向各自合同与完成条件。首次 issued 先核对可信工作线业务，后续沿原 task/arrival/动作，不按当前方向重新路由。手工宿主已本地实施并登记正式 catalog，自动宿主仍按计划待实施；不将本地接入等同已部署。
 
 ### 3.2 WMS / Transport 原业务归属
 
@@ -188,7 +188,7 @@ async def advance(self, execution_id):
         return await self._advance(session, execution_id)
 ```
 
-**BIN_Roller 的目标隔离例外（测试宿主已验证，正式生产宿主未交付）：** 仅会进入其架流/正常求架检查的原宿主单条独立 advance 首 SQL 前设 SERIALIZABLE，复用原 session_factory/业务幂等/Outbox。判定、登记和消费整笔同入口，不按内部 DRAIN 分支拆事务或另建隔离选择器；原 40001 有界重试包括外层 commit，提交未知仍由原 work 进入完整 SERIALIZABLE 推进，已见原引用就恢复；暂时查空不证明回滚，登记须经完整业务判定/唯一性/集合依赖及最终提交，不新增确认状态。receiver 保留事实/待办及 SCAN2 合法即时意图受理，不消费 drain 业务进度/收批/新求架；短扫描、已有无关纯生产及其他业务不一律升级。不改共享 factory/引擎/连接池默认，沿原连接执行选项关闭后恢复，不复制手工锁或新增任务/连接重置钩子。见[U06 范围及恢复](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#roller-u06-minimal-transaction)。
+**BIN_Roller 的目标隔离例外（测试宿主与正式手工宿主已本地验证）：** 仅会进入其架流/正常求架检查的原宿主单条独立 advance 首 SQL 前设 SERIALIZABLE，复用原 session_factory/业务幂等/Outbox。判定、登记和消费整笔同入口，不按内部 DRAIN 分支拆事务或另建隔离选择器；原 40001 有界重试包括外层 commit，提交未知仍由原 work 进入完整 SERIALIZABLE 推进，已见原引用就恢复；暂时查空不证明回滚，登记须经完整业务判定/唯一性/集合依赖及最终提交，不新增确认状态。receiver 保留事实/待办及 SCAN2 合法即时意图受理，不消费 drain 业务进度/收批/新求架；短扫描、已有无关纯生产及其他业务不一律升级。不改共享 factory/引擎/连接池默认，沿原连接执行选项关闭后恢复，不复制手工锁或新增任务/连接重置钩子。见[U06 范围及恢复](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#roller-u06-minimal-transaction)。
 
 以下锁序描述现有基线，不要求为 BIN_Roller 目标业务复制锁；其专项遵循“不新增组件/宿主手工锁”的边界。
 

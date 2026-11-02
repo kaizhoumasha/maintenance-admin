@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     # Transport 任务创建后超过该时长仍无确定终态就输出卡住告警(暂定 2 小时,按现场 SOP 调整)
     TRANSPORT_STUCK_ALERT_MINUTES: int = Field(default=120, gt=0)
 
+    SMT_MANUAL_FIRST_PLAN_WAIT_MS: int | None = Field(default=None, gt=0)
+
+    @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", mode="before")
+    @classmethod
+    def _first_plan_wait(cls, value):
+        if value is not None and type(value) not in {int, str}:
+            raise ValueError("first plan wait must be integer milliseconds")
+        return value
+
     RELIABLE_TARGETS: dict = {}
     RELIABLE_MAX_BODY_BYTES: int = 262144
     RELIABLE_DEFAULT_TIMEOUT_MS: float = 10000

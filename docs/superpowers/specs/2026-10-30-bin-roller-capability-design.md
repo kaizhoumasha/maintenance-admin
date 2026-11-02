@@ -1,6 +1,8 @@
 # BIN_Roller：统一箱流、架流与 SCAN2 生产业务接缝设计
 
-状态：2026-10-30 用户确认采用单一 BIN_Roller 边界，本稿为当前设计，**B1～B5 本地实现与分项验证已完成；B6 FIFO/维护边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产接入、组件迁移及整体验收未完成，未部署**。首版范围已确认：沿 manual-picking 已实现基线，不做跨任务/跨普通-drain 目的留场复用，不做早到完工自动补绑。B6 只改文档，不新增运行能力；B4/B5 验证见[实施计划进度](../plans/2026-10-30-bin-roller-implementation.md#实施进度)。历史框架验收不作为本组件验收，组件测试不代表现场物理验收。
+2026-11-02 后续交付：按[共同收敛设计](2026-11-02-smt-bin-roller-persistence-design.md)及[实施计划](../plans/2026-11-02-smt-persistence-and-capacity-implementation.md)，当前已是 SMT 7 + BIN_Roller 10 张业务表，顺序 revision 为 `smtmanualcompact → binrollercompact → fiveracklimit`。每线可空请求额度及开始前撤销服务已实现，原公开 ports、六种 RollerWorkRef、wire 和冻结身份保持；永久 KT16/KT18 专项 12 passed / 0 skipped。旧 28 表、4933/52 与 11 PASS/1 FAIL 仅为各自历史时点，当前最终全仓/整体复核待执行，见[当前专项证据](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)。未提交、未部署。
+
+状态：2026-10-30 用户确认单一 BIN_Roller 边界；B1～B5组件实现、B6 FIFO/维护文档边界和B7共享声明/隔离测试装配已交付。后续手工 M5/M6 已本地交付首个完整正式消费者、15张组件状态迁移及软件运行验收，见[SMT 手工验收](../../testing/smt-manual.md)；该增量未提交、未部署，对端/现场未验。首版不做跨任务/跨普通-drain目的留场复用或早到完工自动补绑；历史框架/组件测试不代表现场物理验收。
 
 关联：[唯一实施计划](../plans/2026-10-30-bin-roller-implementation.md)、[总计划与历史验收](../plans/2026-10-30-business-components-bin-roller.md)、[公共回流 C01～C07/R01](../../integrations/workline-bin-return-api.md)、[业务组件框架](../../integrations/business-packages.md)。原进箱/回箱双组件及外置共享架面方案已合并；四份旧设计/计划索引删除，当前只执行本设计与 B1～B7。阶段一、二已交付框架的历史记录保留。
 
@@ -350,11 +352,11 @@ receiver 原消息幂等不提供任意不同消息的点级串行化；本次�
 
 已选原步骤再进入登记方法时先恢复保存的原输入及引用：ECS 读取原 call_key/command_code；WMS 使用原 message_id/operation/operation_id 读结果；Transport 用原 task/client_request/caller。已登记的恢复只交原 Sender 处理，原字节/target 键/期限按各协议已有冻结语义保留；不为 WMS/Transport 增加路由快照能力，不用当前 target 选择、设备绑定、数量或超时重新 send/create。接口参数与原身份漂移时沿原接口拒绝/留证，不吞成成功、不换 ID。
 
-复用[现有业务 advance](../../../app/businesses/coarse_sorting/service.py)包围 session.begin 及外层提交的新 session/有界整事务恢复方式处理 40001（当前基线最多 3 次，每次新 session）；仅 §7.1 相关入口按本专项加强为 SERIALIZABLE，不声称该源码已实现目标宿主。组件不自建重试器。已知逻辑唯一竞争若当前快照无法读到赢家，不能在同一失败事务继续选动作；回滚后经原入口按原键重读，不能用新 ID 绕冲突；不承诺把这类所有错误纳入现有 40001 重试分支。其他完整性/输入漂移错误不一概冒充可重试成功；本轮无法推进则保留原持久待办，由原事件/Beat 再定位，不因一次失败清掉义务。
+复用[现有业务 advance](../../../app/businesses/coarse_sorting/service.py)包围 session.begin 及外层提交的新 session/有界整事务恢复方式处理 40001（当前基线最多 3 次，每次新 session）；仅 §7.1 相关入口按本专项加强为 SERIALIZABLE，正式手工宿主已本地按此实现，证据见[手工验收](../../testing/smt-manual.md)。组件不自建重试器。已知逻辑唯一竞争若当前快照无法读到赢家，不能在同一失败事务继续选动作；回滚后经原入口按原键重读，不能用新 ID 绕冲突；不承诺把这类所有错误纳入现有 40001 重试分支。其他完整性/输入漂移错误不一概冒充可重试成功；本轮无法推进则保留原持久待办，由原事件/Beat 再定位，不因一次失败清掉义务。
 
 ### 7.3 重复、并发、回滚与重启推演
 
-以下是设计推演与验收要求；B1～B5 及 B7 测试装配已有对应分项验证，正式生产宿主与现场验收仍未完成。校验对象是原步骤/消息身份、冻结输入、消费依据和可恢复性，既有 Sender 自身的合法重试次数不当作“重复创建业务动作”。
+以下是设计推演与验收要求；B1～B5 及 B7 测试装配已有对应分项验证，正式手工宿主已本地验收，现场物理验收仍未执行。校验对象是原步骤/消息身份、冻结输入、消费依据和可恢复性，既有 Sender 自身的合法重试次数不当作“重复创建业务动作”。
 
 | 场景/断点 | 应有结果与后续 |
 | --- | --- |

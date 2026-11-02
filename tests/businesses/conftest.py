@@ -522,7 +522,21 @@ async def coarse_scan(callback_store, monkeypatch):
     monkeypatch.setattr(catalog, "_registration_guard_enabled", catalog._registration_guard_enabled)
 
     def install():
+        from app.integrations.wms_callback import registry as callbacks
+        from app.integrations.wms_request import operation as requests
+
         monkeypatch.setattr(events, "_registry", {})
+        for registry in (callbacks, requests):
+            monkeypatch.setattr(
+                registry,
+                "_registry",
+                {
+                    name: item
+                    for name, item in registry._registry.items()
+                    if not item.registration_source.module.startswith("app.businesses.")
+                    or item.registration_source.module.startswith("app.businesses.coarse_sorting.")
+                },
+            )
         monkeypatch.setattr(discovery, "_loaded_formal", set())
         monkeypatch.delitem(sys.modules, entry_module, raising=False)
         discovery.load_formal_modules("ecs_event")

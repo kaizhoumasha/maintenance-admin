@@ -53,10 +53,18 @@ async def test_the_catalog_describes_every_registered_operation(client, admin):
 
 
 @pytest.mark.parametrize("operation", sorted(operations()))
-async def test_every_operation_example_registers_a_visible_pending_message(
+async def test_operation_examples_create_messages_only_with_valid_input(
     client, admin, wms, operation
 ):
-    sent = await client.post(BASE, json=trigger(operation), headers=admin)
+    request = trigger(operation)
+    if request["data"] is None:
+        request["operation_id"] = str(uuid7())
+    sent = await client.post(BASE, json=request, headers=admin)
+    if request["data"] is None:
+        assert sent.status_code == 400
+        status = await client.get(f"{BASE}/status/{request['operation_id']}", headers=admin)
+        assert status.status_code == 404
+        return
     assert sent.status_code == 200
     out = sent.json()
     protocol = {"facts": FACTS_PROTOCOL, "decisions": DECISIONS_PROTOCOL}[

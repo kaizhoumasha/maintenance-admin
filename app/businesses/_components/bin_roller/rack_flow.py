@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from time import time
 from typing import Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identifiers import uuid7
@@ -16,6 +16,7 @@ from app.integrations.wms_transport import (
     TransportTaskResult,
     Zone,
 )
+from app.models import WorkLine
 
 from .models import TABLES
 from .repository import RollerRepository
@@ -25,7 +26,7 @@ async def select_supply_cycle(roller, session, demand_id):
     demand = await roller.original_record(session, "supply_demand", demand_id)
     if demand["cycle_id"]:
         return demand["cycle_id"]
-    if demand["withdrawn"]:
+    if demand["demand_state"] == "WITHDRAWN":
         return None
     current = await roller.production.read_current_task(
         session, work_line_id=demand["work_line_id"]
@@ -43,10 +44,14 @@ async def select_supply_cycle(roller, session, demand_id):
         cycles.c.status == "ACTIVE",
     )
     if original is not None:
-        departure = repo.tables["departure"]
+        departure = repo.tables["decision"]
         if await session.scalar(
             select(departure.c.id)
-            .where(*repo.scoped(departure), departure.c.cycle_id == original["id"])
+            .where(
+                *repo.scoped(departure),
+                departure.c.kind == "DEPARTURE",
+                departure.c.cycle_id == original["id"],
+            )
             .limit(1)
         ):
             return None
@@ -55,13 +60,28 @@ async def select_supply_cycle(roller, session, demand_id):
         resources = await roller.read_resources(session, repo.work_line_id)
         if resources is None:
             return None
+        demands = repo.tables["face_work"]
+        demand_id = await session.scalar(
+            select(demands.c.demand_id)
+            .where(
+                *repo.scoped(demands),
+                demands.c.purpose == "SUPPLY",
+                demands.c.task_id == demand["task_id"],
+                demands.c.rack_id == demand["rack_id"],
+                demands.c.demand_state == "ACTIVE",
+                demands.c.cycle_id.is_(None),
+                demands.c.service_id.is_(None),
+            )
+            .order_by(demands.c.id)
+            .limit(1)
+        )
         original = await repo.create_cycle(
             session,
             cycle_id=str(uuid7()),
             rack_id=demand["rack_id"],
             purpose="ORDINARY",
             task_id=demand["task_id"],
-            source_ref=demand["id"],
+            source_ref=demand_id,
             resources=resources,
         )
     await repo.bind_supply(session, demand_id=demand_id, cycle_id=original["id"])
@@ -75,6 +95,29 @@ async def rack_action(roller, session, repo, cycle, *, kind, source_ref, target,
         conditions.append(actions.c.source_ref == source_ref)
     action = await repo._one(session, actions, *conditions)
     if action is None:
+        if kind == "CTU01":
+            line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
+            if line is None or not line.is_enabled or line.business_code != roller.context.domain:
+                return None
+            if line.five_rack_request_limit is not None:
+                cycles = repo.tables["rack_cycle"]
+                occupied = await session.scalar(
+                    select(func.count())
+                    .select_from(cycles)
+                    .where(
+                        *repo.scoped(cycles),
+                        cycles.c.status != "RELEASED",
+                        select(actions.c.id)
+                        .where(
+                            *repo.scoped(actions),
+                            actions.c.cycle_id == cycles.c.id,
+                            actions.c.kind == "CTU01",
+                        )
+                        .exists(),
+                    )
+                )
+                if occupied >= line.five_rack_request_limit:
+                    return None
         entry = await repo._one(
             session, actions, actions.c.cycle_id == cycle["id"], actions.c.kind == "CTU01"
         )
@@ -141,12 +184,16 @@ async def rack_action(roller, session, repo, cycle, *, kind, source_ref, target,
 async def advance_departure(roller, session, repo, cycle, source_ref):
     from .request.rack_departure_decide_v1 import DECISION, OPERATION, DepartureRequest
 
-    table = repo.tables["departure"]
+    table = repo.tables["decision"]
     original = (
         (
             await session.execute(
                 select(table)
-                .where(*repo.scoped(table), table.c.cycle_id == cycle["id"])
+                .where(
+                    *repo.scoped(table),
+                    table.c.kind == "DEPARTURE",
+                    table.c.cycle_id == cycle["id"],
+                )
                 .order_by(table.c.id.desc())
                 .limit(1)
             )
@@ -178,7 +225,7 @@ async def advance_departure(roller, session, repo, cycle, source_ref):
             return "INVALID_DEPARTURE"
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == original["id"])
+            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == original["id"])
             .values(
                 decision=decision,
                 status=decision["result"],
@@ -187,7 +234,9 @@ async def advance_departure(roller, session, repo, cycle, source_ref):
                 else None,
             )
         )
-        original = await repo._one(session, table, table.c.id == original["id"])
+        original = await repo._one(
+            session, table, table.c.kind == "DEPARTURE", table.c.id == original["id"]
+        )
     if original is not None and original["status"] == "READY":
         destination = original["decision"]["rack_destination"]
         await rack_action(
@@ -224,12 +273,13 @@ async def advance_departure(roller, session, repo, cycle, source_ref):
         dict(
             id=str(uuid7()),
             **repo.scope,
+            kind="DEPARTURE",
             cycle_id=cycle["id"],
             source_ref=source_ref,
             operation_id=str(uuid7()),
             request=payload.model_dump(mode="json"),
         ),
-        ("cycle_id", "source_ref"),
+        ("kind", "cycle_id", "source_ref"),
         (),
     )
     if new["message_id"] is None:
@@ -238,13 +288,13 @@ async def advance_departure(roller, session, repo, cycle, source_ref):
         )
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == new["id"])
+            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == new["id"])
             .values(message_id=reference.message_id)
         )
     if original is not None:
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == original["id"])
+            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == original["id"])
             .values(pending=False)
         )
     return "WAITING_FOR_DEPARTURE"
@@ -257,7 +307,7 @@ async def advance_cycle(roller, session, cycle_id):
     cycle = await roller.original_record(session, "rack_cycle", cycle_id)
     repo = roller.repository(cycle["work_line_id"])
     actions, services, departures = (
-        repo.tables[k] for k in ("rack_action", "face_service", "departure")
+        repo.tables[k] for k in ("rack_action", "face_work", "decision")
     )
     originals = (
         (
@@ -283,32 +333,135 @@ async def advance_cycle(roller, session, cycle_id):
     if cycle["status"] == "RELEASED":
         await session.execute(
             services.update()
-            .where(*repo.scoped(services), services.c.cycle_id == cycle_id)
-            .values(status="COMPLETED", pending=False)
+            .where(
+                *repo.scoped(services),
+                services.c.cycle_id == cycle_id,
+                services.c.service_id.is_not(None),
+                services.c.service_state != "WITHDRAWN",
+            )
+            .values(service_state="COMPLETED")
         )
         await session.execute(
             departures.update()
-            .where(*repo.scoped(departures), departures.c.cycle_id == cycle_id)
+            .where(
+                *repo.scoped(departures),
+                departures.c.kind == "DEPARTURE",
+                departures.c.cycle_id == cycle_id,
+            )
             .values(pending=False)
         )
         return "RELEASED"
+    if (
+        cycle["purpose"] == "ORDINARY"
+        and not originals
+        and cycle["release_basis"] is None
+        and not await session.scalar(
+            select(services.c.id)
+            .where(
+                *repo.scoped(services),
+                services.c.cycle_id == cycle_id,
+                services.c.feed_id.is_not(None),
+            )
+            .limit(1)
+        )
+    ):
+        # Preserve the cancelled service's identity without later inheriting a sibling's entry.
+        await session.execute(
+            services.update()
+            .where(
+                *repo.scoped(services),
+                services.c.cycle_id == cycle_id,
+                services.c.demand_state == "WITHDRAWN",
+                services.c.service_state.in_(("PENDING", "READY")),
+            )
+            .values(service_state="WITHDRAWN")
+        )
+        await session.execute(
+            services.update()
+            .where(
+                *repo.scoped(services),
+                services.c.cycle_id == cycle_id,
+                services.c.service_id.is_(None),
+                services.c.demand_state == "WITHDRAWN",
+            )
+            .values(cycle_id=None)
+        )
+        cycles = repo.tables["rack_cycle"]
+        valid = await session.scalar(
+            select(services.c.id)
+            .where(
+                *repo.scoped(services),
+                services.c.purpose == "SUPPLY",
+                services.c.task_id == cycle["task_id"],
+                services.c.rack_id == cycle["rack_id"],
+                services.c.demand_state == "ACTIVE",
+                or_(services.c.cycle_id == cycle_id, services.c.cycle_id.is_(None)),
+            )
+            .limit(1)
+        )
+        if valid is None:
+            await session.execute(
+                cycles.update()
+                .where(*repo.scoped(cycles), cycles.c.id == cycle_id)
+                .values(status="WITHDRAWN", pending=False)
+            )
+            return "WITHDRAWN"
+        selected = await session.scalar(
+            select(services.c.id)
+            .where(
+                *repo.scoped(services),
+                services.c.cycle_id == cycle_id,
+                services.c.demand_state == "ACTIVE",
+                services.c.service_state.in_(("PENDING", "READY")),
+            )
+            .limit(1)
+        )
+        if cycle["status"] == "WITHDRAWN" and selected is not None:
+            await session.execute(
+                cycles.update()
+                .where(*repo.scoped(cycles), cycles.c.id == cycle_id)
+                .values(status="ACTIVE", pending=True)
+            )
+            cycle = await repo.get_cycle(session, cycle_id)
+    if cycle["status"] == "WITHDRAWN":
+        return "WITHDRAWN"
     if await session.scalar(
         select(departures.c.id)
-        .where(*repo.scoped(departures), departures.c.cycle_id == cycle_id)
+        .where(
+            *repo.scoped(departures),
+            departures.c.kind == "DEPARTURE",
+            departures.c.cycle_id == cycle_id,
+        )
         .limit(1)
     ):
         return await advance_departure(roller, session, repo, cycle, cycle_id)
+    if (
+        cycle["purpose"] == "DRAIN"
+        and not originals
+        and not await roller.get_return_candidates(session, work_line_id=repo.work_line_id)
+    ):
+        from .return_flow import summarize_drain
+
+        drain = await summarize_drain(roller, session, cycle["source_ref"])
+        return "WITHDRAWN" if cycle["rack_id"] in drain["unused_racks"] else "WAITING_FOR_RACK"
     while True:
         service = await repo._one(
-            session, services, services.c.cycle_id == cycle_id, services.c.pending.is_(True)
+            session,
+            services,
+            services.c.cycle_id == cycle_id,
+            services.c.service_state.in_(("PENDING", "READY")),
         )
         if service is None:
             completed = (
                 (
                     await session.execute(
                         select(services)
-                        .where(*repo.scoped(services), services.c.cycle_id == cycle_id)
-                        .order_by(services.c.id)
+                        .where(
+                            *repo.scoped(services),
+                            services.c.cycle_id == cycle_id,
+                            services.c.service_id.is_not(None),
+                        )
+                        .order_by(services.c.service_id)
                     )
                 )
                 .mappings()
@@ -319,9 +472,10 @@ async def advance_cycle(roller, session, cycle_id):
                 current_task = await roller.production.read_current_task(
                     session, work_line_id=repo.work_line_id
                 )
-                demands = repo.tables["supply_demand"]
+                demands = services
                 query = select(demands).where(
                     *repo.scoped(demands),
+                    demands.c.purpose == "SUPPLY",
                     demands.c.task_id == cycle["task_id"],
                     demands.c.rack_id == cycle["rack_id"],
                     demands.c.service_id.is_(None),
@@ -330,7 +484,7 @@ async def advance_cycle(roller, session, cycle_id):
                         demands.c.cycle_id.is_(None)
                         & (current_task.is_valid and current_task.task_id == cycle["task_id"]),
                     ),
-                    or_(demands.c.withdrawn.is_(False), demands.c.cycle_id == cycle_id),
+                    or_(demands.c.demand_state == "ACTIVE", demands.c.cycle_id == cycle_id),
                 )
                 demand = (
                     (await session.execute(query.order_by(demands.c.id).limit(1)))
@@ -363,32 +517,42 @@ async def advance_cycle(roller, session, cycle_id):
                 cycle["purpose"] == "DRAIN" and not remaining
             ):
                 return await advance_departure(
-                    roller, session, repo, cycle, completed[-1]["id"] if completed else cycle_id
+                    roller,
+                    session,
+                    repo,
+                    cycle,
+                    completed[-1]["service_id"] if completed else cycle_id,
                 )
-            service = await repo._register(
-                session,
-                services,
-                dict(
-                    id=str(uuid7()),
-                    **repo.scope,
-                    cycle_id=cycle_id,
-                    source_ref=source_ref,
-                    rack_face=face,
-                    task_id=cycle["task_id"],
-                    plan_revision=demand["plan_revision"] if demand else None,
-                ),
-                ("cycle_id", "source_ref"),
-                ("rack_face", "task_id", "plan_revision"),
-            )
+            service_id = str(uuid7())
             if demand is not None:
                 await repo.bind_supply(
-                    session, demand_id=demand["id"], cycle_id=cycle_id, service_id=service["id"]
+                    session, demand_id=demand["demand_id"], cycle_id=cycle_id, service_id=service_id
+                )
+                service = await repo.demand(session, demand["demand_id"])
+            else:
+                service = await repo._register(
+                    session,
+                    services,
+                    dict(
+                        **repo.scope,
+                        id=service_id,
+                        purpose="DRAIN",
+                        service_id=service_id,
+                        cycle_id=cycle_id,
+                        source_ref=source_ref,
+                        rack_id=cycle["rack_id"],
+                        rack_face=face,
+                        task_id=cycle["task_id"],
+                        service_state="PENDING",
+                    ),
+                    ("cycle_id", "source_ref"),
+                    ("purpose", "rack_face", "task_id"),
                 )
         resources = cycle["resources"]
         entry = await repo._one(
             session, actions, actions.c.cycle_id == cycle_id, actions.c.kind == "CTU01"
         )
-        if service["status"] != "READY":
+        if service["service_state"] != "READY":
             if entry is None:
                 await rack_action(
                     roller,
@@ -396,7 +560,7 @@ async def advance_cycle(roller, session, cycle_id):
                     repo,
                     cycle,
                     kind="CTU01",
-                    source_ref=service["id"],
+                    source_ref=service["service_id"],
                     target=dict(
                         kind="RACK_POSITION", location_code=resources["positions"]["FIVE_RACK"]
                     ),
@@ -426,7 +590,7 @@ async def advance_cycle(roller, session, cycle_id):
                     repo,
                     cycle,
                     kind="CTU02",
-                    source_ref=service["id"],
+                    source_ref=service["service_id"],
                     target=entry["target"],
                     face=service["rack_face"],
                     source=RackPosition(entry["target"]["location_code"]),
@@ -434,8 +598,8 @@ async def advance_cycle(roller, session, cycle_id):
                 return "WAITING_FOR_RACK"
             await session.execute(
                 services.update()
-                .where(*repo.scoped(services), services.c.id == service["id"])
-                .values(status="READY")
+                .where(*repo.scoped(services), services.c.service_id == service["service_id"])
+                .values(service_state="READY")
             )
         caller = TransportCaller(entry["caller_workline_id"], entry["station_id"])
         if cycle["purpose"] == "ORDINARY":
@@ -452,15 +616,15 @@ async def advance_cycle(roller, session, cycle_id):
             await opportunity(
                 repo,
                 session,
-                feed=dict(service_id=service["id"]),
-                source_ref=service["id"],
+                feed=dict(service_id=service["service_id"]),
+                source_ref=service["service_id"],
                 kind="PURE_RETURN",
             )
         opportunities = repo.tables["return_opportunity"]
         current = await repo._one(
             session,
             opportunities,
-            opportunities.c.service_id == service["id"],
+            opportunities.c.service_id == service["service_id"],
             opportunities.c.ended.is_(False),
         )
         if current is not None:
@@ -491,12 +655,12 @@ async def advance_cycle(roller, session, cycle_id):
             if current["kind"] == "SEGMENT":
                 await prepare_feed(roller, session, service["source_ref"])
                 return "WAITING_FOR_FEED"
-        if cycle["purpose"] == "ORDINARY" and not feed["feed_complete"]:
+        if cycle["purpose"] == "ORDINARY" and feed["feed_state"] != "COMPLETED":
             return "WAITING_FOR_FEED"
         await session.execute(
             services.update()
-            .where(*repo.scoped(services), services.c.id == service["id"])
-            .values(status="COMPLETED", pending=False)
+            .where(*repo.scoped(services), services.c.service_id == service["service_id"])
+            .values(service_state="COMPLETED")
         )
 
 

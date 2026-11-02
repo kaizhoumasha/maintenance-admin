@@ -31,13 +31,18 @@ def test_callback_context_old_positional_calls_still_work():
 
 
 def test_mounting_callbacks_preserves_explicit_runtime():
+    from app.businesses import catalog
     from app.controllers.ecs_callback import include_ecs_callback
     from app.controllers.wms_events import include_wms_events
 
     app = FastAPI()
     runtime = object()
     include_ecs_callback(
-        app, environment="production", resolve_binding=lambda *a: None, runtime=runtime
+        app,
+        environment="production",
+        resolve_binding=lambda *a: None,
+        resolve_input_target=catalog.input_target,
+        runtime=runtime,
     )
     include_wms_events(app, environment="production")
     assert app.state.business_runtime is runtime
@@ -129,6 +134,7 @@ async def test_lifespan_factory_receives_only_the_available_platform_capabilitie
     from app import main
     from app.businesses import catalog
     from app.integrations.ecs_callback import registry
+    from app.integrations.wms_callback import registry as callbacks
     from app.integrations.wms_request import operation
     from tests.helpers import business_composition
 
@@ -137,6 +143,7 @@ async def test_lifespan_factory_receives_only_the_available_platform_capabilitie
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(registry, "_registry", {})
+    monkeypatch.setattr(callbacks, "_registry", {})
     monkeypatch.setattr(operation, "_registry", {})
     catalog.validate_business_contracts()
     outbox, service = object(), object()

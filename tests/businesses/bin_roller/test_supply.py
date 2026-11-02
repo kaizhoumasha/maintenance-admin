@@ -23,7 +23,7 @@ async def test_supply_change_keeps_original_task_and_member_revision(roller_stor
         assert {p.source for p in progress} == {a, b}
         assert all(p.task_id == "T1" and p.pending and not p.feed_complete for p in progress)
         assert all(p.original_ids for p in progress)
-        assert len((await session.execute(select(store.tables["supply_demand"]))).all()) == 2
+        assert len((await session.execute(select(store.tables["face_work"]))).all()) == 2
 
 
 @pytest.mark.asyncio

@@ -84,7 +84,7 @@ async def test_scan3_and_scan4_do_not_wait_for_upstream_result(roller_scans):
     async with flow.factory() as session:
         arrivals = await flow.rows(session, "scan_arrival")
         scan3, scan4 = arrivals[-2:]
-        assert scan3["return_round_id"] == scan4["return_round_id"] is not None
+        assert scan3["round_id"] == scan4["round_id"] is not None
         assert scan3["command_code"] and scan4["command_code"]
         assert len(await flow.messages(session)) == 2
         result = await flow.roller.get_scan_result(session, arrival_id=scan4["id"])
@@ -103,7 +103,7 @@ async def test_unassociated_scan4_keeps_fact_without_forcing_latest_round(roller
     await flow.scan("SCAN4", "A000000002-B")
     async with flow.factory() as session:
         arrival = (await flow.rows(session, "scan_arrival"))[-1]
-        assert arrival["return_round_id"] is None
+        assert arrival["round_id"] is None
         assert arrival["command_code"] is None
         assert arrival["pending"]
         assert len(await flow.messages(session)) == 1
@@ -143,7 +143,7 @@ async def test_real_scan4_failure_rescan_keeps_original_round_and_first_arrival(
         retry = arrivals[-1]
         round_ = (await flow.rows(session, "return_round"))[0]
         assert round_["scan4_arrival_id"] == first["id"]
-        assert retry["return_round_id"] == first["return_round_id"]
+        assert retry["round_id"] == first["round_id"]
         assert retry["command_code"] != first["command_code"]
         assert len(await flow.messages(session)) == 3
 
@@ -167,7 +167,9 @@ async def test_scan4_new_content_never_reexecutes_unresolved_or_successful_round
         assert round_["scan4_arrival_id"] == first["id"]
 
 
-async def test_orphan_history_does_not_block_proven_current_scan4(roller_scans):
+async def test_unrelated_historical_root_does_not_block_proven_current_scan4(roller_scans):
+    from datetime import timedelta
+
     from sqlalchemy import select
 
     from app.core.identifiers import uuid7
@@ -175,19 +177,26 @@ async def test_orphan_history_does_not_block_proven_current_scan4(roller_scans):
     flow = roller_scans
     await flow.scan("SCAN3", "A000000001-B", timestamp=10)
     async with flow.factory.begin() as session:
-        table = flow.store.tables["return_round"]
+        table = flow.store.tables["scan_arrival"]
         original = (await session.execute(select(table))).mappings().one()
-        orphan = dict(original) | {"id": str(uuid7()), "scan3_arrival_id": str(uuid7())}
-        await session.execute(table.insert().values(**orphan))
+        historical = dict(original) | {
+            "id": str(uuid7()),
+            "round_id": str(uuid7()),
+            "business_key": str(uuid7()),
+            "first_digest": str(uuid7()),
+            "received_at": original["received_at"] - timedelta(seconds=1),
+        }
+        await session.execute(table.insert().values(**historical))
     await flow.scan("SCAN4", "A000000001-B", timestamp=20)
     await flow.scan("SCAN4", "A000000001-B", timestamp=30)
     async with flow.factory() as session:
         arrival = (await flow.rows(session, "scan_arrival"))[-1]
-        assert arrival["return_round_id"] == original["id"]
+        assert arrival["round_id"] == original["round_id"]
         assert arrival["command_code"] is not None
         assert len(await flow.messages(session)) == 2
         assert (
-            dict(await flow.roller.original_record(session, "return_round", orphan["id"])) == orphan
+            dict(await flow.roller.original_record(session, "return_round", historical["round_id"]))
+            == historical
         )
 
 
@@ -203,26 +212,36 @@ async def test_latest_scan3_missing_relation_does_not_fall_back_to_old_round(
         arrivals = await flow.rows(session, "scan_arrival")
         original, current = arrivals[0], arrivals[-1]
         table = flow.store.tables["scan_arrival"]
+        if relation == "conflicting":
+            from sqlalchemy.exc import IntegrityError
+
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    await session.execute(
+                        table.update()
+                        .where(table.c.id == current["id"])
+                        .values(round_id=original["round_id"])
+                    )
         await session.execute(
             table.update()
             .where(table.c.id == current["id"])
-            .values(return_round_id=None if relation == "missing" else original["return_round_id"])
+            .values(round_id=None, return_state=None, removed=None)
         )
     await flow.scan("SCAN4", "A000000001-B", timestamp=40)
     async with flow.factory.begin() as session:
         arrival = (await flow.rows(session, "scan_arrival"))[-1]
-        assert arrival["return_round_id"] is None and arrival["command_code"] is None
+        assert arrival["round_id"] is None and arrival["command_code"] is None
         assert len(await flow.messages(session)) == 3
         # Repairing the test's damaged association cannot retroactively attach the saved SCAN4.
         await session.execute(
             table.update()
             .where(table.c.id == current["id"])
-            .values(return_round_id=current["return_round_id"])
+            .values(round_id=current["round_id"], return_state="PENDING", removed=False)
         )
     await flow.scan("SCAN4", "A000000001-B", timestamp=50)
     async with flow.factory() as session:
         saved = await flow.roller.original_arrival(session, arrival["id"])
-        assert saved["return_round_id"] is None and saved["command_code"] is None
+        assert saved["round_id"] is None and saved["command_code"] is None
         assert saved["scanned_at"] == 40
         facts = [f for f in await flow.rows(session, "scan_fact") if f["point"] == "SCAN4"]
         assert {f["arrival_id"] for f in facts} == {arrival["id"]}
@@ -243,7 +262,7 @@ async def test_earlier_unassociated_scan4_does_not_bind_to_later_scan3_round(rol
             await flow.roller.advance(session, RollerWorkRef("SCAN", original["id"])) == "WAITING"
         )
         saved = await flow.roller.original_arrival(session, original["id"])
-        assert saved["return_round_id"] is None and saved["command_code"] is None
+        assert saved["round_id"] is None and saved["command_code"] is None
         assert saved["scanned_at"] == 10
         facts = [f for f in await flow.rows(session, "scan_fact") if f["point"] == "SCAN4"]
         assert len(facts) == 2
@@ -256,9 +275,9 @@ async def test_earlier_unassociated_scan4_does_not_bind_to_later_scan3_round(rol
         new = (await flow.rows(session, "scan_arrival"))[-1]
         old = await flow.roller.original_arrival(session, original["id"])
         assert new["id"] != old["id"]
-        assert new["return_round_id"] is not None and new["command_code"] is not None
+        assert new["round_id"] is not None and new["command_code"] is not None
         assert new["scanned_at"] == 50
-        assert old["return_round_id"] is None and old["command_code"] is None
+        assert old["round_id"] is None and old["command_code"] is None
         assert old["scanned_at"] == 10
         assert len(await flow.messages(session)) == 2
 
@@ -274,7 +293,7 @@ async def test_failed_point_rescan_after_intervening_content_uses_original_round
     await flow.scan("SCAN4", "A000000001-B", timestamp=40)
     async with flow.factory() as session:
         retry = (await flow.rows(session, "scan_arrival"))[-1]
-        assert retry["return_round_id"] == original["return_round_id"]
+        assert retry["round_id"] == original["round_id"]
         assert retry["command_code"] is not None
         assert retry["command_code"] != original["command_code"]
         assert len(await flow.messages(session)) == 3

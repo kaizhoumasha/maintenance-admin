@@ -20,11 +20,33 @@ async def summarize_drain(roller, session, drain_id):
     if drain["status"] != "READY":
         return drain
     repo = roller.repository(drain["work_line_id"])
-    cycles, drains = repo.tables["rack_cycle"], repo.tables["drain"]
+    cycles, drains = repo.tables["rack_cycle"], repo.tables["decision"]
+    actions, faces, opportunities = (
+        repo.tables[k] for k in ("rack_action", "face_work", "return_opportunity")
+    )
+    action = select(actions.c.id).where(*repo.scoped(actions), actions.c.cycle_id == cycles.c.id)
+    departure = select(drains.c.id).where(
+        *repo.scoped(drains),
+        drains.c.kind == "DEPARTURE",
+        drains.c.cycle_id == cycles.c.id,
+    )
+    opportunity = select(opportunities.c.id).where(
+        *repo.scoped(opportunities), opportunities.c.service_id == faces.c.service_id
+    )
+    face_work = select(faces.c.id).where(
+        *repo.scoped(faces),
+        faces.c.cycle_id == cycles.c.id,
+        faces.c.feed_id.is_not(None)
+        | faces.c.service_state.in_(("READY", "COMPLETED"))
+        | opportunity.exists(),
+    )
     originals = (
         (
             await session.execute(
-                select(cycles).where(
+                select(
+                    cycles,
+                    (action.exists() | departure.exists() | face_work.exists()).label("started"),
+                ).where(
                     *repo.scoped(cycles),
                     cycles.c.purpose == "DRAIN",
                     cycles.c.source_ref == drain_id,
@@ -37,21 +59,46 @@ async def summarize_drain(roller, session, drain_id):
     used = {c["rack_id"] for c in originals}
     unused = drain["unused_racks"]
     if await roller.return_channel_empty(session, work_line_id=repo.work_line_id):
+        unstarted = {
+            c["id"]
+            for c in originals
+            if not c["started"]
+            and c["status"] in ("ACTIVE", "WITHDRAWN")
+            and c["release_basis"] is None
+        }
+        retire = [c["id"] for c in originals if c["id"] in unstarted and c["status"] != "WITHDRAWN"]
+        if retire:
+            await session.execute(
+                faces.update()
+                .where(
+                    *repo.scoped(faces),
+                    faces.c.purpose == "DRAIN",
+                    faces.c.cycle_id.in_(retire),
+                    faces.c.service_state == "PENDING",
+                )
+                .values(service_state="WITHDRAWN")
+            )
+            await session.execute(
+                cycles.update()
+                .where(*repo.scoped(cycles), cycles.c.id.in_(retire))
+                .values(status="WITHDRAWN", pending=False)
+            )
+        used = {c["rack_id"] for c in originals if c["id"] not in unstarted}
         unused = [c["rack_id"] for c in drain["decision"]["racks"] if c["rack_id"] not in used]
-    complete = all(c["status"] == "RELEASED" for c in originals) and all(
+    complete = all(c["status"] == "RELEASED" or c["rack_id"] in unused for c in originals) and all(
         c["rack_id"] in used or c["rack_id"] in unused for c in drain["decision"]["racks"]
     )
     if complete or unused != drain["unused_racks"]:
         await session.execute(
             drains.update()
-            .where(*repo.scoped(drains), drains.c.id == drain_id)
+            .where(*repo.scoped(drains), drains.c.kind == "DRAIN", drains.c.id == drain_id)
             .values(
                 unused_racks=unused,
                 status="COMPLETED" if complete else "READY",
                 pending=not complete,
             )
         )
-    return await repo._one(session, drains, drains.c.id == drain_id)
+    return await repo._one(session, drains, drains.c.kind == "DRAIN", drains.c.id == drain_id)
 
 
 async def advance_drain(roller, session, drain_id):
@@ -59,7 +106,7 @@ async def advance_drain(roller, session, drain_id):
 
     drain = await roller.original_record(session, "drain", drain_id)
     repo = roller.repository(drain["work_line_id"])
-    table = repo.tables["drain"]
+    table = repo.tables["decision"]
     if drain["decision"] is None:
         result = await roller.capabilities.wms.get_result(
             session,
@@ -82,7 +129,7 @@ async def advance_drain(roller, session, drain_id):
             return None
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == drain_id)
+            .where(*repo.scoped(table), table.c.kind == "DRAIN", table.c.id == drain_id)
             .values(
                 decision=decision,
                 status=decision["result"],
@@ -108,7 +155,7 @@ async def advance_drain(roller, session, drain_id):
         .mappings()
         .all()
     )
-    if any(c["status"] != "RELEASED" for c in original):
+    if any(c["status"] not in ("RELEASED", "WITHDRAWN") for c in original):
         return None
     if not await roller.get_return_candidates(session, work_line_id=repo.work_line_id):
         return None
@@ -132,7 +179,7 @@ async def advance_drain(roller, session, drain_id):
 
 
 async def register_drain(roller, session, repo, previous, candidates, successor):
-    table = repo.tables["drain"]
+    table = repo.tables["decision"]
     from .request.workline_return_buffer_drain_rack_decide_v1 import DrainRequest
 
     resources = await roller.read_resources(session, repo.work_line_id)
@@ -155,6 +202,8 @@ async def register_drain(roller, session, repo, previous, candidates, successor)
         table,
         dict(
             id=record_id,
+            kind="DRAIN",
+            unused_racks=[],
             **repo.scope,
             input_kind=input_kind,
             input_ref=input_ref,
@@ -162,20 +211,20 @@ async def register_drain(roller, session, repo, previous, candidates, successor)
             request=payload.model_dump(mode="json"),
             operation_id=str(uuid7()),
         ),
-        ("input_kind", "input_ref"),
+        ("kind", "input_kind", "input_ref"),
         (),
     )
     if row["message_id"] is None:
         ref = await roller.capabilities.wms.send(session, payload, operation_id=row["operation_id"])
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == row["id"])
+            .where(*repo.scoped(table), table.c.kind == "DRAIN", table.c.id == row["id"])
             .values(message_id=ref.message_id)
         )
     if previous and previous["status"] == "WAIT":
         await session.execute(
             table.update()
-            .where(*repo.scoped(table), table.c.id == previous["id"])
+            .where(*repo.scoped(table), table.c.kind == "DRAIN", table.c.id == previous["id"])
             .values(pending=False)
         )
     return None
@@ -231,14 +280,14 @@ async def start_return_batch(
     cycle = await roller.original_record(session, "rack_cycle", service["cycle_id"])
     if service["work_line_id"] != repo.work_line_id or cycle["work_line_id"] != repo.work_line_id:
         raise ValueError("return opportunity must retain its original line")
-    if service["status"] != "READY" or cycle["status"] != "ACTIVE":
+    if service["service_state"] != "READY" or cycle["status"] != "ACTIVE":
         return None
     candidates = await roller.get_return_candidates(session, work_line_id=repo.work_line_id)
     if not candidates:
         await record_return_outcome(
             roller,
             session,
-            service_id=service["id"],
+            service_id=service["service_id"],
             opportunity_id=opportunity_id,
             batch_id=None,
             reason="NO_CANDIDATES",
@@ -285,16 +334,17 @@ async def start_return_batch(
             .where(*repo.scoped(batches), batches.c.id == batch["id"])
             .values(message_id=reference.message_id)
         )
-        rounds = repo.tables["return_round"]
+        rounds = repo.tables["scan_arrival"]
         await session.execute(
             rounds.update()
             .where(
                 *repo.scoped(rounds),
-                rounds.c.id.in_([m["round_id"] for m in batch["members"]]),
+                rounds.c.point == "SCAN3",
+                rounds.c.round_id.in_([m["round_id"] for m in batch["members"]]),
                 rounds.c.removed.is_(False),
-                rounds.c.status != "COMPLETED",
+                rounds.c.return_state != "COMPLETED",
             )
-            .values(status="ALLOCATING")
+            .values(return_state="ALLOCATING")
         )
     return batch["id"]
 
@@ -392,7 +442,7 @@ async def consume_return_result(
     arrivals, positions = repo.tables["scan_arrival"], repo.tables["position_fact"]
     original_attempts = select(arrivals.c.id).where(
         *repo.scoped(arrivals),
-        arrivals.c.return_round_id.in_(member_ids),
+        arrivals.c.round_id.in_(member_ids),
         arrivals.c.point == "SCAN4",
         arrivals.c.command_code.is_not(None),
     )
@@ -408,21 +458,22 @@ async def consume_return_result(
         .values(is_current=False)
     )
     if successful:
-        rounds = repo.tables["return_round"]
+        rounds = repo.tables["scan_arrival"]
         await session.execute(
             rounds.update()
             .where(
                 *repo.scoped(rounds),
-                rounds.c.id.in_(member_ids),
+                rounds.c.point == "SCAN3",
+                rounds.c.round_id.in_(member_ids),
                 rounds.c.removed.is_(False),
-                rounds.c.status != "COMPLETED",
+                rounds.c.return_state != "COMPLETED",
             )
-            .values(status="COMPLETED")
+            .values(return_state="COMPLETED")
         )
         await record_return_outcome(
             roller,
             session,
-            service_id=service["id"],
+            service_id=service["service_id"],
             opportunity_id=opportunity["id"],
             batch_id=batch_id,
             reason="RETURN_SUCCEEDED",
@@ -447,7 +498,7 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
     )
     service = await roller.original_record(session, "face_service", opportunity["service_id"])
     cycle = await roller.original_record(session, "rack_cycle", service["cycle_id"])
-    batches, rounds = repo.tables["return_batch"], repo.tables["return_round"]
+    batches, rounds = repo.tables["return_batch"], repo.tables["scan_arrival"]
     if batch["manifest"] is None:
         result = await roller.capabilities.wms.get_result(
             session,
@@ -492,18 +543,19 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
             rounds.update()
             .where(
                 *repo.scoped(rounds),
-                rounds.c.id.in_([m["round_id"] for m in tail]),
+                rounds.c.point == "SCAN3",
+                rounds.c.round_id.in_([m["round_id"] for m in tail]),
                 repo.current_round_condition(),
                 rounds.c.removed.is_(False),
-                rounds.c.status != "COMPLETED",
+                rounds.c.return_state != "COMPLETED",
             )
-            .values(status="PENDING")
+            .values(return_state="PENDING")
         )
         if no_batch:
             await record_return_outcome(
                 roller,
                 session,
-                service_id=service["id"],
+                service_id=service["service_id"],
                 opportunity_id=opportunity["id"],
                 batch_id=batch_id,
                 reason="NO_BATCH",
@@ -519,12 +571,13 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
         member_ids = {m["round_id"] for m in batch["members"][: len(batch["manifest"]["moves"])]}
         current_ids = set(
             await session.scalars(
-                select(rounds.c.id).where(
+                select(rounds.c.round_id).where(
                     *repo.scoped(rounds),
-                    rounds.c.id.in_(member_ids),
+                    rounds.c.point == "SCAN3",
+                    rounds.c.round_id.in_(member_ids),
                     repo.current_round_condition(),
                     rounds.c.removed.is_(False),
-                    rounds.c.status != "COMPLETED",
+                    rounds.c.return_state != "COMPLETED",
                 )
             )
         )
@@ -536,8 +589,12 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
             )
             await session.execute(
                 rounds.update()
-                .where(*repo.scoped(rounds), rounds.c.id.in_(current_ids))
-                .values(status="PENDING")
+                .where(
+                    *repo.scoped(rounds),
+                    rounds.c.point == "SCAN3",
+                    rounds.c.round_id.in_(current_ids),
+                )
+                .values(return_state="PENDING")
             )
             if opportunity["kind"] == "SEGMENT":
                 await end_opportunity(
@@ -584,13 +641,14 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
             rounds.update()
             .where(
                 *repo.scoped(rounds),
-                rounds.c.id.in_(
+                rounds.c.point == "SCAN3",
+                rounds.c.round_id.in_(
                     [m["round_id"] for m in batch["members"][: len(batch["manifest"]["moves"])]]
                 ),
                 rounds.c.removed.is_(False),
-                rounds.c.status != "COMPLETED",
+                rounds.c.return_state != "COMPLETED",
             )
-            .values(status="IN_TRANSIT")
+            .values(return_state="IN_TRANSIT")
         )
         return "WAITING_FOR_RETURN_RESULT"
     result = await roller.capabilities.transport.get_result(

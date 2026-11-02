@@ -120,8 +120,8 @@ async def test_original_supply_request_survives_head_change_and_restart(roller_l
     rounds = await flow.all_rows("return_round")
     async with flow.factory.begin() as session:
         await session.execute(
-            update(flow.store.tables["return_round"])
-            .where(flow.store.tables["return_round"].c.id == rounds[0]["id"])
+            update(flow.store.tables["scan_arrival"])
+            .where(flow.store.tables["scan_arrival"].c.id == rounds[0]["scan3_arrival_id"])
             .values(removed=True)
         )
     old = flow.roller
@@ -151,8 +151,12 @@ async def test_expired_wait_registers_one_new_original_evaluation(roller_lifecyc
     )
     await flow.advance("DRAIN", original["id"])
     async with flow.factory.begin() as session:
-        table = flow.store.tables["drain"]
-        await session.execute(table.update().where(table.c.id == original["id"]).values(due_at=0))
+        table = flow.store.tables["decision"]
+        await session.execute(
+            table.update()
+            .where(table.c.kind == "DRAIN", table.c.id == original["id"])
+            .values(due_at=0)
+        )
     await flow.advance("SCAN", scan["id"])
     await flow.advance("DRAIN", original["id"])
     drains = await flow.all_rows("drain")
@@ -256,8 +260,12 @@ async def test_empty_buffer_keeps_registered_arrival_and_unused_candidates(rolle
     await flow.advance("DRAIN", drain["id"])
     entry = (await flow.all_rows("rack_action"))[0]
     async with flow.factory.begin() as session:
-        table = flow.store.tables["return_round"]
-        await session.execute(table.update().values(removed=True))
+        table = flow.store.tables["scan_arrival"]
+        await session.execute(
+            table.update()
+            .where(table.c.point == "SCAN3", table.c.round_id.is_not(None))
+            .values(removed=True)
+        )
     await flow.advance("DRAIN", drain["id"])
     drain = (await flow.all_rows("drain"))[0]
     assert drain["status"] == "READY" and drain["unused_racks"] == ["D2"]
@@ -279,8 +287,12 @@ async def test_completed_supply_history_allows_new_demand(roller_lifecycle):
     await flow.advance("SCAN", scan["id"])
     first = (await flow.all_rows("drain"))[0]
     async with flow.factory.begin() as session:
-        table = flow.store.tables["return_round"]
-        await session.execute(table.update().values(removed=True))
+        table = flow.store.tables["scan_arrival"]
+        await session.execute(
+            table.update()
+            .where(table.c.point == "SCAN3", table.c.round_id.is_not(None))
+            .values(removed=True)
+        )
     await flow.decision(
         "drain", first["id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
     )
@@ -302,14 +314,16 @@ async def test_completed_or_removed_round_is_not_pending_scan_work(roller_lifecy
     await flow.bins(2)
     scans = [a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4"]
     async with flow.factory.begin() as session:
-        rounds = flow.store.tables["return_round"]
+        rounds = flow.store.tables["scan_arrival"]
         await session.execute(
             rounds.update()
-            .where(rounds.c.id == scans[0]["return_round_id"])
-            .values(status="COMPLETED")
+            .where(rounds.c.point == "SCAN3", rounds.c.round_id == scans[0]["round_id"])
+            .values(return_state="COMPLETED")
         )
         await session.execute(
-            rounds.update().where(rounds.c.id == scans[1]["return_round_id"]).values(removed=True)
+            rounds.update()
+            .where(rounds.c.point == "SCAN3", rounds.c.round_id == scans[1]["round_id"])
+            .values(removed=True)
         )
         upper = await flow.roller.get_pending_upper_id(session, kind="SCAN")
         pending = await flow.roller.list_pending(

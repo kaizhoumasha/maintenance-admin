@@ -324,8 +324,12 @@ async def test_departure_wait_keeps_due_point_then_registers_one_recheck(roller_
     await flow.advance("RACK_CYCLE", cycle)
     assert (await flow.all_rows("departure"))[0]["due_at"] == due
     async with flow.factory.begin() as session:
-        table = flow.store.tables["departure"]
-        await session.execute(table.update().where(table.c.id == original["id"]).values(due_at=0))
+        table = flow.store.tables["decision"]
+        await session.execute(
+            table.update()
+            .where(table.c.kind == "DEPARTURE", table.c.id == original["id"])
+            .values(due_at=0)
+        )
     await flow.advance("RACK_CYCLE", cycle)
     await flow.advance("FEED", demand)
     requests = await flow.all_rows("departure")

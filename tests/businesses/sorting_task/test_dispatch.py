@@ -46,7 +46,7 @@ async def test_new_issued_uses_trusted_workline(task_flow, mode, line, owner):
     [
         ("AUTO", "SORT-0", 409, "STATE_CONFLICT"),
         ("MANUAL", "SORT-1", 409, "STATE_CONFLICT"),
-        ("MANUAL", "SORT-2", 503, None),
+        ("MANUAL", "SORT-2", 409, "STATE_CONFLICT"),
         ("MANUAL", "MISSING", 409, "REFERENCE_CONFLICT"),
     ],
 )
@@ -61,6 +61,36 @@ async def test_new_issued_refuses_untrusted_or_unsupported_host(
         for host in f.hosts.values():
             assert (await session.execute(select(host.tasks))).all() == []
     assert f.notices == []
+
+
+@pytest.mark.parametrize("missing", ["service", "component", "target"])
+async def test_new_issued_preserves_unavailable_actual_consumer(task_flow, monkeypatch, missing):
+    f = task_flow
+    if missing == "service":
+        monkeypatch.delitem(f.runtime.services, "first")
+    elif missing == "component":
+        monkeypatch.delitem(f.runtime.services["first"].components, "sorting_task")
+    else:
+        monkeypatch.setattr(catalog, "input_target", lambda *args: None)
+    response = await f.deliver(f.message("issued", issued()))
+    assert response.status_code == 503 and response.body["data"] == {}
+    assert all(host.calls == [] for host in f.hosts.values())
+    assert f.notices == []
+
+
+async def test_nonconsumer_refusal_replays_after_workline_correction(task_flow):
+    f = task_flow
+    raw = f.message("issued", issued(line="SORT-2"))
+    first = await f.deliver(raw)
+    assert first.status_code == 409 and first.body["data"] == {"reason_code": "STATE_CONFLICT"}
+    async with f.factory.begin() as session:
+        await session.execute(
+            update(WorkLine).where(WorkLine.line_code == "SORT-2").values(business_code="first")
+        )
+    assert (await f.deliver(f.message("issued", issued(line="SORT-2")))).status_code == 202
+    calls = list(f.hosts["first"].calls)
+    assert (await f.deliver(raw)).body == first.body
+    assert f.hosts["first"].calls == calls
 
 
 async def test_existing_task_ignores_workline_rebinding(task_flow):

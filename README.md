@@ -77,6 +77,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` | 默认 30 分钟 / 7 天 |
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
+| `SMT_MANUAL_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，如 `60000`；从原 prepare 接纳的本地保存时间起计算首版计划等待。首版计划未到且未配置时保持 PREPARING，不发送版本 0 完成确认；配置时长须与 WMS 约定 |
 | `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)
@@ -151,13 +152,13 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
 composition 可用静态 `COMPONENTS` 复用多个内部能力；catalog 编译显式消费者和每业务唯一输入目标，运行主体与推进仍只有业务。WMS 请求保存本地原业务关联，Transport 保存原 owner；有效结果提交后只唤醒原业务，Transport 还须实际应用结果版本前进。接入与兼容边界见[业务组合与原归属指南](docs/integrations/business-packages.md#31-业务内部复用多个代码能力)，阶段一、二验收记录见[开发测试](docs/testing/README.md)。
 最短路线见[业务开发快速开始](docs/integrations/business-development-quickstart.md)，不兼容边界与验证见[单一 API 验收记录](docs/integrations/business-development-single-api-acceptance.md)。
-正式 catalog 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段；动态 HTTP 调试字段不作为业务 SDK 形式。
+正式源码 catalog 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段，以及完整 `smt_manual` 手工宿主；后者组合同源 sorting_task/BIN_Roller。交付提交、最终软件门槛及未验边界见[手工统一验收](docs/testing/smt-manual.md#current-delivery)；登记源码不表示已部署。动态 HTTP 调试字段不作为业务 SDK 形式。
 
 WES → WMS 的 `decisions` / `facts` 出站端点已实现，当前已登记粗分验证 operation `inbound.coarse_sorting.validate_bind@v1`（decisions）：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，位于 `app/businesses/<业务>/request.py` 或入口包，须列入所属 composition.ENTRY_MODULES 并由 catalog 拥有）、信封冻结和公共响应分类，`WmsRequests.send(session, Payload(...), operation_id=...)` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；业务用 `WmsRequests.get_result` 按原消息身份读取可信终局响应，用 `TransportService.get_result` / `list_unclosed_predecessors` 读取已应用搬运结果及明确前序，具体字段和闭合规则见[出站结果契约](docs/integrations/outbound-results.md)。
 
 首次接入先看[业务开发快速开始](docs/integrations/business-development-quickstart.md)，其中包括启动应用前的独立合同检查命令；受理、推进及恢复见[事务配方](docs/integrations/business-transaction-recipes.md)。工作线业务按[业务包开发指南](docs/integrations/business-packages.md)在 `app/businesses/<业务>/` 声明角色、位置和初始入口，由显式清单及简单工厂复用 WMS、Transport、ECS 和 Outbox。启动先加载正式入口并交叉校验合同，再加载 local 入口和构造服务；受理使用原收据事务，需要结果消费的推进另开 REPEATABLE READ 事务，整组重读并原子提交消费依据与下一意图。
 
-管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单提供 coarse_sorting 扫码 → WMS 验证 → MOVE_FORWARD → 原 Result 消费，可配置 INPUT_ARM 与 CONVEYOR 工作线角色。扫码事实、原 WMS 决策和新 ECS Result 提交后按业务唤醒，统一 `business.advance_pending(business_code)` 任务调用声明的待办入口，Beat 每 5 秒调用同一任务兜底；推进使用自己的会话工厂，原 Sender 发送；成功后停在待箱格分配，WMS 业务 NG 停在待 NG 搬运。箱格分配、入箱、NG 搬运及人工分拣仍待实现；正式登记与内部验证不代表真实对端或现场验收。
+管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单提供 coarse_sorting 扫码 → WMS 验证 → MOVE_FORWARD → 原 Result 消费，可配置 INPUT_ARM 与 CONVEYOR 工作线角色。扫码事实、原 WMS 决策和新 ECS Result 提交后按业务唤醒，统一 `business.advance_pending(business_code)` 任务调用声明的待办入口，Beat 每 5 秒调用同一任务兜底；推进使用自己的会话工厂，原 Sender 发送；成功后停在待箱格分配，WMS 业务 NG 停在待 NG 搬运。粗分箱格分配、入箱及 NG 搬运仍待实现；手工业务按上述独立 `smt_manual` 宿主交付，正式登记与内部验证不代表真实对端或现场验收。
 
 ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前已正式登记粗分 SCAN_COMPLETED 扫码受理处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/businesses/<业务>/ecs_event.py` 或同名包，并显式列入 catalog 所属 composition.ENTRY_MODULES，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
 

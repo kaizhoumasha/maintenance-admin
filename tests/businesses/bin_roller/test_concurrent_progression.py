@@ -19,7 +19,11 @@ async def test_two_scan4_wakeups_register_one_first_drain(roller_lifecycle):
 
         async def overlap(session, attempt):
             if attempt == 0:
-                await session.execute(select(flow.store.tables["drain"]))
+                await session.execute(
+                    select(flow.store.tables["decision"]).where(
+                        flow.store.tables["decision"].c.kind == "DRAIN"
+                    )
+                )
                 await asyncio.wait_for(barrier.wait(), 10)
 
         await asyncio.wait_for(
@@ -44,7 +48,13 @@ async def test_old_empty_snapshot_restores_competing_consumed_decision(roller_li
     async def old_snapshot(session, attempt):
         attempts.append(attempt)
         if attempt == 0:
-            assert not (await session.scalars(select(flow.store.tables["drain"].c.id))).all()
+            assert not (
+                await session.scalars(
+                    select(flow.store.tables["decision"].c.id).where(
+                        flow.store.tables["decision"].c.kind == "DRAIN"
+                    )
+                )
+            ).all()
             await flow.roller.repository(1).return_queue(session)
             read_empty.set()
             await asyncio.wait_for(changed.wait(), 10)
@@ -81,7 +91,11 @@ async def test_different_work_kinds_share_original_face_transition(roller_lifecy
 
         async def overlap(session, attempt):
             if attempt == 0:
-                await session.execute(select(flow.store.tables["face_service"]))
+                await session.execute(
+                    select(flow.store.tables["face_work"]).where(
+                        flow.store.tables["face_work"].c.service_id.is_not(None)
+                    )
+                )
                 await asyncio.wait_for(barrier.wait(), 10)
 
         await asyncio.wait_for(
@@ -156,7 +170,13 @@ async def test_empty_snapshot_during_original_commit_cannot_authorize_duplicate(
     async def empty_snapshot(session, attempt):
         attempts.append(attempt)
         if attempt == 0:
-            assert not (await session.scalars(select(flow.store.tables["drain"].c.id))).all()
+            assert not (
+                await session.scalars(
+                    select(flow.store.tables["decision"].c.id).where(
+                        flow.store.tables["decision"].c.kind == "DRAIN"
+                    )
+                )
+            ).all()
             observed_empty.set()
             await asyncio.wait_for(original_committed.wait(), 10)
 

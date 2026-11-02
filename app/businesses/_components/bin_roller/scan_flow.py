@@ -33,9 +33,8 @@ def bin_identity(raw: str) -> str | None:
 
 
 async def get_scan_result(
-    roller: "BinRoller", session: AsyncSession, arrival: RowMapping
+    roller: "BinRoller", session: AsyncSession, code: str | None
 ) -> CommandView | None:
-    code = arrival["command_code"]
     if code is None:
         return None
     return await roller.capabilities.ecs.get_command(
@@ -43,7 +42,9 @@ async def get_scan_result(
     )
 
 
-def applied_result(view: CommandView | None, arrival: RowMapping) -> ResultEnvelope | None:
+def applied_result(
+    view: CommandView | None, code: str | None, device_code: str
+) -> ResultEnvelope | None:
     if (
         view is None
         or view.result is None
@@ -54,9 +55,9 @@ def applied_result(view: CommandView | None, arrival: RowMapping) -> ResultEnvel
         return None
     result = ResultEnvelope.model_validate(view.result)
     if (
-        view.command_code != arrival["command_code"]
-        or result.command_code != arrival["command_code"]
-        or result.device_code != arrival["device_code"]
+        view.command_code != code
+        or result.command_code != code
+        or result.device_code != device_code
         or view.status != ("SUCCEEDED" if result.result == "SUCCESS" else "FAILED")
     ):
         return None
@@ -81,8 +82,8 @@ async def accept_scan(
     previous = await repository.latest_scan(ctx.session, ctx.device_role)
     separator = None
     if previous is not None and previous["command_code"] is not None:
-        view = await get_scan_result(roller, ctx.session, previous)
-        if applied_result(view, previous) is not None:
+        view = await get_scan_result(roller, ctx.session, previous["command_code"])
+        if applied_result(view, previous["command_code"], previous["device_code"]) is not None:
             separator = previous["command_code"]
     arrival = await repository.accept_scan_fact(
         ctx.session,
@@ -98,7 +99,7 @@ async def accept_scan(
         previous_arrival=previous,
     )
     if arrival["point"] == "SCAN2":
-        if not arrival["delegated"]:
+        if arrival["delegation_state"] != "ACCEPTED":
             await roller.production.accept_scan2(
                 ctx,
                 Scan2Arrival(
@@ -110,7 +111,9 @@ async def accept_scan(
                     scanned_at=arrival["scanned_at"],
                 ),
             )
-            await repository.update_scan(ctx.session, arrival["id"], delegated=True, pending=False)
+            await repository.update_scan(
+                ctx.session, arrival["id"], delegation_state="ACCEPTED", pending=False
+            )
         return
     if arrival["first_digest"] == ctx.digest:
         await accept_point(roller, ctx.session, repository, arrival)
@@ -156,16 +159,16 @@ async def accept_point(
         if round_ is None and (point == "SCAN4" or valid):
             return
         if round_ is not None:
-            attempts = await repository.point_attempts(session, round_["id"], point)
+            attempts = await repository.point_attempts(session, round_["round_id"], point)
             if attempts:
                 previous = attempts[-1]
-                view = await get_scan_result(roller, session, previous)
-                result = applied_result(view, previous)
+                view = await get_scan_result(roller, session, previous["command_code"])
+                result = applied_result(view, previous["command_code"], previous["device_code"])
                 if (
                     result is None
                     or result.result != "FAILED"
                     or not valid
-                    or round_["status"] != "PENDING"
+                    or round_["return_state"] != "PENDING"
                 ):
                     await repository.update_scan(session, arrival["id"], pending=False)
                     return
@@ -174,43 +177,30 @@ async def accept_point(
 
 
 async def release_scan2(roller: "BinRoller", session: AsyncSession, *, arrival_id: str) -> str:
-    arrival = await roller.original_arrival(session, arrival_id)
+    arrival = await roller.original_record(session, "scan_arrival", arrival_id, for_update=True)
     if arrival["point"] != "SCAN2":
         raise ValueError("original SCAN2 arrival required")
     repository = roller.repository(arrival["work_line_id"])
-    releases = roller.tables["scan2_release"]
-    release = await repository._one(session, releases, releases.c.arrival_id == arrival_id)
-    if release is not None and release["command_code"] is not None:
-        return release["command_code"]
-    release = await repository._register(
-        session,
-        releases,
-        dict(
-            **repository.scope,
-            id=str(uuid7()),
-            arrival_id=arrival_id,
-            call_key=f"bin_roller:scan2_release:{arrival_id}",
-            command_code=None,
-            pending=True,
-            consumed_result_id=None,
-        ),
-        ["owner_domain", "work_line_id", "arrival_id"],
-        ["call_key"],
-    )
+    if arrival["release_command_code"] is not None:
+        return arrival["release_command_code"]
+    call_key = arrival["release_call_key"] or f"bin_roller:scan2_release:{arrival_id}"
     view = await roller.capabilities.ecs.create(
         session,
         owner=roller.context,
-        call_key=release["call_key"],
+        call_key=call_key,
         device_code=arrival["device_code"],
         timeout_ms=30000,
         command=MoveForward(),
     )
-    await session.execute(
-        releases.update()
-        .where(*repository.scoped(releases), releases.c.id == release["id"])
-        .values(command_code=view.command_code)
+    await repository.update_scan(
+        session,
+        arrival_id,
+        release_record_id=arrival["release_record_id"] or str(uuid7()),
+        release_call_key=call_key,
+        release_state="PENDING",
+        release_command_code=view.command_code,
+        command_code=view.command_code,
     )
-    await repository.update_scan(session, arrival_id, command_code=view.command_code)
     return view.command_code
 
 
@@ -218,39 +208,26 @@ async def consume_scan_result(
     roller: "BinRoller", session: AsyncSession, work: RollerWorkRef
 ) -> str:
     if work.kind == "SCAN2_RELEASE":
-        releases = roller.tables["scan2_release"]
-        release = (
-            (
-                await session.execute(
-                    select(releases).where(
-                        releases.c.owner_domain == roller.context.domain,
-                        releases.c.id == work.record_id,
-                    )
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if release is None:
-            raise ValueError("original SCAN2 release missing")
-        arrival = await roller.original_arrival(session, release["arrival_id"])
-        table, row = releases, release
+        arrival = await roller.original_record(session, "scan2_release", work.record_id)
     elif work.kind == "SCAN":
         arrival = await roller.original_arrival(session, work.record_id)
-        table, row = roller.tables["scan_arrival"], arrival
         if arrival["point"] == "SCAN2":
-            return "DELEGATED" if arrival["delegated"] else "WAITING"
+            return "DELEGATED" if arrival["delegation_state"] == "ACCEPTED" else "WAITING"
     else:
         raise ValueError("unsupported scan work kind")
-    result = applied_result(await get_scan_result(roller, session, arrival), arrival)
+    code = (
+        arrival["release_command_code"] if work.kind == "SCAN2_RELEASE" else arrival["command_code"]
+    )
+    result = applied_result(
+        await get_scan_result(roller, session, code), code, arrival["device_code"]
+    )
     if result is None:
         return "WAITING"
-    await session.execute(
-        table.update()
-        .where(table.c.id == row["id"])
-        .values(
-            consumed_result_id=canonical_digest(result.model_dump()),
-            pending=work.kind == "SCAN" and arrival["point"] == "SCAN4",
-        )
+    digest = canonical_digest(result.model_dump())
+    values = (
+        dict(release_consumed_result_id=digest, release_state="CONSUMED")
+        if work.kind == "SCAN2_RELEASE"
+        else dict(consumed_result_id=digest, pending=arrival["point"] == "SCAN4")
     )
+    await roller.repository(arrival["work_line_id"]).update_scan(session, arrival["id"], **values)
     return result.result

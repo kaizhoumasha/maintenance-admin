@@ -53,7 +53,7 @@ async def test_recorded_new_scan3_supersedes_old_unassociated_scan4_queue_shadow
     raw = BAD["scan3_reentry"]["raw"]
     await flow.scan("SCAN4", raw, timestamp=1)
     orphan = dict(await arrival(flow, "SCAN4", raw))
-    assert orphan["return_round_id"] is None and orphan["command_code"] is None
+    assert orphan["round_id"] is None and orphan["command_code"] is None
     await flow.scan("SCAN3", raw, timestamp=10)
     other4 = await visit(flow, OTHER, 20)
     await flow.scan("SCAN4", raw, timestamp=30)
@@ -64,8 +64,8 @@ async def test_recorded_new_scan3_supersedes_old_unassociated_scan4_queue_shadow
     await rebuild(flow)
     await flow.scan("SCAN4", raw, timestamp=1)
     assert [r["id"] for r in await candidates(flow)] == [
-        other4["return_round_id"],
-        own4["return_round_id"],
+        other4["round_id"],
+        own4["round_id"],
     ]
     async with flow.factory() as session:
         assert dict(await flow.roller.original_arrival(session, orphan["id"])) == orphan
@@ -128,10 +128,10 @@ async def test_recorded_scan3_reentry_rolls_back_and_does_not_separate_scan4(rol
     assert await candidates(flow) == ()
     await flow.scan("SCAN4", raw, timestamp=33)
     own4 = await arrival(flow, "SCAN4", raw)
-    assert own4["return_round_id"] == new3["return_round_id"]
+    assert own4["round_id"] == new3["round_id"]
     assert own4["command_code"] not in {None, old4["command_code"]}
     await flow.result(own4["command_code"], "SCAN4")
-    assert [r["id"] for r in await candidates(flow)] == [new3["return_round_id"]]
+    assert [r["id"] for r in await candidates(flow)] == [new3["round_id"]]
 
 
 @pytest.mark.parametrize("foreign_history", [False, True])
@@ -182,8 +182,8 @@ async def test_recorded_reentry_preserves_old_facts_and_requires_current_fifo_su
     new4 = await visit(flow, raw, 30)
     new3 = await arrival(flow, "SCAN3", raw)
     assert new3["command_code"] is not None
-    assert new3["return_round_id"] != old_round["id"]
-    assert new4["return_round_id"] == new3["return_round_id"]
+    assert new3["round_id"] != old_round["id"]
+    assert new4["round_id"] == new3["round_id"]
     assert new4["command_code"] not in {None, old4["command_code"]}
     assert await candidates(flow) == ()  # Unready B remains the physical head.
     await rebuild(flow)
@@ -258,7 +258,7 @@ async def test_recorded_reentry_retains_native_obligation_without_moving_new_rou
         assert (await rows(flow, "return_batch"))[0]["status"] == "FAILED"
     other4 = await visit(flow, OTHER, 20)
     new4 = await visit(flow, raw, 30)
-    assert new4["return_round_id"] != old_round["id"]
+    assert new4["round_id"] != old_round["id"]
     assert new4["command_code"] is not None
     await rebuild(flow)
     if old_transport == "WAITING_WMS":
@@ -321,8 +321,8 @@ async def test_recorded_reentry_retains_native_obligation_without_moving_new_rou
         await flow.advance("FEED", demand)
         new_batch = (await rows(flow, "return_batch"))[-1]
         assert [m["round_id"] for m in new_batch["members"]] == [
-            other4["return_round_id"],
-            new4["return_round_id"],
+            other4["round_id"],
+            new4["round_id"],
         ]
         await flow.complete_return()
         assert await candidates(flow) == ()
@@ -355,15 +355,15 @@ async def test_recorded_old_allocation_releases_unchanged_members_in_fifo(
     assert dict((await rows(flow, "return_round"))[0]) == old_round
     if opportunity_kind == "SEGMENT":
         assert (await rows(flow, "return_opportunity"))[0]["end_reason"] == "SUPERSEDED_ROUNDS"
-        assert [r["id"] for r in await candidates(flow)] == [other4["return_round_id"]]
+        assert [r["id"] for r in await candidates(flow)] == [other4["round_id"]]
         assert len(await rows(flow, "feed_segment")) == 2
         await flow.result(new4["command_code"], "SCAN4")
         await flow.feed_success((await rows(flow, "feed_segment"))[-1])
         await flow.advance("FEED", (await rows(flow, "supply_demand"))[0]["id"])
         current_batch = (await rows(flow, "return_batch"))[-1]
         assert [m["round_id"] for m in current_batch["members"]] == [
-            other4["return_round_id"],
-            new4["return_round_id"],
+            other4["round_id"],
+            new4["round_id"],
         ]
         await flow.complete_return(count=2)
         await flow.finish_departure(entry["cycle_id"])
@@ -372,13 +372,13 @@ async def test_recorded_old_allocation_releases_unchanged_members_in_fifo(
     assert len(batches) == 2
     continuation = batches[-1]
     assert continuation["source_ref"] == batch["id"]
-    assert [m["round_id"] for m in continuation["members"]] == [other4["return_round_id"]]
+    assert [m["round_id"] for m in continuation["members"]] == [other4["round_id"]]
     assert not (await rows(flow, "return_opportunity"))[0]["ended"]
     assert not await rows(flow, "departure")
     await flow.result(new4["command_code"], "SCAN4")
     await flow.complete_return(count=1)
     next_batch = (await rows(flow, "return_batch"))[-1]
-    assert [m["round_id"] for m in next_batch["members"]] == [new4["return_round_id"]]
+    assert [m["round_id"] for m in next_batch["members"]] == [new4["round_id"]]
     await flow.complete_return(count=1)
     await flow.finish_departure(entry["cycle_id"])
     assert dict((await rows(flow, "return_round"))[0]) == old_round
@@ -397,18 +397,18 @@ async def test_recorded_allocation_tail_preserves_superseded_round(roller_lifecy
     batch = dict((await rows(flow, "return_batch"))[0])
     async with flow.factory() as session:
         old_round = dict(
-            await flow.roller.original_record(session, "return_round", old4["return_round_id"])
+            await flow.roller.original_record(session, "return_round", old4["round_id"])
         )
         frozen_request = await session.scalar(
             select(ReliableMessage.request_raw).where(ReliableMessage.id == batch["message_id"])
         )
     assert [m["round_id"] for m in batch["members"]] == [
-        other4["return_round_id"],
-        old4["return_round_id"],
+        other4["round_id"],
+        old4["round_id"],
     ]
     # Each original point's applied result separates the actual new A visit.
     new4 = await visit(flow, raw, 30)
-    assert new4["return_round_id"] != old4["return_round_id"]
+    assert new4["round_id"] != old4["round_id"]
     async with flow.factory.begin() as session:
         manifest = await flow.decide(
             session,
@@ -422,7 +422,7 @@ async def test_recorded_allocation_tail_preserves_superseded_round(roller_lifecy
     await flow.advance("RETURN_BATCH", batch["id"])
     async with flow.factory() as session:
         assert (
-            dict(await flow.roller.original_record(session, "return_round", old_round["id"]))
+            dict(await flow.roller.original_record(session, "return_round", old_round["round_id"]))
             == old_round
         )
         current = await flow.roller.original_record(session, "return_batch", batch["id"])
@@ -439,25 +439,25 @@ async def test_recorded_allocation_tail_preserves_superseded_round(roller_lifecy
         )
     if decision == "NO_BATCH":
         assert applied["transport_task_id"] is None
-        assert [r["id"] for r in await candidates(flow)] == [other4["return_round_id"]]
+        assert [r["id"] for r in await candidates(flow)] == [other4["round_id"]]
     else:
         assert applied["transport_task_id"] is not None
         assert await candidates(flow) == ()
         await flow.success(batch["id"])
         await flow.advance("RETURN_BATCH", batch["id"])
         async with flow.factory() as session:
+            assert (await flow.roller.original_record(session, "return_round", other4["round_id"]))[
+                "return_state"
+            ] == "COMPLETED"
             assert (
-                await flow.roller.original_record(
-                    session, "return_round", other4["return_round_id"]
+                dict(
+                    await flow.roller.original_record(
+                        session, "return_round", old_round["round_id"]
+                    )
                 )
-            )["status"] == "COMPLETED"
-            assert (
-                dict(await flow.roller.original_record(session, "return_round", old_round["id"]))
                 == old_round
             )
     await flow.result(new4["command_code"], "SCAN4")
     assert [r["id"] for r in await candidates(flow)] == (
-        [other4["return_round_id"], new4["return_round_id"]]
-        if decision == "NO_BATCH"
-        else [new4["return_round_id"]]
+        [other4["round_id"], new4["round_id"]] if decision == "NO_BATCH" else [new4["round_id"]]
     )

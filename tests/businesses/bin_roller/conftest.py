@@ -6,6 +6,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.database import create_database_engine
+from tests.helpers import bin_roller_query
 
 
 @pytest.fixture
@@ -115,7 +116,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
                     (),
                 ),
             )
-            table = flow.store.tables["supply_demand"]
+            table = flow.store.tables["face_work"]
             return (
                 (
                     await session.execute(
@@ -407,7 +408,7 @@ async def roller_feed(roller_transport, monkeypatch):
     from app.businesses._components.bin_roller.feed_flow import advance_feed
 
     async def rows(session, key):
-        return (await session.execute(select(store.tables[key]))).mappings().all()
+        return (await session.execute(bin_roller_query(store.tables, key))).mappings().all()
 
     async def demand(session, *, task="T1", revision=1, change="M1", face="A"):
         await roller.apply_supply_change(
@@ -446,23 +447,12 @@ async def roller_feed(roller_transport, monkeypatch):
                 caller_workline_id="LINE-ORIGINAL",
             )
         service_id = str(uuid7())
-        await session.execute(
-            store.tables["face_service"]
-            .insert()
-            .values(
-                id=service_id,
-                owner_domain="first",
-                work_line_id=1,
-                cycle_id=cycle_id,
-                source_ref=original["id"],
-                rack_face=original["rack_face"],
-                task_id=original["task_id"],
-                plan_revision=original["plan_revision"],
-                status="READY",
-            )
-        )
         await repo.bind_supply(
             session, demand_id=original["id"], cycle_id=cycle_id, service_id=service_id
+        )
+        faces = store.tables["face_work"]
+        await session.execute(
+            faces.update().where(faces.c.service_id == service_id).values(service_state="READY")
         )
         return service_id, cycle_id
 
@@ -618,6 +608,8 @@ async def roller_scans(roller_store, monkeypatch):
     from app.integrations.ecs_command.result import receive_ecs_result
     from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
+    from app.integrations.wms_callback import registry as callbacks
+    from app.integrations.wms_request import operation as requests
     from app.models import (
         CallbackReceipt,
         EcsCommand,
@@ -631,6 +623,16 @@ async def roller_scans(roller_store, monkeypatch):
     from tests.helpers import business_composition
 
     monkeypatch.setattr(registry, "_registry", {})
+    for registry_ in (callbacks, requests):
+        monkeypatch.setattr(
+            registry_,
+            "_registry",
+            {
+                name: item
+                for name, item in registry_._registry.items()
+                if not item.registration_source.module.startswith("app.businesses.")
+            },
+        )
     module_name = "app.businesses._components.bin_roller.ecs_event.scan_completed"
     component = ComponentDefinition(
         key="bin_roller",
@@ -789,8 +791,7 @@ async def roller_scans(roller_store, monkeypatch):
         )
 
     async def rows(session, key):
-        table = store.tables[key]
-        return (await session.execute(select(table).order_by(table.c.id))).mappings().all()
+        return (await session.execute(bin_roller_query(store.tables, key))).mappings().all()
 
     async def messages(session):
         return (
@@ -854,7 +855,15 @@ async def roller_store(request):
         url = request.getfixturevalue("pg_url")
     engine = create_database_engine(url)
     metadata = MetaData()
-    tables = {key: table.to_metadata(metadata) for key, table in TABLES.items()}
+    tables = {
+        key: table.to_metadata(metadata, name="test_bin_roller_" + key)
+        for key, table in TABLES.items()
+    }
+    for table in tables.values():
+        for number, constraint in enumerate(table.constraints):
+            constraint.name = f"{table.name}_constraint_{number}"
+        for index in table.indexes:
+            index.name = "test_bin_roller_" + index.name
     async with engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
     try:
@@ -1025,7 +1034,7 @@ async def roller_return(roller_scans, monkeypatch):
     import sys
     from dataclasses import replace
 
-    from sqlalchemy import delete, select
+    from sqlalchemy import delete, func, select
 
     from app.businesses import catalog
     from app.businesses.runtime import Capabilities
@@ -1089,25 +1098,36 @@ async def roller_return(roller_scans, monkeypatch):
 
     async def selected(session, *, kind="FACE_END", face="A", line=1):
         repo = flow.roller.repository(line)
+        demand_id, service_id, opportunity_id = str(uuid7()), str(uuid7()), str(uuid7())
+        faces = store.tables["face_work"]
+        revision = 1 + (
+            await session.scalar(select(func.max(faces.c.plan_revision)).where(*repo.scoped(faces)))
+            or 0
+        )
         cycle = await repo.create_cycle(
             session,
             cycle_id=str(uuid7()),
             rack_id="R1",
             purpose="ORDINARY",
             task_id="T1",
-            source_ref=str(uuid7()),
+            source_ref=demand_id,
         )
-        service_id, opportunity_id = str(uuid7()), str(uuid7())
         await session.execute(
-            store.tables["face_service"]
-            .insert()
-            .values(
-                id=service_id,
+            faces.insert().values(
+                id=demand_id,
+                demand_id=demand_id,
+                service_id=service_id,
+                purpose="SUPPLY",
+                task_id="T1",
+                change_id=opportunity_id,
+                plan_revision=revision,
+                rack_id="R1",
                 **repo.scope,
                 cycle_id=cycle["id"],
-                source_ref=opportunity_id,
+                source_ref=demand_id,
                 rack_face=face,
-                status="READY",
+                demand_state="ACTIVE",
+                service_state="READY",
             )
         )
         await session.execute(

@@ -24,57 +24,37 @@ async def start_feed(
     target: HandoffPosition,
 ) -> str | None:
     """The rack lifecycle selects the original ready face in its caller transaction."""
-    demand = await roller.original_record(session, "supply_demand", demand_id)
+    demand = await roller.original_record(session, "supply_demand", demand_id, for_update=True)
     repo = roller.repository(demand["work_line_id"])
-    feeds, services = repo.tables["feed"], repo.tables["face_service"]
-    feed = (
-        await repo._one(session, feeds, feeds.c.service_id == demand["service_id"])
-        if demand["service_id"]
-        else None
-    )
-    if feed is not None:
-        return feed["id"]
-    if demand["withdrawn"] and not await repo.supply_started(session, demand):
+    if demand["feed_id"] is not None:
+        return demand["feed_id"]
+    if demand["demand_state"] == "WITHDRAWN" and not await repo.supply_started(session, demand):
         return None
-    if not demand["service_id"]:
+    if demand["service_state"] != "READY":
         return None
-    await repo.bind_supply(
-        session, demand_id=demand_id, cycle_id=demand["cycle_id"], service_id=demand["service_id"]
-    )
-    service = await repo._one(session, services, services.c.id == demand["service_id"])
-    if service["status"] != "READY":
-        return None
-    feed = await repo._register(
+    feeds = repo.tables["face_work"]
+    feed_id, operation_id = str(uuid7()), str(uuid7())
+    reference = await roller.capabilities.wms.send(
         session,
-        feeds,
-        dict(
-            id=str(uuid7()),
-            **repo.scope,
-            service_id=service["id"],
-            operation_id=str(uuid7()),
+        InboundBatch(
+            task_id=demand["task_id"], rack_id=demand["rack_id"], rack_face=demand["rack_face"]
+        ),
+        operation_id=operation_id,
+    )
+    await session.execute(
+        feeds.update()
+        .where(*repo.scoped(feeds), feeds.c.demand_id == demand_id)
+        .values(
+            feed_id=feed_id,
+            feed_state="REQUESTED",
+            operation_id=operation_id,
+            message_id=reference.message_id,
             caller_workline_id=caller.workline_id,
             station_id=caller.station_id,
             target={"kind": "HANDOFF_POSITION", "location_code": target.code},
-        ),
-        ("service_id",),
-        (),
+        )
     )
-    if feed["message_id"] is None:
-        reference = await roller.capabilities.wms.send(
-            session,
-            InboundBatch(
-                task_id=demand["task_id"],
-                rack_id=demand["rack_id"],
-                rack_face=demand["rack_face"],
-            ),
-            operation_id=feed["operation_id"],
-        )
-        await session.execute(
-            feeds.update()
-            .where(*repo.scoped(feeds), feeds.c.id == feed["id"])
-            .values(message_id=reference.message_id)
-        )
-    return feed["id"]
+    return feed_id
 
 
 async def opportunity(repo, session, *, feed, source_ref: str, kind: str) -> str:
@@ -100,25 +80,20 @@ async def record_feed_success(
 ) -> str:
     feed = await roller.original_record(session, "feed", feed_id)
     repo = roller.repository(feed["work_line_id"])
-    segments, services = repo.tables["feed_segment"], repo.tables["face_service"]
+    segments = repo.tables["feed_segment"]
     segment = await repo._one(
         session, segments, segments.c.id == segment_id, segments.c.feed_id == feed_id
     )
-    service = await repo._one(session, services, services.c.id == feed["service_id"])
-    if (
-        segment is None
-        or service is None
-        or (
-            result.availability != "FOUND"
-            or result.owner_domain != repo.owner_domain
-            or result.transport_task_id != segment["transport_task_id"]
-            or result.client_request_id != segment["client_request_id"]
-            or result.operation_id != segment["operation_id"]
-            or result.workline_id != feed["caller_workline_id"]
-            or result.station_id != feed["station_id"]
-            or result.cycle_id != service["cycle_id"]
-            or result.kind != "BIN_MOVE"
-        )
+    if segment is None or (
+        result.availability != "FOUND"
+        or result.owner_domain != repo.owner_domain
+        or result.transport_task_id != segment["transport_task_id"]
+        or result.client_request_id != segment["client_request_id"]
+        or result.operation_id != segment["operation_id"]
+        or result.workline_id != feed["caller_workline_id"]
+        or result.station_id != feed["station_id"]
+        or result.cycle_id != feed["cycle_id"]
+        or result.kind != "BIN_MOVE"
     ):
         return ""
     outcome = result.outcome
@@ -171,15 +146,32 @@ async def record_feed_success(
         )
     elif result.outcome_revision < segment["consumed_revision"]:
         return ""
+    if not successful or feed["feed_state"] == "REVIEW":
+        faces = repo.tables["face_work"]
+        later = select(segments.c.id).where(
+            *repo.scoped(segments),
+            segments.c.feed_id == feed_id,
+            segments.c.segment_index > segment["segment_index"],
+        )
+        await session.execute(
+            faces.update()
+            .where(
+                *repo.scoped(faces),
+                faces.c.feed_id == feed_id,
+                faces.c.feed_state != "COMPLETED",
+                ~later.exists(),
+            )
+            .values(feed_state="ALLOCATED" if successful else "REVIEW")
+        )
     if not successful:
         return ""
     last = segment["segment_index"] * 4 >= len(feed["manifest"]["bins"])
     if last:
-        feeds = repo.tables["feed"]
+        feeds = repo.tables["face_work"]
         await session.execute(
             feeds.update()
-            .where(*repo.scoped(feeds), feeds.c.id == feed_id)
-            .values(feed_complete=True, pending=False)
+            .where(*repo.scoped(feeds), feeds.c.feed_id == feed_id)
+            .values(feed_state="COMPLETED")
         )
     return await opportunity(
         repo,
@@ -193,14 +185,10 @@ async def record_feed_success(
 async def advance_feed(roller, session: AsyncSession, demand_id: str) -> str:
     demand = await roller.original_record(session, "supply_demand", demand_id)
     repo = roller.repository(demand["work_line_id"])
-    feeds, segments = repo.tables["feed"], repo.tables["feed_segment"]
-    feed = (
-        await repo._one(session, feeds, feeds.c.service_id == demand["service_id"])
-        if demand["service_id"]
-        else None
-    )
-    if feed is None:
-        if demand["withdrawn"] and not await repo.supply_started(session, demand):
+    feeds, segments = repo.tables["face_work"], repo.tables["feed_segment"]
+    feed = demand
+    if feed["feed_id"] is None:
+        if demand["demand_state"] == "WITHDRAWN" and not await repo.supply_started(session, demand):
             return "WITHDRAWN"
         return "WAITING_FOR_SELECTED_FACE"
     if feed["manifest"] is None:
@@ -232,24 +220,24 @@ async def advance_feed(roller, session: AsyncSession, demand_id: str) -> str:
             return "INVALID_ALLOCATION"
         await session.execute(
             feeds.update()
-            .where(*repo.scoped(feeds), feeds.c.id == feed["id"])
-            .values(manifest=manifest)
+            .where(*repo.scoped(feeds), feeds.c.feed_id == feed["feed_id"])
+            .values(manifest=manifest, feed_state="ALLOCATED")
         )
-        feed = await repo._one(session, feeds, feeds.c.id == feed["id"])
+        feed = await repo._one(session, feeds, feeds.c.feed_id == feed["feed_id"])
     if feed["manifest"]["result"] == "RACK_FACE_DONE":
         await session.execute(
             feeds.update()
-            .where(*repo.scoped(feeds), feeds.c.id == feed["id"])
-            .values(feed_complete=True, pending=False)
+            .where(*repo.scoped(feeds), feeds.c.feed_id == feed["feed_id"])
+            .values(feed_state="COMPLETED")
         )
         return await opportunity(
-            repo, session, feed=feed, source_ref="FEED:" + feed["id"], kind="FACE_END"
+            repo, session, feed=feed, source_ref="FEED:" + feed["feed_id"], kind="FACE_END"
         )
     existing = (
         (
             await session.execute(
                 select(segments)
-                .where(*repo.scoped(segments), segments.c.feed_id == feed["id"])
+                .where(*repo.scoped(segments), segments.c.feed_id == feed["feed_id"])
                 .order_by(segments.c.segment_index)
             )
         )
@@ -265,7 +253,7 @@ async def advance_feed(roller, session: AsyncSession, demand_id: str) -> str:
             caller=TransportCaller(feed["caller_workline_id"], feed["station_id"]),
         )
         original_opportunity = await record_feed_success(
-            roller, session, feed_id=feed["id"], segment_id=current["id"], result=result
+            roller, session, feed_id=feed["feed_id"], segment_id=current["id"], result=result
         )
         if not original_opportunity:
             return "WAITING_FOR_FEED_RESULT"
@@ -280,15 +268,15 @@ async def prepare_feed(roller, session: AsyncSession, demand_id: str) -> str:
     """Register only the ready original segment; result consumption stays in advance_feed."""
     demand = await roller.original_record(session, "supply_demand", demand_id)
     repo = roller.repository(demand["work_line_id"])
-    feeds, segments = repo.tables["feed"], repo.tables["feed_segment"]
-    feed = await repo._one(session, feeds, feeds.c.service_id == demand["service_id"])
-    if feed is None or feed["manifest"] is None or feed["feed_complete"]:
+    segments = repo.tables["feed_segment"]
+    feed = demand
+    if feed["feed_id"] is None or feed["manifest"] is None or feed["feed_state"] == "COMPLETED":
         return "WAITING_FOR_FEED"
     current = (
         (
             await session.execute(
                 select(segments)
-                .where(*repo.scoped(segments), segments.c.feed_id == feed["id"])
+                .where(*repo.scoped(segments), segments.c.feed_id == feed["feed_id"])
                 .order_by(segments.c.segment_index.desc())
                 .limit(1)
             )
@@ -317,7 +305,7 @@ async def prepare_feed(roller, session: AsyncSession, demand_id: str) -> str:
         dict(
             id=str(uuid7()),
             **repo.scope,
-            feed_id=feed["id"],
+            feed_id=feed["feed_id"],
             segment_index=index,
             members=members,
             client_request_id=str(uuid7()),
@@ -326,13 +314,11 @@ async def prepare_feed(roller, session: AsyncSession, demand_id: str) -> str:
         ("members",),
     )
     if segment["transport_task_id"] is None:
-        services = repo.tables["face_service"]
-        service = await repo._one(session, services, services.c.id == feed["service_id"])
         handle = await roller.capabilities.transport.move_bins(
             session,
             client_request_id=segment["client_request_id"],
             caller=TransportCaller(feed["caller_workline_id"], feed["station_id"]),
-            cycle_id=service["cycle_id"],
+            cycle_id=feed["cycle_id"],
             moves=[
                 BinMove(
                     m["bin_code"],

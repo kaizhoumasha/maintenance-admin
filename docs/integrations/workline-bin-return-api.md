@@ -1,6 +1,8 @@
 # 公共料箱回流 WES / WMS / ECS 对接文档
 
-状态：**本系统公共能力对接草案；B1～B5 组件本地实现与分项验证、B6 文档边界核对已完成；B7 共享声明及隔离测试装配已完成，正式生产注册/接入及整体验收未完成，未部署。** 本文描述 BIN_Roller 内部的 `SCAN3 → SCAN4 → FIFO → Return_Batch` 回流段，统一描述正常/NG 分流、回架搬运、尾箱清退及恢复边界，供 smt_manual 的人工入/出库及 smt_auto 的自动上架/拣料流程复用。不因此新增业务包、数据库表、API 入口、发送器或调度器。
+2026-11-02 本地增量：BIN_Roller 持久化已收敛为 10 张表，SMT 宿主 7 张，`sorting_task` 仍只有合同/分派。原 SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN、公开 ports、operation 及 owner 保持。可空的每线 `five_rack_request_limit` 只限制新原 CTU01 登记，CTU03 有效接纳只释放原周期一次；未知/失败不伪造释放，最终物理结果仍归原 Transport。开始前撤销的 WITHDRAWN 服务保留原身份，可由有效兄弟面继续原周期，兄弟开始和周期 RELEASED 后该撤销服务仍是 WITHDRAWN、公开进度 false/false，不列 pending FEED。详见[实现及迁移兼容边界](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)和[12 项永久配置专项](../testing/smt-manual-kt16-kt18.md#current-factory-profile)；全仓/整体复核待控制器，未提交、未部署。
+
+状态：**B1～B5组件实现、B6文档边界、B7共享声明及隔离测试装配已交付；后续手工 M5/M6 已本地交付首个完整正式宿主、组件状态迁移及软件组合/真实 worker 验证，见[SMT 手工验收](../testing/smt-manual.md)。手工增量未提交、未部署，供应商/现场验收未执行。** 本文描述 BIN_Roller 内部 SCAN3→SCAN4→FIFO→Return_Batch 回流段，供手工和自动宿主复用；不因此新增业务码或调度器。
 
 [人工线](manual-picking-api.md)归 smt_manual；[自动拣料](smt-auto-api.md#outbound-flow)与[自动上架](smt-auto-api.md#inbound-flow)归同一 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md) 的 outbound/inbound 工作段。每个宿主只装配一份 BIN_Roller，两方向不各建公共状态或 owner，生产准入及完成条件仍沿各自合同。自动上架的任务完成条件及与本文 C01～C07、R01 的[边界约定](smt-auto-api.md#roller-seams)在该正式对接文档维护。operation 仍保留参考合同名 `outbound.bin.return_batch@v1`、`workline.return_buffer.drain_rack_decide@v1`，不因名称含 outbound 将回流限制为出库；是否改名另行确认，不改变冻结请求。
 
@@ -198,9 +200,9 @@ BIN_Roller 四点及供箱/回流合同只定义一次；本回流段的 SCAN3/4
 
 **Transport 结果也必须即时唤醒原业务，5 秒 Beat 只做兜底。** ECS 新事件提交后通知本次受信解析的业务；ECS/WMS/Transport 结果提交后通知原持久业务归属。Transport 新结果实际应用，或位置事实使 pending 结果实际应用，均在提交后通知本业务 scan_pending，再由其推进内部回流待办。共享 WMS operation 不能只按源码位置猜归属，需保留每个原请求的业务关联；通知不广播各业务或各组件。
 
-复用现有 receiver、BindingResolver、BusinessRuntime、公开读口、Outbox、after_commit、业务任务壳及 scan_pending；组件不新增 Sender、事件总线或调度器。阶段一、二已验收组合/分派及原归属通知接缝；BIN_Roller B1～B5 已完成组件本地实现与分项验证，B7 正式生产接入未完成，当前设计见[实现设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
+复用现有 receiver、BindingResolver、BusinessRuntime、公开读口、Outbox、after_commit、业务任务壳及 scan_pending；组件不新增 Sender、事件总线或调度器。阶段一、二已验收组合/分派及原归属通知接缝；BIN_Roller B1～B5 已完成组件本地实现与分项验证，B7 首个手工正式消费者已本地接入（未部署），当前设计见[实现设计稿](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)。
 
-已登记 [TODO：业务子包组合接入与即时唤醒](../../TODOS.md#业务子包组合接入与即时唤醒)。**业务边界与代码复用归属已确认，B1～B5 组件实现已分项验证，B7 正式生产装配与整体验收未完成**，不据此提供生产可调用的新 API。
+已登记 [TODO：业务子包组合接入与即时唤醒](../../TODOS.md#业务子包组合接入与即时唤醒)。**业务边界与代码复用归属已确认，B1～B5 组件实现已分项验证，B7 手工正式装配与本地软件验收已完成，对端及现场整体验收仍未完成**，不据此提供生产可调用的新 API。
 
 <a id="return-rescan"></a>
 ### 1.9 C07：失败重扫、人工重投与轮次隔离（已确认）
@@ -417,6 +419,8 @@ NO_BATCH 按 C03 结束当前面服务，剩余候选交给后续架面；原响
 本批供架尚未全部使用，但回程通道已真实排空时，**已到位架无其他直接义务即可正常申请 departure_decide，不为空回架逐一换面**；离场仍须取得原 READY 许可并按原 Transport 结果确认，不以本地服务结束代替实际离场。
 
 仅 READY 可用架候选且尚未创建原叫架/CTU01 的项，真实提前排空后记录未使用，不为清空列表补发 CTU01/CTU03；不声称撤销对端动作或释放容量。已创建原 CTU01 的未到位架沿原叫架及搬运动作收口，不因通道排空自动撤销、改写原请求或伪造完成；后续实际到位且仍无待回箱、无其他直接义务时，按相同规则正常申请离场。不发送空候选 return_batch，不伪造 NO_BATCH，也不以 READY 候选暂为 0 代替真实排空；SCAN4 未决箱、已分配/在途回架及位置未知等仍按 C05 保留原责任。
+
+已持久选定、仍在等待额度的候选同样适用 R01。WES 检查本线完整 FIFO 和未收口的原回架批次，包括同箱再次经过 SCAN3 后仍未知的原搬运。真实排空且该架尚无冻结义务时，原决定保存该架的 `unused_racks` 记录，原 cycle/service 记为 WITHDRAWN，并保留原 ID 和资源。已有 CTU01 的架继续沿原身份等待结果。
 
 <a id="return-transport"></a>
 ### 2.3 复用 Transport 与货架离场
