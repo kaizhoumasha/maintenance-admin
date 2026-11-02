@@ -64,7 +64,7 @@ async def test_round_association_does_not_reject_scan_fact(roller_store):
     await accept(store, "b", "B", point="SCAN3")
     later = await accept(store, "a2", "A", point="SCAN3")
     assert later["id"] != first["id"]
-    assert later["return_round_id"] is None
+    assert later["round_id"] is None
 
 
 async def rack(store, *, cycle="cycle", action="action", kind="CTU01", source="source"):
@@ -130,6 +130,7 @@ async def test_failed_known_position_uses_existing_outcome(roller_store):
             session,
             action_id="action",
             result=result(outcome=outcome(status="FAILED", location="OTHER"), outcome_revision=1),
+            repository=store.repo,
         )
         assert applied.action_changed and applied.projection_update == "UPDATED"
     async with store.factory() as session:

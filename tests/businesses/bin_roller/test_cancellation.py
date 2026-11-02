@@ -24,10 +24,12 @@ async def test_cancelled_in_progress_rack_requests_wms_on_arrival(roller_feed, b
     async with env.store.factory.begin() as session:
         original = await env.demand(session)
         service_id, _ = await env.ready(session, original)
-        services = env.store.tables["face_service"]
+        services = env.store.tables["face_work"]
         if before_request:
             await session.execute(
-                services.update().where(services.c.id == service_id).values(status="PENDING")
+                services.update()
+                .where(services.c.service_id == service_id)
+                .values(service_state="PENDING")
             )
             assert await env.start(session, original) is None
         if not before_request:
@@ -37,7 +39,9 @@ async def test_cancelled_in_progress_rack_requests_wms_on_arrival(roller_feed, b
         )
         if before_request:
             await session.execute(
-                services.update().where(services.c.id == service_id).values(status="READY")
+                services.update()
+                .where(services.c.service_id == service_id)
+                .values(service_state="READY")
             )
         recovered = await env.start(session, original)
         if not before_request:

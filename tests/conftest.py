@@ -428,3 +428,11 @@ def shared_wms_contract(monkeypatch):
     request_operation("shared.ask@v1", Endpoint.DECISIONS)(Ask)
     catalog.validate_business_contracts()
     return SimpleNamespace(model=Ask, operation="shared.ask@v1", entries=(first, second, unrelated))
+
+
+@pytest.fixture
+async def formal_manual(pg_sessions, monkeypatch):
+    from tests.helpers import formal_manual_fixture
+
+    async with formal_manual_fixture(pg_sessions, monkeypatch) as state:
+        yield state

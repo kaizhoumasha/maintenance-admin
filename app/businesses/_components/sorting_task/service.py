@@ -6,7 +6,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.businesses import catalog
-from app.businesses.runtime import bind_callback_business, require_component, require_runtime
 from app.integrations.wms_callback import (
     CallbackContext,
     CallbackResponse,
@@ -56,6 +55,8 @@ class SortingTask:
 
 
 async def _resolve(ctx: CallbackContext, payload, *, validate_branch: bool = True) -> SortingTask:
+    from app.businesses.runtime import bind_callback_business, require_component, require_runtime
+
     runtime = require_runtime(ctx)
     key = ("wms_callback", ctx.operation, None)
     consumers = catalog.contract_consumers(key)
@@ -109,7 +110,7 @@ async def _resolve(ctx: CallbackContext, payload, *, validate_branch: bool = Tru
             raise Conflict({"reason_code": "REFERENCE_CONFLICT"})
         business = line.business_code
         if business not in consumers:
-            raise Unavailable()
+            raise Conflict({"reason_code": "STATE_CONFLICT"})
         if validate_branch:
             validate_task_branch(
                 payload, task_type=payload.task_type, business_type=payload.business_type

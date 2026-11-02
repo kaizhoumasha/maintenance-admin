@@ -189,6 +189,6 @@ async def receive_ecs_result(
         resp_timestamp=unix_ms(now),
         created_at=now,
     )
-    if on_result is not None:
+    if applied and on_result is not None:
         after_commit(session, partial(on_result, command.owner_domain))
     return response

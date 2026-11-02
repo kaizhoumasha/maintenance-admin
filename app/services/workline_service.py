@@ -34,6 +34,8 @@ def snapshot(row):
             "line_code",
             "line_name",
             "business_code",
+            "is_enabled",
+            "five_rack_request_limit",
             "zone_name",
             "description",
             "sort_order",
@@ -120,7 +122,13 @@ async def update_workline(session, workline_id, data, *, actor, definition_looku
             raise AppError(ErrorCode.CONFLICT, "工作线版本已变化")
         before = snapshot(row)
         updates = data.model_dump(exclude={"version"})
-        for key in ("business_code", "device_bindings", "position_bindings"):
+        for key in (
+            "business_code",
+            "is_enabled",
+            "five_rack_request_limit",
+            "device_bindings",
+            "position_bindings",
+        ):
             if key not in data.model_fields_set:
                 updates.pop(key)
         business_code = updates.get("business_code", row.business_code)

@@ -1,0 +1,275 @@
+{
+  "checked_at": "2026-11-02T09:29:00+08:00",
+  "source": "user-provided wes_integration wes_biz.work_lines/devices/workline_positions snapshot",
+  "endpoint_base_url": "http://10.24.209.26:8080",
+  "business_type": "MANUAL",
+  "plugin": "manual-picking@0.1.0",
+  "runtime_mode": "AUTO",
+  "device_contract": "third_party_integration@1.1",
+  "status_max_age_ms": 10000,
+  "command_timeout_ms": 30000,
+  "lines": [
+    {
+      "code": "KT16",
+      "source_work_line_id": "348950323769920",
+      "version": 31,
+      "enabled": true,
+      "devices": [
+        {
+          "role": null,
+          "usage": "INLET",
+          "device_code": "STATION_INPUT3",
+          "display_name": "入料工位3",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": false,
+          "upstream_device_id": null
+        },
+        {
+          "role": null,
+          "usage": "OUTLET",
+          "device_code": "STATION_OUTPUT3",
+          "display_name": "出料工位3",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": false,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN1",
+          "usage": "SCAN1",
+          "device_code": "STATION_SCAN9",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN2",
+          "usage": "SCAN2",
+          "device_code": "STATION_SCAN10",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN3",
+          "usage": "SCAN3",
+          "device_code": "STATION_SCAN11",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN4",
+          "usage": "SCAN4",
+          "device_code": "STATION_SCAN12",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        }
+      ],
+      "positions": [
+        {
+          "role": "INLET",
+          "code": "CNV0301",
+          "position_type": "STATION",
+          "binding_kind": "HANDOFF_POSITION",
+          "rack_type": null,
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "CNV0301",
+          "external_location_code": null,
+          "device_code": "STATION_INPUT3"
+        },
+        {
+          "role": "OUTLET",
+          "code": "CNV0302",
+          "position_type": "STATION",
+          "binding_kind": "HANDOFF_POSITION",
+          "rack_type": null,
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "CNV0302",
+          "external_location_code": null,
+          "device_code": "STATION_OUTPUT3"
+        },
+        {
+          "role": "FIVE_RACK",
+          "code": "KT16",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "FIVE_LAYER",
+          "capacity": 3,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "KT16",
+          "external_location_code": null,
+          "device_code": null
+        },
+        {
+          "role": "RETURN_RACK",
+          "code": "OUT55",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "RETURN",
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "OUT55",
+          "external_location_code": null,
+          "device_code": null
+        },
+        {
+          "role": "TRANSFER_RACK",
+          "code": "OUT65",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "TRANSFER",
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "OUT65",
+          "external_location_code": null,
+          "device_code": null
+        }
+      ]
+    },
+    {
+      "code": "KT18",
+      "source_work_line_id": "361883088622144",
+      "version": 7,
+      "enabled": true,
+      "devices": [
+        {
+          "role": null,
+          "usage": "INLET",
+          "device_code": "STATION_INPUT4",
+          "display_name": "入料工位4",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": false,
+          "upstream_device_id": null
+        },
+        {
+          "role": null,
+          "usage": "OUTLET",
+          "device_code": "STATION_OUTPUT4",
+          "display_name": "出料工位4",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": false,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN1",
+          "usage": "SCAN1",
+          "device_code": "STATION_SCAN13",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN2",
+          "usage": "SCAN2",
+          "device_code": "STATION_SCAN14",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN3",
+          "usage": "SCAN3",
+          "device_code": "STATION_SCAN15",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        },
+        {
+          "role": "SCAN4",
+          "usage": "SCAN4",
+          "device_code": "STATION_SCAN16",
+          "enabled": true,
+          "deleted": false,
+          "has_contract": true,
+          "upstream_device_id": null
+        }
+      ],
+      "positions": [
+        {
+          "role": "INLET",
+          "code": "CNV0401",
+          "position_type": "STATION",
+          "binding_kind": "HANDOFF_POSITION",
+          "rack_type": null,
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "CNV0401",
+          "external_location_code": null,
+          "device_code": "STATION_INPUT4"
+        },
+        {
+          "role": "OUTLET",
+          "code": "CNV0402",
+          "position_type": "STATION",
+          "binding_kind": "HANDOFF_POSITION",
+          "rack_type": null,
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "CNV0402",
+          "external_location_code": null,
+          "device_code": "STATION_OUTPUT4"
+        },
+        {
+          "role": "FIVE_RACK",
+          "code": "KT18",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "FIVE_LAYER",
+          "capacity": 3,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "KT18",
+          "external_location_code": null,
+          "device_code": null
+        },
+        {
+          "role": "RETURN_RACK",
+          "code": "OUT56",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "RETURN",
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "OUT56",
+          "external_location_code": null,
+          "device_code": null
+        },
+        {
+          "role": "TRANSFER_RACK",
+          "code": "OUT66",
+          "position_type": "RACK_POSITION",
+          "binding_kind": "RACK_POSITION",
+          "rack_type": "TRANSFER",
+          "capacity": 1,
+          "enabled": true,
+          "priority": 100,
+          "logic_location_code": "OUT66",
+          "external_location_code": null,
+          "device_code": null
+        }
+      ]
+    }
+  ]
+}

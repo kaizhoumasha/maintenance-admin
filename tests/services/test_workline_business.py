@@ -11,6 +11,86 @@ from tests.helpers import add_bound_device, workline_definition_lookup
 ACTOR = AssetActor(1, "business-test", None, None)
 
 
+async def test_workline_enable_state_defaults_and_updates_are_audited(db):
+    created = await service.create_workline(
+        db,
+        WorkLineCreate(line_code="ENABLED", line_name="Line", business_code="test_sorting"),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert created.is_enabled is True
+    changed = await service.update_workline(
+        db,
+        created.id,
+        WorkLineUpdate(line_name="Line", version=1, is_enabled=False),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert changed.is_enabled is False
+    unchanged = await service.update_workline(
+        db,
+        created.id,
+        WorkLineUpdate(line_name="Renamed", version=2),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert unchanged.is_enabled is False
+    audits = list(await db.scalars(select(AuditLog).order_by(AuditLog.id)))
+    assert audits[0].detail["after"]["is_enabled"] is True
+    assert audits[1].detail["before"]["is_enabled"] is True
+    assert audits[1].detail["after"]["is_enabled"] is False
+    assert audits[2].detail["before"]["is_enabled"] is False
+    assert audits[2].detail["after"]["is_enabled"] is False
+
+
+async def test_workline_can_be_created_disabled(db):
+    created = await service.create_workline(
+        db,
+        WorkLineCreate(
+            line_code="DISABLED", line_name="Line", business_code="test_sorting", is_enabled=False
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert (await service.read_workline(db, created.id)).is_enabled is False
+
+
+async def test_workline_can_be_created_with_limit_and_legacy_update_preserves_it(db):
+    created = await service.create_workline(
+        db,
+        WorkLineCreate(
+            line_code="LIMIT",
+            line_name="Line",
+            business_code="test_sorting",
+            five_rack_request_limit=3,
+        ),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert (await service.read_workline(db, created.id)).five_rack_request_limit == 3
+    changed = await service.update_workline(
+        db,
+        created.id,
+        WorkLineUpdate(line_name="Renamed", version=1),
+        actor=ACTOR,
+        definition_lookup=workline_definition_lookup,
+    )
+    assert changed.five_rack_request_limit == 3 and changed.version == 2
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", "false", None])
+@pytest.mark.parametrize("model", [WorkLineCreate, WorkLineUpdate])
+def test_workline_enable_state_requires_a_boolean(model, value):
+    data = dict(line_name="Line", is_enabled=value)
+    data.update(
+        dict(line_code="LINE", business_code="test_sorting")
+        if model is WorkLineCreate
+        else dict(version=1)
+    )
+    with pytest.raises(ValueError):
+        model(**data)
+
+
 async def test_unknown_business_uses_invalid_request_and_rolls_back(db):
     with pytest.raises(AppError) as error:
         await service.create_workline(

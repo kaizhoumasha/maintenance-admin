@@ -226,3 +226,66 @@ async def test_created_business_selection_is_in_transaction_audit(client, admin)
         assert len(logs) == 1
         assert logs[0].detail["before"] == {}
         assert logs[0].detail["after"]["business_code"] == "test_sorting"
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "3", 2147483648])
+async def test_rack_request_limit_rejects_non_positive_or_non_sql_integer(client, admin, value):
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json=dict(
+            line_code="LIMIT",
+            line_name="Line",
+            business_code="test_sorting",
+            five_rack_request_limit=value,
+        ),
+    )
+    assert response.status_code == 400, response.text
+
+
+async def test_rack_request_limit_save_omit_clear_version_and_audit(client, admin):
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json=dict(line_code="LIMIT", line_name="Line", business_code="test_sorting"),
+    )
+    assert response.status_code == 201, response.text
+    line = response.json()
+    assert line.get("five_rack_request_limit", "missing") is None
+    for version, fields, expected in (
+        (1, {"five_rack_request_limit": 3}, 3),
+        (2, {}, 3),
+        (3, {"five_rack_request_limit": None}, None),
+        (4, {"five_rack_request_limit": 2147483647}, 2147483647),
+    ):
+        response = await client.put(
+            f"/api/v1/work-lines/{line['id']}",
+            headers=admin,
+            json=dict(line_name="Line", version=version, **fields),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["five_rack_request_limit"] == expected
+        assert response.json()["version"] == version + 1
+    stale = await client.put(
+        f"/api/v1/work-lines/{line['id']}",
+        headers=admin,
+        json=dict(line_name="Line", version=4, five_rack_request_limit=1),
+    )
+    assert stale.status_code == 409
+    read = await client.get(f"/api/v1/work-lines/{line['id']}", headers=admin)
+    assert read.json()["five_rack_request_limit"] == 2147483647
+    async with app.state.audit_session_factory() as session:
+        logs = list(
+            await session.scalars(
+                select(AuditLog)
+                .where(AuditLog.resource_id == int(line["id"]))
+                .order_by(AuditLog.id)
+            )
+        )
+        assert [log.detail["after"]["five_rack_request_limit"] for log in logs] == [
+            None,
+            3,
+            3,
+            None,
+            2147483647,
+        ]

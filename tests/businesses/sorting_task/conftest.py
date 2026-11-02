@@ -16,12 +16,16 @@ def request_models(monkeypatch):
         "app.businesses._components.sorting_task.request.sorting_task_prepare_v1",
         "app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1",
     ]
+    original_modules = {name: sys.modules[name] for name in modules if name in sys.modules}
     try:
         loaded = [importlib.import_module(name) for name in modules]
         yield {"Prepare": loaded[0].Prepare, "CompletionConfirm": loaded[1].CompletionConfirm}
     finally:
         for name in modules:
-            sys.modules.pop(name, None)
+            if name in original_modules:
+                sys.modules[name] = original_modules[name]
+            else:
+                sys.modules.pop(name, None)
 
 
 @pytest.fixture
@@ -163,6 +167,9 @@ async def task_flow(callback_store, monkeypatch):
             host.archive_guard = archive_guard
         hosts[code] = host
     line_ids = []
+    original_modules = {
+        name: sys.modules[name] for name in COMPONENT.entry_modules if name in sys.modules
+    }
     try:
         async with engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
@@ -194,7 +201,17 @@ async def task_flow(callback_store, monkeypatch):
         monkeypatch.setattr(callbacks, "_registry", {})
         monkeypatch.setattr(requests, "_registry", {})
         for name in COMPONENT.entry_modules:
-            if name in sys.modules:
+            if ".request." in name and name in sys.modules:
+                model = "Prepare" if name.endswith("prepare_v1") else "CompletionConfirm"
+                op = (
+                    "sorting.task.prepare@v1"
+                    if model == "Prepare"
+                    else "sorting.task.completion_confirm@v1"
+                )
+                requests.request_operation(op, requests.Endpoint.DECISIONS)(
+                    getattr(sys.modules[name], model)
+                )
+            elif name in sys.modules:
                 importlib.reload(sys.modules[name])
             else:
                 importlib.import_module(name)
@@ -269,4 +286,7 @@ async def task_flow(callback_store, monkeypatch):
                 await session.execute(delete(WorkLine).where(WorkLine.id.in_(line_ids)))
         finally:
             for name in COMPONENT.entry_modules:
-                sys.modules.pop(name, None)
+                if name in original_modules:
+                    sys.modules[name] = original_modules[name]
+                else:
+                    sys.modules.pop(name, None)

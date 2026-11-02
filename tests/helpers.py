@@ -1011,7 +1011,15 @@ async def business_flow_fixture(factory, monkeypatch):
         )
         outbox.lifecycles = {"ecs-command": EcsLifecycle(commands)}
         monkeypatch.setattr(ecs, "_registry", {})
-        monkeypatch.setattr(callbacks, "_registry", dict(callbacks._registry))
+        monkeypatch.setattr(
+            callbacks,
+            "_registry",
+            {
+                name: item
+                for name, item in callbacks._registry.items()
+                if not item.registration_source.module.startswith("app.businesses.")
+            },
+        )
         monkeypatch.setattr(requests, "_registry", {})
         entries, receipt_ids = [], set()
         for code, role, payload in (
@@ -1315,3 +1323,616 @@ def coarse_sorting_composition(table):
 
     entry.build_service = build_service
     return entry
+
+
+@asynccontextmanager
+async def formal_manual_fixture(factory, monkeypatch):
+    """Formal catalog/default tables with two bound lines and only loopback peers."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from sqlalchemy import and_, delete, select
+
+    from app import business_wakeups
+    from app.businesses import catalog
+    from app.businesses._components.bin_roller.models import TABLES as ROLLER_TABLES
+    from app.businesses.smt_manual.models import TABLES
+    from app.core import get_settings
+    from app.core.identifiers import uuid7
+    from app.http_client import AsyncHttpClient
+    from app.integrations.ecs_callback.receiver import receive_ecs_event
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.integrations.wms_callback.receiver import receive
+    from app.models import (
+        CallbackReceipt,
+        Device,
+        DeviceRoute,
+        EcsCommand,
+        EcsResultEvidence,
+        EcsSendEvidence,
+        ReliableMessage,
+        TransportTask,
+        WorkLine,
+    )
+    from app.reliable.sender import Sender
+    from app.reliable.store import MessageStore
+    from app.services.device_bindings import resolve_binding
+    from app.tasks.business_tasks import _runtime
+
+    prefix = "m6-" + uuid7().hex
+    state = SimpleNamespace(
+        factory=factory,
+        prefix=prefix,
+        lines=[],
+        devices=[],
+        positions=[],
+        receipts=set(),
+        requests=[],
+        notices=[],
+        admission={},
+        transport_code="RECEIVED",
+        transport_http=202,
+        confirmation={"result": "BUSINESS_IN_PROGRESS", "retry_after_ms": 60000},
+    )
+    tables = {
+        **{("host", k): v for k, v in TABLES.items()},
+        **{("roller", k): v for k, v in ROLLER_TABLES.items()},
+    }
+    async with factory() as session:
+        before = {
+            key: set((await session.execute(select(*table.primary_key.columns))).all())
+            for key, table in tables.items()
+        }
+    peer = FastAPI()
+
+    @peer.post("/{path:path}")
+    async def reply(path: str, request: Request):
+        body = await request.json()
+        state.requests.append((path, body))
+        operation = body.get("operation")
+        if path == "api/v1/device/command":
+            return {"code": 200, "message": "ACK"}
+        if operation == "transport.task.submit@v1":
+            return JSONResponse(
+                dict(
+                    operation_id=body["operation_id"],
+                    code=state.transport_code,
+                    timestamp=1,
+                    data={"transport_task_id": body["data"]["transport_task_id"]},
+                ),
+                status_code=state.transport_http,
+            )
+        code, status, data = "DECIDED", 200, {}
+        if operation == "sorting.task.prepare@v1":
+            code, status = "PREPARE_ACCEPTED", 202
+        elif operation == "manual_bin.work_admission_decide@v1":
+            data = state.admission.get(body["data"]["bin_code"], {"result": "NO_WORK"})
+        elif operation == "sorting.task.completion_confirm@v1":
+            data = state.confirmation
+        elif operation == "rack.departure_decide@v1":
+            data = getattr(state, "departure_decision", {"result": "WAIT", "retry_after_ms": 60000})
+        elif operation == "outbound.bin.return_batch@v1":
+            data = getattr(state, "return_decision", {"result": "NO_BATCH"})
+        elif operation == "outbound.bin.inbound_batch@v1":
+            data = getattr(state, "inbound_decision", {"result": "NO_BATCH"})
+        elif operation == "workline.return_buffer.drain_rack_decide@v1":
+            data = {
+                "result": "WAIT",
+                "reason_code": "NO_DRAIN_RACK_AVAILABLE",
+                "retry_after_ms": 60000,
+            }
+        elif path.endswith("facts"):
+            code = "RECORDED"
+        return JSONResponse(
+            dict(operation_id=body["operation_id"], code=code, timestamp=1, data=data),
+            status_code=status,
+        )
+
+    async with loopback_app(peer) as origin:
+        state.origin = origin
+        targets = {
+            prefix + "-" + protocol: {"base_url": origin, "protocol": protocol}
+            for protocol in ("wms-facts", "wms-decisions", "wms-transport")
+        }
+        state.target_config = {"targets": targets}
+        monkeypatch.setattr(get_settings(), "RELIABLE_TARGETS", state.target_config)
+        state.runtime = _runtime(factory)
+        state.host = state.runtime.services["smt_manual"]
+        state.roller = state.host.components["bin_roller"]
+        commands = state.host.capabilities.ecs
+        outbox = commands.outbox
+        state.store = MessageStore(
+            factory,
+            lifecycles=outbox.lifecycles,
+            on_result=business_wakeups.wms_result_committed,
+            on_delivered=business_wakeups.transport_submit_delivered,
+        )
+        sender = Sender(
+            state.store,
+            outbox.targets,
+            outbox.adapters,
+            {
+                name: AsyncHttpClient(target.http_config())
+                for name, target in outbox.targets.items()
+                if target.address_mode == "STATIC"
+            },
+            provider=DynamicClients(factory=simulator_client_factory([origin])),
+        )
+        state.sender = sender
+        async with factory.begin() as session:
+            for number in (1, 2):
+                devices = {
+                    point: f"{prefix}-{number}-{point}"
+                    for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")
+                }
+                positions = {
+                    slot: f"{prefix}-{number}-{slot}"
+                    for slot in ("FIVE_RACK", "INLET", "OUTLET", "RETURN_RACK", "TRANSFER_RACK")
+                }
+                line = WorkLine(
+                    line_code=f"{prefix}-{number}",
+                    line_name="M6 manual",
+                    business_code="smt_manual",
+                    device_bindings=devices,
+                    position_bindings=positions,
+                )
+                session.add(line)
+                await session.flush()
+                state.lines.append(line.id)
+                state.devices.append(devices)
+                state.positions.append(positions)
+                for code in devices.values():
+                    route = DeviceRoute(id=str(uuid7()), device_code=code, ecs_origin=origin)
+                    session.add(route)
+                    await session.flush()
+                    session.add(
+                        Device(
+                            device_code=code,
+                            display_name=code,
+                            work_line_id=line.id,
+                            current_route_id=route.id,
+                        )
+                    )
+
+        def envelope(operation, data, *, identity=None, timestamp=100):
+            identity = identity or str(uuid7())
+            state.receipts.add(identity)
+            return json.dumps(
+                dict(operation=operation, operation_id=identity, timestamp=timestamp, data=data)
+            ).encode()
+
+        async def callback(operation, data, *, rollback=False, before_commit=None, identity=None):
+            async with factory() as session:
+                response = await receive(
+                    session,
+                    envelope(operation, data, identity=identity),
+                    runtime=state.runtime,
+                    on_business_committed=business_wakeups.notify_business_committed,
+                    on_owner_committed=business_wakeups.notify_business_committed,
+                )
+                if before_commit:
+                    await before_commit()
+                await session.rollback() if rollback else await session.commit()
+                return response
+
+        async def issue(task, *, line=0, direction="inbound"):
+            return await callback(
+                "sorting.task.issued@v1",
+                dict(
+                    task_id=task,
+                    task_type="MANUAL",
+                    business_type=direction,
+                    workline_code=f"{prefix}-{line + 1}",
+                    queue_revision=1,
+                    dispatch_sequence=1,
+                ),
+            )
+
+        async def scan(point, raw="A000000001-C", *, line=0, timestamp=10, rollback=False):
+            async with factory() as session:
+                response = await receive_ecs_event(
+                    session,
+                    json.dumps(
+                        dict(
+                            device_code=state.devices[line][point],
+                            event_type="SCAN_COMPLETED",
+                            timestamp=timestamp,
+                            data={"bin_code": raw},
+                        )
+                    ).encode(),
+                    resolve_binding=resolve_binding,
+                    resolve_input_target=catalog.input_target,
+                    runtime=state.runtime,
+                    on_business_committed=business_wakeups.notify_business_committed,
+                )
+                state.receipts.add(response.digest)
+                await session.rollback() if rollback else await session.commit()
+                return response
+
+        async def dispatch():
+            total = 0
+            for _ in range(100):
+                count = await sender.tick(maintain=False)
+                if sender.inflight:
+                    await asyncio.gather(*tuple(sender.inflight))
+                total += count
+                if not count:
+                    return total
+            raise AssertionError("loopback sender did not drain its bounded fixture work")
+
+        async def rows(key, *, roller=False):
+            query = (
+                bin_roller_query(ROLLER_TABLES, key) if roller else smt_manual_query(TABLES, key)
+            )
+            async with factory() as session:
+                return [dict(row) for row in (await session.execute(query)).mappings()]
+
+        async def result(code, *, status="SUCCESS", rollback=False, before_commit=None):
+            async with factory() as session:
+                command = await session.scalar(
+                    select(EcsCommand).where(EcsCommand.command_code == code)
+                )
+                raw = json.dumps(
+                    dict(
+                        command_code=code,
+                        device_code=command.device_code,
+                        result=status,
+                        finish_time=1,
+                        data={"actual_qty": 1},
+                        error_detail={"code": "DEVICE_FAILURE", "msg": "local mock failure"}
+                        if status == "FAILED"
+                        else None,
+                    )
+                ).encode()
+                response = await receive_ecs_result(
+                    session, raw, commands, on_result=business_wakeups.ecs_result_committed
+                )
+                if before_commit:
+                    await before_commit()
+                await session.rollback() if rollback else await session.commit()
+                return response
+
+        state.callback, state.issue, state.scan = callback, issue, scan
+        state.dispatch, state.rows, state.result, state.envelope = dispatch, rows, result, envelope
+        try:
+            yield state
+        finally:
+            await sender.aclose()
+            async with factory.begin() as session:
+                codes = select(EcsCommand.command_code).where(
+                    EcsCommand.device_code.like(prefix + "%")
+                )
+                await session.execute(
+                    delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+                )
+                await session.execute(
+                    delete(EcsSendEvidence).where(EcsSendEvidence.command_code.in_(codes))
+                )
+                await session.execute(
+                    delete(ReliableMessage).where(ReliableMessage.operation_id.in_(codes))
+                )
+                await session.execute(
+                    delete(EcsCommand).where(EcsCommand.device_code.like(prefix + "%"))
+                )
+                await session.execute(
+                    delete(TransportTask).where(
+                        TransportTask.operation_id.in_(
+                            select(ReliableMessage.operation_id).where(
+                                ReliableMessage.target.in_(targets)
+                            )
+                        )
+                    )
+                )
+                await session.execute(
+                    delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
+                )
+                await session.execute(
+                    delete(CallbackReceipt).where(
+                        (CallbackReceipt.operation_id.in_(state.receipts))
+                        | CallbackReceipt.device_code.like(prefix + "%")
+                    )
+                )
+                for key, table in reversed(tuple(tables.items())):
+                    current = (await session.execute(select(*table.primary_key.columns))).all()
+                    for row in set(current) - before[key]:
+                        await session.execute(
+                            table.delete().where(
+                                and_(
+                                    *(
+                                        column == value
+                                        for column, value in zip(
+                                            table.primary_key.columns, row, strict=True
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                await session.execute(delete(Device).where(Device.device_code.like(prefix + "%")))
+                await session.execute(
+                    delete(DeviceRoute).where(DeviceRoute.device_code.like(prefix + "%"))
+                )
+                await session.execute(delete(WorkLine).where(WorkLine.id.in_(state.lines)))
+
+
+async def manual_source_departure(flow, entry):
+    """Reach one unsent CTU03 using the original CTU01 Result and WMS decisions."""
+    cycle = next(
+        r for r in await flow.rows("rack_cycle", roller=True) if r["id"] == entry["cycle_id"]
+    )
+    flow.inbound_decision = {"result": "RACK_FACE_DONE"}
+    flow.departure_decision = dict(
+        result="READY", rack_destination=dict(type="ZONE", location_code="LOCAL-RETURN")
+    )
+    response = await flow.callback(
+        "transport.task.resulted@v1",
+        dict(
+            transport_task_id=entry["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id=cycle["rack_id"],
+            outcome_revision=1,
+            status="SUCCEEDED",
+            final_position=entry["target"],
+            arrival_face=entry["target_face"],
+        ),
+    )
+    assert response.status_code == 202
+    await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
+    await flow.dispatch()
+    await flow.host.advance("FEED", cycle["source_ref"])
+    await flow.dispatch()
+    await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
+    return next(
+        r
+        for r in await flow.rows("rack_action", roller=True)
+        if r["cycle_id"] == entry["cycle_id"] and r["kind"] == "CTU03"
+    )
+
+
+async def manual_departure_obligation(flow, *, line=0):
+    """A saved original CTU03 obligation; no physical arrival/completion is invented."""
+    from app.businesses._components.bin_roller.rack_flow import rack_action
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_transport import RackPosition
+
+    async with flow.factory.begin() as session:
+        repo = flow.roller.repository(flow.lines[line])
+        resources = await flow.roller.read_resources(session, flow.lines[line])
+        cycle = await repo.create_cycle(
+            session,
+            cycle_id=str(uuid7()),
+            rack_id=flow.prefix + "-old-rack",
+            purpose="ORDINARY",
+            task_id=flow.prefix + "-old-task",
+            source_ref=str(uuid7()),
+            resources=resources,
+        )
+        action = await rack_action(
+            flow.roller,
+            session,
+            repo,
+            cycle,
+            kind="CTU03",
+            source_ref=cycle["id"],
+            target={"kind": "ZONE", "location_code": "LOCAL-RETURN"},
+            face=None,
+            source=RackPosition(flow.positions[line]["FIVE_RACK"]),
+        )
+        return dict(cycle), dict(action)
+
+
+async def manual_return_opportunity(flow, *, line=0):
+    """Select an already READY face; allocation/Transport remain actual public behavior."""
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_transport import HandoffPosition, TransportCaller
+
+    async with flow.factory.begin() as session:
+        repo = flow.roller.repository(flow.lines[line])
+        cycle = await repo.create_cycle(
+            session,
+            cycle_id=str(uuid7()),
+            rack_id=flow.prefix + "-return",
+            purpose="DRAIN",
+            task_id=flow.prefix + "-task",
+            source_ref=str(uuid7()),
+            resources=await flow.roller.read_resources(session, flow.lines[line]),
+        )
+        await session.execute(
+            repo.tables["decision"]
+            .insert()
+            .values(
+                id=cycle["source_ref"],
+                kind="DRAIN",
+                unused_racks=[],
+                **repo.scope,
+                input_kind="SCAN4",
+                input_ref=str(uuid7()),
+                operation_id=str(uuid7()),
+                status="READY",
+                decision={
+                    "result": "READY",
+                    "racks": [{"rack_id": cycle["rack_id"], "rack_face": "A"}],
+                },
+            )
+        )
+        service_id, opportunity_id = str(uuid7()), str(uuid7())
+        await repo.register_rack_action(
+            session,
+            cycle_id=cycle["id"],
+            kind="CTU01",
+            source_ref=cycle["id"],
+            action_id=str(uuid7()),
+            client_request_id=str(uuid7()),
+            transport_task_id=None,
+            operation_id=None,
+            target={"kind": "RACK_POSITION", "location_code": flow.positions[line]["FIVE_RACK"]},
+            target_face="A",
+            caller_workline_id=str(flow.lines[line]),
+        )
+        await session.execute(
+            repo.tables["face_work"]
+            .insert()
+            .values(
+                id=service_id,
+                purpose="DRAIN",
+                service_id=service_id,
+                rack_id=cycle["rack_id"],
+                **repo.scope,
+                cycle_id=cycle["id"],
+                source_ref=opportunity_id,
+                rack_face="A",
+                service_state="READY",
+            )
+        )
+        await session.execute(
+            repo.tables["return_opportunity"]
+            .insert()
+            .values(
+                id=opportunity_id,
+                **repo.scope,
+                service_id=service_id,
+                source_ref=service_id,
+                kind="PURE_RETURN",
+            )
+        )
+        return await flow.roller.start_return_batch(
+            session,
+            opportunity_id=opportunity_id,
+            source_ref=opportunity_id,
+            workline_code=f"{flow.prefix}-{line + 1}",
+            caller=TransportCaller(str(flow.lines[line])),
+            source=HandoffPosition(flow.positions[line]["OUTLET"]),
+        )
+
+
+def smt_manual_query(tables, key):
+    """Select the concrete input/request category a behavioral fixture needs."""
+    from sqlalchemy import select
+
+    from app.businesses.smt_manual.models import (
+        BIN_COMPLETION_OPERATION,
+        RACK_COMPLETION_OPERATIONS,
+    )
+
+    request_kinds = {
+        "confirmation": "COMPLETION_CONFIRM",
+        "admission": "BIN_ADMISSION",
+        "rack_report": "RACK_ARRIVAL_REPORT",
+        "rack_departure": "RACK_DEPARTURE",
+    }
+    if key in request_kinds:
+        table = tables["request"]
+        return (
+            select(table).where(table.c.kind == request_kinds[key]).order_by(table.c.operation_id)
+        )
+    if key in {"completion", "rack_completion", "plan", "input"}:
+        table = tables["input"]
+        predicate = {
+            "completion": table.c.operation == BIN_COMPLETION_OPERATION,
+            "rack_completion": table.c.operation.in_(RACK_COMPLETION_OPERATIONS),
+            "plan": table.c.is_plan_record,
+            "input": table.c.operation.like("sorting.task.%"),
+        }[key]
+        return select(table).where(predicate).order_by(table.c.operation_id)
+    table = tables[key]
+    return select(table).order_by(*table.primary_key.columns)
+
+
+def bin_roller_query(tables, key):
+    """Inspect one original responsibility and identity in the compact component tables."""
+    from sqlalchemy import select
+
+    if key in {"drain", "departure"}:
+        t = tables["decision"]
+        return select(t).where(t.c.kind == key.upper()).order_by(t.c.id)
+    if key in {"scan2_release", "return_round"}:
+        c = tables["scan_arrival"].c
+        if key == "scan2_release":
+            return (
+                select(
+                    c.release_record_id.label("id"),
+                    c.owner_domain,
+                    c.work_line_id,
+                    c.id.label("arrival_id"),
+                    c.release_call_key.label("call_key"),
+                    c.release_command_code.label("command_code"),
+                    (c.release_state == "PENDING").label("pending"),
+                    c.release_consumed_result_id.label("consumed_result_id"),
+                )
+                .where(c.release_record_id.is_not(None))
+                .order_by(c.release_record_id)
+            )
+        return (
+            select(
+                c.round_id.label("id"),
+                c.owner_domain,
+                c.work_line_id,
+                c.id.label("scan3_arrival_id"),
+                c.first_scan4_arrival_id.label("scan4_arrival_id"),
+                c.bin_code,
+                c.return_state.label("status"),
+                c.removed,
+            )
+            .where(c.point == "SCAN3", c.round_id.is_not(None))
+            .order_by(c.round_id)
+        )
+    if key in {"supply_demand", "face_service", "feed"}:
+        c = tables["face_work"].c
+        if key == "supply_demand":
+            return (
+                select(
+                    c.demand_id.label("id"),
+                    c.owner_domain,
+                    c.work_line_id,
+                    c.task_id,
+                    c.change_id,
+                    c.plan_revision,
+                    c.rack_id,
+                    c.rack_face,
+                    c.cycle_id,
+                    c.service_id,
+                    (c.demand_state == "WITHDRAWN").label("withdrawn"),
+                )
+                .where(c.demand_id.is_not(None))
+                .order_by(c.demand_id)
+            )
+        if key == "feed":
+            return (
+                select(
+                    c.feed_id.label("id"),
+                    c.owner_domain,
+                    c.work_line_id,
+                    c.service_id,
+                    c.caller_workline_id,
+                    c.station_id,
+                    c.target,
+                    c.operation_id,
+                    c.message_id,
+                    c.manifest,
+                    (c.feed_state == "COMPLETED").label("feed_complete"),
+                    (c.feed_state != "COMPLETED").label("pending"),
+                )
+                .where(c.feed_id.is_not(None))
+                .order_by(c.feed_id)
+            )
+        return (
+            select(
+                c.service_id.label("id"),
+                c.owner_domain,
+                c.work_line_id,
+                c.task_id,
+                c.plan_revision,
+                c.cycle_id,
+                c.source_ref,
+                c.rack_face,
+                c.service_state.label("status"),
+                c.service_state.in_(("PENDING", "READY")).label("pending"),
+            )
+            .where(c.service_id.is_not(None))
+            .order_by(c.service_id)
+        )
+    table = tables[key]
+    return select(table).order_by(*table.primary_key.columns)

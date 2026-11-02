@@ -27,6 +27,8 @@ class WorkLineEditable(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     line_name: str = Field(min_length=1, max_length=100)
+    is_enabled: Annotated[bool, Field(strict=True)] = True
+    five_rack_request_limit: Annotated[int, Field(strict=True, ge=1, le=2147483647)] | None = None
     zone_name: str | None = Field(None, max_length=100)
     description: str | None = Field(None, max_length=500)
     sort_order: int = 0

@@ -13,7 +13,7 @@ async def test_scan2_fact_precedes_business_admission_and_closes_only_component_
         assert admitted["arrival_id"] == arrival["id"]
         assert admitted["raw_bin_code"] == "A000000001-C"
         assert admitted["scanned_at"] == arrival["scanned_at"] == 10
-        assert arrival["delegated"] and not arrival["pending"]
+        assert arrival["delegation_state"] == "ACCEPTED" and not arrival["pending"]
         assert not await flow.messages(session)
 
 
