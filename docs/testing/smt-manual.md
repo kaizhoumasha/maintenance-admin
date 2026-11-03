@@ -1,5 +1,7 @@
 # SMT 手工正式组合软件验收
 
+**2026-11-03 实施状态。** 手工 MANUAL_RACK、MANUAL_BIN、MANUAL_COMPLETION 与组件相关推进在首条 SQL 前采用 SERIALIZABLE。独立 RACK_REPORT 与 SCAN2_RELEASE 保留 REPEATABLE READ。
+
 <a id="current-delivery"></a>
 ## 2026-11-02 提交交付与最终全仓验证
 
@@ -139,7 +141,7 @@ N1 继续列为非阻断覆盖补充：新写已选 service/feed 的专门降级
 - 迁移链为 `a39a1988a81a → ac980eb32c52 → 0177313880f9`；最后一项是唯一head。前两项分别为既有WorkLine启停及组件状态，最后为宿主状态；本轮不迁移wes_backend历史数据。
 - `enterprise_backend`中15张组件表、13张宿主表在独占测试库完成迁移并在回归后保持完整。`m6-schema-cleanup.log`再次核对head、28张表及零正式业务行；本轮拥有的工作线/设备/路由/ECS命令/可靠消息也均为零。未创建、清空或升级运行库。
 
-组件相关原单条TASK/SCAN/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN advance在首SQL前使用SERIALIZABLE；纯人工及SCAN2_RELEASE保留REPEATABLE READ，receiver和短扫描未整体升级。扫候选采用本轮只读REPEATABLE READ快照、固定上界和轮换分页，各记录仍用独立新事务。limit是页大小，等待/失败不阻断后续页；该规则由M5保留测试及本轮回归共同证明。
+组件相关原单条TASK/SCAN/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN advance在首SQL前使用SERIALIZABLE；当时纯人工及SCAN2_RELEASE保留REPEATABLE READ（当前范围见文首），receiver和短扫描未整体升级。扫候选采用本轮只读REPEATABLE READ快照、固定上界和轮换分页，各记录仍用独立新事务。limit是页大小，等待/失败不阻断后续页；该规则由M5保留测试及本轮回归共同证明。
 
 ## 3. 两线及公共轮次
 
@@ -274,3 +276,12 @@ worker使用原 `business.advance_pending`、关闭eager、唯一队列和节点
 运行库未升级；将来运行本版本前需按已验证的迁移链升级，当前记录不授权部署。供应商签认、真实WMS/ECS/RCS联调及现场物理验收保持未执行；SCAN2原释放、原Transport和公共回流独立履约，任务COMPLETED或CTU03提交接纳不证明物理完成。测试容器清理结果在下段收尾记录登记，工作区、未提交源码和忽略目录内全部证据保留。
 
 收尾结果：仅停止并自动移除本轮拥有的 `codex-smt-manual-m36-pg` / `codex-smt-manual-m36-redis` 两个专用容器，移除后按精确名称检查无残留；没有清理其他服务、主目录、工作区、源文件或证据。真实worker/Beat在容器停止前已确认退出。分支与完整未提交工作继续保留。
+
+## 共享货架调度切换
+
+1. 关闭新业务入口，停止所有旧版 API/receiver、worker、Beat 和 Sender。等待已启动事务结束，逐笔核对在途原 HTTP、回调、冻结请求与接纳身份，保留尚未核清的证据。
+2. 对静止数据库做一致备份，在可丢弃副本从 `racksubmitack` 演练升至 `sharedrackdispatch`，核对原作业、动作、报告、候选、消息数与 WAIT 截止时间。无法证明前驱或归属时保留源库和原证据，定位原始记录后重新验算。
+3. 运行单链升级，在同一事务内回填、核对并移除旧调度表。确认 head、核对计数、原请求字节及外发数。将全部进程切至同一制品，确认配置、版本和唯一 Beat 后恢复接收、Sender 与推进。
+4. 升级失败时事务回滚。若已按新语义写入数据或已有受保护接纳证据，降级会在首个破坏操作前拒绝。保持停写，恢复切换前一致备份，并逐笔对账切换窗口内的外部请求和回调后再开放。
+
+这些步骤用于部署窗口。当前分支仅在可丢弃数据库验证，真实数据及设备行为须另行验收。

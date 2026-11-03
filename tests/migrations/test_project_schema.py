@@ -95,8 +95,11 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
         )
         assert await connection.scalar(text("SELECT payload FROM public.other_system")) == "keep me"
         assert await connection.scalar(text("SELECT to_regclass('public.alembic_version')")) is None
-        assert await connection.scalar(
-            text("SELECT version_num FROM enterprise_backend.alembic_version")
+        assert (
+            await connection.scalar(
+                text("SELECT version_num FROM enterprise_backend.alembic_version")
+            )
+            == "sharedrackdispatch"
         )
 
 

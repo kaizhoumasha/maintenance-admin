@@ -410,42 +410,6 @@ class RackDispatch:
         source = (
             {"kind": "RACK", "location_code": job.rack_id} if kind == "ENTER" else _point(job.point)
         )
-        caller = _caller(job)
-        args = dict(
-            client_request_id=_id(),
-            caller=caller,
-            rack_id=job.rack_id,
-            cycle_id=job.original_cycle_id,
-            rcs_template_id=template,
-            target_face=face,
-        )
-        transport = self.capabilities.transport
-        if kind == "ROTATE":
-            handle = await transport.rotate_rack(session, **args, position=RackPosition(job.point))
-        else:
-            handle = await transport.move_rack(
-                session,
-                **args,
-                source=Rack(job.rack_id) if kind == "ENTER" else RackPosition(job.point),
-                target=(Zone if target["kind"] == "ZONE" else RackPosition)(
-                    target["location_code"]
-                ),
-            )
-        view = await transport.get_result(
-            session,
-            transport_task_id=handle.transport_task_id,
-            client_request_id=handle.client_request_id,
-            caller=caller,
-        )
-        if (
-            view.availability != "FOUND"
-            or view.owner_domain != job.owner_domain
-            or view.cycle_id != job.original_cycle_id
-            or not view.operation_id
-            or not view.submission_message_id
-            or not view.submission_target
-        ):
-            raise ValueError("registered transport identity unavailable")
         action = RackAction(
             id=_id(),
             job_id=job.id,
@@ -463,17 +427,60 @@ class RackDispatch:
             target=target,
             target_face=face,
             template=template,
-            client_request_id=handle.client_request_id,
-            transport_task_id=handle.transport_task_id,
-            submit_operation_id=view.operation_id,
-            submit_message_id=view.submission_message_id,
-            submit_target=view.submission_target,
+            client_request_id=_id(),
         )
+        await self._bind_move(session, job, action)
         job.current_action_id = action.id
         session.add(action)
         await session.flush()
         actions.append(action)
         return action
+
+    async def _bind_move(self, session, job, action):
+        caller = _caller(action)
+        args = dict(
+            client_request_id=action.client_request_id,
+            caller=caller,
+            rack_id=job.rack_id,
+            cycle_id=job.original_cycle_id,
+            rcs_template_id=action.template,
+            target_face=action.target_face,
+        )
+        transport = self.capabilities.transport
+        if action.kind == "ROTATE":
+            handle = await transport.rotate_rack(
+                session, **args, position=RackPosition(action.source["location_code"])
+            )
+        else:
+            handle = await transport.move_rack(
+                session,
+                **args,
+                source=(Rack if action.kind == "ENTER" else RackPosition)(
+                    action.source["location_code"]
+                ),
+                target=(Zone if action.target["kind"] == "ZONE" else RackPosition)(
+                    action.target["location_code"]
+                ),
+            )
+        view = await transport.get_result(
+            session,
+            transport_task_id=handle.transport_task_id,
+            client_request_id=handle.client_request_id,
+            caller=caller,
+        )
+        if (
+            view.availability != "FOUND"
+            or view.owner_domain != job.owner_domain
+            or view.cycle_id != job.original_cycle_id
+            or not view.operation_id
+            or not view.submission_message_id
+            or not view.submission_target
+        ):
+            raise ValueError("registered transport identity unavailable")
+        action.transport_task_id = handle.transport_task_id
+        action.submit_operation_id = view.operation_id
+        action.submit_message_id = view.submission_message_id
+        action.submit_target = view.submission_target
 
     async def _result(self, session, job, action):
         if not action.transport_task_id or not action.client_request_id or not action.caller:
@@ -637,6 +644,14 @@ class RackDispatch:
         actions = await self._actions(session, job, lock=True)
         if not job.pending:
             return _snapshot(job, actions)
+        if actions:
+            original = actions[-1]
+            if (
+                original.transport_task_id is None
+                and original.phase == "REGISTERED"
+                and (original.basis or {}).get("legacy_table") == "bin_roller_rack_action"
+            ):
+                await self._bind_move(session, job, original)
         if actions and actions[-1].kind == "DEPART":
             await self._accept(session, job, actions, now_ms)
             return _snapshot(job, actions)

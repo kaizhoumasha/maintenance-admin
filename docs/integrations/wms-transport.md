@@ -1,6 +1,8 @@
 # Transport 接入参考
 
-> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+**2026-11-03 实施状态。** 手工与 BIN_Roller 已接入公共货架服务。只有 DEPART/RACK_MOVE 的 F01 或 CTU03 送往 ZONE 或不同 RACK_POSITION，并精确匹配原提交和 HTTP 202 RECEIVED 或 200 DUPLICATE，才能按新规则结束调度。原 Transport 独立保存接纳证据，清理可靠消息后仍可核对。历史仅有 SUCCEEDED 的既成释放保留独立历史依据。
+
+> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，此处保留 11 月 2 日的设计和验收边界。
 
 Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-command.md)处理快照路由和结果，两者不混用。正式能力、适配器和回调已实现；原身份结果读取与明确前序查询见[出站结果契约](outbound-results.md)。技术接纳不代表业务/物理完成。
 
@@ -44,7 +46,7 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 
 ## ACK 与合同边界
 
-新增业务完成解释见[公共货架调度§4](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md#4-离场成功接纳即完成)：原业务为离开当前工作线货架工作位的DEPART/RACK_MOVE、使用CTU03或F01时（含ZONE或生产线等RACK_POSITION去向），下表有效DELIVERED响应是调度完成依据；回调只补记实际终位/失败备查，不重开调度。其他动作及Transport.outcome本身仍按原规则，不把FAILED改成SUCCEEDED。当前接收/读口源码尚未实施该公共调度增量。
+新增业务完成解释见[公共货架调度§4](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md#4-离场成功接纳即完成)：原业务为离开当前工作线货架工作位的DEPART/RACK_MOVE、使用CTU03或F01时（含ZONE或生产线等RACK_POSITION去向），下表有效DELIVERED响应是调度完成依据；回调只补记实际终位/失败备查，不重开调度。其他动作及Transport.outcome本身仍按原规则，不把FAILED改成SUCCEEDED。当前手工与 BIN_Roller 已通过原接纳读口消费此依据。
 
 
 分类器按 Transport 合同 §4.2 实现，不按 HTTP 状态码单独判断。下面的具体响应可以直接转成测试输入，都针对 上面的请求示例 那条带合法任务 ID 的请求，JSON 响应头为 `Content-Type: application/json`。空响应体按原始字节 `b""` 判断，不能用 `{}`、`null` 或空白替代。

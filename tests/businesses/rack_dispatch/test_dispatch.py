@@ -598,3 +598,63 @@ async def test_jobs_filter_original_source_and_include_terminal_candidates(rack)
     assert {
         j.id for j in await dispatch.jobs(db, work_line_id=12, source_kinds=("ROLLER_DRAIN",))
     } == {own, active, other}
+
+
+@pytest.mark.parametrize("already_registered", [False, True])
+async def test_unbound_roller_move_recovers_original_client_identity(rack, already_registered):
+    from sqlalchemy import func, select
+
+    from app.businesses._components.rack_dispatch.models import RackAction
+    from app.models import ReliableMessage, TransportTask
+
+    db, dispatch = rack
+    job = await dispatch.register(db, origin("ROLLER_ORDINARY"))
+    client = str(uuid7())
+    if already_registered:
+        await dispatch.prepare(db, job_id=job, kind="ENTER", source_ref="entry", face="90")
+        action = (await dispatch.progress(db, job_id=job)).actions[-1]
+        client = action.client_request_id
+        old = await db.get(RackAction, action.id)
+        old.transport_task_id = old.submit_operation_id = old.submit_message_id = (
+            old.submit_target
+        ) = None
+    else:
+        old = RackAction(
+            id="original",
+            job_id=job,
+            owner_domain="owner",
+            work_line_id=12,
+            ordinal=1,
+            kind="ENTER",
+            source_ref="entry",
+            phase="REGISTERED",
+            caller={"workline_id": "caller", "station_id": "station"},
+            source={"kind": "RACK", "location_code": "rack"},
+            target={"kind": "RACK_POSITION", "location_code": "P"},
+            target_face="90",
+            template="CTU01",
+            completion_rule="APPLIED_RESULT",
+            client_request_id=client,
+        )
+        db.add(old)
+    old.basis = {
+        "legacy_table": "bin_roller_rack_action",
+        "legacy_id": old.id,
+        "legacy_state": "PENDING",
+        "legacy_pending": True,
+    }
+    await db.flush()
+    for _ in range(2):
+        progress = await dispatch.advance(
+            db, job_id=job, **evidence(job, demand="CONTINUE"), now_ms=10
+        )
+    (recovered,) = progress.actions
+    assert recovered.transport_task_id and recovered.client_request_id == client
+    if already_registered:
+        assert (
+            recovered.transport_task_id,
+            recovered.submit_operation_id,
+            recovered.submit_message_id,
+        ) == (action.transport_task_id, action.submit_operation_id, action.submit_message_id)
+    assert await db.scalar(select(func.count()).select_from(TransportTask)) == 1
+    assert await db.scalar(select(func.count()).select_from(ReliableMessage)) == 1

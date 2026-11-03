@@ -1326,8 +1326,8 @@ def coarse_sorting_composition(table):
 
 
 @asynccontextmanager
-async def formal_manual_fixture(factory, monkeypatch):
-    """Formal catalog/default tables with two bound lines and only loopback peers."""
+async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
+    """Formal catalog/default tables with bound lines and only loopback peers."""
     import asyncio
     import json
     from types import SimpleNamespace
@@ -1464,7 +1464,7 @@ async def formal_manual_fixture(factory, monkeypatch):
         )
         state.sender = sender
         async with factory.begin() as session:
-            for number in (1, 2):
+            for number in range(1, line_count + 1):
                 devices = {
                     point: f"{prefix}-{number}-{point}"
                     for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")
@@ -1821,7 +1821,7 @@ async def manual_source_departure(flow, entry):
 
 async def manual_departure_obligation(flow, *, line=0):
     """Reach CTU03 through one real source plan, original arrival and WMS decisions."""
-    task = flow.prefix + "-old-task"
+    task = f"{flow.prefix}-old-task-{line}"
     assert (await flow.issue(task, line=line)).status_code == 202
     await flow.host.advance("TASK", task)
     await flow.dispatch()
@@ -1831,7 +1831,9 @@ async def manual_departure_obligation(flow, *, line=0):
         dict(
             task_id=task,
             plan_revision=1,
-            added_bin_source_racks=[dict(rack_id=flow.prefix + "-old-rack", rack_face=["A"])],
+            added_bin_source_racks=[
+                dict(rack_id=f"{flow.prefix}-old-rack-{line}", rack_face=["A"])
+            ],
         ),
     )
     assert response.status_code == 202

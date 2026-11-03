@@ -431,8 +431,10 @@ def shared_wms_contract(monkeypatch):
 
 
 @pytest.fixture
-async def formal_manual(pg_sessions, monkeypatch):
+async def formal_manual(pg_sessions, monkeypatch, request):
     from tests.helpers import formal_manual_fixture
 
-    async with formal_manual_fixture(pg_sessions, monkeypatch) as state:
+    async with formal_manual_fixture(
+        pg_sessions, monkeypatch, line_count=getattr(request, "param", 2)
+    ) as state:
         yield state

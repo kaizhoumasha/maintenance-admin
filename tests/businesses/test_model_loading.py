@@ -119,3 +119,19 @@ def test_formal_and_local_package_members_keep_supported_layouts(monkeypatch):
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     assert catalog.entry_modules("request", environment="production") == entry.ENTRY_MODULES[:1]
     assert catalog.entry_modules("request", environment="local") == entry.ENTRY_MODULES
+
+
+def test_formal_hosts_load_shared_dispatch_models():
+    from app.models import Base
+
+    catalog.load_business_models()
+    names = {table.name for table in Base.metadata.tables.values()}
+    assert {"rack_dispatch_job", "rack_dispatch_action"} <= names
+    assert names.isdisjoint(
+        {
+            "smt_manual_rack",
+            "smt_manual_rack_action",
+            "bin_roller_rack_cycle",
+            "bin_roller_rack_action",
+        }
+    )
