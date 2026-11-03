@@ -64,7 +64,7 @@ Follow history: `feat:`, `fix:`, `test:`, `chore:`, concise Chinese descriptions
 Baseline is `main` at tag `v0.1.0`; work follows Git Flow from there.
 
 - `main`: released code only. Every commit is a release or hotfix merge, tagged `vX.Y.Z` (annotated). Never commit directly.
-- `develop`: integration branch, always green (CI runs ruff and pytest on every push and PR). All new work branches from it.
+- `develop`: integration branch, always green (CI runs ruff and pytest on PRs or manual dispatch, not pushes; merging requires a PR, a passing `test` check, and an up-to-date branch). All new work branches from it.
 - `feature/<slug>` (from `develop`, e.g. `feature/spec-017-dictionary`): merge back with `--no-ff` or a PR into `develop`, then delete the branch.
 - `release/X.Y.Z` (from `develop`): only the version bump (`pyproject.toml` and `version=` in `app/main.py`), upgrade notes, and fixes. Merge into `main` with `--no-ff`, tag `vX.Y.Z` on `main`, merge back into `develop`, delete the branch.
 - `hotfix/X.Y.Z` (from `main`): urgent production fix. Merge into `main` (tag) and `develop`.
