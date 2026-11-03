@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 
 from app.diagnostics import log_exception
@@ -23,6 +23,7 @@ async def send_one(
     clock: Callable[[], datetime],
     uniform: Callable[[float, float], float],
     provider=None,
+    observe_delivered: Callable[[Claim, AttemptOutcome], Awaitable[None]] | None = None,
 ) -> None:
     if claim.message.delivery_snapshot is not None:
         await send_snapshot(
@@ -112,6 +113,18 @@ async def send_one(
             FailReason.LOCAL_ERROR,
             result=result if isinstance(result, HttpResult) else None,
         )
+    if observe_delivered is not None and outcome.status == MessageStatus.DONE:
+        try:
+            await observe_delivered(claim, outcome)
+        except Exception as error:
+            log_exception(
+                logger,
+                "Delivered evidence unavailable",
+                error,
+                component="reliable",
+                phase="observe_delivered",
+                context={"message_id": claim.message_id},
+            )
     changed = await store.finish(claim, outcome)
     if not changed:
         return

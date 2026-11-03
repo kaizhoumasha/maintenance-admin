@@ -3,11 +3,12 @@ import json
 from dataclasses import replace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.http_client import AsyncHttpClient, DeliveryState, HttpClientConfig, HttpResult
 from app.integrations.wms_transport import Rack, RackPosition, TransportCaller
-from app.models import ReliableMessage
+from app.integrations.wms_transport.acceptance import submission_observer
+from app.models import ReliableMessage, TransportTask
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore, cleanup_terminal
 from app.reliable.testing import ScriptedHttpClient
@@ -25,13 +26,14 @@ def ack(raw, code):
     ).encode()
 
 
-def sender_for(rig, client):
+def sender_for(rig, client, **kwargs):
     return Sender(
         MessageStore(rig.factory, clock=rig.clock),
         {rig.target.name: rig.target},
         rig.adapters,
         {rig.target.name: client},
         clock=rig.clock,
+        **kwargs,
     )
 
 
@@ -152,3 +154,80 @@ async def test_real_http_preserves_bytes_and_recovers_lost_response(
                 assert body == raw and b"station-local" not in body
         finally:
             await sender.aclose()
+
+
+@pytest.mark.parametrize("fault", ["save", "settle_and_save", "finish"])
+async def test_failed_evidence_or_finish_preserves_available_ack(
+    transport_storage, transport_request, fault, rack_failure_callback
+):
+    rig = transport_storage
+    rig.service.owner_domain = "original"
+    async with rig.factory.begin() as session:
+        handle = await rig.service.move_rack(session, **transport_request)
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+        )
+    calls = 0
+    notices = []
+
+    class Peer:
+        async def send(self, request):
+            nonlocal calls
+            calls += 1
+            if fault == "settle_and_save":
+                async with rig.factory.begin() as session:
+                    await rack_failure_callback(rig, session, handle, "rack")
+            return HttpResult(
+                DeliveryState.HTTP_RESPONSE_COMPLETE, None, 202, (), ack(request.body, "RECEIVED")
+            )
+
+        async def aclose(self):
+            pass
+
+    def factory():
+        session = rig.factory()
+
+        def fail(_):
+            raise ConnectionError("injected commit failure")
+
+        if fault != "finish":
+            event.listen(session.sync_session, "before_commit", fail)
+        return session
+
+    sender = sender_for(
+        rig,
+        Peer(),
+        observe_delivered=submission_observer(rig.outbox.targets, factory, notices.append),
+    )
+    if fault == "finish":
+
+        async def broken_finish(*args):
+            raise ConnectionError("finish unavailable")
+
+        sender.store.finish = broken_finish
+    try:
+        if fault == "finish":
+            with pytest.raises(ConnectionError, match="finish unavailable"):
+                await deliver(sender)
+        else:
+            await deliver(sender)
+        async with rig.factory() as session:
+            observed = await rig.service.get_submission_acceptance(
+                session,
+                transport_task_id=handle.transport_task_id,
+                client_request_id=handle.client_request_id,
+                caller=transport_request["caller"],
+            )
+            state = await session.get(ReliableMessage, message.id)
+            task = await session.scalar(
+                select(TransportTask).where(
+                    TransportTask.transport_task_id == handle.transport_task_id
+                )
+            )
+            assert (task.submission_acceptance is not None) is (fault == "finish")
+            assert observed.state == ("MISSING" if fault == "settle_and_save" else "ACCEPTED")
+            assert state.status == ("SENDING" if fault == "finish" else "DONE")
+            assert (state.response_raw is not None) is (fault == "save")
+        assert calls == 1 and notices == (["original"] if fault == "finish" else [])
+    finally:
+        await sender.aclose()

@@ -11,7 +11,7 @@ from app.http_client import AsyncHttpClient, HttpClient, HttpClientConfig
 from app.reliable import Outbox, OutgoingMessage, ProtocolAdapter
 from app.reliable.config import ReliableConfig
 from app.reliable.sender import Sender
-from app.reliable.store import MessageStore
+from app.reliable.store import AttemptOutcome, Claim, MessageStore
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ async def reliable_lifespan(
     lifecycles=None,
     client_provider=None,
     on_result: Callable[[str, str | None], None] | None = None,
+    observe_delivered: Callable[[Claim, AttemptOutcome], Awaitable[None]] | None = None,
     on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[None]] | None = None,
 ) -> AsyncIterator[Outbox | None]:
     url = database_url or get_settings().DATABASE_URL
@@ -52,6 +53,7 @@ async def reliable_lifespan(
         budget=config,
         dispose=engine.dispose,
         provider=client_provider,
+        observe_delivered=observe_delivered,
     )
     try:
         for name, target in config.targets.items():

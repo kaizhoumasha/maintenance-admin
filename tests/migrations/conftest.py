@@ -3,10 +3,12 @@ import os
 import subprocess
 import sys
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.database import create_database_engine
 
@@ -91,3 +93,20 @@ async def state_migration(request, tmp_path):
         )
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def schema_database(pg_url):
+    database = "schema_test_" + uuid4().hex
+    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    async with admin.connect() as connection:
+        await connection.execute(text(f'CREATE DATABASE "{database}"'))
+    url = make_url(pg_url).set(database=database).render_as_string(hide_password=False)
+    engine = create_async_engine(url)
+    try:
+        yield url, engine
+    finally:
+        await engine.dispose()
+        async with admin.connect() as connection:
+            await connection.execute(text(f'DROP DATABASE "{database}" WITH (FORCE)'))
+        await admin.dispose()

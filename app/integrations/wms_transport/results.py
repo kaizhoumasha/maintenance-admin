@@ -3,7 +3,7 @@
 from copy import deepcopy
 from dataclasses import dataclass, replace
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import json_object
@@ -60,23 +60,37 @@ class TransportTaskResult:
     closure_basis: dict | None = None
 
 
-async def read_rows(session: AsyncSession, ids: tuple[str, ...]) -> dict:
+async def read_rows(
+    session: AsyncSession, ids: tuple[str, ...], *, check_conflicts: bool = False
+) -> dict:
     """One statement includes all original submission matches, including ambiguity."""
     if not ids:
         return {}
     task, message = TransportTask.__table__, ReliableMessage.__table__
+    match_identity = or_ if check_conflicts else and_
+    columns = (*RESPONSE_COLUMNS, "delivery_snapshot") if check_conflicts else RESPONSE_COLUMNS
+    task_columns = [c for c in task.c if c.name != "submission_acceptance"]
+    if check_conflicts:
+        task_columns.extend(
+            (
+                task.c.submission_acceptance,
+                task.c.submission_acceptance.is_not(None).label("has_acceptance"),
+            )
+        )
     query = (
         select(
-            *[c.label("task_" + c.name) for c in task.c],
-            *[message.c[n].label("submit_" + n) for n in RESPONSE_COLUMNS],
+            *[c.label("task_" + c.name) for c in task_columns],
+            *[message.c[n].label("submit_" + n) for n in columns],
         )
         .select_from(
             task.outerjoin(
                 message,
                 and_(
-                    message.c.operation_id == task.c.operation_id,
                     message.c.operation == OPERATION,
-                    message.c.business_key == task.c.transport_task_id,
+                    match_identity(
+                        message.c.operation_id == task.c.operation_id,
+                        message.c.business_key == task.c.transport_task_id,
+                    ),
                 ),
             )
         )
@@ -88,9 +102,9 @@ async def read_rows(session: AsyncSession, ids: tuple[str, ...]) -> dict:
     for row in rows:
         key = row["task_transport_task_id"]
         if key not in grouped:
-            grouped[key] = ({c.name: row["task_" + c.name] for c in task.c}, [])
+            grouped[key] = ({c.name: row["task_" + c.name] for c in task_columns}, [])
         if row["submit_id"] is not None:
-            grouped[key][1].append({n: row["submit_" + n] for n in RESPONSE_COLUMNS})
+            grouped[key][1].append({n: row["submit_" + n] for n in columns})
     return grouped
 
 

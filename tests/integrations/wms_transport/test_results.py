@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import JSON, delete, select, update
 
 from app.integrations.wms_transport import TransportCaller, TransportService
 from app.models import ReliableMessage, TransportTask
@@ -404,3 +404,77 @@ async def test_refusal_and_applied_position_milestones_require_reconciliation(
     resolved = await read(factory, task)
     assert resolved.closure == "CLOSED" and resolved.closure_reason == "APPLIED_RESULT"
     assert resolved.member_facts == result.member_facts
+
+
+@pytest.mark.parametrize(
+    "case,state",
+    [
+        ("valid", "ACCEPTED"),
+        ("rejected", "INVALID"),
+        ("echo", "INVALID"),
+        ("request", "INVALID"),
+        ("duplicate_key", "INVALID"),
+        ("corrupt_preferred", "INVALID"),
+        ("json_null", "INVALID"),
+        ("corrupt_digest", "INVALID"),
+        ("settled", "MISSING"),
+        ("owner", "IDENTITY_MISMATCH"),
+        ("caller", "IDENTITY_MISMATCH"),
+    ],
+)
+async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
+    transport_rig, case, state
+):
+    factory = transport_rig.factory
+    task = await result_task(factory)
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.target == task.target)
+        )
+        row.status = "DONE"
+        row.last_http_status, row.last_verdict = 202, "DELIVERED"
+        row.response_raw = json.dumps(
+            {
+                "operation_id": row.operation_id,
+                "code": "RECEIVED",
+                "timestamp": 1,
+                "data": {"transport_task_id": task.handle.transport_task_id},
+            }
+        ).encode()
+        if case == "rejected":
+            row.last_http_status = 422
+            row.response_raw = row.response_raw.replace(b"RECEIVED", b"REJECTED")
+        if case == "echo":
+            row.response_raw = row.response_raw.replace(
+                task.handle.transport_task_id.encode(), b"wrong"
+            )
+        if case == "request":
+            row.request_raw += b" "
+        if case == "duplicate_key":
+            row.response_raw = b'{"code":"RECEIVED",' + row.response_raw[1:]
+        if case == "settled":
+            row.response_raw = None
+        if case == "corrupt_preferred":
+            await session.execute(
+                update(TransportTask).values(submission_acceptance={"partial": True})
+            )
+        if case == "json_null":
+            await session.execute(update(TransportTask).values(submission_acceptance=JSON.NULL))
+        if case == "corrupt_digest":
+            await session.execute(update(TransportTask).values(input_digest="a" * 64))
+        if case == "owner":
+            task.service.owner_domain = "other"
+        await session.execute(
+            update(TransportTask)
+            .where(TransportTask.transport_task_id == task.handle.transport_task_id)
+            .values(applied_outcome={"bad": "outcome"})
+        )
+    async with factory() as session:
+        result = await task.service.get_submission_acceptance(
+            session,
+            transport_task_id=task.handle.transport_task_id,
+            client_request_id=task.handle.client_request_id,
+            caller=TransportCaller("other") if case == "caller" else task.caller,
+        )
+    assert result.state == state
+    assert (result.basis is not None) == (state == "ACCEPTED")

@@ -13,6 +13,7 @@ from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 
+from .acceptance import SubmissionAcceptance, get_submission_acceptance
 from .adapter import ADAPTERS
 from .predecessors import PredecessorQueryResult, list_unclosed_predecessors
 from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL, SUBMIT_TTL
@@ -89,6 +90,23 @@ class TransportService:
             transport_task_id=transport_task_id,
             client_request_id=client_request_id,
             caller=caller,
+        )
+
+    async def get_submission_acceptance(
+        self,
+        session: AsyncSession,
+        *,
+        transport_task_id: str,
+        client_request_id: str,
+        caller: TransportCaller,
+    ) -> SubmissionAcceptance:
+        return await get_submission_acceptance(
+            session,
+            transport_task_id=transport_task_id,
+            client_request_id=client_request_id,
+            caller=caller,
+            owner=self.owner_domain,
+            target=self._target,
         )
 
     async def list_unclosed_predecessors(

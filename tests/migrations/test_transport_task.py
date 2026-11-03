@@ -18,12 +18,17 @@ REVISION = "a019d20261022"
 
 
 @pytest.fixture(params=["sqlite", "pg"])
-async def transport_db(request, tmp_path):
-    url = (
+def transport_migration_url(request, tmp_path):
+    return (
         f"sqlite+aiosqlite:///{tmp_path / 'transport.db'}"
         if request.param == "sqlite"
-        else request.getfixturevalue("pg_url")
+        else request.getfixturevalue("schema_database")[0]
     )
+
+
+@pytest.fixture
+async def transport_db(transport_migration_url):
+    url = transport_migration_url
 
     async def migrate(command, revision):
         return await asyncio.to_thread(
@@ -36,19 +41,11 @@ async def transport_db(request, tmp_path):
 
     upgraded = await migrate("upgrade", REVISION)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
-    # 共享 PostgreSQL 库可能已在更新的 head 上:upgrade 对它是空操作,这里把库收敛到本迁移版本
-    targeted = await migrate("downgrade", REVISION)
-    assert targeted.returncode == 0, targeted.stdout + targeted.stderr
     engine = create_async_engine(url)
     try:
         yield engine, migrate
     finally:
-        async with engine.begin() as connection:
-            await connection.execute(TransportTask.__table__.delete())
         await engine.dispose()
-        if request.param == "pg":
-            restored = await migrate("upgrade", "head")
-            assert restored.returncode == 0, restored.stdout + restored.stderr
 
 
 async def test_identity_constraints_and_safe_downgrade(transport_db):
@@ -96,3 +93,41 @@ async def test_identity_constraints_and_safe_downgrade(transport_db):
         assert not await connection.run_sync(lambda sync: inspect(sync).has_table("transport_task"))
     restored = await migrate("upgrade", REVISION)
     assert restored.returncode == 0, restored.stdout + restored.stderr
+
+
+async def test_original_acceptance_survives_refused_downgrade(transport_db):
+    engine, migrate = transport_db
+    previous = await migrate("upgrade", "fiveracklimit")
+    assert previous.returncode == 0, previous.stdout + previous.stderr
+    async with engine.begin() as conn:
+        await conn.execute(
+            insert(TransportTask).values(
+                transport_task_id="transport-" + str(uuid7()),
+                client_request_id=str(uuid7()),
+                operation_id=str(uuid7()),
+                kind="RACK_MOVE",
+                input_digest="a" * 64,
+                workline_id="test",
+                created_at=datetime.now(UTC),
+            )
+        )
+    upgrade = await migrate("upgrade", "racksubmitack")
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+    async with engine.begin() as conn:
+        assert (
+            await conn.scalar(
+                select(TransportTask.input_digest).where(
+                    TransportTask.submission_acceptance.is_(None)
+                )
+            )
+            == "a" * 64
+        )
+        await conn.execute(
+            TransportTask.__table__.update().values(submission_acceptance={"record": 1})
+        )
+    refused = await migrate("downgrade", "fiveracklimit")
+    assert refused.returncode != 0 and "submission_acceptance" in refused.stdout + refused.stderr
+    async with engine.begin() as conn:
+        assert await conn.scalar(select(TransportTask.submission_acceptance)) == {"record": 1}
+        await conn.execute(TransportTask.__table__.delete())
+    assert (await migrate("downgrade", "fiveracklimit")).returncode == 0

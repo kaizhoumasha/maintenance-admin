@@ -52,6 +52,7 @@
 transport-callback-design。
 """
 
+from .acceptance import AcceptanceBasis, SubmissionAcceptance
 from .adapter import ADAPTERS, TransportSubmitAdapter
 from .bin_scenarios import BinScenarios, bin_scenarios
 from .predecessors import PredecessorItem, PredecessorQueryResult
@@ -74,6 +75,8 @@ from .types import (
 )
 
 __all__ = [
+    "AcceptanceBasis",
+    "SubmissionAcceptance",
     "TransportTaskResult",
     "PredecessorItem",
     "PredecessorQueryResult",

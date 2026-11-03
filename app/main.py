@@ -8,7 +8,6 @@ from app.business_wakeups import (
     ecs_result_committed,
     event_committed,
     notify_business_committed,
-    transport_submit_delivered,
     wms_result_committed,
 )
 from app.businesses import catalog
@@ -39,6 +38,7 @@ from app.integrations.discovery import load_formal_modules, load_local_modules
 from app.integrations.ecs_command.runtime import configure_ecs, ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
+from app.integrations.wms_transport.acceptance import submission_observer
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
 from app.services.device_bindings import resolve_binding
@@ -79,13 +79,16 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         application.state.ecs_result_committed = (
             getattr(application.state, "ecs_result_committed", None) or ecs_result_committed
         )
+        config = ecs_runtime_config(settings, ecs_commands)
         async with reliable_lifespan(
-            ecs_runtime_config(settings, ecs_commands),
+            config,
             getattr(application.state, "reliable_adapters", {}),
             lifecycles=getattr(application.state, "reliable_lifecycles", {}),
             client_provider=getattr(application.state, "reliable_client_provider", None),
             on_result=wms_result_committed,
-            on_delivered=transport_submit_delivered,
+            observe_delivered=submission_observer(
+                config.targets, session_factory, application.state.business_committed
+            ),
         ) as outbox:
             application.state.outbox = outbox
             if ecs_commands is not None:

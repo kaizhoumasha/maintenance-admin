@@ -3,12 +3,15 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import event, select
+from sqlalchemy import delete, event, select
+from sqlalchemy.exc import OperationalError
 
 from app import business_wakeups
 from app.businesses import catalog
@@ -22,19 +25,22 @@ from app.integrations.wms_transport import (
     TransportCaller,
     TransportService,
 )
+from app.integrations.wms_transport.acceptance import submission_observer
 from app.models import ReliableMessage, TransportTask
 from app.reliable.config import ReliableConfig
 from app.reliable.store import AttemptOutcome, MessageStore
-from app.reliable.types import FailReason, MessageStatus
+from app.reliable.types import MessageStatus
 
 
 @pytest.mark.parametrize("status,code", [(202, "RECEIVED"), (200, "DUPLICATE")])
-async def test_application_sender_wakes_original_submit_owner(
-    pg_transport_rig, pg_url, monkeypatch, status, code
+@pytest.mark.parametrize("path", ["current", "late", "duplicate_evidence", "rollback"])
+async def test_late_ack_survives_settle_and_cleanup(
+    pg_transport_rig, pg_url, monkeypatch, status, code, path, rack_failure_callback
 ):
     import app.main as main
     from app.reliable_runtime import reliable_lifespan
 
+    late = path == "late"
     rig = pg_transport_rig
     rig.clock.current = datetime.now(UTC)
     service = TransportService(rig.outbox, target=rig.target.name, owner_domain="original")
@@ -65,8 +71,15 @@ async def test_application_sender_wakes_original_submit_owner(
     )
     monkeypatch.setattr(business_wakeups, "enqueue_business", notices.append)
 
+    calls = 0
+    sending, release = asyncio.Event(), asyncio.Event()
+
     class Peer:
         async def send(self, request):
+            nonlocal calls
+            calls += 1
+            sending.set()
+            await release.wait()
             assert request.body == frozen
             data = json.loads(request.body)
             raw = json.dumps(
@@ -84,6 +97,14 @@ async def test_application_sender_wakes_original_submit_owner(
 
     @asynccontextmanager
     async def runtime(config, adapters, **kwargs):
+        if path == "duplicate_evidence":
+            observe = kwargs["observe_delivered"]
+
+            async def observe_twice(claim, outcome):
+                await observe(claim, outcome)
+                await observe(claim, outcome)
+
+            kwargs["observe_delivered"] = observe_twice
         async with reliable_lifespan(
             ReliableConfig(rig.outbox.targets),
             ADAPTERS,
@@ -104,20 +125,37 @@ async def test_application_sender_wakes_original_submit_owner(
     monkeypatch.setattr(main, "get_redis", redis)
     monkeypatch.setattr(main, "reliable_lifespan", runtime)
     monkeypatch.setattr(main, "ecs_runtime_config", lambda *_: ReliableConfig(rig.outbox.targets))
+
+    def observer_session():
+        session = rig.factory()
+        if path == "rollback":
+
+            def reject(_):
+                raise ConnectionError("commit failed")
+
+            event.listen(session.sync_session, "before_commit", reject, once=True)
+        return session
+
+    monkeypatch.setattr(main, "session_factory", observer_session)
     application = FastAPI()
     application.state.ecs_commands = SimpleNamespace()
     application.state.business_runtime = BusinessRuntime({}, {})
     async with main.lifespan(application):
+        await asyncio.wait_for(sending.wait(), 5)
+        if late:
+            async with rig.factory.begin() as callback:
+                await rack_failure_callback(rig, callback, handle, "R1")
+        release.set()
         async with asyncio.timeout(5):
             while True:
                 async with rig.factory() as session:
                     message = await session.scalar(
                         select(ReliableMessage).where(ReliableMessage.operation_id == identity[0])
                     )
-                    if message.status == "DONE":
+                    if message.status == "DONE" and (not late or notices):
                         break
                 await asyncio.sleep(0.01)
-        assert notices == ["original"]
+        assert notices == ([] if path == "rollback" else ["original"])
         async with rig.factory() as session:
             original = await session.scalar(
                 select(TransportTask).where(
@@ -132,17 +170,40 @@ async def test_application_sender_wakes_original_submit_owner(
             assert (
                 message.business_key == handle.transport_task_id and message.request_raw == frozen
             )
-            assert original.applied_outcome_revision is None
+            assert original.applied_outcome_revision == (1 if late else None)
+            assert (
+                message.lease_id is None and message.attempts == (0 if late else 1) and calls == 1
+            )
+            assert (message.response_raw is None) is late
+            await session.execute(delete(ReliableMessage).where(ReliableMessage.id == message.id))
+            await session.commit()
+            service.owner_domain = "original"
+            result = await service.get_submission_acceptance(
+                session,
+                transport_task_id=handle.transport_task_id,
+                client_request_id=handle.client_request_id,
+                caller=TransportCaller(rig.target.name),
+            )
+            if path == "rollback":
+                assert result.state == "MISSING" and result.basis is None
+            else:
+                assert result.state == "ACCEPTED" and result.basis.response_code == code
+                snapshot = asdict(result.basis)
+                assert snapshot["caller"] == {"workline_id": rig.target.name, "station_id": None}
+                assert snapshot["request_sha256"] == sha256(frozen).hexdigest()
+                assert snapshot["message_id"] == message.id and snapshot["accepted_at"] == 1
+                assert snapshot["request_raw"].encode() == frozen
+                assert result.basis.frozen["rcs_template_id"] == "CTU03"
+                assert (
+                    json.loads(snapshot["response_raw"])["data"]["transport_task_id"]
+                    == handle.transport_task_id
+                )
 
 
 @pytest.fixture
-async def submit(transport_storage, transport_request, monkeypatch):
+async def submit(transport_storage, transport_request):
     rig = transport_storage
     notices = []
-    monkeypatch.setattr(
-        catalog, "progressions", lambda: {"original": "scan_pending", "current": "scan_pending"}
-    )
-    monkeypatch.setattr(business_wakeups, "enqueue_business", notices.append)
     service = TransportService(
         rig.outbox, target=rig.target.name, owner_domain="original", clock=rig.clock
     )
@@ -151,8 +212,6 @@ async def submit(transport_storage, transport_request, monkeypatch):
     store = MessageStore(
         rig.factory,
         clock=rig.clock,
-        on_result=business_wakeups.wms_result_committed,
-        on_delivered=business_wakeups.transport_submit_delivered,
     )
     [claim] = await store.claim(1, rig.outbox.targets)
 
@@ -174,128 +233,127 @@ async def submit(transport_storage, transport_request, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("status,code", [(202, "RECEIVED"), (200, "DUPLICATE")])
-async def test_current_acceptance_notifies_once_without_applied_outcome(submit, status, code):
-    flow = submit
-    outcome = flow.outcome(status, code)
-    original = flow.claim.message
-    assert await flow.store.finish(flow.claim, outcome)
-    assert flow.notices == ["original"]
-    assert not await flow.store.finish(flow.claim, outcome)
-    assert flow.notices == ["original"]
-    async with flow.rig.factory() as session:
-        task = await session.scalar(
-            select(TransportTask).where(
-                TransportTask.transport_task_id == flow.handle.transport_task_id
-            )
-        )
-        message = await session.get(ReliableMessage, flow.claim.message_id)
-        assert message.status == "DONE" and message.response_raw == outcome.result.body
-        assert message.operation_id == original.operation_id
-        assert message.business_key == original.business_key
-        assert message.request_raw == original.request_raw
-        assert task.applied_outcome_revision is None and task.owner_domain == "original"
-
-
 @pytest.mark.parametrize(
-    "case", ["task_id", "operation_id", "unowned", "unknown_owner", "lost_lease"]
+    "case", ["duplicate", "message_id", "target", "wrong_protocol", "wrong_body"]
 )
-async def test_acceptance_never_guesses_original_owner(submit, case):
+async def test_evidence_requires_original_claim_and_keeps_first_ack(submit, case):
     flow = submit
+    observe = submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)
+    claim = flow.claim
+    if case == "target":
+        claim = replace(claim, message=replace(claim.message, target="unconfigured"))
+    if case == "message_id":
+        claim = replace(claim, message_id=claim.message_id + 20)
+    if case == "wrong_protocol":
+        observe = submission_observer(
+            {claim.message.target: replace(flow.rig.target, protocol="other")},
+            flow.rig.factory,
+            flow.notices.append,
+        )
+    if case == "wrong_body":
+        claim = replace(
+            claim, message=replace(claim.message, request_raw=claim.message.request_raw + b" ")
+        )
+    if case in {"wrong_body", "message_id"}:
+        with pytest.raises(ValueError):
+            await observe(claim, flow.outcome())
+    else:
+        await observe(claim, flow.outcome())
+    if case == "duplicate":
+        await observe(claim, flow.outcome(200, "DUPLICATE"))
+    async with flow.rig.factory() as session:
+        task = (
+            await session.scalars(
+                select(TransportTask).where(
+                    TransportTask.transport_task_id == flow.handle.transport_task_id
+                )
+            )
+        ).one()
+        if case == "duplicate":
+            assert task.submission_acceptance["response_code"] == "RECEIVED"
+        else:
+            assert task.submission_acceptance is None
+    assert flow.notices == (["original"] if case == "duplicate" else [])
+
+
+async def test_saved_attempt_identity_is_revalidated_after_outbox_cleanup(
+    submit, transport_request
+):
+    flow = submit
+    await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+        flow.claim, flow.outcome()
+    )
     async with flow.rig.factory.begin() as session:
         task = await session.scalar(
             select(TransportTask).where(
                 TransportTask.transport_task_id == flow.handle.transport_task_id
             )
         )
-        if case == "task_id":
-            task.transport_task_id = "transport-" + str(uuid7())
-        elif case == "operation_id":
-            task.operation_id = str(uuid7())
-        elif case == "unowned":
-            task.owner_domain = None
-        elif case == "unknown_owner":
-            task.owner_domain = "removed"
-        else:
-            message = await session.get(ReliableMessage, flow.claim.message_id)
-            message.lease_id = "new-lease"
-    assert await flow.store.finish(flow.claim, flow.outcome()) is (case != "lost_lease")
-    assert flow.notices == []
-
-
-@pytest.mark.parametrize("case", ["unknown", "unavailable", "failed", "expired"])
-async def test_unaccepted_submit_never_notifies_owner(submit, case):
-    flow = submit
-    if case == "expired":
-        flow.rig.clock.advance(3600)
-        outcome = AttemptOutcome(MessageStatus.EXPIRED)
-    else:
-        status, code = {
-            "unknown": (202, "BOGUS"),
-            "unavailable": (503, "UNAVAILABLE"),
-            "failed": (422, "REJECTED"),
-        }[case]
-        outcome = flow.outcome(
-            status, code, **({"reason_code": "INVALID_DATA"} if case == "failed" else {})
+        task.submission_acceptance = {
+            **task.submission_acceptance,
+            "message_id": flow.claim.message_id + 1,
+        }
+        await session.execute(
+            delete(ReliableMessage).where(ReliableMessage.id == flow.claim.message_id)
         )
-        if case == "failed":
-            outcome = AttemptOutcome(
-                MessageStatus.FAILED,
-                fail_reason=FailReason.REJECTED,
-                result=outcome.result,
-                verdict=outcome.verdict,
-            )
-        else:
-            outcome = AttemptOutcome(
-                MessageStatus.PENDING,
-                result=outcome.result,
-                verdict=outcome.verdict,
-                next_attempt_at=flow.rig.clock(),
-            )
-    assert await flow.store.finish(flow.claim, outcome)
-    assert flow.notices == []
-
-
-@pytest.mark.parametrize("end", ["commit", "rollback", "savepoint_rollback", "commit_failure"])
-async def test_submit_notice_waits_for_successful_outer_commit(submit, end):
-    flow = submit
+    service = TransportService(
+        flow.rig.outbox, target=flow.rig.target.name, owner_domain="original"
+    )
     async with flow.rig.factory() as session:
-        await session.begin()
-        begin_nested = session.begin_nested
-        session.begin = begin_nested
+        result = await service.get_submission_acceptance(
+            session,
+            transport_task_id=flow.handle.transport_task_id,
+            client_request_id=flow.handle.client_request_id,
+            caller=transport_request["caller"],
+        )
+        assert result.state == "INVALID" and result.basis is None
 
-        @asynccontextmanager
-        async def factory():
+
+@pytest.mark.parametrize(
+    "sqlstate,failures", [("40001", 2), ("40P01", 3), ("other", 1), ("lost_reply", 1)]
+)
+async def test_evidence_transactions_retry_without_changing_the_original_claim(
+    submit, sqlstate, failures
+):
+    flow = submit
+    attempts = []
+
+    class Failure(Exception):
+        pass
+
+    @asynccontextmanager
+    async def factory():
+        async with flow.rig.factory() as session:
+            attempts.append(session)
+            if len(attempts) <= failures:
+
+                def fail(_):
+                    assert flow.notices == []
+                    error = Failure()
+                    error.sqlstate = sqlstate
+                    raise OperationalError(None, None, error)
+
+                if sqlstate != "lost_reply":
+                    event.listen(session.sync_session, "before_commit", fail, once=True)
             yield session
+            if sqlstate == "lost_reply" and len(attempts) == 1:
+                raise ConnectionError("lost commit reply")
 
-        flow.store.session_factory = factory
-        if end == "savepoint_rollback":
-
-            def reject_savepoint(_):
-                raise ValueError("savepoint rejected")
-
-            event.listen(session.sync_session, "before_commit", reject_savepoint, once=True)
-            with pytest.raises(ValueError, match="savepoint rejected"):
-                await flow.store.finish(flow.claim, flow.outcome())
-            await session.commit()
-        else:
-            assert await flow.store.finish(flow.claim, flow.outcome())
-            assert flow.notices == []
-            if end == "rollback":
-                await session.rollback()
-            elif end == "commit_failure":
-
-                def reject_outer(_):
-                    raise ValueError("outer commit rejected")
-
-                event.listen(session.sync_session, "before_commit", reject_outer, once=True)
-                with pytest.raises(ValueError, match="outer commit rejected"):
-                    await session.commit()
-                await session.rollback()
-            else:
-                await session.commit()
-    assert flow.notices == (["original"] if end == "commit" else [])
-    async with flow.rig.factory() as reader:
-        row = await reader.get(ReliableMessage, flow.claim.message_id)
-        assert row.status == ("DONE" if end == "commit" else "SENDING")
-        assert (row.response_raw is not None) is (end == "commit")
+    observe = submission_observer(flow.rig.outbox.targets, factory, flow.notices.append)
+    if sqlstate in {"other", "40P01"}:
+        with pytest.raises(OperationalError):
+            await observe(flow.claim, flow.outcome())
+    else:
+        await observe(flow.claim, flow.outcome())
+    accepted = sqlstate in {"40001", "lost_reply"}
+    assert len(attempts) == {"40001": 3, "40P01": 3, "other": 2, "lost_reply": 2}[sqlstate]
+    assert flow.notices == (["original"] if accepted else [])
+    async with flow.rig.factory() as session:
+        task = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == flow.handle.transport_task_id
+            )
+        )
+        assert (task.submission_acceptance is not None) is accepted
+        message = await session.get(ReliableMessage, flow.claim.message_id)
+        assert message.status == "SENDING" and message.lease_id == flow.claim.lease_id
