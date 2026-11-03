@@ -1,9 +1,11 @@
 """Cut over original rack lifecycles in one offline-writer transaction."""
 
 import json
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from uuid import UUID
 
 import sqlalchemy as sa
 from alembic import op
@@ -464,6 +466,37 @@ def _place(value):
     return {"kind": value.get("kind", value.get("type")), "location_code": value["location_code"]}
 
 
+def _wire_json(raw):
+    def unique_fields(pairs):
+        obj = dict(pairs)
+        if len(obj) != len(pairs):
+            raise ValueError("duplicate original wire field")
+        return obj
+
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_fields)
+
+
+def _terminal_response(message, operation_id, codes):
+    ack = _wire_json(message["response_raw"] or b"null")
+    _require(
+        message["status"] == "DONE"
+        and message["last_http_status"] == 200
+        and message["last_verdict"] == "DELIVERED"
+        and message["last_failure_kind"] is None
+        and message["fail_reason"] is None
+        and isinstance(ack, dict)
+        and set(ack) == {"operation_id", "code", "timestamp", "data"}
+        and ack["operation_id"] == operation_id
+        and type(ack["timestamp"]) is int
+        and 0 <= ack["timestamp"] < 2**63
+        and ack["code"] in codes
+        and isinstance(ack["data"], dict),
+        "terminal WMS response",
+        operation_id,
+    )
+    return {k: ack[k] for k in ("code", "timestamp", "data")}
+
+
 def _wire(messages, op_name, op_id, msg_id, data, keys, protocol):
     candidates = messages.get((op_name, op_id), ())
     if msg_id is not None and msg_id in messages:
@@ -481,7 +514,7 @@ def _wire(messages, op_name, op_id, msg_id, data, keys, protocol):
         op_id,
     )
     try:
-        wire = json.loads(m["request_raw"])
+        wire = _wire_json(m["request_raw"])
     except (ValueError, UnicodeError):
         wire = None
     _require(
@@ -602,6 +635,13 @@ def _move(job, r, manual, tasks, messages, positions):
     )
     t = tasks.get(a["client_request_id"])
     if t is None and a["transport_task_id"] is None:
+        for original_id in (a["client_request_id"], job["original_cycle_id"]):
+            parsed = UUID(original_id)
+            _require(
+                parsed.version == 7 and str(parsed) == original_id,
+                "unrecoverable unbound transport identity",
+                i,
+            )
         _require(
             not manual
             and r["operation_id"] is None
@@ -896,13 +936,17 @@ def _decisions(job, rows, manual, services, pointer, messages):
                     and set(decision) == {"result", "rack_destination"}
                     and isinstance(decision.get("rack_destination"), dict)
                     and decision["rack_destination"].get("type") in ("ZONE", "RACK_POSITION")
-                    and bool(decision["rack_destination"].get("location_code"))
+                    and set(decision["rack_destination"]) == {"type", "location_code"}
+                    and re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}",
+                        decision["rack_destination"]["location_code"],
+                    )
                     and decision["rack_destination"] != request["current_location"]
                 ),
                 "consumed decision",
                 i,
             )
-        _wire(
+        message = _wire(
             messages,
             DECIDE,
             r["operation_id"],
@@ -911,6 +955,15 @@ def _decisions(job, rows, manual, services, pointer, messages):
             ("business:" + job["owner_domain"],),
             "wms-decisions",
         )
+        if message is not None and phase in ("WAIT", "READY"):
+            ack = _terminal_response(message, r["operation_id"], ("DECIDED",))
+            # JSON numbers and booleans remain distinct even when Python compares them equal.
+            _require(
+                message["id"] == r["message_id"]
+                and json.dumps(ack["data"], sort_keys=True) == json.dumps(decision, sort_keys=True),
+                "saved decision contradicts original WMS response",
+                i,
+            )
         _require(previous not in children, "decision roots or fork", i)
         children[previous] = dict(
             id=i,
@@ -1130,13 +1183,23 @@ def _report(job, entry, trigger, records, messages, report_wires, updates):
             i,
         )
         return
+    _require(trigger and trigger["rack_face"] == entry["target_face"], "unproved report trigger", i)
+    m = history[0] if history else None
+    r = records[0] if records else None
+    _require(m is not None or r and r["state"] == "CONSUMED", "missing arrival report wire", i)
+    proof = r if r else m
+    operation_id = proof["operation_id"]
+    message_id = r["message_id"] if r else m["id"]
     _require(
-        trigger and trigger["rack_face"] == entry["target_face"] and len(history) == 1,
-        "unproved original report trigger or wire",
+        proof["operation"] == REPORT
+        and operation_id
+        and type(message_id) is int
+        and message_id > 0,
+        "original arrival report identity",
         i,
     )
-    m = history[0]
-    payload = json.loads(m["request_raw"])["data"]
+    payload = _wire_json(m["request_raw"])["data"] if m else r["request_snapshot"]
+    _require(isinstance(payload, dict), "missing original report snapshot", i)
     rev = payload.get("outcome_revision")
     _require(
         type(rev) is int
@@ -1153,52 +1216,76 @@ def _report(job, entry, trigger, records, messages, report_wires, updates):
         "report outcome",
         i,
     )
-    if records:
-        r = records[0]
-        _require(r["request_snapshot"] in (None, payload), "conflicting arrival report snapshot", i)
-        if r["state"] == "CONSUMED":
-            ack = json.loads(m["response_raw"] or b"null")
-            _require(
-                isinstance(ack, dict)
-                and m["status"] == "DONE"
-                and m["last_http_status"] == 200
-                and m["last_verdict"] == "DELIVERED"
-                and ack.get("operation_id") == r["operation_id"]
-                and ack.get("code") in ("RECORDED", "DUPLICATE")
-                and type(ack.get("timestamp")) is int
-                and ack.get("data") == {}
-                and r["response"] in (None, {k: ack[k] for k in ("timestamp", "code", "data")}),
-                "original recorded report response",
-                i,
-            )
-        if r["request_snapshot"] is None:
-            updates.append(
-                (
-                    "smt_manual_request",
-                    {"operation": REPORT, "operation_id": r["operation_id"]},
-                    {"request_snapshot": payload},
-                )
-            )
+    if rev == entry["outcome_revision"]:
+        applied = entry["outcome"]
         _require(
-            (r["task_id"], r["work_line_id"], r["rack_work_id"], r["operation_id"], r["message_id"])
-            == (job["task_id"], job["work_line_id"], job["id"], m["operation_id"], m["id"]),
-            "report registration",
+            applied["status"] == "SUCCEEDED"
+            and applied["final_position"] == _point(job["point"])
+            and applied["arrival_face"] == payload["arrival_face"],
+            "report disagrees with original applied revision",
             i,
         )
-    _wire(
+    original = _wire(
         messages,
         REPORT,
-        m["operation_id"],
-        m["id"],
+        operation_id,
+        message_id,
         payload,
         (None, "business:smt_manual"),
         "wms-facts",
     )
+    _require(original == m, "conflicting report authority", i)
+    if r:
+        _require(
+            (r["task_id"], r["work_line_id"], r["rack_work_id"], r["action_id"])
+            == (job["task_id"], job["work_line_id"], job["id"], entry["id"])
+            and (
+                r["request_snapshot"] is None
+                or json.dumps(r["request_snapshot"], sort_keys=True)
+                == json.dumps(payload, sort_keys=True)
+            ),
+            "report registration",
+            i,
+        )
+        if r["state"] == "CONSUMED":
+            saved = r["response"]
+            if m:
+                received = _terminal_response(m, operation_id, ("RECORDED", "DUPLICATE"))
+                _require(
+                    received["data"] == {}
+                    and (
+                        saved is None
+                        or json.dumps(saved, sort_keys=True) == json.dumps(received, sort_keys=True)
+                    )
+                    and r["decision_code"] in (None, received["code"]),
+                    "conflicting recorded report",
+                    i,
+                )
+            else:
+                _require(
+                    isinstance(saved, dict)
+                    and set(saved) == {"code", "timestamp", "data"}
+                    and saved["code"] in ("RECORDED", "DUPLICATE")
+                    and type(saved["timestamp"]) is int
+                    and 0 <= saved["timestamp"] < 2**63
+                    and saved["data"] == {}
+                    and r["decision_code"] in (None, saved["code"]),
+                    "incomplete pruned native report",
+                    i,
+                )
+        if r["request_snapshot"] is None:
+            updates.append(
+                (
+                    "smt_manual_request",
+                    {"operation": REPORT, "operation_id": operation_id},
+                    {"request_snapshot": payload},
+                )
+            )
     updates.append(
         (
             "smt_manual_task_member",
             {"id": trigger["id"]},
-            {"arrival_report_operation_id": m["operation_id"]},
+            {"arrival_report_operation_id": operation_id},
         )
     )
 
@@ -1256,11 +1343,12 @@ def _plan(data, transports, wire_rows):
                 m["id"],
             )
         if m["operation"] == REPORT:
-            wire = json.loads(m["request_raw"])
+            wire = _wire_json(m["request_raw"])
             report_wires[wire["data"]["transport_task_id"]].append(m)
     jobs = []
     actions = []
     updates = []
+    cancelled_entries = []
     for idx, parents in enumerate((manual_jobs, rollers)):
         manual = idx == 0
         _require(
@@ -1538,8 +1626,7 @@ def _plan(data, transports, wire_rows):
                 )
             if state == "ENTRY_CANCELLED":
                 _require(enter and len(ordered) == 1, "cancelled entry with successor", i)
-                # A historical zone is outside managed rack positions. Never resolve a position
-                # conflict by consulting today's mutable WorkLine binding.
+                job["review_reason"] = "LEGACY_ENTRY_CANCELLED"
                 if (
                     enter["phase"] == "APPLIED"
                     and (enter.get("outcome") or {}).get("status") == "CANCELLED"
@@ -1547,14 +1634,7 @@ def _plan(data, transports, wire_rows):
                     and not enter["outcome"].get("position_unknown")
                     and not enter.get("pending_revision")
                 ):
-                    job.update(
-                        state="NOT_ARRIVED",
-                        pending=False,
-                        closure_reason="NOT_ARRIVED",
-                        closure_basis=job["release_basis"],
-                    )
-                else:
-                    job["review_reason"] = "LEGACY_ENTRY_CANCELLED"
+                    cancelled_entries.append((job, enter))
             for n, a in enumerate(ordered, 1):
                 a["ordinal"] = n
             if ordered:
@@ -1590,6 +1670,52 @@ def _plan(data, transports, wire_rows):
         len(actions) == len(orig_moves) + sum(len(v) for g in decisions for v in g.values()),
         "migration decision count",
     )
+    # Compare cancellations only after all original jobs and observations have been read.
+    if cancelled_entries:
+        live = {j["id"]: j for j in jobs if j["pending"]}
+        held = defaultdict(set)
+        for key, job in live.items():
+            held[job["point"]].add(key)
+            for location in ((job["resources"] or {}).get("positions") or {}).values():
+                held[location].add(key)
+            held[(job.get("actual_position") or {}).get("location_code")].add(key)
+        for a in actions:
+            if a["job_id"] not in live or a["kind"] == "DEPARTURE_DECIDE":
+                continue
+            if a["phase"] == "REVIEW":
+                held[(a.get("actual_position") or {}).get("location_code")].add(a["job_id"])
+            for fact in positions.get(a["id"], ()):
+                if fact["is_current"]:
+                    held[fact["location_code"]].add(a["job_id"])
+            original = transport.get(a["client_request_id"])
+            if original:
+                for evidence in (
+                    original["position_observation"],
+                    (original["pending_outcome"] or {}).get("data"),
+                    original["applied_outcome"],
+                ):
+                    if evidence and evidence["outcome_revision"] > (a.get("outcome_revision") or 0):
+                        held[(evidence.get("final_position") or {}).get("location_code")].add(
+                            a["job_id"]
+                        )
+        for job, entry in cancelled_entries:
+            location = entry["actual_position"]["location_code"]
+            observation = transport[entry["client_request_id"]]["position_observation"]
+            if (
+                location
+                and location != job["point"]
+                and not (held[location] - {job["id"]})
+                and (
+                    not observation or observation["outcome_revision"] <= entry["outcome_revision"]
+                )
+            ):
+                job.update(
+                    state="NOT_ARRIVED",
+                    pending=False,
+                    closure_reason="NOT_ARRIVED",
+                    closure_basis=job["release_basis"],
+                    review_reason=None,
+                )
     return jobs, actions, updates
 
 

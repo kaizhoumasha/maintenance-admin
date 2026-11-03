@@ -9,6 +9,9 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 
+UNBOUND_CYCLE = "019a1111-2222-7333-8444-555555555551"
+UNBOUND_CLIENT = "019a1111-2222-7333-8444-555555555552"
+
 
 async def migrate(url, direction, revision):
     return await asyncio.to_thread(
@@ -399,6 +402,27 @@ async def seed(conn, t, multi_rotation):
             saved_at_ms=saved,
             due_at_ms=saved + 100 if result == wait else None,
         )
+    await message(
+        "rack.departure_decide@v1",
+        "a-ready",
+        53,
+        request,
+        "business:smt_manual",
+        "old-wms-decisions",
+    )
+    await conn.execute(
+        t["reliable_message"]
+        .update()
+        .where(t["reliable_message"].c.id == 53)
+        .values(
+            status="DONE",
+            last_http_status=200,
+            last_verdict="DELIVERED",
+            response_raw=json.dumps(
+                dict(operation_id="a-ready", code="DECIDED", timestamp=7, data=ready)
+            ).encode(),
+        )
+    )
     await move("manual", "DEPART", "a-ready", 99)
     resources = dict(
         workline_code="L",
@@ -410,7 +434,7 @@ async def seed(conn, t, multi_rotation):
         ("roller", "RELEASED"),
         ("ack", "ACTIVE"),
         ("unused", "WITHDRAWN"),
-        ("unbound", "ACTIVE"),
+        (UNBOUND_CYCLE, "ACTIVE"),
     ):
         drain = "drain-" + job
         await insert(
@@ -481,7 +505,7 @@ async def seed(conn, t, multi_rotation):
                 with_message=job == "ack",
                 ack=job == "ack",
             )
-        if job == "unbound":
+        if job == UNBOUND_CYCLE:
             await insert(
                 "bin_roller_rack_action",
                 **scope,
@@ -489,7 +513,7 @@ async def seed(conn, t, multi_rotation):
                 cycle_id=job,
                 kind="CTU01",
                 source_ref=job,
-                client_request_id="original-client-only",
+                client_request_id=UNBOUND_CLIENT,
                 caller_workline_id="caller",
                 target=point(loc),
                 target_face="A",
@@ -697,7 +721,7 @@ async def test_original_history_survives_without_dispatch(schema_database):
         pending_ids = await roller_component.list_pending(
             db, kind="RACK_CYCLE", after_id=None, upper_id="zz", limit=10
         )
-        assert {work.record_id for work in pending_ids} == {"ordinary", "ack", "unbound"}
+        assert {work.record_id for work in pending_ids} == {"ordinary", "ack", UNBOUND_CYCLE}
 
         job = await dispatch.progress(db, job_id="manual")
         assert job.state == "COMPLETED" and job.completed_at_ms is None
@@ -754,9 +778,9 @@ async def test_original_history_survives_without_dispatch(schema_database):
         assert (
             unused.state == "WITHDRAWN" and unused.origin.resources is unused.origin.caller is None
         )
-        unbound = await dispatch.progress(db, job_id="unbound")
+        unbound = await dispatch.progress(db, job_id=UNBOUND_CYCLE)
         assert (
-            unbound.actions[0].client_request_id == "original-client-only"
+            unbound.actions[0].client_request_id == UNBOUND_CLIENT
             and unbound.actions[0].transport_task_id is None
         )
         cancelled = await dispatch.progress(db, job_id="cancelled")
@@ -820,6 +844,24 @@ async def test_original_history_survives_without_dispatch(schema_database):
 @pytest.mark.parametrize(
     "table,statement",
     [
+        pytest.param(
+            "reliable_message",
+            "update reliable_message set response_raw=convert_to("
+            "replace(convert_from(response_raw,'UTF8'),'\"Z\"','\"OTHER\"'),'UTF8') where id=53",
+            id="conflicting-retained-ready",
+        ),
+        pytest.param(
+            "bin_roller_rack_action",
+            "update bin_roller_rack_action set client_request_id='invalid' where id='client-only'",
+            id="invalid-unbound-client",
+        ),
+        pytest.param(
+            "bin_roller_rack_cycle",
+            "with changed as (update bin_roller_rack_action set cycle_id='bad',"
+            "source_ref='bad' where id='client-only') update bin_roller_rack_cycle set id='bad' "
+            f"where id='{UNBOUND_CYCLE}'",
+            id="invalid-unbound-cycle",
+        ),
         (
             "bin_roller_face_work",
             "update bin_roller_face_work set source_ref='wrong' where id='service'",
@@ -922,4 +964,171 @@ async def test_stored_submit_evidence_guards_even_an_empty_rack_downgrade(schema
         ) == {"original": True}
         assert await conn.scalar(
             text("select to_regclass('enterprise_backend.rack_dispatch_action')")
+        )
+
+
+@pytest.mark.parametrize("complete", [True, False])
+async def test_pruned_consumed_report_requires_complete_native_proof(schema_database, complete):
+    url, engine, t = await old_store(schema_database)
+    async with engine.begin() as conn:
+        await conn.execute(t["reliable_message"].delete().where(t["reliable_message"].c.id == 31))
+        if not complete:
+            await conn.execute(
+                t["smt_manual_request"]
+                .update()
+                .where(t["smt_manual_request"].c.operation_id == "report")
+                .values(response=None)
+            )
+        before = await snapshot(conn, ("smt_manual_request", "reliable_message", "transport_task"))
+    result = await migrate(url, "upgrade", "sharedrackdispatch")
+    assert (result.returncode == 0) == complete, result.stdout + result.stderr
+    async with engine.connect() as conn:
+        after = await snapshot(conn, ("smt_manual_request", "reliable_message", "transport_task"))
+        assert (
+            after["reliable_message"] == before["reliable_message"]
+            and after["transport_task"] == before["transport_task"]
+        )
+        assert [r for r in after["smt_manual_request"] if r["operation_id"] == "report"] == [
+            r for r in before["smt_manual_request"] if r["operation_id"] == "report"
+        ]
+        if complete:
+            assert (
+                await conn.scalar(
+                    text(
+                        "select arrival_report_operation_id from "
+                        "enterprise_backend.smt_manual_task_member where id='member-manual'"
+                    )
+                )
+                == "report"
+            )
+        else:
+            assert (
+                await conn.scalar(
+                    text("select version_num from enterprise_backend.alembic_version")
+                )
+                == "racksubmitack"
+            )
+
+
+async def test_migrated_unbound_action_uses_its_original_transport_client(schema_database):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.businesses._components.rack_dispatch.contracts import (
+        DirectHandoff,
+        PointDemand,
+        PointRef,
+    )
+    from app.businesses.runtime import build_runtime
+    from app.integrations.ecs_command.service import EcsCommands
+    from app.integrations.wms_transport import ADAPTERS
+    from app.reliable import Outbox
+    from app.reliable.config import TargetConfig
+
+    url, engine, _ = await old_store(schema_database)
+    assert (await migrate(url, "upgrade", "sharedrackdispatch")).returncode == 0
+    factory = async_sessionmaker(engine)
+    outbox = Outbox(
+        {"original": TargetConfig("original", "http://127.0.0.1", "wms-transport")}, ADAPTERS
+    )
+    host = build_runtime(
+        outbox=outbox, ecs_commands=EcsCommands(outbox, None), session_factory=factory
+    ).services["smt_manual"]
+    point = PointRef("smt_manual", 7, UNBOUND_CYCLE, "R", "P")
+    async with engine.connect() as conn:
+        before = await snapshot(conn, ("transport_task", "reliable_message"))
+    for _ in range(2):
+        async with factory.begin() as db:
+            job = await host.rack_dispatch.advance(
+                db,
+                job_id=UNBOUND_CYCLE,
+                demand=PointDemand(point, "UNKNOWN", ()),
+                handoff=DirectHandoff(point, "UNKNOWN", ()),
+                now_ms=3000,
+            )
+            (action,) = job.actions
+            assert (
+                action.id == "client-only"
+                and action.client_request_id == UNBOUND_CLIENT
+                and action.transport_task_id
+            )
+    async with engine.connect() as conn:
+        transports = await snapshot(conn, ("transport_task", "reliable_message"))
+        assert len(transports["transport_task"]) == len(before["transport_task"]) + 1
+        assert len(transports["reliable_message"]) == len(before["reliable_message"]) + 1
+        (registered,) = [
+            t for t in transports["transport_task"] if t["client_request_id"] == UNBOUND_CLIENT
+        ]
+        assert (
+            registered["cycle_id"] == UNBOUND_CYCLE
+            and registered["transport_task_id"] == action.transport_task_id
+        )
+        assert [
+            m["id"]
+            for m in transports["reliable_message"]
+            if m["business_key"] == action.transport_task_id
+        ] == [action.submit_message_id]
+
+
+@pytest.mark.parametrize("evidence", ["point", "resource", "observation"])
+async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_database, evidence):
+    url, engine, t = await old_store(schema_database)
+    async with engine.begin() as conn:
+        if evidence == "point":
+            await conn.execute(
+                t["smt_manual_rack"]
+                .insert()
+                .values(
+                    id="protected",
+                    task_id="task-active",
+                    work_line_id=7,
+                    workline_code="L",
+                    rack_id="other",
+                    role="RETURN",
+                    location_code="Z",
+                    initial_face="A",
+                    caller_workline_id="caller",
+                    state="ACTIVE",
+                    pending=True,
+                )
+            )
+        elif evidence == "resource":
+            cycle = t["bin_roller_rack_cycle"]
+            resources = await conn.scalar(
+                sa.select(cycle.c.resources).where(cycle.c.id == "ordinary")
+            )
+            await conn.execute(
+                cycle.update()
+                .where(cycle.c.id == "ordinary")
+                .values(
+                    resources={**resources, "positions": {**resources["positions"], "INLET": "Z"}}
+                )
+            )
+        else:
+            await conn.execute(
+                t["transport_task"]
+                .update()
+                .where(t["transport_task"].c.transport_task_id == "tt-active-ENTER")
+                .values(
+                    position_observation=dict(
+                        transport_task_id="tt-active-ENTER",
+                        kind="RACK_MOVE",
+                        rack_id="R",
+                        outcome_revision=2,
+                        final_position={"kind": "RACK_POSITION", "location_code": "Z"},
+                        arrival_face="A",
+                    )
+                )
+            )
+    result = await migrate(url, "upgrade", "sharedrackdispatch")
+    assert result.returncode == 0, result.stdout + result.stderr
+    async with engine.connect() as conn:
+        (job,) = [
+            r
+            for r in (await snapshot(conn, ("rack_dispatch_job",)))["rack_dispatch_job"]
+            if r["id"] == "cancelled"
+        ]
+        assert (
+            job["pending"]
+            and job["review_reason"] == "LEGACY_ENTRY_CANCELLED"
+            and job["closure_reason"] is None
         )
