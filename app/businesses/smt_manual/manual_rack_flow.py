@@ -649,7 +649,7 @@ class ManualRackFlow:
         position: RowMapping,
         now_ms: int,
     ) -> str:
-        from app.businesses._components.bin_roller.request.rack_departure_decide_v1 import (
+        from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
             DECISION,
             OPERATION,
             DepartureRequest,

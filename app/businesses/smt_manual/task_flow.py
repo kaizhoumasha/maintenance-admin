@@ -124,8 +124,17 @@ class SmtManualTaskFlow:
         await self.repository.save_input(ctx, payload, applied=True)
         return Accepted()
 
+    async def _original_plan_task(self, session, task_id):
+        located = await self.repository.task(session, task_id)
+        if located is None:
+            return None, None, ()
+        line, jobs = await self.repository.lock_dispatch_line(
+            session, self.roller, located["work_line_id"], task_id=task_id, lock_actions=False
+        )
+        return line, await self.repository.task(session, task_id), jobs
+
     async def accept_task_plan_delta(self, ctx: CallbackContext, payload: PlanDelta) -> Outcome:
-        line, task = await self.repository.original(ctx.session, payload.task_id)
+        line, task, jobs = await self._original_plan_task(ctx.session, payload.task_id)
         if task is None:
             return Conflict({"reason_code": "REFERENCE_CONFLICT"})
         validate_task_branch(
@@ -212,6 +221,16 @@ class SmtManualTaskFlow:
                 (),
             ),
         )
+        if added:
+            await self.roller.rack_dispatch.note_facts_changed(
+                ctx.session,
+                job_ids=tuple(
+                    j.id
+                    for j in jobs
+                    if j.origin.task_id == payload.task_id
+                    and j.origin.rack_id in {f.rack_id for f in added}
+                ),
+            )
         await self.repository.save_task(
             ctx.session,
             payload.task_id,
@@ -248,7 +267,7 @@ class SmtManualTaskFlow:
         return await self.accept_task_plan_delta(ctx, payload)
 
     async def accept_task_cancel(self, ctx: CallbackContext, payload: Cancel) -> Outcome:
-        _, task = await self.repository.original(ctx.session, payload.task_id)
+        _, task, jobs = await self._original_plan_task(ctx.session, payload.task_id)
         if task is None:
             return Conflict({"reason_code": "REFERENCE_CONFLICT"})
         validate_task_branch(
@@ -312,6 +331,16 @@ class SmtManualTaskFlow:
                     tuple(withdrawn),
                 ),
             )
+            if withdrawn:
+                await self.roller.rack_dispatch.note_facts_changed(
+                    ctx.session,
+                    job_ids=tuple(
+                        j.id
+                        for j in jobs
+                        if j.origin.task_id == payload.task_id
+                        and j.origin.rack_id in {f.rack_id for f in withdrawn}
+                    ),
+                )
         await self.repository.save_input(ctx, payload, applied=True)
         return Accepted()
 

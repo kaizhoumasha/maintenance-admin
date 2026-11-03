@@ -273,6 +273,16 @@ async def profile_fixture(factory, monkeypatch, evidence_dir, evidence_name):
             raise AssertionError("loopback sender did not drain its bounded fixture work")
 
         async def rows(key, *, roller=False):
+            if roller and key in ("rack_cycle", "rack_action", "departure"):
+                from tests.helpers import roller_dispatch_rows
+
+                async with factory() as session:
+                    records = [
+                        r
+                        for line in state.lines
+                        for r in await roller_dispatch_rows(session, state.roller, key, line)
+                    ]
+                    return sorted(records, key=lambda r: r["id"])
             table = ROLLER_TABLES[key] if roller else TABLES[key]
             async with factory() as session:
                 return [
@@ -319,6 +329,17 @@ async def profile_fixture(factory, monkeypatch, evidence_dir, evidence_name):
                 "observations": getattr(state, "observations", {}),
             }
             async with factory() as session:
+                from dataclasses import asdict
+
+                from app.businesses._components.bin_roller.service import ROLLER_SOURCES
+
+                evidence["rack_dispatch/jobs"] = [
+                    asdict(j)
+                    for line in state.lines
+                    for j in await state.roller.rack_dispatch.jobs(
+                        session, work_line_id=line, source_kinds=ROLLER_SOURCES
+                    )
+                ]
                 for key, table in tables.items():
                     evidence["/".join(key)] = [
                         dict(r) for r in (await session.execute(select(table))).mappings()
@@ -380,6 +401,9 @@ async def profile_fixture(factory, monkeypatch, evidence_dir, evidence_name):
                         | CallbackReceipt.device_code.in_(OWNED_CODES)
                     )
                 )
+                from tests.helpers import clear_test_rack_jobs
+
+                await clear_test_rack_jobs(session, state.lines)
                 for key, table in reversed(tuple(tables.items())):
                     current = (await session.execute(select(*table.primary_key.columns))).all()
                     for row in set(current) - before[key]:

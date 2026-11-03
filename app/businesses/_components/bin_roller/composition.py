@@ -25,7 +25,6 @@ COMPONENT = ComponentDefinition(
         "app.businesses._components.bin_roller.request.outbound_bin_inbound_batch_v1",
         "app.businesses._components.bin_roller.request.outbound_bin_return_batch_v1",
         "app.businesses._components.bin_roller.request.workline_return_buffer_drain_rack_decide_v1",
-        "app.businesses._components.bin_roller.request.rack_departure_decide_v1",
     ),
     model_modules=("app.businesses._components.bin_roller.models",),
     commands=(MoveForward, MoveLeft, MoveRight),

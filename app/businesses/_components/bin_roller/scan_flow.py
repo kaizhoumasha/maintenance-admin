@@ -79,6 +79,16 @@ async def accept_scan(
     if ctx.business_code != roller.context.domain:
         raise ValueError("scan business does not match the component owner")
     repository = roller.repository(ctx.work_line_id)
+    jobs = ()
+    fifo = ()
+    bin_code = bin_identity(payload.bin_code)
+    affects_return = ctx.device_role == "SCAN4" or (
+        ctx.device_role == "SCAN3" and bin_code is not None and payload.bin_code.endswith("-B")
+    )
+    if affects_return:
+        jobs = await roller.lock_jobs_on_line(ctx.session, ctx.work_line_id)
+        await roller.lock_production_subjects(ctx.session, ctx.work_line_id, jobs)
+        fifo = await repository.return_queue(ctx.session)
     previous = await repository.latest_scan(ctx.session, ctx.device_role)
     separator = None
     if previous is not None and previous["command_code"] is not None:
@@ -92,12 +102,50 @@ async def accept_scan(
         point=ctx.device_role,
         device_code=ctx.device_code,
         raw_bin_code=payload.bin_code,
-        bin_code=bin_identity(payload.bin_code),
+        bin_code=bin_code,
         scanned_at=ctx.timestamp,
         separator_command_code=separator,
         binding_snapshot=asdict(ctx.binding),
         previous_arrival=previous,
     )
+    if affects_return and arrival["first_digest"] == ctx.digest:
+        identity = {
+            "arrival_id": arrival["id"],
+            "digest": ctx.digest,
+            "receipt_id": ctx.receipt_id,
+            "point": ctx.device_role,
+        }
+        decisions = roller.tables["decision"]
+        active = (
+            (
+                await ctx.session.execute(
+                    select(decisions).where(*repository.scoped(decisions), decisions.c.pending)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for decision in active:
+            await ctx.session.execute(
+                decisions.update()
+                .where(
+                    *repository.scoped(decisions),
+                    decisions.c.kind == "DRAIN",
+                    decisions.c.id == decision["id"],
+                )
+                .values(received_work=[*(decision["received_work"] or ()), identity])
+            )
+        if not active and not jobs and fifo and fifo[0]["id"] and fifo[0]["status"] == "PENDING":
+            head = fifo[0]
+            await repository.update_scan(
+                ctx.session,
+                head["fifo_arrival_id"],
+                received_work=[*(head["received_work"] or ()), identity],
+            )
+        if jobs:
+            await roller.rack_dispatch.note_facts_changed(
+                ctx.session, job_ids=tuple(j.id for j in jobs)
+            )
     if arrival["point"] == "SCAN2":
         if arrival["delegation_state"] != "ACCEPTED":
             await roller.production.accept_scan2(

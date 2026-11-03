@@ -192,6 +192,7 @@ async def test_ctu03_acceptance_releases_cycle_without_final_outcome(notices):
 
     flow = notices
     cycle, action = await manual_departure_obligation(flow)
+    flow.notices.clear()
     await flow.dispatch()
     assert flow.notices == ["smt_manual"]
     assert await flow.host.advance("RACK_CYCLE", cycle["id"]) == "RELEASED"
@@ -203,7 +204,7 @@ async def test_ctu03_acceptance_releases_cycle_without_final_outcome(notices):
             caller=TransportCaller(str(flow.lines[0])),
         )
         assert original.outcome is None and original.outcome_revision is None
-    assert (await flow.rows("rack_action", roller=True))[0]["status"] == "ACCEPTED"
+    assert (await flow.rows("rack_action", roller=True))[-1]["status"] == "ACCEPTED"
     assert (await flow.rows("rack_cycle", roller=True))[0]["release_basis"][
-        "outcome_revision"
-    ] is None
+        "response_code"
+    ] == "RECEIVED"

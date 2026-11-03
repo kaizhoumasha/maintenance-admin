@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.businesses.runtime import Capabilities
 from app.businesses.smt_manual.service import KINDS, SmtManualService
 
@@ -18,6 +19,22 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
         for i in range(3):
             identity = f"pending-{i}"
             scope = dict(id=identity, owner_domain="smt_manual", work_line_id=flow.lines[0])
+            await flow.host.rack_dispatch.register(
+                session,
+                JobOrigin(
+                    "ROLLER_ORDINARY",
+                    identity,
+                    flow.lines[0],
+                    "R",
+                    "T0",
+                    None,
+                    None,
+                    "A",
+                    None,
+                    identity,
+                    None,
+                ),
+            )
             for key, values in {
                 "scan_arrival": dict(
                     business_key=identity,
@@ -38,7 +55,6 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                     rack_id="R",
                     rack_face="A",
                 ),
-                "rack_cycle": dict(rack_id="R", purpose="ORDINARY", source_ref=identity),
                 "return_batch": dict(
                     opportunity_id=identity,
                     source_ref=identity,

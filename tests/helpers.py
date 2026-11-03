@@ -1565,6 +1565,14 @@ async def formal_manual_fixture(factory, monkeypatch):
             raise AssertionError("loopback sender did not drain its bounded fixture work")
 
         async def rows(key, *, roller=False):
+            if roller and key in ("rack_cycle", "rack_action", "departure"):
+                async with factory() as session:
+                    records = [
+                        row
+                        for line in state.lines
+                        for row in await roller_dispatch_rows(session, state.roller, key, line)
+                    ]
+                    return sorted(records, key=lambda row: row["id"])
             query = (
                 bin_roller_query(ROLLER_TABLES, key) if roller else smt_manual_query(TABLES, key)
             )
@@ -1636,6 +1644,7 @@ async def formal_manual_fixture(factory, monkeypatch):
                         | CallbackReceipt.device_code.like(prefix + "%")
                     )
                 )
+                await clear_test_rack_jobs(session, state.lines)
                 for key, table in reversed(tuple(tables.items())):
                     current = (await session.execute(select(*table.primary_key.columns))).all()
                     for row in set(current) - before[key]:
@@ -1656,6 +1665,83 @@ async def formal_manual_fixture(factory, monkeypatch):
                     delete(DeviceRoute).where(DeviceRoute.device_code.like(prefix + "%"))
                 )
                 await session.execute(delete(WorkLine).where(WorkLine.id.in_(state.lines)))
+
+
+async def clear_test_rack_jobs(session, lines):
+    from sqlalchemy import delete, select
+
+    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+
+    # Delete descendants before their original, retained predecessors.
+    actions = await session.scalars(
+        select(RackAction.id)
+        .where(RackAction.work_line_id.in_(lines), RackAction.owner_domain == "smt_manual")
+        .order_by(RackAction.ordinal.desc())
+    )
+    for action_id in actions:
+        await session.execute(delete(RackAction).where(RackAction.id == action_id))
+    await session.execute(
+        delete(RackJob).where(RackJob.work_line_id.in_(lines), RackJob.owner_domain == "smt_manual")
+    )
+
+
+async def roller_dispatch_rows(session, roller, key, line_id=1):
+    from dataclasses import asdict
+
+    jobs = await roller.rack_dispatch.jobs(
+        session, work_line_id=line_id, source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN")
+    )
+    if key == "rack_cycle":
+        return [
+            dict(
+                id=j.id,
+                rack_id=j.origin.rack_id,
+                purpose=j.origin.source_kind.removeprefix("ROLLER_"),
+                task_id=j.origin.task_id,
+                work_line_id=j.origin.work_line_id,
+                owner_domain=roller.context.domain,
+                resources=j.origin.resources,
+                source_ref=j.origin.source_ref,
+                status=(
+                    "RELEASED"
+                    if j.state == "COMPLETED"
+                    else "ACTIVE"
+                    if j.state == "RELEASING"
+                    else j.state
+                ),
+                pending=j.pending,
+                release_basis=j.closure_basis["acceptance_basis"]
+                if j.closure_reason == "DEPARTURE_ACK"
+                else None,
+            )
+            for j in jobs
+        ]
+    result = []
+    for j in jobs:
+        for a in j.actions:
+            if (key == "departure") != (a.kind == "DEPARTURE_DECIDE"):
+                continue
+            result.append(
+                dict(
+                    asdict(a),
+                    cycle_id=j.id,
+                    kind="DEPARTURE" if key == "departure" else a.template,
+                    work_line_id=j.origin.work_line_id,
+                    owner_domain=roller.context.domain,
+                    operation_id=a.decision_operation_id
+                    if key == "departure"
+                    else a.submit_operation_id,
+                    caller_workline_id=a.caller.workline_id if a.caller else None,
+                    station_id=a.caller.station_id if a.caller else None,
+                    status=a.phase if a.phase != "APPLIED" else a.outcome["status"],
+                    pending=j.pending
+                    if key == "departure"
+                    else a.phase not in ("ACCEPTED", "APPLIED"),
+                    due_at=a.due_at_ms,
+                    consumed_revision=a.outcome_revision,
+                )
+            )
+    return sorted(result, key=lambda a: a["id"])
 
 
 async def manual_source_departure(flow, entry):
@@ -1693,119 +1779,91 @@ async def manual_source_departure(flow, entry):
 
 
 async def manual_departure_obligation(flow, *, line=0):
-    """A saved original CTU03 obligation; no physical arrival/completion is invented."""
-    from app.businesses._components.bin_roller.rack_flow import rack_action
-    from app.core.identifiers import uuid7
-    from app.integrations.wms_transport import RackPosition
-
-    async with flow.factory.begin() as session:
-        repo = flow.roller.repository(flow.lines[line])
-        resources = await flow.roller.read_resources(session, flow.lines[line])
-        cycle = await repo.create_cycle(
-            session,
-            cycle_id=str(uuid7()),
-            rack_id=flow.prefix + "-old-rack",
-            purpose="ORDINARY",
-            task_id=flow.prefix + "-old-task",
-            source_ref=str(uuid7()),
-            resources=resources,
-        )
-        action = await rack_action(
-            flow.roller,
-            session,
-            repo,
-            cycle,
-            kind="CTU03",
-            source_ref=cycle["id"],
-            target={"kind": "ZONE", "location_code": "LOCAL-RETURN"},
-            face=None,
-            source=RackPosition(flow.positions[line]["FIVE_RACK"]),
-        )
-        return dict(cycle), dict(action)
+    """Reach CTU03 through one real source plan, original arrival and WMS decisions."""
+    task = flow.prefix + "-old-task"
+    assert (await flow.issue(task, line=line)).status_code == 202
+    await flow.host.advance("TASK", task)
+    await flow.dispatch()
+    await flow.host.advance("TASK", task)
+    response = await flow.callback(
+        "sorting.task.plan_delta@v1",
+        dict(
+            task_id=task,
+            plan_revision=1,
+            added_bin_source_racks=[dict(rack_id=flow.prefix + "-old-rack", rack_face=["A"])],
+        ),
+    )
+    assert response.status_code == 202
+    [demand] = [
+        row for row in await flow.rows("supply_demand", roller=True) if row["task_id"] == task
+    ]
+    await flow.host.advance("FEED", demand["id"])
+    [entry] = [
+        row
+        for row in await flow.rows("rack_action", roller=True)
+        if row["kind"] == "CTU01" and row["work_line_id"] == flow.lines[line]
+    ]
+    departure = await manual_source_departure(flow, entry)
+    [cycle] = [
+        row for row in await flow.rows("rack_cycle", roller=True) if row["id"] == entry["cycle_id"]
+    ]
+    return cycle, departure
 
 
 async def manual_return_opportunity(flow, *, line=0):
-    """Select an already READY face; allocation/Transport remain actual public behavior."""
+    """A controlled original drain selection enters and serves its face through real Transport."""
     from app.core.identifiers import uuid7
-    from app.integrations.wms_transport import HandoffPosition, TransportCaller
 
+    decision_id = str(uuid7())
+    line_id = flow.lines[line]
+    rack = flow.prefix + "-return"
     async with flow.factory.begin() as session:
-        repo = flow.roller.repository(flow.lines[line])
-        cycle = await repo.create_cycle(
-            session,
-            cycle_id=str(uuid7()),
-            rack_id=flow.prefix + "-return",
-            purpose="DRAIN",
-            task_id=flow.prefix + "-task",
-            source_ref=str(uuid7()),
-            resources=await flow.roller.read_resources(session, flow.lines[line]),
-        )
+        repo = flow.roller.repository(line_id)
+        candidates = await flow.roller.get_return_candidates(session, work_line_id=line_id)
+        assert candidates
         await session.execute(
             repo.tables["decision"]
             .insert()
             .values(
-                id=cycle["source_ref"],
+                id=decision_id,
                 kind="DRAIN",
                 unused_racks=[],
                 **repo.scope,
-                input_kind="SCAN4",
-                input_ref=str(uuid7()),
+                input_kind="FIFO_OBSERVATION",
+                input_ref=decision_id,
+                input_snapshot={"round_id": candidates[0]["id"]},
                 operation_id=str(uuid7()),
                 status="READY",
-                decision={
-                    "result": "READY",
-                    "racks": [{"rack_id": cycle["rack_id"], "rack_face": "A"}],
-                },
+                decision={"result": "READY", "racks": [{"rack_id": rack, "rack_face": ["A"]}]},
             )
         )
-        service_id, opportunity_id = str(uuid7()), str(uuid7())
-        await repo.register_rack_action(
-            session,
-            cycle_id=cycle["id"],
-            kind="CTU01",
-            source_ref=cycle["id"],
-            action_id=str(uuid7()),
-            client_request_id=str(uuid7()),
-            transport_task_id=None,
-            operation_id=None,
-            target={"kind": "RACK_POSITION", "location_code": flow.positions[line]["FIVE_RACK"]},
-            target_face="A",
-            caller_workline_id=str(flow.lines[line]),
-        )
-        await session.execute(
-            repo.tables["face_work"]
-            .insert()
-            .values(
-                id=service_id,
-                purpose="DRAIN",
-                service_id=service_id,
-                rack_id=cycle["rack_id"],
-                **repo.scope,
-                cycle_id=cycle["id"],
-                source_ref=opportunity_id,
-                rack_face="A",
-                service_state="READY",
-            )
-        )
-        await session.execute(
-            repo.tables["return_opportunity"]
-            .insert()
-            .values(
-                id=opportunity_id,
-                **repo.scope,
-                service_id=service_id,
-                source_ref=service_id,
-                kind="PURE_RETURN",
-            )
-        )
-        return await flow.roller.start_return_batch(
-            session,
-            opportunity_id=opportunity_id,
-            source_ref=opportunity_id,
-            workline_code=f"{flow.prefix}-{line + 1}",
-            caller=TransportCaller(str(flow.lines[line])),
-            source=HandoffPosition(flow.positions[line]["OUTLET"]),
-        )
+    await flow.host.advance("DRAIN", decision_id)
+    [cycle] = [
+        r for r in await flow.rows("rack_cycle", roller=True) if r["source_ref"] == decision_id
+    ]
+    [entry] = [
+        r for r in await flow.rows("rack_action", roller=True) if r["cycle_id"] == cycle["id"]
+    ]
+    response = await flow.callback(
+        "transport.task.resulted@v1",
+        dict(
+            transport_task_id=entry["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id=rack,
+            outcome_revision=1,
+            status="SUCCEEDED",
+            final_position=entry["target"],
+            arrival_face="A",
+        ),
+    )
+    assert response.status_code == 202
+    await flow.host.advance("RACK_CYCLE", cycle["id"])
+    [batch] = [
+        r
+        for r in await flow.rows("return_batch", roller=True)
+        if r["work_line_id"] == line_id and r["pending"]
+    ]
+    return batch["id"]
 
 
 def smt_manual_query(tables, key):
@@ -1845,7 +1903,7 @@ def bin_roller_query(tables, key):
     """Inspect one original responsibility and identity in the compact component tables."""
     from sqlalchemy import select
 
-    if key in {"drain", "departure"}:
+    if key == "drain":
         t = tables["decision"]
         return select(t).where(t.c.kind == key.upper()).order_by(t.c.id)
     if key in {"scan2_release", "return_round"}:

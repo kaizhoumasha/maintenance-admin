@@ -381,3 +381,45 @@ async def test_disabled_workline_preserves_original_obligations(manual_flow):
     )
     assert (await flow.deliver(flow.message("cancel", cancel))).status_code == 202
     assert await flow.prepare() is None
+
+
+async def test_roller_coverage_uses_original_task_and_unapplied_inputs(manual_flow):
+    from dataclasses import replace
+
+    from app.businesses._components.rack_dispatch.contracts import PointRef
+
+    flow = manual_flow
+    await flow.ready()
+    raw = flow.message(
+        "plan_delta",
+        dict(
+            task_id="T1",
+            plan_revision=3,
+            added_bin_source_racks=[dict(rack_id="R1", rack_face=["A"])],
+        ),
+    )
+    assert (await flow.deliver(raw)).status_code == 409
+    pending = json.loads(raw)
+    assert (await flow.issue("QUEUED")).status_code == 202
+    point = PointRef("smt_manual", flow.lines[0], "job", "R1", "FIVE")
+    async with flow.factory() as session:
+        read = flow.ports.read_task_coverage
+        coverage = await read(session, point=point, task_id="T1")
+        assert coverage.anchor.key == ("T1",)
+        assert coverage.anchor.version[:2] == ("0", "PREPARING")
+        assert [pending["operation"], pending["operation_id"]] in json.loads(
+            coverage.anchor.version[2]
+        )
+        assert [(r.key, r.version[:2]) for r in coverage.rows] == [
+            ((pending["operation"], pending["operation_id"]), ("DEFERRED", "3"))
+        ]
+        queued = await read(session, point=point, task_id="QUEUED")
+        assert queued.anchor.key == ("QUEUED",) and queued.anchor.version[1] == "QUEUED"
+        assert (
+            await read(session, point=replace(point, owner_domain="another"), task_id="T1") is None
+        )
+        assert (
+            await read(session, point=replace(point, work_line_id=flow.lines[1]), task_id="T1")
+            is None
+        )
+        assert await read(session, point=point, task_id="missing") is None

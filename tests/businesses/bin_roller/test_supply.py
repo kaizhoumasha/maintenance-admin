@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef, SourceFaceRef, SupplyChange
 from app.businesses._components.bin_roller.service import BinRoller
+from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.integrations.ecs_command.service import CommandOwner
 
 
@@ -12,7 +13,11 @@ from app.integrations.ecs_command.service import CommandOwner
 async def test_supply_change_keeps_original_task_and_member_revision(roller_store):
     store = roller_store
     roller = BinRoller(
-        CommandOwner("first"), SimpleNamespace(), SimpleNamespace(), tables=store.tables
+        CommandOwner("first"),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        rack_dispatch=RackDispatch("first", None),
+        tables=store.tables,
     )
     a = SourceFaceRef(1, "R1", "90")
     b = SourceFaceRef(2, "R1", "90")
@@ -30,10 +35,18 @@ async def test_supply_change_keeps_original_task_and_member_revision(roller_stor
 async def test_supply_progress_is_scoped_to_original_task(roller_store):
     store = roller_store
     roller = BinRoller(
-        CommandOwner("first"), SimpleNamespace(), SimpleNamespace(), tables=store.tables
+        CommandOwner("first"),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        rack_dispatch=RackDispatch("first", None),
+        tables=store.tables,
     )
     other = BinRoller(
-        CommandOwner("second"), SimpleNamespace(), SimpleNamespace(), tables=store.tables
+        CommandOwner("second"),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        rack_dispatch=RackDispatch("second", None),
+        tables=store.tables,
     )
     source = SourceFaceRef(1, "R1", "A")
     async with store.factory.begin() as session:

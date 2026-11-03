@@ -6,7 +6,8 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.exc import DBAPIError
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
-from app.businesses._components.bin_roller.service import BinRoller
+from app.businesses._components.bin_roller.service import BinRoller, RackLockSetChanged
+from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses._components.sorting_task.service import SortingTask
 from app.businesses.runtime import Capabilities
 from app.core.clock import unix_ms
@@ -29,14 +30,21 @@ class SmtManualService(SmtManualTaskFlow):
     def __init__(self, capabilities: Capabilities, *, first_plan_wait_ms: int | None = None):
         repository = TaskRepository()
         self.ports = RollerPorts(repository)
-        roller = BinRoller(CommandOwner("smt_manual"), capabilities, self.ports)
+        self.rack_dispatch = RackDispatch("smt_manual", capabilities)
+        roller = BinRoller(
+            CommandOwner("smt_manual"), capabilities, self.ports, rack_dispatch=self.rack_dispatch
+        )
         super().__init__(
             capabilities, roller, repository=repository, first_plan_wait_ms=first_plan_wait_ms
         )
         self.manual_bins = ManualBinFlow(capabilities, roller, repository=repository)
         self.manual_racks = ManualRackFlow(capabilities, repository=repository)
         self.ports.manual_bins = self.manual_bins
-        self.components = {"sorting_task": SortingTask("smt_manual", self), "bin_roller": roller}
+        self.components = {
+            "sorting_task": SortingTask("smt_manual", self),
+            "bin_roller": roller,
+            "rack_dispatch": self.rack_dispatch,
+        }
 
     async def read_current_task(self, session, *, work_line_id):
         return await self.ports.read_current_task(session, work_line_id=work_line_id)
@@ -154,18 +162,49 @@ class SmtManualService(SmtManualTaskFlow):
                             execution_options={
                                 "isolation_level": "SERIALIZABLE"
                                 if kind
-                                in {"TASK", "SCAN", "FEED", "RETURN_BATCH", "RACK_CYCLE", "DRAIN"}
+                                in {
+                                    "TASK",
+                                    "SCAN",
+                                    "FEED",
+                                    "RETURN_BATCH",
+                                    "RACK_CYCLE",
+                                    "DRAIN",
+                                    "MANUAL_RACK",
+                                    "MANUAL_BIN",
+                                    "MANUAL_COMPLETION",
+                                }
                                 else "REPEATABLE READ"
                             }
                         )
                     return await self._advance(session, kind, record_id)
+            except RackLockSetChanged:
+                if attempt == 2:
+                    raise
             except DBAPIError as error:
                 if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
                     raise
 
     async def _advance(self, session, kind, record_id):
+        if kind in {"TASK", "SCAN", "FEED", "RETURN_BATCH", "RACK_CYCLE", "DRAIN"}:
+            if kind == "TASK":
+                located = await self.repository.task(session, record_id)
+                if not located:
+                    return "NOT_FOUND"
+                line_id = located["work_line_id"]
+            elif kind == "RACK_CYCLE":
+                located = await self.rack_dispatch.progress(session, job_id=record_id)
+                if not located:
+                    return "NOT_FOUND"
+                line_id = located.origin.work_line_id
+            else:
+                key = {"SCAN": "scan_arrival", "FEED": "supply_demand"}.get(kind, kind.lower())
+                located = await self.roller.original_record(session, key, record_id)
+                line_id = located["work_line_id"]
+            await self.repository.lock_dispatch_line(
+                session, self.roller, line_id, task_id=record_id if kind == "TASK" else None
+            )
         if kind == "TASK":
-            _, original = await self.repository.original(session, record_id)
+            original = await self.repository.task(session, record_id)
             if original is None:
                 return "NOT_FOUND"
             if original["status"] == "QUEUED":
@@ -184,10 +223,8 @@ class SmtManualService(SmtManualTaskFlow):
             return await self.manual_bins.advance_completion(session, operation_id=record_id)
         if kind == "MANUAL_RACK":
             return await self.manual_racks.advance_rack(session, rack_work_id=record_id)
-        key = {"SCAN": "scan_arrival", "FEED": "supply_demand"}.get(kind, kind.lower())
-        located = await self.roller.original_record(session, key, record_id)
-        await self.repository.lock_line(session, located["work_line_id"])
-        original = await self.roller.original_record(session, key, record_id, for_update=True)
-        if original["work_line_id"] != located["work_line_id"]:
-            raise ValueError("original roller workline cannot change")
+        if kind == "SCAN2_RELEASE":
+            located = await self.roller.original_record(session, "scan2_release", record_id)
+            await self.repository.lock_line(session, located["work_line_id"])
+            await self.roller.original_record(session, "scan2_release", record_id, for_update=True)
         return await self.roller.advance(session, RollerWorkRef(kind, record_id))

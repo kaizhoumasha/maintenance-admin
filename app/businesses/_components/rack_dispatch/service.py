@@ -6,7 +6,7 @@ from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -143,6 +143,27 @@ class RackDispatch:
     async def lock_jobs(self, session: AsyncSession, *, job_ids: tuple[str, ...]) -> None:
         await session.execute(
             self._jobs.where(RackJob.id.in_(job_ids)).order_by(RackJob.id).with_for_update()
+        )
+
+    async def lock_actions(self, session: AsyncSession, *, job_ids: tuple[str, ...]) -> None:
+        await session.execute(
+            select(RackAction.id)
+            .where(
+                RackAction.owner_domain == self.owner_domain,
+                RackAction.job_id.in_(job_ids),
+            )
+            .order_by(RackAction.id)
+            .with_for_update()
+        )
+
+    async def note_facts_changed(self, session: AsyncSession, *, job_ids: tuple[str, ...]) -> None:
+        """Called after locking the original jobs and admitting a new host fact."""
+        await session.execute(
+            update(RackJob)
+            .where(
+                RackJob.owner_domain == self.owner_domain, RackJob.id.in_(job_ids), RackJob.pending
+            )
+            .values(facts_revision=RackJob.facts_revision + 1)
         )
 
     async def _actions(self, session, job, *, lock=False):
@@ -694,7 +715,7 @@ class RackDispatch:
 
     async def _consume_decision(self, session, job, previous, now_ms):
         """Read the original response once, including when new movement is blocked."""
-        from app.businesses._components.bin_roller.request.rack_departure_decide_v1 import (
+        from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
             DECISION,
             OPERATION,
             DepartureRequest,
@@ -754,7 +775,7 @@ class RackDispatch:
         return previous.phase == decision["result"]
 
     async def _departure(self, session, job, actions, demand, handoff, now_ms):
-        from app.businesses._components.bin_roller.request.rack_departure_decide_v1 import (
+        from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
             OPERATION,
             DepartureRequest,
         )

@@ -189,8 +189,7 @@ async def test_each_line_refills_one_old_waiter_per_original_departure_acceptanc
         cycle = next(c for c in cycles if c["id"] == original[index]["cycle_id"])
         basis = cycle["release_basis"]
         assert cycle["status"] == "RELEASED"
-        assert basis["submission_response_code"] == "RECEIVED"
-        assert basis["outcome_revision"] is None
+        assert basis["response_code"] == "RECEIVED"
         async with flow.factory() as session:
             transport = await session.scalar(
                 select(TransportTask).where(

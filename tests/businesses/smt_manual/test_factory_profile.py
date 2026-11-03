@@ -265,7 +265,8 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
 async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
     flow = profile_flow
     assert flow.runtime.services["smt_manual"] is flow.host
-    assert set(flow.host.components) == {"sorting_task", "bin_roller"}
+    assert set(flow.host.components) == {"sorting_task", "bin_roller", "rack_dispatch"}
+    assert flow.host.components["rack_dispatch"] is flow.roller.rack_dispatch
     async with flow.factory() as session:
         lines = list(await session.scalars(select(WorkLine).order_by(WorkLine.line_code)))
         assert [(r.line_code, r.version, r.is_enabled, r.business_code) for r in lines] == [
@@ -529,8 +530,13 @@ async def test_ctu03_submit_acceptance_releases_original_cycle_without_final_res
     departure = await cycle_departure(flow, action)
     cycles = await flow.rows("rack_cycle", roller=True)
     assert cycles[0]["status"] == "RELEASED"
-    assert cycles[0]["release_basis"]["submission_response_code"] == "RECEIVED"
-    assert cycles[0]["release_basis"]["outcome_revision"] is None
+    assert cycles[0]["release_basis"]["response_code"] == "RECEIVED"
+    async with flow.factory() as session:
+        assert (
+            await flow.roller.rack_dispatch.final_result(
+                session, job_id=departure["cycle_id"], action_id=departure["id"]
+            )
+        ).outcome is None
     original = next(
         r
         for r in await saved_transports(flow)

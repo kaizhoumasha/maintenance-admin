@@ -30,7 +30,11 @@ async def configure(flow, task_id):
 
 def restart(flow):
     flow.roller = BinRoller(
-        flow.roller.context, flow.roller.capabilities, flow.production, tables=flow.store.tables
+        flow.roller.context,
+        flow.roller.capabilities,
+        flow.production,
+        rack_dispatch=flow.roller.rack_dispatch,
+        tables=flow.store.tables,
     )
 
 

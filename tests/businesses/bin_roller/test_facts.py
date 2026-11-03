@@ -2,8 +2,6 @@ from dataclasses import replace
 
 import pytest
 
-from app.integrations.wms_transport import TransportTaskResult
-
 
 async def accept(store, digest, code, *, point="SCAN1", separator=None):
     async with store.factory.begin() as session:
@@ -67,335 +65,210 @@ async def test_round_association_does_not_reject_scan_fact(roller_store):
     assert later["round_id"] is None
 
 
-async def rack(store, *, cycle="cycle", action="action", kind="CTU01", source="source"):
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id=cycle,
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref=source,
-        )
-        return await store.repo.register_rack_action(
-            session,
-            cycle_id=cycle,
-            kind=kind,
-            source_ref=source,
-            action_id=action,
-            client_request_id="request-" + action,
-            transport_task_id="transport-" + action,
-            operation_id="operation-" + action,
-            target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-            target_face="A",
-            caller_workline_id="1",
-        )
-
-
-def result(action="action", **kwargs):
-    return TransportTaskResult(
-        transport_task_id="transport-" + action,
-        client_request_id="request-" + action,
-        workline_id="1",
-        station_id=None,
-        availability="FOUND",
-        owner_domain="first",
-        cycle_id="cycle",
-        kind="RACK_MOVE",
-        operation_id="operation-" + action,
-        **kwargs,
-    )
-
-
-def outcome(revision=1, *, status="SUCCEEDED", location="CTU01"):
-    return dict(
-        transport_task_id="transport-action",
-        kind="RACK_MOVE",
-        rack_id="R1",
-        outcome_revision=revision,
-        status=status,
-        final_position={"kind": "RACK_POSITION", "location_code": location},
-        arrival_face="A",
-        position_unknown=None,
-    )
-
-
-async def test_failed_known_position_uses_existing_outcome(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store)
-    async with store.factory.begin() as session:
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=result(outcome=outcome(status="FAILED", location="OTHER"), outcome_revision=1),
-            repository=store.repo,
-        )
-        assert applied.action_changed and applied.projection_update == "UPDATED"
-    async with store.factory() as session:
-        assert (await store.repo.current_position(session, "RACK", "R1"))[
-            "location_code"
-        ] == "OTHER"
-        assert (await store.repo.get_action(session, "action"))["status"] == "FAILED"
-
-
-async def test_known_rack_mismatch_updates_position_without_fulfilling_action(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store)
-    async with store.factory.begin() as session:
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=result(position_observation=outcome(location="OTHER")),
-            repository=store.repo,
-        )
-        assert not applied.action_changed and applied.projection_update == "UPDATED"
-    async with store.factory() as session:
-        assert (await store.repo.get_action(session, "action"))["status"] == "PENDING"
-        assert (await store.repo.current_position(session, "RACK", "R1"))[
-            "location_code"
-        ] == "OTHER"
-
-
-async def test_lower_original_revision_does_not_replace_newer_rack_fact(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store)
-    async with store.factory.begin() as session:
-        for revision, location in [(3, "NEW"), (2, "OLD")]:
-            applied = await apply_rack_result(
-                session,
-                action_id="action",
-                result=result(position_observation=outcome(revision, location=location)),
-                repository=store.repo,
-            )
-        assert applied.projection_update == "HISTORY_ONLY"
-    async with store.factory() as session:
-        assert (await store.repo.current_position(session, "RACK", "R1"))["location_code"] == "NEW"
-
-
-async def test_departure_acceptance_completes_original_cycle_without_outcome(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store, kind="CTU03")
-    async with store.factory.begin() as session:
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=result(
-                submission_state="AVAILABLE",
-                submission_response_state="VALID",
-                submission_http_status=202,
-                submission_response_code="RECEIVED",
-            ),
-            repository=store.repo,
-        )
-        assert applied.action_changed
-    async with store.factory() as session:
-        assert (await store.repo.get_cycle(session, "cycle"))["status"] == "RELEASED"
-        assert not (await store.repo.get_action(session, "action"))["pending"]
-
-
-async def test_late_departure_result_preserves_released_cycle(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store, kind="CTU03")
-    async with store.factory.begin() as session:
-        accepted = result(
-            submission_state="AVAILABLE",
-            submission_response_state="VALID",
-            submission_http_status=200,
-            submission_response_code="DUPLICATE",
-        )
-        await apply_rack_result(session, action_id="action", result=accepted, repository=store.repo)
-        await store.repo.record_position(
-            session,
-            object_kind="RACK",
-            object_code="R2",
-            location_code="CTU01",
-            rack_face="B",
-            source_kind="RACK",
-            source_id="new-action",
-            source_revision=1,
-        )
-        late = await apply_rack_result(
-            session,
-            action_id="action",
-            result=replace(accepted, outcome=outcome(status="FAILED"), outcome_revision=1),
-            repository=store.repo,
-        )
-        assert late.projection_update == "HISTORY_ONLY"
-    async with store.factory() as session:
-        assert (await store.repo.get_cycle(session, "cycle"))["status"] == "RELEASED"
-        assert (await store.repo.position_at(session, "RACK", "CTU01"))["object_code"] == "R2"
-
-
 @pytest.mark.parametrize(
-    "change",
+    "mismatch",
     [
-        dict(owner_domain="other"),
-        dict(client_request_id="other"),
-        dict(availability="INVALID"),
-        dict(cycle_id="other"),
-        dict(kind="BIN_MOVE"),
+        {"owner_domain": "other"},
+        {"client_request_id": "other"},
+        {"availability": "INVALID"},
+        {"cycle_id": "other"},
+        {"kind": "BIN_MOVE"},
+        {"transport_task_id": "other"},
+        {"operation_id": "other"},
+        {"workline_id": "other"},
     ],
 )
-async def test_unrelated_result_cannot_change_original_action(roller_store, change):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    await rack(store)
-    async with store.factory.begin() as session:
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=replace(result(outcome=outcome(), outcome_revision=1), **change),
-            repository=store.repo,
-        )
-        assert not applied.action_changed and applied.projection_update == "NEEDS_ASSOCIATION"
-    async with store.factory() as session:
-        assert await store.repo.current_position(session, "RACK", "R1") is None
-
-
-@pytest.mark.parametrize(
-    "http,code,response_state",
-    [(200, "RECEIVED", "VALID"), (202, "RECEIVED", "INVALID"), (422, "REJECTED", "VALID")],
-)
-async def test_departure_requires_original_valid_acceptance(
-    roller_store, http, code, response_state
+async def test_unrelated_original_result_cannot_publish_rack_position(
+    roller_lifecycle, monkeypatch, mismatch
 ):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[0]
+    await flow.rack_result(entry)
+    port = flow.roller.capabilities.transport
+    original = port.get_result
 
-    store = roller_store
-    await rack(store, kind="CTU03")
-    async with store.factory.begin() as session:
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=result(
-                submission_state="AVAILABLE",
-                submission_response_state=response_state,
-                submission_http_status=http,
-                submission_response_code=code,
-            ),
-            repository=store.repo,
-        )
-        assert not applied.action_changed
-        assert (await store.repo.get_cycle(session, "cycle"))["status"] == "ACTIVE"
-        assert (await store.repo.get_action(session, "action"))["pending"]
+    async def read(*args, **kwargs):
+        return replace(await original(*args, **kwargs), **mismatch)
 
-
-async def test_original_caller_code_survives_rack_result_application(roller_store):
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-
-    store = roller_store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id="cycle",
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
-        )
-        await store.repo.register_rack_action(
-            session,
-            cycle_id="cycle",
-            kind="CTU01",
-            source_ref="source",
-            action_id="action",
-            client_request_id="request-action",
-            transport_task_id="transport-action",
-            operation_id="operation-action",
-            target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-            target_face="A",
-            caller_workline_id="WL-01",
-        )
-        applied = await apply_rack_result(
-            session,
-            action_id="action",
-            result=replace(result(outcome=outcome(), outcome_revision=1), workline_id="WL-01"),
-            repository=store.repo,
-        )
-        assert applied.action_changed and applied.projection_update == "UPDATED"
+    monkeypatch.setattr(port, "get_result", read)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        assert await flow.store.repo.current_position(session, "RACK", "R1") is None
+    assert not await flow.all_rows("feed")
 
 
 @pytest.mark.parametrize("consume_unknown", [False, True])
-async def test_newer_known_position_survives_original_unknown_outcome(
-    roller_transport, consume_unknown
+async def test_newer_observation_preserves_known_position_and_original_outcome(
+    roller_lifecycle, consume_unknown
 ):
-    from sqlalchemy import select
-
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-    from app.core.identifiers import uuid7
-
-    rig, cycle_id = roller_transport, str(uuid7())
-    store = rig.store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id=cycle_id,
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    action = (await flow.all_rows("rack_action"))[0]
+    cycle = action["cycle_id"]
+    payload = dict(
+        transport_task_id=action["transport_task_id"],
+        kind="RACK_MOVE",
+        rack_id="R1",
+        arrival_face=None,
+    )
+    await flow.rack_callback(
+        dict(
+            payload,
+            status="FAILED",
+            outcome_revision=1,
+            position_unknown=True,
+            failure_code="POSITION_UNKNOWN",
         )
-        action = await rig.create_action(
-            session, cycle_id=cycle_id, kind="CTU01", source_ref="source", target_face="A"
-        )
-    await rig.callback(action, status="FAILED", location=None, face=None)
+    )
     if consume_unknown:
-        async with store.factory.begin() as session:
-            view = await rig.read_result(session, action)
-            initial = await apply_rack_result(
-                session, action_id=action["id"], result=view, repository=store.repo
+        await flow.advance("RACK_CYCLE", cycle)
+        assert not await flow.all_rows("position_fact")
+    wrong = dict(
+        payload,
+        status="SUCCEEDED",
+        outcome_revision=2,
+        arrival_face="A",
+        final_position=dict(kind="RACK_POSITION", location_code="OTHER"),
+    )
+    await flow.rack_callback(wrong)
+    for _ in range(2):
+        await flow.advance("RACK_CYCLE", cycle)
+        async with flow.factory() as session:
+            job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+            assert job.actions[0].outcome["position_unknown"]
+            assert (job.actions[0].outcome_revision, job.actions[0].position_revision) == (1, 2)
+            assert job.review_reason == "POSITION_CONFLICT"
+        assert len(await flow.all_rows("position_fact")) == 1
+        assert not await flow.all_rows("feed")
+    await flow.rack_result(action, revision=3)
+    await flow.advance("RACK_CYCLE", cycle)
+    async with flow.factory() as session:
+        p = await flow.store.repo.current_position(session, "RACK", "R1")
+        assert (p["location_code"], p["source_id"], p["source_revision"]) == (
+            "RACK-WORK",
+            action["id"],
+            3,
+        )
+    assert len(await flow.all_rows("feed")) == 1
+
+
+async def test_failed_arrival_records_original_position_without_authorizing_face(roller_lifecycle):
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[0]
+    await flow.rack_result(entry, status="FAILED")
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert job.actions[0].outcome["status"] == "FAILED"
+        p = await flow.store.repo.current_position(session, "RACK", "R1")
+        assert (p["source_id"], p["rack_face"]) == (entry["id"], "A")
+    assert not await flow.all_rows("feed")
+
+
+@pytest.mark.parametrize(
+    "http,code,mismatched",
+    [
+        (200, "RECEIVED", False),
+        (202, "RECEIVED", True),
+        (422, "REJECTED", False),
+        (200, "DUPLICATE", False),
+    ],
+)
+async def test_departure_requires_its_own_acceptance_and_preserves_new_rack(
+    roller_lifecycle, http, code, mismatched
+):
+    flow = roller_lifecycle
+    demand, cycle = await flow.ready_supply(count=1)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", demand)
+    root = (await flow.all_rows("departure"))[0]
+    await flow.decision(
+        "departure",
+        root["id"],
+        dict(result="READY", rack_destination=dict(type="ZONE", location_code="S")),
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    depart = (await flow.all_rows("rack_action"))[-1]
+    await flow.accepted(
+        depart, http=http, code=code, response_task="different-task" if mismatched else None
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        if http != 200 or code != "DUPLICATE":
+            assert job.pending and job.actions[-1].id == depart["id"]
+            return
+        assert not job.pending and job.closure_reason == "DEPARTURE_ACK"
+        assert (
+            await flow.roller.rack_dispatch.final_result(
+                session, job_id=cycle, action_id=depart["id"]
             )
-            assert initial.action_changed and initial.projection_update == "HISTORY_ONLY"
-    operation_id = await rig.callback(action, revision=2, location="OTHER")
-    async with store.factory.begin() as session:
-        view = await rig.read_result(session, action)
-        assert view.outcome_revision == 1 and view.outcome["position_unknown"]
-        assert view.position_observation["outcome_revision"] == 2
-        observed = await apply_rack_result(
-            session, action_id=action["id"], result=view, repository=store.repo
+        ).outcome is None
+    original_faces = await flow.all_rows("face_work")
+    new = await flow.demand(rack="R2")
+    await flow.advance("FEED", new)
+    entry = (await flow.all_rows("rack_action"))[-1]
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    await flow.rack_callback(
+        dict(
+            transport_task_id=depart["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            status="FAILED",
+            outcome_revision=1,
+            final_position=dict(kind="RACK_POSITION", location_code="RACK-WORK"),
+            failure_code="RCS_EXECUTION_FAILED",
         )
-        assert observed.action_changed is (not consume_unknown)
-        assert observed.projection_update == "UPDATED"
-        progress = await store.repo.get_action(session, action["id"])
-        assert progress["status"] == "UNKNOWN" and progress["pending"]
-        assert (progress["consumed_revision"], progress["position_revision"]) == (1, 2)
-        assert (await store.repo.current_position(session, "RACK", "R1"))[
-            "location_code"
-        ] == "OTHER"
-    await rig.callback(action, revision=2, location="OTHER", operation_id=operation_id)
-    async with store.factory.begin() as session:
-        replay = await apply_rack_result(
-            session,
-            action_id=action["id"],
-            result=await rig.read_result(session, action),
-            repository=store.repo,
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    async with flow.factory() as session:
+        assert await flow.roller.rack_dispatch.progress(session, job_id=cycle) == job
+        assert (await flow.store.repo.position_at(session, "RACK", "RACK-WORK"))[
+            "source_id"
+        ] == entry["id"]
+        assert (
+            await flow.roller.rack_dispatch.final_result(
+                session, job_id=cycle, action_id=depart["id"]
+            )
+        ).outcome["status"] == "FAILED"
+    assert [r for r in await flow.all_rows("face_work") if r["cycle_id"] == cycle] == original_faces
+
+
+async def test_original_caller_and_observations_keep_frozen_authority(
+    roller_lifecycle, monkeypatch
+):
+    flow = roller_lifecycle
+    read = flow.roller.read_resources
+
+    async def custom(*args):
+        return dict(await read(*args), caller_workline_id="WL-01")
+
+    monkeypatch.setattr(flow.roller, "read_resources", custom)
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[0]
+    for revision, location in ((3, "NEW"), (2, "OLD")):
+        await flow.rack_callback(
+            dict(
+                transport_task_id=entry["transport_task_id"],
+                kind="RACK_MOVE",
+                rack_id="R1",
+                status="SUCCEEDED",
+                outcome_revision=revision,
+                final_position=dict(kind="RACK_POSITION", location_code=location),
+                arrival_face="A",
+            )
         )
-        assert not replay.action_changed and replay.projection_update == "HISTORY_ONLY"
-        assert len((await session.execute(select(store.tables["position_fact"]))).all()) == 1
-        assert (await store.repo.get_action(session, action["id"]))["pending"]
-    await rig.callback(action, revision=3)
-    async with store.factory.begin() as session:
-        corrected = await apply_rack_result(
-            session,
-            action_id=action["id"],
-            result=await rig.read_result(session, action),
-            repository=store.repo,
-        )
-        assert corrected.action_changed and corrected.projection_update == "UPDATED"
-        progress = await store.repo.get_action(session, action["id"])
-        assert progress["status"] == "SUCCEEDED" and not progress["pending"]
-        assert (progress["consumed_revision"], progress["position_revision"]) == (3, 3)
-        assert (await store.repo.current_position(session, "RACK", "R1"))[
-            "location_code"
-        ] == "CTU01"
+        await flow.advance("FEED", demand)
+        async with flow.factory() as session:
+            job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+            assert job.actions[0].caller.workline_id == "WL-01"
+            assert job.actions[0].outcome is None and job.actual_position["location_code"] == "NEW"
+            assert job.actions[0].position_revision == 3
+        assert not await flow.all_rows("feed")

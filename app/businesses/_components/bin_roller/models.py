@@ -105,6 +105,7 @@ class ScanArrival(Scope, Base):
     removed: Mapped[bool | None]
     first_scan4_arrival_id: Mapped[str | None]
     delegation_state: Mapped[str | None]
+    received_work: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
     release_record_id: Mapped[str | None]
     release_call_key: Mapped[str | None]
     release_command_code: Mapped[str | None]
@@ -150,53 +151,6 @@ class RackPositionFact(Scope, Base):
     source_id: Mapped[str]
     source_revision: Mapped[int] = mapped_column(BigInteger)
     is_current: Mapped[bool]
-
-
-class RackCycle(Scope, Base):
-    __tablename__ = "bin_roller_rack_cycle"
-    __table_args__ = (UniqueConstraint("owner_domain", "work_line_id", "source_ref", "rack_id"),)
-    rack_id: Mapped[str]
-    purpose: Mapped[str]
-    task_id: Mapped[str | None]
-    source_ref: Mapped[str]
-    resources: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
-    status: Mapped[str] = mapped_column(default="ACTIVE")
-    pending: Mapped[bool] = mapped_column(default=True)
-    release_basis: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
-
-
-class RackAction(Scope, Base):
-    __tablename__ = "bin_roller_rack_action"
-    __table_args__ = (
-        UniqueConstraint("owner_domain", "work_line_id", "cycle_id", "kind", "source_ref"),
-        UniqueConstraint("client_request_id"),
-        UniqueConstraint("transport_task_id"),
-        Index(
-            "bin_roller_cycle_entry_departure",
-            "owner_domain",
-            "work_line_id",
-            "cycle_id",
-            "kind",
-            unique=True,
-            sqlite_where=text("kind IN ('CTU01', 'CTU03')"),
-            postgresql_where=text("kind IN ('CTU01', 'CTU03')"),
-        ),
-    )
-    cycle_id: Mapped[str]
-    kind: Mapped[str]
-    source_ref: Mapped[str]
-    client_request_id: Mapped[str]
-    transport_task_id: Mapped[str | None]
-    operation_id: Mapped[str | None]
-    station_id: Mapped[str | None]
-    caller_workline_id: Mapped[str]
-    target: Mapped[dict] = mapped_column(JSON)
-    target_face: Mapped[str | None]
-    status: Mapped[str] = mapped_column(default="PENDING")
-    pending: Mapped[bool] = mapped_column(default=True)
-    consumed_revision: Mapped[int | None] = mapped_column(BigInteger)
-    position_revision: Mapped[int | None] = mapped_column(BigInteger)
-    acceptance_basis: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
 
 
 class FaceWork(Scope, Base):
@@ -262,6 +216,7 @@ class FaceWork(Scope, Base):
     rack_id: Mapped[str]
     rack_face: Mapped[str]
     cycle_id: Mapped[str | None]
+    preparation_action_id: Mapped[str | None]
     source_ref: Mapped[str | None]
     demand_state: Mapped[str | None]
     service_state: Mapped[str | None]
@@ -334,31 +289,18 @@ class Decision(Scope, Base):
             "input_ref",
             condition="kind = 'DRAIN'",
         ),
-        _unique_where(
-            "bin_roller_departure_source",
-            "owner_domain",
-            "work_line_id",
-            "cycle_id",
-            "source_ref",
-            condition="kind = 'DEPARTURE'",
-        ),
         CheckConstraint(
-            "(kind = 'DRAIN' AND input_kind IS NOT NULL AND input_ref IS NOT NULL "
-            "AND unused_racks IS NOT NULL AND cycle_id IS NULL AND source_ref IS NULL) OR "
-            "(kind = 'DEPARTURE' AND input_kind IS NULL AND input_ref IS NULL AND "
-            "input_snapshot IS NULL "
-            "AND unused_racks IS NULL AND cycle_id IS NOT NULL AND source_ref IS NOT "
-            "NULL AND request IS NOT NULL)",
+            "kind = 'DRAIN' AND input_kind IS NOT NULL AND input_ref IS NOT NULL "
+            "AND unused_racks IS NOT NULL",
             name="subject",
         ),
     )
     kind: Mapped[str] = mapped_column(primary_key=True)
-    cycle_id: Mapped[str | None]
-    source_ref: Mapped[str | None]
     input_kind: Mapped[str | None]
     input_ref: Mapped[str | None]
     input_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     request: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    received_work: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
     unused_racks: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
     operation_id: Mapped[str]
     message_id: Mapped[int | None]
@@ -372,8 +314,6 @@ TABLES = {
     "scan_fact": ScanFact.__table__,
     "scan_arrival": ScanArrival.__table__,
     "position_fact": RackPositionFact.__table__,
-    "rack_cycle": RackCycle.__table__,
-    "rack_action": RackAction.__table__,
     "face_work": FaceWork.__table__,
     "feed_segment": FeedSegment.__table__,
     "return_opportunity": ReturnOpportunity.__table__,

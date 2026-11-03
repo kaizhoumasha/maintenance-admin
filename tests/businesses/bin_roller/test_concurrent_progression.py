@@ -146,7 +146,13 @@ async def test_restart_after_unknown_commit_restores_committed_identity(roller_l
         # The server committed; the caller lost its commit answer and all transient IDs.
     original = (await flow.all_rows("drain"))[0]
     old = flow.roller
-    flow.roller = BinRoller(old.context, old.capabilities, old.production, tables=old.tables)
+    flow.roller = BinRoller(
+        old.context,
+        old.capabilities,
+        old.production,
+        rack_dispatch=old.rack_dispatch,
+        tables=old.tables,
+    )
     await flow.advance("SCAN", scan["id"])
     current = (await flow.all_rows("drain"))[0]
     assert len(await flow.all_rows("drain")) == 1
@@ -319,3 +325,106 @@ async def test_successor_registration_failure_still_rolls_back_original_release(
         == "RELEASED"
     )
     assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01", "CTU03", "CTU01"]
+
+
+@pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
+@pytest.mark.parametrize("authority", ["FIFO", "DRAIN", "JOB"])
+async def test_committed_scan_invalidates_older_dispatch_snapshot(roller_lifecycle, authority):
+    from app.models import WorkLine
+
+    flow = roller_lifecycle
+    if authority == "JOB":
+        demand, job = await flow.ready_supply(count=1)
+        await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+        work = ("FEED", demand)
+    else:
+        flow.successor = "NONE"
+        await flow.bins(1)
+        fourth = next(r for r in await flow.all_rows("scan_arrival") if r["point"] == "SCAN4")
+        work = ("SCAN", fourth["id"])
+        if authority == "DRAIN":
+            await flow.advance(*work)
+            drain = (await flow.all_rows("drain"))[0]
+            await flow.decision(
+                "drain",
+                drain["id"],
+                dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])]),
+            )
+            work = ("DRAIN", drain["id"])
+    old, accepted = asyncio.Event(), asyncio.Event()
+    attempts = []
+
+    async def before(session, attempt):
+        attempts.append(attempt)
+        if attempt == 0:
+            await session.scalar(select(WorkLine.id))
+            old.set()
+            await asyncio.wait_for(accepted.wait(), 5)
+
+    dispatch = asyncio.create_task(flow.advance(*work, before=before))
+    await asyncio.wait_for(old.wait(), 5)
+    try:
+        await flow.scan("SCAN3", "A000000033-B", timestamp=33)
+        await flow.scan("SCAN3", "A000000033-B", timestamp=33)
+    finally:
+        accepted.set()
+    await asyncio.wait_for(dispatch, 10)
+    assert attempts == [0, 1]
+    if authority == "FIFO":
+        head = next(r for r in await flow.all_rows("scan_arrival") if r["point"] == "SCAN4")
+        assert len(head["received_work"]) == 1
+        assert len(await flow.all_rows("drain")) == 1
+    elif authority == "DRAIN":
+        assert len((await flow.all_rows("drain"))[0]["received_work"]) == 1
+        assert len(await flow.all_rows("rack_action")) == 1
+    else:
+        async with flow.factory() as session:
+            assert (
+                await flow.roller.rack_dispatch.progress(session, job_id=job)
+            ).facts_revision == 1
+        assert not await flow.all_rows("departure")
+
+
+@pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
+async def test_new_scan_after_drain_creation_versions_the_committed_job(
+    roller_lifecycle, monkeypatch
+):
+    flow = roller_lifecycle
+    flow.successor = "NONE"
+    await flow.bins(1)
+    fourth = next(r for r in await flow.all_rows("scan_arrival") if r["point"] == "SCAN4")
+    await flow.advance("SCAN", fourth["id"])
+    drain = (await flow.all_rows("drain"))[0]
+    await flow.decision(
+        "drain", drain["id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
+    )
+    prepared, release, started = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = flow.roller.rack_dispatch.prepare
+
+    async def pause(*args, **kwargs):
+        action = await original(*args, **kwargs)
+        prepared.set()
+        await asyncio.wait_for(release.wait(), 5)
+        return action
+
+    monkeypatch.setattr(flow.roller.rack_dispatch, "prepare", pause)
+    dispatch = asyncio.create_task(flow.advance("DRAIN", drain["id"]))
+    await asyncio.wait_for(prepared.wait(), 5)
+    lock = flow.lock_scan_line
+
+    async def entering(session, line_id):
+        started.set()
+        return await lock(session, line_id)
+
+    flow.lock_scan_line = entering
+    receive = asyncio.create_task(flow.scan("SCAN3", "A000000034-B", timestamp=34))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert not receive.done()
+    finally:
+        release.set()
+    await asyncio.wait_for(asyncio.gather(receive, dispatch), 10)
+    [entry] = await flow.all_rows("rack_action")
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert job.facts_revision == 1 and job.current_action_id == entry["id"]

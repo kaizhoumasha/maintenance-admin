@@ -3,6 +3,8 @@ from typing import Literal, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.businesses._components.rack_dispatch.contracts import Coverage, PointRef
+
 
 @dataclass(frozen=True, slots=True)
 class CurrentTask:
@@ -58,6 +60,10 @@ class RollerWorkRef:
 
 
 class Production(Protocol):
+    async def read_task_coverage(
+        self, session: AsyncSession, *, point: PointRef, task_id: str
+    ) -> Coverage | None: ...
+
     async def read_current_task(
         self, session: AsyncSession, *, work_line_id: int
     ) -> CurrentTask: ...

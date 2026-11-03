@@ -7,6 +7,7 @@ from sqlalchemy import Table, func, or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses.runtime import Capabilities
 from app.core.errors import AppError, ErrorCode
 from app.integrations.ecs_callback import EcsEventContext
@@ -21,6 +22,12 @@ from .ports import Production, RollerWorkRef, SupplyChange, SupplyProgress
 from .repository import RollerRepository
 from .scan_flow import accept_scan, consume_scan_result, get_scan_result, release_scan2
 
+ROLLER_SOURCES = ("ROLLER_ORDINARY", "ROLLER_DRAIN")
+
+
+class RackLockSetChanged(RuntimeError):
+    """An original job entered or left the located set while acquiring host locks."""
+
 
 class BinRoller:
     def __init__(
@@ -29,15 +36,94 @@ class BinRoller:
         capabilities: Capabilities,
         production: Production,
         *,
+        rack_dispatch: RackDispatch,
         tables: Mapping[str, Table] | None = None,
     ) -> None:
+        self.rack_dispatch = rack_dispatch
         self.context = context
         self.capabilities = capabilities
         self.production = production
         self.tables = TABLES if tables is None else tables
 
     def repository(self, work_line_id: int) -> RollerRepository:
-        return RollerRepository(self.context.domain, work_line_id, tables=self.tables)
+        return RollerRepository(
+            self.context.domain, work_line_id, tables=self.tables, rack_dispatch=self.rack_dispatch
+        )
+
+    async def lock_jobs_on_line(self, session, work_line_id):
+        jobs = await self.rack_dispatch.jobs(
+            session, work_line_id=work_line_id, source_kinds=ROLLER_SOURCES, pending=True
+        )
+        await self.rack_dispatch.lock_jobs(session, job_ids=tuple(j.id for j in jobs))
+        return jobs
+
+    async def lock_production_subjects(self, session, work_line_id, jobs):
+        repo = self.repository(work_line_id)
+        arrivals, faces, segments, opportunities, batches, drains = (
+            repo.tables[k]
+            for k in (
+                "scan_arrival",
+                "face_work",
+                "feed_segment",
+                "return_opportunity",
+                "return_batch",
+                "decision",
+            )
+        )
+        active_faces = (
+            faces.c.cycle_id.in_([j.id for j in jobs])
+            | (faces.c.demand_state == "ACTIVE") & faces.c.cycle_id.is_(None)
+            | (faces.c.feed_id.is_not(None) & (faces.c.feed_state != "COMPLETED"))
+        )
+        active_feeds = select(faces.c.feed_id).where(*repo.scoped(faces), active_faces)
+        active_services = select(faces.c.service_id).where(*repo.scoped(faces), active_faces)
+        active_opportunities = ~opportunities.c.ended | opportunities.c.service_id.in_(
+            active_services
+        )
+        selected_opportunities = select(opportunities.c.id).where(
+            *repo.scoped(opportunities), active_opportunities
+        )
+        # A retired FIFO visit can remain part of a frozen unresolved return.
+        relevant_rounds = {
+            m["round_id"]
+            for members in await session.scalars(
+                select(batches.c.members).where(*repo.scoped(batches), batches.c.pending)
+            )
+            for m in members
+        }
+        live_rounds = select(arrivals.c.round_id).where(
+            *repo.scoped(arrivals),
+            arrivals.c.removed.is_(False),
+            arrivals.c.return_state != "COMPLETED",
+        )
+        subjects = (
+            (
+                arrivals,
+                arrivals.c.pending
+                | (arrivals.c.release_state == "PENDING")
+                | (arrivals.c.removed.is_(False) & (arrivals.c.return_state != "COMPLETED"))
+                | arrivals.c.round_id.in_(live_rounds)
+                | arrivals.c.round_id.in_(relevant_rounds),
+            ),
+            (faces, active_faces),
+            (segments, segments.c.pending | segments.c.feed_id.in_(active_feeds)),
+            (opportunities, active_opportunities),
+            (batches, batches.c.pending | batches.c.opportunity_id.in_(selected_opportunities)),
+            (
+                drains,
+                drains.c.pending
+                | drains.c.id.in_(
+                    [j.origin.source_ref for j in jobs if j.origin.source_kind == "ROLLER_DRAIN"]
+                ),
+            ),
+        )
+        for table, condition in subjects:
+            await session.execute(
+                select(*table.primary_key)
+                .where(*repo.scoped(table), condition)
+                .order_by(*table.primary_key)
+                .with_for_update()
+            )
 
     async def original_arrival(self, session: AsyncSession, arrival_id: str) -> RowMapping:
         return await self.original_record(session, "scan_arrival", arrival_id)
@@ -53,7 +139,7 @@ class BinRoller:
                 "feed": table.c.feed_id,
             }[key]
             conditions = (identity == record_id,)
-        elif key in {"drain", "departure"}:
+        elif key == "drain":
             table = self.tables["decision"]
             conditions = (table.c.kind == key.upper(), table.c.id == record_id)
         elif key == "scan2_release":
@@ -66,8 +152,6 @@ class BinRoller:
             "scan_arrival",
             "scan_fact",
             "position_fact",
-            "rack_cycle",
-            "rack_action",
             "feed_segment",
             "return_opportunity",
             "return_batch",
@@ -93,13 +177,7 @@ class BinRoller:
         return await self.repository(work_line_id).supply_progress(session, task_id)
 
     def pending_feed_query(self):
-        demand, action = self.tables["face_work"], self.tables["rack_action"]
-        original_entry = select(action.c.id).where(
-            action.c.owner_domain == demand.c.owner_domain,
-            action.c.work_line_id == demand.c.work_line_id,
-            action.c.cycle_id == demand.c.cycle_id,
-            action.c.kind == "CTU01",
-        )
+        demand = self.tables["face_work"]
         return select(demand.c.demand_id.label("id")).where(
             demand.c.owner_domain == self.context.domain,
             demand.c.purpose == "SUPPLY",
@@ -108,14 +186,14 @@ class BinRoller:
             or_(
                 demand.c.demand_state == "ACTIVE",
                 demand.c.feed_id.is_not(None),
-                original_entry.exists(),
+                demand.c.preparation_action_id.is_not(None),
             ),
         )
 
     def pending_query(self, kind: str):
         if kind == "FEED":
             return self.pending_feed_query()
-        if kind in {"RETURN_BATCH", "RACK_CYCLE", "DRAIN"}:
+        if kind in {"RETURN_BATCH", "DRAIN"}:
             table = self.tables["decision" if kind == "DRAIN" else kind.lower()]
             query = select(table.c.id).where(
                 table.c.owner_domain == self.context.domain, table.c.pending.is_(True)
@@ -149,6 +227,8 @@ class BinRoller:
         raise ValueError("unsupported roller work kind")
 
     async def get_pending_upper_id(self, session: AsyncSession, *, kind: str) -> str | None:
+        if kind == "RACK_CYCLE":
+            return await self.rack_dispatch.pending_upper_id(session, source_kinds=ROLLER_SOURCES)
         pending = self.pending_query(kind).subquery()
         return await session.scalar(select(func.max(pending.c.id)))
 
@@ -157,6 +237,15 @@ class BinRoller:
     ) -> tuple[RollerWorkRef, ...]:
         if limit < 1:
             raise ValueError("invalid roller work page")
+        if kind == "RACK_CYCLE":
+            ids = await self.rack_dispatch.pending_ids(
+                session,
+                source_kinds=ROLLER_SOURCES,
+                after_id=after_id,
+                upper_id=upper_id,
+                limit=limit,
+            )
+            return tuple(RollerWorkRef(kind, id_) for id_ in ids)
         table = self.pending_query(kind).subquery()
         query = select(table.c.id).where(table.c.id <= upper_id)
         if after_id is not None:
@@ -230,12 +319,12 @@ class BinRoller:
                 line_id = arrival["work_line_id"] if arrival["point"] == "SCAN4" else None
         if cycle_id is not None:
             progress = await advance_cycle(self, session, cycle_id)
-            cycle = await self.original_record(session, "rack_cycle", cycle_id)
-            line_id = cycle["work_line_id"]
-            if cycle["purpose"] == "DRAIN":
+            cycle = await self.rack_dispatch.progress(session, job_id=cycle_id)
+            line_id = cycle.origin.work_line_id
+            if cycle.origin.source_kind == "ROLLER_DRAIN":
                 from .return_flow import summarize_drain
 
-                await summarize_drain(self, session, cycle["source_ref"])
+                await summarize_drain(self, session, cycle.origin.source_ref)
         if line_id is not None:
             selected = await self.check_drain(session, line_id)
             if selected is not None and selected != cycle_id:
@@ -269,7 +358,7 @@ class BinRoller:
         from .return_flow import advance_drain, register_drain
 
         repo = self.repository(work_line_id)
-        table, cycles = repo.tables["decision"], repo.tables["rack_cycle"]
+        table = repo.tables["decision"]
         current = (
             (
                 await session.execute(
@@ -291,14 +380,8 @@ class BinRoller:
                 return None
             if current["status"] == "WAIT" and current["due_at"] > int(time() * 1000):
                 return None
-        original_cycles = (
-            (
-                await session.execute(
-                    select(cycles).where(*repo.scoped(cycles), cycles.c.status == "ACTIVE")
-                )
-            )
-            .mappings()
-            .all()
+        original_cycles = await self.rack_dispatch.jobs(
+            session, work_line_id=work_line_id, source_kinds=("ROLLER_ORDINARY",), pending=True
         )
         task = await self.production.read_current_task(session, work_line_id=work_line_id)
         if task.is_valid:
@@ -330,9 +413,7 @@ class BinRoller:
             .where(
                 *repo.scoped(services),
                 services.c.service_state.in_(("PENDING", "READY")),
-                services.c.cycle_id.in_(
-                    [c["id"] for c in original_cycles if c["purpose"] == "ORDINARY"]
-                ),
+                services.c.cycle_id.in_([c.id for c in original_cycles]),
             )
             .limit(1)
         ):
@@ -395,6 +476,19 @@ class BinRoller:
     async def return_channel_empty(self, session: AsyncSession, *, work_line_id: int) -> bool:
         repo = self.repository(work_line_id)
         if await repo.return_queue(session):
+            return False
+        arrivals = repo.tables["scan_arrival"]
+        if await session.scalar(
+            select(arrivals.c.id)
+            .where(
+                *repo.scoped(arrivals),
+                repo.current_round_condition(),
+                arrivals.c.first_scan4_arrival_id.is_(None),
+                arrivals.c.removed.is_(False),
+                arrivals.c.return_state != "COMPLETED",
+            )
+            .limit(1)
+        ):
             return False
         # A new SCAN3 visit can retire an older FIFO entry before its frozen return is resolved.
         batches = repo.tables["return_batch"]

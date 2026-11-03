@@ -261,7 +261,8 @@ async def test_concurrent_feed_completion_selects_one_original_next_segment(roll
         tasks = (
             await session.scalars(
                 select(TransportTask).where(
-                    TransportTask.cycle_id == (await env.rows(session, "rack_cycle"))[0]["id"]
+                    TransportTask.cycle_id == (await env.rows(session, "rack_cycle"))[0]["id"],
+                    TransportTask.kind == "BIN_MOVE",
                 )
             )
         ).all()

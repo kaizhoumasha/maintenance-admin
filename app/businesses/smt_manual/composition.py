@@ -1,11 +1,12 @@
 """The same complete manual host is assembled by API and worker."""
 
 from app.businesses._components.bin_roller.composition import COMPONENT as BIN_ROLLER
+from app.businesses._components.rack_dispatch.composition import COMPONENT as RACK_DISPATCH
 from app.businesses._components.sorting_task.composition import COMPONENT as SORTING_TASK
 
 from .definition import DEFINITION as DEFINITION
 
-COMPONENTS = (SORTING_TASK, BIN_ROLLER)
+COMPONENTS = (SORTING_TASK, BIN_ROLLER, RACK_DISPATCH)
 ENTRY_MODULES = (
     "app.businesses.smt_manual.callback.manual_bin_work_completed_v1",
     "app.businesses.smt_manual.callback.outbound_manual_rack_direct_pick_completed_v1",
