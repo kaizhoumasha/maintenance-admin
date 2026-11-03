@@ -235,11 +235,14 @@ class RackDispatch:
         work_line_id: int,
         source_kinds: tuple[str, ...],
         task_id: str | None = None,
+        source_ref: str | None = None,
         pending: bool | None = None,
     ) -> tuple[RackProgress, ...]:
         query = self._jobs.where(
             RackJob.work_line_id == work_line_id, RackJob.source_kind.in_(source_kinds)
         )
+        if source_ref is not None:
+            query = query.where(RackJob.source_ref == source_ref)
         if task_id is not None:
             query = query.where(RackJob.task_id == task_id)
         if pending is not None:

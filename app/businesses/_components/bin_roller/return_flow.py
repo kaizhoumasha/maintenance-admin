@@ -15,6 +15,8 @@ from app.integrations.wms_transport import (
     TransportTaskResult,
 )
 
+from .rack_flow import can_use_face
+
 
 async def summarize_drain(roller, session, drain_id):
     drain = await roller.original_record(session, "drain", drain_id)
@@ -24,10 +26,9 @@ async def summarize_drain(roller, session, drain_id):
     from .rack_flow import row_fact
 
     drains, faces = repo.tables["decision"], repo.tables["face_work"]
-    jobs = await roller.rack_dispatch.jobs(
-        session, work_line_id=repo.work_line_id, source_kinds=("ROLLER_DRAIN",)
+    originals = await roller.rack_dispatch.jobs(
+        session, work_line_id=repo.work_line_id, source_kinds=("ROLLER_DRAIN",), source_ref=drain_id
     )
-    originals = [job for job in jobs if job.origin.source_ref == drain_id]
     used = {job.origin.rack_id for job in originals}
     unused = drain["unused_racks"]
     if await roller.return_channel_empty(session, work_line_id=repo.work_line_id):
@@ -134,10 +135,9 @@ async def advance_drain(roller, session, drain_id):
     drain = await summarize_drain(roller, session, drain_id)
     if drain["status"] != "READY":
         return None
-    jobs = await roller.rack_dispatch.jobs(
-        session, work_line_id=repo.work_line_id, source_kinds=("ROLLER_DRAIN",)
+    original = await roller.rack_dispatch.jobs(
+        session, work_line_id=repo.work_line_id, source_kinds=("ROLLER_DRAIN",), source_ref=drain_id
     )
-    original = [job for job in jobs if job.origin.source_ref == drain_id]
     if any(job.pending for job in original):
         return None
     if not await roller.get_return_candidates(session, work_line_id=repo.work_line_id):
@@ -282,6 +282,8 @@ async def start_return_batch(
             reason="NO_CANDIDATES",
             evidence={"source_ref": source_ref},
         )
+        return None
+    if not await can_use_face(roller, session, service):
         return None
     payload = ReturnBatchRequest(
         workline_code=workline_code,
@@ -594,6 +596,8 @@ async def advance_return_batch(roller, session: AsyncSession, batch_id: str) -> 
                     {"batch_id": batch_id, "round_ids": sorted(member_ids - current_ids)},
                 )
             return "SUPERSEDED_ROUNDS"
+        if not await can_use_face(roller, session, service):
+            return "WAITING_FOR_ORIGINAL_POSITION"
         client_request_id = batch["client_request_id"] or str(uuid7())
         handle = await roller.capabilities.transport.move_bins(
             session,

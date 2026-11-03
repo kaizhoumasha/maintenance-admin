@@ -12,6 +12,7 @@ from app.integrations.wms_transport import (
     TransportTaskResult,
 )
 
+from .rack_flow import can_use_face
 from .request.outbound_bin_inbound_batch_v1 import DECISION, OPERATION, InboundBatch
 
 
@@ -30,7 +31,7 @@ async def start_feed(
         return demand["feed_id"]
     if demand["demand_state"] == "WITHDRAWN" and not await repo.supply_started(session, demand):
         return None
-    if demand["service_state"] != "READY":
+    if not await can_use_face(roller, session, demand):
         return None
     feeds = repo.tables["face_work"]
     feed_id, operation_id = str(uuid7()), str(uuid7())
@@ -298,6 +299,8 @@ async def prepare_feed(roller, session: AsyncSession, demand_id: str) -> str:
         if original["kind"] == "FACE_END":
             return original["id"]
         index = current["segment_index"] + 1
+    if not await can_use_face(roller, session, feed):
+        return "WAITING_FOR_ORIGINAL_POSITION"
     members = feed["manifest"]["bins"][(index - 1) * 4 : index * 4]
     segment = await repo._register(
         session,

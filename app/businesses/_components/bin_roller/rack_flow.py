@@ -342,9 +342,112 @@ async def evaluate_roller_point(
         r["object_kind"] == "RACK" and r["is_current"] and r["source_id"] not in own_actions
         for r in positions
     )
+    if (
+        job.position_action_id
+        and job.actual_position
+        and job.actual_position["location_code"] == origin.point
+    ):
+        move = next((a for a in job.actions if a.id == job.position_action_id), None)
+        conflict |= not any(matches_position(r, job, move) for r in positions)
     return PointDemand(point, "CONTINUE" if remaining else "NONE", tuple(coverage)), DirectHandoff(
         point, "BLOCKED" if responsibility or conflict else "CLEAR", tuple(coverage)
     )
+
+
+def matches_position(position, job, move):
+    return bool(
+        move
+        and position
+        and position["is_current"]
+        and (
+            position["object_kind"],
+            position["object_code"],
+            position["source_kind"],
+            position["source_id"],
+            position["source_revision"],
+            position["location_code"],
+            position["rack_face"],
+        )
+        == (
+            "RACK",
+            job.origin.rack_id,
+            "RACK",
+            move.id,
+            move.position_revision,
+            job.origin.point,
+            job.actual_face,
+        )
+    )
+
+
+def applied_preparation(job):
+    if not job or job.state != "ACTIVE" or job.review_reason or not job.actions:
+        return None
+    move = job.actions[-1]
+    if (
+        move.id != job.current_action_id
+        or move.id != job.position_action_id
+        or move.kind not in ("ENTER", "ROTATE")
+        or move.phase != "APPLIED"
+        or not move.outcome
+        or move.outcome["status"] != "SUCCEEDED"
+        or move.target_face != job.actual_face
+        or move.actual_face != job.actual_face
+        or move.target != {"kind": "RACK_POSITION", "location_code": job.origin.point}
+        or move.actual_position != move.target
+        or job.actual_position != move.target
+        or move.position_revision != move.outcome_revision
+    ):
+        return None
+    return move
+
+
+async def can_use_face(roller, session, service):
+    """Verify the saved face preparation and current position before new box work."""
+    action_id = service["preparation_action_id"]
+    if service["service_state"] != "READY" or not action_id or not service["cycle_id"]:
+        return False
+    dispatch = roller.rack_dispatch
+    job = await dispatch.progress(session, job_id=service["cycle_id"])
+    move = applied_preparation(job)
+    expected_kind = "ROLLER_DRAIN" if service["purpose"] == "DRAIN" else "ROLLER_ORDINARY"
+    if (
+        not move
+        or move.id != action_id
+        or (
+            job.origin.source_kind,
+            job.origin.work_line_id,
+            job.origin.rack_id,
+            job.origin.task_id,
+            job.actual_face,
+        )
+        != (
+            expected_kind,
+            service["work_line_id"],
+            service["rack_id"],
+            service["task_id"],
+            service["rack_face"],
+        )
+    ):
+        return False
+    repo = roller.repository(service["work_line_id"])
+    position = await repo.current_position(session, "RACK", service["rack_id"])
+    if not matches_position(position, job, move):
+        return False
+    # A callback can arrive before the host consumes it, including on a predecessor.
+    for action in job.actions:
+        result = await dispatch.final_result(session, job_id=job.id, action_id=action.id)
+        if (
+            action.phase != "APPLIED"
+            or not result
+            or result.closure != "CLOSED"
+            or result.has_pending_outcome
+            or result.outcome_revision != action.outcome_revision
+            or result.outcome != action.outcome
+            or result.position_observation != action.position_observation
+        ):
+            return False
+    return True
 
 
 async def refresh_job(roller, session, job):
@@ -468,18 +571,6 @@ async def advance_cycle(roller, session, cycle_id):
         return "WAITING_FOR_ORIGINAL_FACTS"
     if job.state != "ACTIVE" or (job.release_requested and not job.actions):
         return cycle_progress(job)
-    if (
-        job.position_action_id
-        and job.actual_position
-        and job.actual_position["location_code"] == job.origin.point
-    ):
-        position = await repo.current_position(session, "RACK", job.origin.rack_id)
-        if not position or (
-            position["source_id"],
-            position["location_code"],
-            position["rack_face"],
-        ) != (job.position_action_id, job.origin.point, job.actual_face):
-            return "WAITING_FOR_ORIGINAL_POSITION"
     while True:
         service = await repo._one(
             session,
@@ -582,8 +673,6 @@ async def advance_cycle(roller, session, cycle_id):
                 )
         resources = job.origin.resources
         entry = next((a for a in job.actions if a.kind == "ENTER"), None)
-        if service["service_state"] == "READY" and job.review_reason:
-            return "WAITING_FOR_ORIGINAL_POSITION"
         if service["service_state"] != "READY":
             if entry is None:
                 line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
@@ -603,16 +692,9 @@ async def advance_cycle(roller, session, cycle_id):
                         return "WAITING_FOR_RACK"
                 kind = "ENTER"
             else:
-                move = next((a for a in job.actions if a.id == job.position_action_id), None)
-                if (
-                    not move
-                    or job.review_reason
-                    or move.phase != "APPLIED"
-                    or move.outcome["status"] != "SUCCEEDED"
-                    or move.actual_position != move.target
-                    or move.position_revision != move.outcome_revision
-                    or move.target_face != move.actual_face
-                ):
+                move = applied_preparation(job)
+                position = await repo.current_position(session, "RACK", job.origin.rack_id)
+                if not matches_position(position, job, move):
                     return "WAITING_FOR_ORIGINAL_POSITION"
                 if service["preparation_action_id"] and move.id != service["preparation_action_id"]:
                     return "WAITING_FOR_ORIGINAL_POSITION"
@@ -652,9 +734,24 @@ async def advance_cycle(roller, session, cycle_id):
                 caller=caller,
                 target=HandoffPosition(resources["positions"]["INLET"]),
             )
+            if feed_id is None:
+                return "WAITING_FOR_ORIGINAL_POSITION"
             await prepare_feed(roller, session, service["source_ref"])
             feed = await roller.original_record(session, "feed", feed_id)
         else:
+            opportunities = repo.tables["return_opportunity"]
+            selected = await repo._one(
+                session,
+                opportunities,
+                opportunities.c.service_id == service["service_id"],
+                opportunities.c.source_ref == service["service_id"],
+            )
+            if selected is None and not await can_use_face(
+                roller,
+                session,
+                await roller.original_record(session, "face_service", service["service_id"]),
+            ):
+                return "WAITING_FOR_ORIGINAL_POSITION"
             await opportunity(
                 repo,
                 session,

@@ -12,6 +12,91 @@ from app.database import SCHEMA, create_database_engine
 from tests.helpers import bin_roller_query, roller_dispatch_rows
 
 
+async def arrived_face(roller, session, cycle_id, service_id, receipts):
+    """Drive the selected fixture face through its original Transport callback and projection."""
+    import json
+
+    from app.businesses._components.bin_roller.rack_flow import row_fact
+    from app.businesses._components.rack_dispatch.contracts import (
+        DirectHandoff,
+        PointDemand,
+        PointRef,
+    )
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_callback import receive
+
+    dispatch = roller.rack_dispatch
+    face = await roller.original_record(session, "face_service", service_id)
+    repo = roller.repository(face["work_line_id"])
+    job = await dispatch.progress(session, job_id=cycle_id)
+    if job.position_action_id and job.actual_face == face["rack_face"]:
+        action_id = job.position_action_id
+    else:
+        action_id = await dispatch.prepare(
+            session,
+            job_id=cycle_id,
+            kind="ROTATE" if job.actions else "ENTER",
+            source_ref=service_id,
+            face=face["rack_face"],
+        )
+        assert action_id
+        move = (await dispatch.progress(session, job_id=cycle_id)).actions[-1]
+        original_id = str(uuid7())
+        receipts.add(original_id)
+        response = await receive(
+            session,
+            json.dumps(
+                dict(
+                    operation="transport.task.resulted@v1",
+                    operation_id=original_id,
+                    timestamp=1,
+                    data=dict(
+                        transport_task_id=move.transport_task_id,
+                        kind="RACK_MOVE" if move.kind == "ENTER" else "RACK_ROTATE",
+                        rack_id=job.origin.rack_id,
+                        outcome_revision=1,
+                        status="SUCCEEDED",
+                        final_position=move.target,
+                        arrival_face=face["rack_face"],
+                    ),
+                )
+            ).encode(),
+        )
+        assert response.status_code == 202
+        point = PointRef(
+            repo.owner_domain, repo.work_line_id, job.id, job.origin.rack_id, job.origin.point
+        )
+        source = row_fact("face_work", repo.tables["face_work"], face)
+        coverage = (
+            Coverage(
+                "selected_face",
+                (point.owner_domain, str(point.work_line_id), job.id, point.rack_id, point.point),
+                source,
+                (source,),
+            ),
+        )
+        job = await dispatch.advance(
+            session,
+            job_id=cycle_id,
+            demand=PointDemand(point, "CONTINUE", coverage),
+            handoff=DirectHandoff(point, "BLOCKED", coverage),
+            now_ms=1,
+        )
+        move = job.actions[-1]
+        assert move.phase == "APPLIED" and move.outcome["status"] == "SUCCEEDED"
+        await repo.record_position(
+            session,
+            object_kind="RACK",
+            object_code=job.origin.rack_id,
+            location_code=move.actual_position["location_code"],
+            rack_face=move.actual_face,
+            source_kind="RACK",
+            source_id=move.id,
+            source_revision=move.position_revision,
+        )
+    return action_id
+
+
 @pytest.fixture
 async def roller_lifecycle(roller_return, monkeypatch):
     import importlib
@@ -481,17 +566,13 @@ async def roller_feed(roller_transport, monkeypatch):
                 ),
             )
         service_id = str(uuid7())
-        action_id = None
-        if in_progress:
-            action_id = await roller.rack_dispatch.prepare(
-                session,
-                job_id=cycle_id,
-                kind="ENTER",
-                source_ref=service_id,
-                face=original["rack_face"],
-            )
         await repo.bind_supply(
             session, demand_id=original["id"], cycle_id=cycle_id, service_id=service_id
+        )
+        action_id = (
+            await arrived_face(roller, session, cycle_id, service_id, receipts)
+            if in_progress
+            else None
         )
         faces = store.tables["face_work"]
         await session.execute(
@@ -1101,12 +1182,12 @@ async def roller_return(roller_scans, monkeypatch):
                 line,
                 "R1",
                 "T1",
-                None,
-                None,
+                "RETURN-LINE",
+                "CTU01",
                 face,
-                None,
+                TransportCaller(str(line)),
                 str(uuid7()),
-                None,
+                {},
             ),
         )
         await session.execute(
@@ -1126,6 +1207,12 @@ async def roller_return(roller_scans, monkeypatch):
                 demand_state="ACTIVE",
                 service_state="READY",
             )
+        )
+        action_id = await arrived_face(flow.roller, session, cycle_id, service_id, receipts)
+        await session.execute(
+            faces.update()
+            .where(faces.c.service_id == service_id)
+            .values(preparation_action_id=action_id)
         )
         await session.execute(
             store.tables["return_opportunity"]

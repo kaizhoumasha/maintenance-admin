@@ -560,3 +560,41 @@ async def test_blocked_departure_consumes_first_decision_before_successor_permis
     assert final.actions[-1].kind == (
         "DEPARTURE_DECIDE" if decision["result"] == "WAIT" else "DEPART"
     )
+
+
+@pytest.mark.parametrize("rack", ["sqlite", "postgres"], indirect=True)
+async def test_jobs_filter_original_source_and_include_terminal_candidates(rack):
+    db, dispatch = rack
+    base = origin("ROLLER_DRAIN")
+    own = await dispatch.register(db, base)
+    other = await dispatch.register(
+        db, replace(base, source_ref="other-decision", cycle_id=str(uuid7()))
+    )
+    active = await dispatch.register(
+        db, replace(base, rack_id="second-rack", cycle_id=str(uuid7()))
+    )
+    await dispatch.advance(db, job_id=own, **evidence(own), now_ms=1)
+    from sqlalchemy import event
+
+    from app.businesses._components.rack_dispatch.models import RackJob
+
+    await db.flush()
+    db.expunge_all()
+    loaded = []
+
+    def observe(session, record):
+        if isinstance(record, RackJob):
+            loaded.append(record.id)
+
+    event.listen(db.sync_session, "loaded_as_persistent", observe)
+    try:
+        selected = await dispatch.jobs(
+            db, work_line_id=12, source_kinds=("ROLLER_DRAIN",), source_ref=base.source_ref
+        )
+    finally:
+        event.remove(db.sync_session, "loaded_as_persistent", observe)
+    assert set(loaded) == {own, active}
+    assert {(j.id, j.pending) for j in selected} == {(own, False), (active, True)}
+    assert {
+        j.id for j in await dispatch.jobs(db, work_line_id=12, source_kinds=("ROLLER_DRAIN",))
+    } == {own, active, other}
