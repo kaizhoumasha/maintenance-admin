@@ -266,6 +266,9 @@ class RackDispatch:
         return tuple(await session.scalars(query.order_by(RackJob.id).limit(limit)))
 
     async def has_position_conflict(self, session: AsyncSession, *, point: str) -> bool:
+        return await self._position_conflict(session, point)
+
+    async def _position_conflict(self, session, point, *, exclude_job_id=None):
         conflict = (
             select(RackAction.id)
             .where(
@@ -275,20 +278,17 @@ class RackDispatch:
             )
             .exists()
         )
-        return bool(
-            await session.scalar(
-                select(RackJob.id)
-                .where(
-                    RackJob.pending,
-                    conflict
-                    | (
-                        (RackJob.review_reason == "POSITION_CONFLICT")
-                        & (RackJob.actual_position["location_code"].as_string() == point)
-                    ),
-                )
-                .limit(1)
-            )
+        query = select(RackJob.id).where(
+            RackJob.pending,
+            conflict
+            | (
+                ((RackJob.point != point) | (RackJob.review_reason == "POSITION_CONFLICT"))
+                & (RackJob.actual_position["location_code"].as_string() == point)
+            ),
         )
+        if exclude_job_id is not None:
+            query = query.where(RackJob.id != exclude_job_id)
+        return bool(await session.scalar(query.limit(1)))
 
     async def withdraw_unused(
         self, session: AsyncSession, *, job_id: str, source: Coverage
@@ -535,7 +535,7 @@ class RackDispatch:
                     actual["arrival_face"],
                 )
                 action.position_revision = actual["outcome_revision"]
-            if actual and (action is moves[-1] or newer_observation):
+            if actual and actual["final_position"] and (action is moves[-1] or newer_observation):
                 job.actual_position, job.actual_face = (
                     actual["final_position"],
                     actual["arrival_face"],
@@ -593,7 +593,9 @@ class RackDispatch:
                 ):
                     reason = "UNRESOLVED_PREDECESSOR"
                     break
-        job.review_reason = reason
+        # Consuming an applied non-success elsewhere does not release that point's protection.
+        external = job.actual_position is not None and job.actual_position != _point(job.point)
+        job.review_reason = reason or ("POSITION_CONFLICT" if external else None)
         return reason is None
 
     async def advance(
@@ -615,6 +617,9 @@ class RackDispatch:
             await self._accept(session, job, actions, now_ms)
             return _snapshot(job, actions)
         applied = await self._applied(session, job, actions)
+        if actions and actions[-1].kind == "DEPARTURE_DECIDE":
+            if not await self._consume_decision(session, job, actions[-1], now_ms):
+                return _snapshot(job, actions)
         known_demand = isinstance(demand, PointDemand) and _at_point(demand, job)
         none = known_demand and demand.state == "NONE"
         clear = (
@@ -648,7 +653,7 @@ class RackDispatch:
                 or await session.scalar(
                     select(RackJob.id).where(RackJob.pending, RackJob.point == location).limit(1)
                 )
-                or await self.has_position_conflict(session, point=location)
+                or await self._position_conflict(session, location, exclude_job_id=job.id)
             )
             move = actions[-1]
             if (
@@ -687,9 +692,69 @@ class RackDispatch:
         await session.flush()
         return _snapshot(job, actions)
 
-    async def _departure(self, session, job, actions, demand, handoff, now_ms):
+    async def _consume_decision(self, session, job, previous, now_ms):
+        """Read the original response once, including when new movement is blocked."""
         from app.businesses._components.bin_roller.request.rack_departure_decide_v1 import (
             DECISION,
+            OPERATION,
+            DepartureRequest,
+        )
+
+        stored = previous.decision
+        if (
+            previous.operation != OPERATION
+            or not previous.decision_operation_id
+            or previous.message_id is None
+            or previous.message_id <= 0
+        ):
+            job.review_reason = "INVALID_DEPARTURE_IDENTITY"
+            return False
+        try:
+            original = DepartureRequest.model_validate(previous.request)
+        except ValueError:
+            job.review_reason = "INVALID_DEPARTURE_REQUEST"
+            return False
+        if (
+            original.rack_id != job.rack_id
+            or original.workline_code != job.workline_code
+            or original.current_location.location_code != job.point
+        ):
+            job.review_reason = "INVALID_DEPARTURE_REQUEST"
+            return False
+        if stored is None:
+            result = await self.capabilities.wms.get_result(
+                session,
+                message_id=previous.message_id,
+                operation=previous.operation,
+                operation_id=previous.decision_operation_id,
+            )
+            if (
+                result.availability != "FOUND"
+                or result.response_state != "VALID"
+                or (result.message_id, result.operation, result.operation_id)
+                != (previous.message_id, OPERATION, previous.decision_operation_id)
+                or (result.http_status, result.response_code) != (200, "DECIDED")
+            ):
+                return False
+            stored = result.response_data
+        try:
+            decision = DECISION.validate_python(stored).model_dump(mode="json")
+        except ValueError:
+            job.review_reason = "INVALID_DEPARTURE_DECISION"
+            return False
+        if decision.get("rack_destination") == previous.request["current_location"]:
+            job.review_reason = "INVALID_DEPARTURE_DESTINATION"
+            return False
+        if previous.decision is None:
+            previous.phase = decision["result"]
+            previous.decision = decision
+            previous.decision_consumed_at_ms = now_ms
+            if previous.phase == "WAIT":
+                previous.due_at_ms = now_ms + decision["retry_after_ms"]
+        return previous.phase == decision["result"]
+
+    async def _departure(self, session, job, actions, demand, handoff, now_ms):
+        from app.businesses._components.bin_roller.request.rack_departure_decide_v1 import (
             OPERATION,
             DepartureRequest,
         )
@@ -716,56 +781,6 @@ class RackDispatch:
         }
         basis["task_status"] = next(iter(statuses)) if len(statuses) == 1 else None
         if previous:
-            stored = previous.decision
-            if (
-                previous.operation != OPERATION
-                or not previous.decision_operation_id
-                or not previous.message_id
-            ):
-                job.review_reason = "INVALID_DEPARTURE_IDENTITY"
-                return
-            try:
-                original = DepartureRequest.model_validate(previous.request)
-            except ValueError:
-                job.review_reason = "INVALID_DEPARTURE_REQUEST"
-                return
-            if (
-                original.rack_id != job.rack_id
-                or original.workline_code != job.workline_code
-                or original.current_location.location_code != job.point
-            ):
-                job.review_reason = "INVALID_DEPARTURE_REQUEST"
-                return
-            if stored is None:
-                result = await self.capabilities.wms.get_result(
-                    session,
-                    message_id=previous.message_id,
-                    operation=previous.operation,
-                    operation_id=previous.decision_operation_id,
-                )
-                if (
-                    result.availability != "FOUND"
-                    or result.response_state != "VALID"
-                    or (result.message_id, result.operation, result.operation_id)
-                    != (previous.message_id, OPERATION, previous.decision_operation_id)
-                    or (result.http_status, result.response_code) != (200, "DECIDED")
-                ):
-                    return
-                stored = result.response_data
-            try:
-                decision = DECISION.validate_python(stored).model_dump(mode="json")
-            except ValueError:
-                job.review_reason = "INVALID_DEPARTURE_DECISION"
-                return
-            if decision.get("rack_destination") == previous.request["current_location"]:
-                job.review_reason = "INVALID_DEPARTURE_DESTINATION"
-                return
-            if previous.decision is None:
-                previous.phase = decision["result"]
-                previous.decision = decision
-                previous.decision_consumed_at_ms = now_ms
-                if previous.phase == "WAIT":
-                    previous.due_at_ms = now_ms + decision["retry_after_ms"]
             if previous.phase == "READY":
                 destination = previous.decision["rack_destination"]
                 await self._move(
@@ -842,19 +857,17 @@ class RackDispatch:
             or action.template != ("F01" if job.source_kind.startswith("MANUAL_") else "CTU03")
             or action.source != _point(job.point)
             or action.target_face is not None
-            or not action.target
-            or action.target["kind"] not in ("ZONE", "RACK_POSITION")
-            or action.target == action.source
-            or not ready.request
-            or ready.request.get("current_location")
-            != {"type": "RACK_POSITION", "location_code": job.point}
-            or ready.request.get("rack_id") != job.rack_id
-            or ready.request.get("workline_code") != job.workline_code
-            or ready.decision.get("result") != "READY"
             or action.caller != job.caller
-            or ready.decision.get("rack_destination")
-            != {"type": action.target["kind"], "location_code": action.target["location_code"]}
         ):
+            job.review_reason = "INVALID_DEPARTURE_INTENT"
+            return
+        if not await self._consume_decision(session, job, ready, now_ms):
+            return
+        destination = ready.decision["rack_destination"]
+        if action.target != {
+            "kind": destination["type"],
+            "location_code": destination["location_code"],
+        }:
             job.review_reason = "INVALID_DEPARTURE_INTENT"
             return
         acceptance = await self.capabilities.transport.get_submission_acceptance(

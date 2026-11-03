@@ -8,8 +8,13 @@ from . import apply_outcome, evidence, origin, respond, store
 
 
 @pytest.fixture
-async def rack():
-    async with store("sqlite+aiosqlite://") as (factory, dispatch), factory.begin() as session:
+async def rack(request):
+    url = (
+        request.getfixturevalue("pg_url")
+        if getattr(request, "param", None) == "postgres"
+        else "sqlite+aiosqlite://"
+    )
+    async with store(url) as (factory, dispatch), factory.begin() as session:
         yield session, dispatch
 
 
@@ -445,3 +450,113 @@ async def test_later_applied_revision_resolves_original_execution_without_new_en
         ("DEPARTURE_DECIDE", None),
     ]
     assert next_view.actions[0].id == move.id
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_rejected_prepare_keeps_cross_owner_managed_point_protected(backend, request):
+    from app.businesses._components.rack_dispatch.service import RackDispatch
+    from app.models import WorkLine
+
+    url = request.getfixturevalue("pg_url") if backend == "postgres" else "sqlite+aiosqlite://"
+    async with store(url) as (factory, dispatch):
+        async with factory.begin() as db:
+            job, move = await setup_move(db, dispatch, "ROTATE")
+            db.add(WorkLine(line_name="other", line_code="OTHER", position_bindings={"ROLE": "Q"}))
+            await apply_outcome(db, move, "CANCELLED", point="Q")
+            await dispatch.advance(db, job_id=job, **evidence(job, demand="CONTINUE"), now_ms=1)
+            assert await dispatch.has_position_conflict(db, point="Q")
+        async with factory.begin() as db:
+            assert (
+                await dispatch.prepare(db, job_id=job, kind="ROTATE", source_ref="new", face="90")
+                is None
+            )
+        async with factory.begin() as db:
+            observer = RackDispatch("other", dispatch.capabilities)
+            assert await observer.has_position_conflict(db, point="Q")
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "extra_decision",
+        "extra_request",
+        "missing_message",
+        "wrong_operation",
+        "missing_operation_id",
+    ],
+)
+@pytest.mark.parametrize("rack", ["sqlite", "postgres"], indirect=True)
+async def test_ack_cannot_close_depart_with_invalid_recovered_ready(rack, mutation):
+    from sqlalchemy import update
+
+    from app.businesses._components.rack_dispatch.models import RackAction
+
+    db, dispatch = rack
+    job, move = await setup_move(db, dispatch, "ENTER")
+    await apply_outcome(db, move, "SUCCEEDED")
+
+    async def step(n):
+        return await dispatch.advance(db, job_id=job, **evidence(job), now_ms=n)
+
+    root = (await step(1)).actions[-1]
+    decision = {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "Z"}}
+    await respond(db, root.decision_operation_id, 200, "DECIDED", decision)
+    depart = (await step(2)).actions[-1]
+    assert depart.kind == "DEPART"
+    changes = {
+        "extra_decision": {"decision": {**decision, "extra": True}},
+        "extra_request": {"request": {**root.request, "extra": True}},
+        "missing_message": {"message_id": None},
+        "wrong_operation": {"operation": "other"},
+        "missing_operation_id": {"decision_operation_id": None},
+    }[mutation]
+    await db.execute(update(RackAction).where(RackAction.id == root.id).values(**changes))
+    await respond(
+        db,
+        depart.submit_operation_id,
+        202,
+        "RECEIVED",
+        {"transport_task_id": depart.transport_task_id},
+    )
+    view = await step(3)
+    assert view.pending and view.state == "RELEASING" and view.actions[-1].acceptance_basis is None
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        {"result": "WAIT", "retry_after_ms": 10},
+        {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "Z"}},
+    ],
+)
+@pytest.mark.parametrize("barrier", ["BLOCKED", "UNKNOWN", "unresolved"])
+@pytest.mark.parametrize("rack", ["sqlite", "postgres"], indirect=True)
+async def test_blocked_departure_consumes_first_decision_before_successor_permission(
+    rack, decision, barrier, monkeypatch
+):
+    db, dispatch = rack
+    job, move = await setup_move(db, dispatch, "ENTER")
+    await apply_outcome(db, move, "SUCCEEDED")
+    root = (await dispatch.advance(db, job_id=job, **evidence(job), now_ms=1)).actions[-1]
+    await respond(db, root.decision_operation_id, 200, "DECIDED", decision)
+    transport = dispatch.capabilities.transport
+    read = transport.get_result
+    if barrier == "unresolved":
+
+        async def unresolved(session, **identity):
+            return replace(await read(session, **identity), closure="OPEN")
+
+        monkeypatch.setattr(transport, "get_result", unresolved)
+    facts = evidence(job, handoff="CLEAR" if barrier == "unresolved" else barrier)
+    for now in (2, 15):
+        view = await dispatch.advance(db, job_id=job, **facts, now_ms=now)
+        assert len(view.actions) == 2
+        consumed = view.actions[-1]
+        assert consumed.decision == decision and consumed.decision_consumed_at_ms == 2
+        assert consumed.due_at_ms == (12 if decision["result"] == "WAIT" else None)
+    monkeypatch.setattr(transport, "get_result", read)
+    final = await dispatch.advance(db, job_id=job, **evidence(job), now_ms=16)
+    assert len(final.actions) == 3 and final.actions[-1].previous_action_id == root.id
+    assert final.actions[-1].kind == (
+        "DEPARTURE_DECIDE" if decision["result"] == "WAIT" else "DEPART"
+    )
