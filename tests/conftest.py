@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
@@ -12,6 +13,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from redis.asyncio import Redis  # noqa: E402
 from sqlalchemy import delete, exists, func, select, text  # noqa: E402
@@ -23,6 +25,7 @@ from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
 from app.core.identifiers import uuid7
 from app.core.redis import get_redis  # noqa: E402
+from app.database import SCHEMA  # noqa: E402
 from app.database import create_database_engine as create_async_engine  # noqa: E402
 from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
@@ -70,6 +73,67 @@ async def pg_sessions(pg_url):
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def postgres_tables():
+    """Reuse owned tables while keeping each case's engines and committed data isolated."""
+    from sqlalchemy.schema import CreateSchema, DropSchema
+
+    schemas = {}
+
+    async def drop_schema(url, schema):
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await connection.exec_driver_sql("SET LOCAL lock_timeout = '5s'")
+                await connection.execute(DropSchema(schema, cascade=True))
+        finally:
+            await engine.dispose()
+
+    @asynccontextmanager
+    async def database(url, family, metadata):
+        assert all(table.schema in (None, SCHEMA) for table in metadata.tables.values())
+        key = (url, family)
+        fresh = key not in schemas
+        schema = schemas.get(key) or f"test_{family}_{uuid7().hex}"
+        engine = create_async_engine(
+            url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
+        )
+        try:
+            if fresh:
+                async with engine.begin() as connection:
+                    await connection.execute(CreateSchema(schema))
+                    await connection.run_sync(metadata.create_all)
+                schemas[key] = schema
+            else:
+                async with engine.begin() as connection:
+                    await connection.exec_driver_sql("SET LOCAL lock_timeout = '5s'")
+                    names = list(
+                        await connection.scalars(
+                            text(
+                                "SELECT tablename FROM pg_tables "
+                                "WHERE schemaname = :schema ORDER BY tablename"
+                            ),
+                            {"schema": schema},
+                        )
+                    )
+                    if names:
+                        quote = engine.dialect.identifier_preparer.quote_identifier
+                        tables = ", ".join(f"{quote(schema)}.{quote(name)}" for name in names)
+                        await connection.exec_driver_sql(
+                            f"TRUNCATE TABLE {tables} RESTART IDENTITY"
+                        )
+            yield engine
+        finally:
+            await engine.dispose()
+
+    try:
+        yield database
+    finally:
+        async with AsyncExitStack() as cleanup:
+            for (url, _), schema in schemas.items():
+                cleanup.push_async_callback(drop_schema, url, schema)
 
 
 # WMS 回调相关的共享存储夹具:SQLite(create_all)与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
