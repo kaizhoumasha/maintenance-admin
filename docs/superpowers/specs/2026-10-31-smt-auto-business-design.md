@@ -1,6 +1,8 @@
 # SMT 自动上架、拣料业务子包设计
 
-设计基线：2026-10-31已确认统一业务划分；交付状态核对：2026-11-01。**smt_auto宿主未实施、未注册、未部署**；共享ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）。本轮仅同步文档，不执行迁移、不提交、不发送真实请求。文档确认不代表 WMS/ECS/RCS 合同签认、联调或现场验收。
+> 2026-11-02 新目标决定：[公共货架调度设计](2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
+设计基线：2026-10-31已确认统一业务划分；交付状态核对：2026-11-02。**smt_auto宿主未实施、未注册、未部署**；共享ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）；完整手工首宿主及BIN_Roller后续收敛已随[PR #47](https://github.com/kaizhoumasha/maintenance-admin/pull/47)合入（064b5c8），当前源码为手工7表、组件10表；新公共调度迁移是后续目标，未改变当前物理表。既有软件证据见[手工当前交付](../../testing/smt-manual.md#current-delivery)，本轮未重跑。本轮仅同步文档，不执行迁移、不提交、不发送真实请求。文档确认不代表 WMS/ECS/RCS 合同签认、联调或现场验收。
 
 ## 1. 目标与已选择方案
 
@@ -15,6 +17,8 @@
 统一 [smt_auto API](../../integrations/smt-auto-api.md)按接口和共同规则维护一套合同：六类任务操作、授权/等待/关联、ECS公共信封、BIN_Roller接缝及协议规则各定义一次；[inbound流程](../../integrations/smt-auto-api.md#inbound-flow)与[outbound流程](../../integrations/smt-auto-api.md#outbound-flow)的资源、逐盘字段、设备参数、报告范围及完成前置用严格联合、差异表和专属子节表达。操作名称和报文字段不因包归属变更而改名。人工两方向仍归 [smt_manual](2026-10-31-smt-manual-business-design.md)，不纳入自动业务。
 
 本设计固定统一边界；[总实施计划](../plans/2026-10-31-smt-auto-implementation.md)以S1/S2/S5/S6/S7维护唯一共同任务、接缝、释放/确认、装配恢复和综合验收；[S3的I1～I4](../plans/2026-10-31-smt-auto-implementation.md#inbound-steps)与[S4的O1～O4](../plans/2026-10-31-smt-auto-implementation.md#outbound-steps)保留方向专属生产及完成资格。验收追踪和交付依赖各一份，不再保留两份完整方向计划。产品代码、迁移、配置和历史执行迁移均不在本轮范围。
+
+[数据模型设计草案（2026-11-02）](2026-11-02-smt-auto-data-model-design.md)细化共同任务/输入/到箱记录、方向来源/盘/决定轮次、原生产架动作、唯一约束、外键及保留规则；M01～M12定位未来持久化验收，不替代API合同或总计划。草案§10已收敛三项业务边界：资格沿已合入手工规则；单层全撤回后安全退架、可恢复报警由ECS原命令内恢复由用户本轮选择。对端能力及D3/D4仍须交付，尚未创建模型或迁移。
 
 ## 2. 主体、组件与资源
 
@@ -31,6 +35,8 @@
 
 四点及公共五层架资源只由 BIN_Roller 声明。两臂和生产位置由 smt_auto 统一声明；按方向实际使用核对绑定。inbound 沿单层架 STATION_A/B、扫码台、SCAN2/NG；outbound 沿 BIN/RETURN_RACK/TRANSFER_RACK、扫码台及其 NG 设备附录。仅因包支持两个方向，不能要求每条线无条件具备另一方向全部专属资源；缺少本次流程必需配置时拒绝启动该流程，不猜默认值或增加工作线类型字段。实际支持两个方向必须有相应绑定及对端合同证据。
 
+复用边界以已合并源码为准：sorting_task共享合同/分派、BIN_Roller公开ports及现有平台运行机制直接复用；手工task_flow/repository/7张表仅作实现参考，不导入或继承，不把人工准入/完工当自动盘终局，不为复用抽取跨宿主状态机。组件合表后的内部FaceWork/Decision及TABLES键不是自动依赖；原SourceFaceRef、demand/release等具名ID及六种RollerWorkRef保持。请求额度直接沿WorkLine.five_rack_request_limit及组件原CTU01/RELEASED计算，不增加自动计数器或配置。
+
 同角色同设备 task_type 的 PICK_AND_PUT 合同由宿主 `ecs_command.py` 单份声明，精确保留两条流程合法分支、数值及 Result 约束，由 catalog 编译，不各注册一个冲突模型、不用宽松字典抹平参数差异。供应商尚未确认的分支保持未交付。
 
 ## 3. 统一任务生命周期与可信分派
@@ -41,7 +47,7 @@
 
 task_id、task_type、business_type、workline_code 与原 issued.timestamp 首次受理后冻结，不能换 operation_id 改向/改线。已有任务重报先沿原收据、原任务及保留终态摘要解析；摘要保留TaskOwnerRef所需的原模式/方向/工作线ID及code，不随业务明细清理，当前工作线改配不能改变原 owner。WMS负责task_id在sorting_task显式消费者范围唯一；读口拒绝可见缺失/歧义，不承诺跨宿主任务表的全局数据库唯一性，不广播或按任务号前缀猜测。
 
-queue_changed、plan_delta、cancel 沿 task_id 读取原业务/模式/方向；prepare 与 completion_confirm 保持各 API 规定的最小字段，不额外增加 business_code 或方向字段。统一注册仍遵循 [sorting_task 单份合同与可信归属](2026-10-31-smt-manual-business-design.md#9-sorting_task-单份合同与分派)；该组件与归属接缝的ST1/ST2已随PR #44合入develop，专项24 passed及全仓4654 passed/52 skipped、最新复审和CI证据见[共享交付§11](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；完整SMT宿主任务执行仍待实施。
+queue_changed、plan_delta、cancel 沿 task_id 读取原业务/模式/方向；prepare 与 completion_confirm 保持各 API 规定的最小字段，不额外增加 business_code 或方向字段。统一注册仍遵循 [sorting_task 单份合同与可信归属](2026-10-31-smt-manual-business-design.md#9-sorting_task-单份合同与分派)；该组件与归属接缝的ST1/ST2已随PR #44合入develop，专项24 passed及全仓4654 passed/52 skipped、最新复审和CI证据见[共享交付§11](../plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；完整smt_auto宿主任务执行仍待实施，手工已合入状态见本文基线。
 
 ### 3.2 一份队列与版本
 
@@ -71,6 +77,16 @@ ST1以隔离operation验证公共扩展/旧默认及并发兼容；ST2创建四�
 ## 4. 生产分派与原执行关联
 
 首次 SCAN2 委托先在 receiver 原事务保存组件本点事实，宿主将本次作业绑定当时合法任务及冻结方向，再交对应流程。无任务、不可读箱、完成确认未决等分支沿各 API；完成确认未决的新到位保存原关联并暂缓首盘，不能误作无任务直通。
+
+CurrentTask直接沿手工资格结构：PREPARING/EXECUTING、原prepare可靠接纳、线启用及原宿主/编码匹配，不以首版已应用作附加条件。prepare未知时保留原task_id及CONTEXT_NOT_READY异常，不误直通，也不因prepare后来接纳自动回放异常到箱；完成确认暂缓则按原3.7.3条件恢复，两个阻碍不混用。
+
+成员撤回按原版本保留历史；RETURN面首次work_plan意图登记即进入已开始保护，未开始撤回不制造面终局。单层架同次在位全部有效覆盖撤回后，原授权/可能授权本架的未决求值/取料及安全交出责任结清，可按ALL_MEMBERS_WITHDRAWN依据沿既有departure退架，不伪造取尽；其他有效覆盖仍在则不退架。原已取离盘的放盘/报告独立继续，不变成原架离场的统一门槛。
+
+全撤回原成员集合须非空，生产来源资格仍要求原成功到位/当前位置可靠。ENTER未决/位置未知不能补认在位；失败/取消可靠在本点位、无有效需求且直接责任可交出时，按公共安全清架离场，不补生产成功；原执行责任已终结、无继续执行/更正/未决核对且可靠未进入、无冲突则按NOT_ARRIVED收尾，不补发DEPART。依据/覆盖复核和唯一离场首轮同事务，每visit只一条根及WAIT后继链，后来撤回/取尽不另开链、不改原意图。首次离场求值后新成员留未选中、后续独立新进场；归档后的原独立离场仍保留全撤回最小依据、原链及未消费引用，不重建动作。
+
+可恢复扫码/取放故障先由硬件停机报警、人工处理，ECS保留原未结束命令并只恢复未完成部分，最后用原command_code回传严格最终结果；WES不新增HOLD/复位/重发或人工恢复接口。已应用FAILED仍不可改SUCCESS，受影响直接责任无证据不能关闭，正常/NG报告范围不变；设备互锁决定实际停机范围，不新增WES全线门禁。该设备能力属于D3/D4待签认交付，不表示本轮实现。
+
+ECS发送最终FAILED后即不再属于可恢复中间报警，不利用WES尚未应用/ACK未到窗口另报成功；合法Result先于ACK仍按原证据应用。成功消费只关闭对应原动作阶段，取到扫码台不能提前记整盘物理收口；正常/NG实际放置、应报报告和原授权/终局责任分别核对，未知/HELD或最终失败不能借人工已处理说明放箱/关单/归档。
 
 重复委托及恢复先查原 arrival/作业，不读当前任务改绑。RackSlot/单层架过程、盘、求值、命令、报告均沿所属原任务的 business_type 选择处理；旧 inbound 未决与新 outbound 任务可以分别被同一个 pending 发现，不能按当前方向过滤掉旧责任，也不能把旧授权用于新任务。真实同箱新 arrival 沿组件原经过事实独立受理，不按箱码合并。
 
@@ -109,7 +125,7 @@ inbound 的 archive_guard 在共享任务入口按原任务方向显式委托；
 | tests/businesses/smt_auto/、inbound/、outbound/ | 共同生命周期/归属/切换，方向行为及原完成矩阵；独立 fixture 不互相 import 测试文件 |
 | migrations/versions/2026-10-31_smt_auto_state.py、tests/migrations/test_smt_auto_state.py | 一次业务状态迁移交付；实施日期/head 按真实基线调整，组件迁移独立串接 |
 
-业务自有每个 operation 仍用规范化文件名；六类 sorting.task.* 不在 inbound/outbound 再注册。根 composition 显式列方向入口/模型模块及统一命令，真实完整业务才进入 catalog。当前 catalog 仅 coarse_sorting；不能为展示新业务增加空工厂、空模型或测试消费者。
+业务自有每个 operation 仍用规范化文件名；六类 sorting.task.* 不在 inbound/outbound 再注册。根 composition 显式列方向入口/模型模块及统一命令，真实完整业务才进入 catalog。当前 catalog 为 coarse_sorting、smt_manual，新增完整smt_auto时保留两者；不能为展示新业务增加空工厂、空模型或测试消费者。
 
 任务/计划真相源归根模型；方向表以原 task 引用关联，不再各建一份生命周期。迁移只建必要业务表/约束，保持一个 Alembic head；不改 BIN_Roller 表、不改已发布历史迁移、不执行本轮数据库升级。
 
@@ -117,8 +133,8 @@ inbound 的 archive_guard 在共享任务入口按原任务方向显式委托；
 
 唯一 SmtAutoService.scan_pending 公平分页轮换任务、inbound/outbound 生产及组件六类原待办。组件仍由宿主传入事务；after_commit 只通知 smt_auto，5 秒 Beat 调用同一入口，不新增方向 Celery 任务、Sender、锁/预占/租约或 WAIT 调度器。
 
-消费公开原结果、已消费版本与下一意图同事务；独立推进沿 WorkLine → Devices 按 ID → 原业务记录加锁。纯生产沿既有 REPEATABLE READ，实际进入 BIN_Roller 架流覆盖范围的原 advance 在首 SQL 前设 SERIALIZABLE；新会话有界整事务重试覆盖 commit，提交未知重读原身份，不凭暂时查空换号。receiver/候选短扫描不整体升级隔离。
+消费公开原结果、已消费版本与下一意图同事务；独立推进沿 WorkLine → Devices 按 ID → 原业务记录加锁。沿现有手工接入复用TASK及组件SCAN/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN的SERIALIZABLE覆盖；AUTO为全撤回与新授权的跨聚合交接，额外将INBOUND_RACK/INBOUND_BIN/INBOUND_PLATE在首SQL前设SERIALIZABLE，新公共调度下outbound自有架/盘目标交接也按公共设计局部SERIALIZABLE及相关读集合，不能只提升搬架一侧；INBOUND_ARCHIVE/SCAN2_RELEASE保持原范围。候选轮扫用一个只读REPEATABLE READ快照，各advance独立新会话，40001含commit最多3次整笔重试；提交未知重读原身份，不凭暂时查空换号。receiver不整体升级隔离，不新增事务runner。
 
 总计划验收必须覆盖：同线混合方向唯一领取；两线独立；共享 operation/组件只注册一次；同角色命令严格联合；方向计划不串支；inbound 旧结果晚于 outbound 新任务仍归原执行；共享 pending 不漏旧义务；两方向NG/WAIT/完成与保留差异；工作线停用/恢复及按方向核对资源；公开结果FOUND/VALID、精确HTTP/code及响应联合；通知丢失、回滚、40001、重启及原身份防重。
 
-统一API验收表的72项编号在[总计划唯一追踪表](../plans/2026-10-31-smt-auto-implementation.md#acceptance-matrix)定位：共同项按原方向参数化，I/O任务覆盖专属差异，S5验证释放/确认交错，S6验证组合恢复，S7统一综合回归及证据；[总计划G01～G04](../plans/2026-10-31-smt-auto-implementation.md#integration-acceptance)补原结果唤醒/两线、非eager worker/Beat、公共真实接缝与首批等待配置。非eager worker只连独占测试DB/Redis及对端替身，独立记软件恢复证据；真实WMS/ECS/RCS联调与现场物理另记证，ACK/启动/本地通过不代表物理完成。首个 BIN_Roller 正式宿主顺序沿 B7，统一自动包不自行改变人工宿主交付安排。
+统一API验收表的72项编号在[总计划唯一追踪表](../plans/2026-10-31-smt-auto-implementation.md#acceptance-matrix)定位：共同项按原方向参数化，I/O任务覆盖专属差异，S5验证释放/确认交错，S6验证组合恢复，S7统一综合回归及证据；[总计划G01～G04](../plans/2026-10-31-smt-auto-implementation.md#integration-acceptance)补原结果唤醒/两线、非eager worker/Beat、公共真实接缝与首批等待配置。非eager worker只连独占测试DB/Redis及对端替身，独立记软件恢复证据；真实WMS/ECS/RCS联调与现场物理另记证，ACK/启动/本地通过不代表物理完成。手工首宿主B7软件接入已合入，自动只补自己的组合证据；不重复组件迁移、手工生产实现或套用尚未实施的粗分Transport结果更正。

@@ -1,10 +1,14 @@
 # 公共料箱回流 WES / WMS / ECS 对接文档
 
+> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
 2026-11-02 本地增量：BIN_Roller 持久化已收敛为 10 张表，SMT 宿主 7 张，`sorting_task` 仍只有合同/分派。原 SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN、公开 ports、operation 及 owner 保持。可空的每线 `five_rack_request_limit` 只限制新原 CTU01 登记，CTU03 有效接纳只释放原周期一次；未知/失败不伪造释放，最终物理结果仍归原 Transport。开始前撤销的 WITHDRAWN 服务保留原身份，可由有效兄弟面继续原周期，兄弟开始和周期 RELEASED 后该撤销服务仍是 WITHDRAWN、公开进度 false/false，不列 pending FEED。详见[实现及迁移兼容边界](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)和[12 项永久配置专项](../testing/smt-manual-kt16-kt18.md#current-factory-profile)；全仓/整体复核待控制器，未提交、未部署。
 
 状态：**B1～B5组件实现、B6文档边界、B7共享声明及隔离测试装配已交付；后续手工 M5/M6 已本地交付首个完整正式宿主、组件状态迁移及软件组合/真实 worker 验证，见[SMT 手工验收](../testing/smt-manual.md)。手工增量未提交、未部署，供应商/现场验收未执行。** 本文描述 BIN_Roller 内部 SCAN3→SCAN4→FIFO→Return_Batch 回流段，供手工和自动宿主复用；不因此新增业务码或调度器。
 
 [人工线](manual-picking-api.md)归 smt_manual；[自动拣料](smt-auto-api.md#outbound-flow)与[自动上架](smt-auto-api.md#inbound-flow)归同一 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md) 的 outbound/inbound 工作段。每个宿主只装配一份 BIN_Roller，两方向不各建公共状态或 owner，生产准入及完成条件仍沿各自合同。自动上架的任务完成条件及与本文 C01～C07、R01 的[边界约定](smt-auto-api.md#roller-seams)在该正式对接文档维护。operation 仍保留参考合同名 `outbound.bin.return_batch@v1`、`workline.return_buffer.drain_rack_decide@v1`，不因名称含 outbound 将回流限制为出库；是否改名另行确认，不改变冻结请求。
+
+新公共方案按业务动作判定离场：下文既有CTU03接纳释放是064b5c8实现基线；原架结束当前工作线工作位服务后，以CTU03/F01调往库区ZONE或其他RACK_POSITION（含生产线工作位）均属DEPART，按有效接纳完成，后到失败/未知/缺回调只备查。ENTER/ROTATE仍按原匹配成功；已闭合历史CTU03不回滚重开。供箱/面服务/FIFO/drain业务条件继续归BIN_Roller，架作业/动作将迁入公共调度，不能同时维护两份周期真相。
 
 ## 目录
 

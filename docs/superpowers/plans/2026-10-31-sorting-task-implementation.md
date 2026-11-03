@@ -10,6 +10,8 @@
 
 **Spec:** [SMT 手工设计 §9](../specs/2026-10-31-smt-manual-business-design.md#9-sorting_task-单份合同与分派)、[SMT 自动设计](../specs/2026-10-31-smt-auto-business-design.md)、[人工 API](../../integrations/manual-picking-api.md)、[自动 API 3 任务节](../../integrations/smt-auto-api.md#tasks)。宿主实施分别见[手工计划](2026-10-31-smt-manual-implementation.md)和[自动总计划](2026-10-31-smt-auto-implementation.md)。
 
+2026-11-02宿主状态补充：完整smt_manual及其BIN_Roller消费已随PR #47/064b5c8合入，见[手工交付](../../testing/smt-manual.md#current-delivery)；smt_auto仍为设计/计划。共享合同已覆盖MANUAL/AUTO分支不等于自动生产已实现。自动S1/S6复用本计划既有合同/receiver/分派，只验证自己的实际受理和共同catalog消费；不重新执行ST1/ST2实施步骤、不抽取手工任务表或另注册六个operation。§11原测试数字保持共享交付时点，本轮没有新增产品测试证据。
+
 ## Global Constraints
 
 - 唯一注册源为 sorting_task；四个 callback 为 issued、queue_changed、plan_delta、cancel，两个 decisions request 为 prepare、completion_confirm，均使用 sorting.task.*@v1。

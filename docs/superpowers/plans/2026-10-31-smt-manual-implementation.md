@@ -1,5 +1,7 @@
 # SMT 手工分拣、入库业务子包实施计划
 
+> 2026-11-02 新目标决定：[公共货架调度设计](../specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
 2026-11-02 后续增量：原 M/B 任务和下文数字保持原日期范围；[模型收敛与额度实施计划](2026-11-02-smt-persistence-and-capacity-implementation.md) Task1～3 已本地实现并通过分项独立复审。当前 SMT/BIN_Roller 为 7/10 张表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit` 单 head；管理字段 `five_rack_request_limit` 与开始前 WITHDRAWN 服务的兼容边界见[当前设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。永久 KT16/KT18 专项已 12 passed / 0 skipped，当前最终全仓及整体复核待执行；[当前结果和旧失败](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)分开保存。无提交或部署。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after implementation authorization. M1～M6已按后续授权完成本地实现及分项复核；当前软件证据和最终全仓门槛见[统一验收](../../testing/smt-manual.md)，M1/M2原数字分别保留在历史页。共享ST1/ST2与BIN_Roller复用已合入源码；手工增量不提交、不推送、不部署、不操作运行库或真实发送。
@@ -91,9 +93,9 @@ M1先交付真实任务读口及生产适配的任务部分，M2补accept_scan2�
 | async scan_pending(*, limit:int=100) -> int | M5；可无参调用，返回本轮检查数，不作完成证明 |
 | async advance(kind:str, record_id:str) -> str | M5；一个原记录的新会话整事务推进，返回持久业务状态 |
 
-M3的转运架离场消费M1任务记录中的原COMPLETED事实；M3隔离测试可设置这一权威输入来验证离场条件，M4负责形成该事实并联合回归M3，不反向要求M3先实现整单确认。
+旧M3以M1原COMPLETED事实为转运架离场门槛；新公共目标改为原点位无其他可承接需求且可安全交出，不等整单终态。M1仍提供原成员/许可/直接义务依据，M3通过公共服务登记唯一离场链，M4独立判断整单资格。需覆盖父任务仍执行、其他点位有任务、报告未收妥而本点位已可释放的场景。
 
-kind 仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK，以及组件原SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN。前四者分别定位原任务、生产arrival作业、原完工通知、原生产架执行；后六者构造原 RollerWorkRef 交组件。不建组件种类副本或跨任务通用调度状态。
+kind仅本地：TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK、RACK_REPORT，以及组件原SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN。原生产架执行转为公共作业引用；RACK_REPORT以原ManualRequest.operation_id定位未CONSUMED的RACK_ARRIVAL_REPORT请求，参与同一scan_pending公平分页及独立推进，不以公共作业未完成/当前任务为筛选条件。组件候选仍构造原RollerWorkRef，不建种类副本、第二扫描任务或跨任务通用调度状态。
 
 本计划消费的组件接口以已合并 ports.py/service.py 为准，不重新定义 DTO：
 

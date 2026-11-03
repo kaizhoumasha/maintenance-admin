@@ -1,5 +1,7 @@
 # SMT 自动上架与拣料统一实施计划
 
+> 2026-11-02 新目标决定：[公共货架调度设计](../specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。本计划S1～S7及I/O方向任务仍未实施；共享ST1/ST2已随PR #44合入develop。本轮仅同步文档，不实施代码、不运行产品测试或迁移、不提交、不部署或真实发送；宿主实施与验收步骤保持未勾选。
 
 **Goal:** 交付一个 `smt_auto` 业务子包，共用任务、队列、原归属和恢复入口，按冻结的 `business_type` 运行 inbound/outbound，分别满足资源、逐盘、异常及完成合同。
@@ -8,7 +10,7 @@
 
 **Tech Stack:** Python 3.13+，既有 FastAPI/Pydantic/SQLAlchemy/Alembic/Celery/pytest、独立 PostgreSQL；不新增依赖。
 
-**Spec:** [统一业务设计](../specs/2026-10-31-smt-auto-business-design.md)、[统一自动API](../../integrations/smt-auto-api.md)、[sorting_task共享计划ST1～ST2](2026-10-31-sorting-task-implementation.md)、[BIN_Roller计划B1～B7](2026-10-30-bin-roller-implementation.md)。本文只维护实施位置、步骤和证据归属；字段及响应规则以统一API为准。
+**Spec:** [统一业务设计](../specs/2026-10-31-smt-auto-business-design.md)、[数据模型设计草案](../specs/2026-11-02-smt-auto-data-model-design.md)、[统一自动API](../../integrations/smt-auto-api.md)、[sorting_task共享计划ST1～ST2](2026-10-31-sorting-task-implementation.md)、[BIN_Roller计划B1～B7](2026-10-30-bin-roller-implementation.md)。本文只维护实施位置、步骤和证据归属；字段及响应规则以统一API为准。
 
 ## 阅读与实施导航
 
@@ -29,7 +31,7 @@
 - 六类sorting.task.*只由sorting_task注册一次；四点由BIN_Roller唯一受理。共享错误、Unavailable、recheck和可选只读guard消费ST1/ST2，不在自动包再次扩展receiver。旧登记默认不变，field_path首版可省略。
 - 原plan重验按[共享1.1](2026-10-31-sorting-task-implementation.md#sorting-task-recheck)由receiver先锁定/刷新原收据，宿主随后按WorkLine→Devices按ID→原业务动作写入，成功收妥不可降级，advance不反向锁收据。首次正式接入前完整交付四分支，后到宿主按[1.4](2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)消费冻结@v1，不原地增补有效字段或重解析旧待定输入。
 - 一份bin_roller、一套接缝和scan_pending；组件及方向无独立业务码、Sender、Celery、WAIT调度器、手工锁/租约/资源预占/协调版本。WMS负责库存、绑定、容量/占用、业务唯一性和最终决定；ECS/PLC负责运动、互锁、HOLD及实物恢复。
-- receiver使用原调用方事务；独立推进按WorkLine→Devices（ID顺序）→原业务动作，消费版本/下一意图原子保存，只读公开结果。纯生产REPEATABLE READ；实际进入BIN_Roller架流/正常求架检查的原advance按其覆盖表首SQL前SERIALIZABLE，不扩到receiver/候选短扫描/其他业务。40001覆盖commit，最多3次新会话整事务重试；提交不明不当回滚。
+- receiver使用原调用方事务；独立推进按WorkLine→Devices（ID顺序）→原业务动作，消费版本/下一意图原子保存，只读公开结果。AUTO的INBOUND_RACK/BIN/PLATE及TASK、组件SCAN/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN在首SQL前SERIALIZABLE；新公共调度下outbound自有架/可能登记目标PUT的完整推进按共同SERIALIZABLE及真实相关读集合；INBOUND_ARCHIVE及SCAN2_RELEASE保持原范围，不扩到receiver/候选快照/手工业务。40001覆盖commit，最多3次新会话整事务重试；提交不明不当回滚。
 - 新ECS命令使用PROTOCOL_RETRY_WINDOW=300秒；历史operation/身份/timestamp/正文/owner/路由/期限/附录/证据不改，不回填历史null，不搬另一项目数据或运行配置。
 - 正常成功必须有已应用的原Result及严格成功字段；ACK、返回命令号、online/IDLE、空查询、消息过期不证明物理完成。任务终态、直接收口、inbound归档和公共排空分别判断。
 - 实施时按每任务RED→观察失败→最小实现→GREEN；导入/fixture失败不是业务RED。测试表独立MetaData、显式创建/finally清理，PostgreSQL用可丢弃库；未配置跳过不算通过，配置后连接失败必须失败。测试文件不互相import。
@@ -46,9 +48,11 @@
 <a id="scope-and-files"></a>
 ## 1. 当前基线、文件与固定接口
 
-2026-11-01交付状态核对：smt_auto 的 S1～S7/I/O 仍待实施；手工 M1～M6 已完成本地正式宿主、组件/宿主状态迁移与软件运行验收，见[手工统一验收](../../testing/smt-manual.md)，仍未提交、未部署。sorting_task ST1/ST2 已随 PR #44/380aeba 合入，原证据见[共享合入记录](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。BIN_Roller 组件表已由首个手工宿主交付 ac980eb32c52，自动 S6 应引用实际已合入的组件 revision，不能重复建表；自动宿主自身状态迁移仍按实施时唯一 head 衔接。
+2026-11-02交付状态核对：smt_auto 的 S1～S7/I/O 仍待实施；完整手工宿主已随 [PR #47](https://github.com/kaizhoumasha/maintenance-admin/pull/47) 合入（064b5c8），当前catalog登记coarse_sorting及smt_manual。手工最终软件证据见[统一验收](../../testing/smt-manual.md#current-delivery)，属于既有记录，本轮未重跑。sorting_task ST1/ST2 已随 PR #44/380aeba 合入，原证据见[共享合入记录](2026-10-31-sorting-task-implementation.md#sorting-task-merged)。BIN_Roller已由手工首宿主完成正式源码接入：原ac980eb32c52建表后已收敛至10表，手工为7表，现有唯一head为fiveracklimit；自动宿主自身迁移接实施时最新head，不重跑B7或重复建组件表。合入与软件验收不表示本轮部署或运行库升级。
 
-现有catalog/runtime/Capabilities、receiver收据及raw/effective digest、WmsRequests、EcsCommands、TransportService公开结果、after_commit和5秒Beat均复用。ST1/ST2的共享任务合同/分派及必要receiver接缝已合入，S1只消费；B7交付公共模型/组件迁移与正式接入。wes_backend只作已确认合同/设备参考，不移植其运行时、旧锁/容量窗口、入线成员门槛、失败报告或跨点等待。
+现有catalog/runtime/Capabilities、receiver收据及raw/effective digest、WmsRequests、EcsCommands、TransportService公开结果、after_commit和5秒Beat均复用。ST1/ST2及B7手工首宿主软件交付已存在，自动包验证自己的实际消费；已收敛的组件物理表由组件维护，自动代码不依赖TABLES内部键、FaceWork/Decision等实现布局。wes_backend只作已确认合同/设备参考，不移植其运行时、旧锁/容量窗口、入线成员门槛、失败报告或跨点等待。
+
+可参考已合并手工任务、请求历史、上界分页、原结果消费及事务结构，但不继承SmtManualService/SmtManualTaskFlow、不导入手工repository/模型或读写其7张表；不把人工准入/完工通知搬入自动生产，也不以本轮复用为由抽取跨宿主状态机。原自动14表草案已由公共调度方案调整为11张宿主生产/任务表及公共架作业引用；不再新增两方向私有visit和rack_action，原布局仅作事实/约束对照。[持久化收敛设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)用于理解已有公共边界，既有手工测试只补真实受影响回归，不复制整套工程。
 
 下表是唯一文件责任表。共享ST1/ST2路径已存在，其余宿主路径为后续实施位置，各目录含__init__.py；实际存在性与迁移日期/head在实施时再核对。
 
@@ -63,9 +67,9 @@
 | 同包outbound/contracts.py、models.py、repository.py、rack_flow.py、material_flow.py | O1生产架、O2两条正常链、O3异常、O4面终局及方向资格；不重建共享任务DTO/分支校验器 |
 | 同包outbound/request/outbound_{bin_work_plan,return_rack_work_plan,bin_material_decide,rackslot_material_decide,material_movement_report,source_empty_decide}_v1.py | O2/O3六个专属严格请求；任务prepare/completion_confirm不在方向内重建 |
 | app/businesses/_components/sorting_task/及wms_callback必要扩展 | ST1/ST2单份交付，S1只消费；实际适配缺陷回共享计划修复/回归 |
-| BIN_Roller四点、供回箱/FIFO/drain、五层架、departure及组件迁移 | B1～B7单份交付；自动包只消费公开门面，不复制公共状态或测试工程 |
+| BIN_Roller四点、供回箱/FIFO/drain、五层架、departure及组件迁移 | B1～B7及后续10表收敛已合入；自动包只消费公开门面，不复制公共状态或测试工程 |
 | tests/businesses/smt_auto/及conftest.py | S1/S2/S5/S6/S7共同行为、隔离端口装配和共享fixture；方向测试仅在inbound/、outbound/ |
-| app/businesses/catalog.py；migrations/versions/2026-10-31_smt_auto_state.py；tests/migrations/test_smt_auto_state.py | S6一次完整业务注册、根及两方向必要表/约束；组件迁移独立串接 |
+| app/businesses/catalog.py；migrations/versions/2026-10-31_smt_auto_state.py；tests/migrations/test_smt_auto_state.py | S6一次完整业务注册、根及两方向必要表/约束；日期按实施调整，接既有迁移链且保留手工/组件数据 |
 | app/core/config.py、.env.example | S5声明可选SMT_AUTO_FIRST_PLAN_WAIT_MS，默认None；S6工厂注入，G04验证配置/期限恢复，不覆盖现有.env |
 | tests/tasks/test_smt_auto_worker.py | S7独占测试DB/Redis、关闭eager的真实worker/Beat恢复证据，不连接现场设备 |
 | docs/testing/smt-auto.md | S7一份分层证据，内含共同项、inbound、outbound及外部交付状态，不另建两份综合验收模板 |
@@ -76,7 +80,7 @@
 | --- | --- |
 | SmtAutoService(capabilities, *, first_plan_wait_ms:int\|None=None) | 构造时注入可选正整数毫秒；只存配置不持有session，原期限沿任务依据，不新增wire字段或期限调度表 |
 | composition.build_service(capabilities) | S6构造一个无状态SmtAutoService；components精确含sorting_task、bin_roller，production指向本服务，工厂从get_settings读取并注入S5配置，不查数据库 |
-| SmtAutoService.read_current_task(session, *, work_line_id:int) -> CurrentTask | 原共同任务/执行位提供上下文，不抹去已取消但在制的原关联 |
+| SmtAutoService.read_current_task(session, *, work_line_id:int) -> CurrentTask | PREPARING/EXECUTING+原prepare可靠接纳+线启用且原宿主/编码匹配；不附加首版；未知仍留原task_id且false，不误无任务旁路，不抹去原在制 |
 | SmtAutoService.read_successor(session, *, work_line_id:int) -> SuccessorContext | 原队列/prepare证据形成UNKNOWN/CHECKING/AVAILABLE/NONE，不凭空查询报NONE |
 | SmtAutoService.accept_scan2(ctx, arrival:Scan2Arrival) -> None | 原receiver事务按arrival先查历史，首次绑定原任务/方向并委托生产；重复不读当前任务改绑 |
 | SmtAutoService.scan_pending(*, limit:int=100) -> int | 唯一PROGRESSION，可无参调用；返回检查数，按上界/游标公平轮换共同/方向/组件待办 |
@@ -84,6 +88,12 @@
 | WmsRequests.send(session, payload, *, operation_id) / get_result(session, *, message_id, operation, operation_id) | 精确已注册RequestPayload；保存原三引用，仅消费公开终态结果，不直读ReliableMessage |
 | EcsCommands.create(session, *, owner, call_key, device_code, timeout_ms, command) | 保存原owner/call_key/command_code；通过get_command(... owner, command_code)/get_by_call(... owner, call_key)读原已应用结果，不调用发送器 |
 | TransportService.move_rack/rotate_rack/get_result | 沿原caller/client_request_id/transport_task_id及公开位置观察；精确签名沿现有service，不建搬架ECS指令或直读TransportTask |
+
+BIN_Roller精确调用沿当前源码：`apply_supply_change(session, change)`、`get_supply_progress(session, *, work_line_id, task_id)`返回本任务SupplyProgress元组，宿主按原SourceFaceRef核对；`release_scan2(session, *, arrival_id)`及`get_scan2_release_result(session, *, arrival_id)`；分页返回原RollerWorkRef，FEED记录ID仍为原demand_id，SCAN2_RELEASE仍为原release_record_id，不换成合表后物理主键。组件原记录定位/加锁可使用已有`original_record(..., for_update=...)`，不绕过门面查询其模型表。
+
+沿已合并手工复用TASK及组件SCAN/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN的SERIALIZABLE覆盖；AUTO新增全撤回/逐盘授权的跨聚合交接，因此INBOUND_RACK/INBOUND_BIN/INBOUND_PLATE也在首SQL前SERIALIZABLE。新公共调度下outbound自有架与盘的目标交接按共同SERIALIZABLE，INBOUND_ARCHIVE及SCAN2_RELEASE保持原范围。候选sweep使用一个只读REPEATABLE READ快照固定各kind上界/游标，每条advance另开事务；外部task_id不保证随受理时间递增，不在分页中滚动更换快照。receiver保持原事务隔离，40001含commit最多3次新会话整笔重试。若具体自动动作实际进入公共架流覆盖范围，按其真实读写集合提升对应advance，不在内层临时换隔离或全局升级。
+
+复用已合并的`WorkLine.five_rack_request_limit`及组件原CTU01登记/RELEASED计数，不新增自动额度配置、计数表或求架锁；未配置保持原行为，恢复原动作不再次占额度，未知/失败不释放，CTU03及单层/RETURN/TRANSFER F01的DEPART统一按有效submit接纳完成调度，去向包括库区和生产线等不同工作位，最终结果仅备查且可失败；ENTER/ROTATE仍需原结果，不宣称物理已搬离。粗分拟议的Transport结果更正不是AUTO依赖；当前所有自动原任务沿既有严格终态，不因同用F01而获得更正能力。
 
 kind固定为TASK、INBOUND_RACK/INBOUND_BIN/INBOUND_PLATE/INBOUND_ARCHIVE、OUTBOUND_RACK/OUTBOUND_BIN/OUTBOUND_PLATE，另有组件原SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN。record_id为该类原主键，前者按原task方向复核，后六类组装原RollerWorkRef交组件。call_key稳定包含方向、原授权出处、动作类型，不增加wire身份或另建结果反查路由。
 
@@ -95,6 +105,8 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 ## 2. 共同记录、原子交接与方向差异
 
 下列共同要求只有一份。实现仍在各自根/方向模型和流程，表格不是新增通用状态机、授权表、消息表或公共运行时；方向任务引用它并补自身字段。
+
+表级布局、字段/外键/部分唯一约束及明细保留见[数据模型草案§3～§8](../specs/2026-11-02-smt-auto-data-model-design.md#3-共同任务与原输入)。其中方向决定轮次仅保留原业务求值/消费事实，任务请求仅保留prepare/确认原引用；不接管Outbox发送、租约或可靠重试。[M01～M12](../specs/2026-11-02-smt-auto-data-model-design.md#9-数据模型验收与实施定位)分别由原S1/S2/I/O/S5/S6/S7落实，不新建专项计划或重复API用例；§10三项边界已收敛，资格沿手工，全撤回安全退架及ECS原命令内恢复按用户本轮选择；设备能力仍须D3/D4交付，模型及行为均尚未实施。
 
 | 记录 | 原事实、唯一性与保存要求 |
 | --- | --- |
@@ -134,6 +146,8 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 所有异常阶段只在原箱/面未终局且无待消费授权/未决求值/在途取盘等冲突时建立；已有有效后继继续原授权，不叠加work_plan。完整字段、严格联合、共用成功条件和完成差异分别见[API逐盘合同](../../integrations/smt-auto-api.md#material-operations)、[共同规则](../../integrations/smt-auto-api.md#production-rules)及[完成映射](../../integrations/smt-auto-api.md#task-completion-conditions)。
 
+共同设备故障处置沿[API7.1.4](../../integrations/smt-auto-api.md#ecs-in-command-recovery)：硬件停机报警/人工处理期间原已接纳命令不先报FAILED，ECS持久保留原阶段并只恢复未完成部分，最终回原严格Result；WES只等待/消费，不新增重试、报警表或恢复指令。已应用FAILED仍终态、未闭合直接责任保留，不影响既有PICK_EMPTY/WMS RETRY语义。I3/O3消费该共同边界，不各实现一套恢复流程；S7软件验收与D3/D4设备证据分开。
+
 <a id="common-tasks"></a>
 ## Task S1：共同任务、队列、计划与取消
 
@@ -157,6 +171,7 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 - [ ] **步骤1：写接缝RED。** `test_scan2_admission_keeps_original_arrival`覆盖有效任务可读箱无SCAN1/投箱成员仍委托WMS、无任务且无原在制走原释放决定、不可读只留到位/异常；完成确认未决保存关联/暂缓首盘，不作无任务直通。同arrival重报不改绑，新arrival独立，取消在制实际到位沿原上下文首次合法求值。
 - [ ] **步骤2：写合同/供箱RED。** 验证SourceFaceRef只由五层供箱展开、原顺序和跨版范围精确，重复应用/同版确认不二次交付，单层/RETURN/TRANSFER不进供箱；CurrentTask/SuccessorContext无证据不报NONE。验证一份同角色严格联合，字段互斥、整数/有限数/字符串映射和Result约束；缺参数拒绝，不以宽松dict或占位枚举容纳未交付分支；inbound只按API9.2.1约定类型/枚举传原值，不因共用模型新增尺寸上下限、精度/步进或占用关系校验。
+- [ ] **步骤2a：补任务资格RED。** 按模型§10.1覆盖PREPARING原prepare未知时task_id保留/is_valid=false、不误直通/首问，后来prepare接纳不自动回放此前异常到箱；prepare可靠接纳且0版仍valid，可按方向首问但不越过来源/目标/授权条件；确认暂缓不同于CONTEXT_NOT_READY，仅前者按原3.7.3条件恢复。队列/终态不当当前任务，禁用/改绑阻新生产但原结果/报告/释放继续，不把手工私有HOLD/ADMISSION实现导入自动包。
 - [ ] **步骤3：观察RED。** `rtk uv run pytest tests/businesses/smt_auto/test_scan2.py tests/businesses/smt_auto/test_arm_contracts.py -q`；通过公开门面观察委托/原意图和外层回滚，不依赖私有函数调用次数。
 - [ ] **步骤4：最小实现。** receiver原session先保存组件事实，再保存业务原arrival/方向及合法待办；不另开会话/HTTP、注册SCAN2或发MOVE_FORWARD。单份ECS模型由catalog编译，设备/位置取WORKLINE实际绑定；未获D3/D4/D5的严格分支保持未交付，不猜设备码/NG位置。具体逐盘状态及参数提取仍在方向流程，不新增共用生产引擎。
 - [ ] **步骤5：GREEN。** 重跑步骤3，接收外层回滚不留下业务事实/意图，原身份/首次时间不刷新；确认两组件合同各单份、类型直接复用公共ports。真实catalog/组件链及跨方向恢复留S6，原释放登记/结果门槛留S5。
@@ -177,16 +192,17 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 | 特有场景 | 实现/验收要求 |
 | --- | --- |
-| 候选与同架跨版 | 原版本/数组顺序及A→B选位；原在途/在位过程复用进场，不双侧调入；只撤一版不影响其他有效覆盖 |
+| 候选与同架跨版 | 原版本/数组顺序及A→B选位；只复用仍可承接需求且未取尽/未进入离场链的原过程，不双侧调入；只撤一版不影响其他有效覆盖，已进入退架链后新成员留未选中 |
 | 原架取尽/离场后再列 | 不重置旧取尽/未知、不撤旧departure；真实再到位用新Transport，版本递增不证明新物料/到位 |
 | 新左架先到、旧左架结果未回 | 新可靠事实消费后更新当前关联，旧结果只处理原过程，不清新架/重提旧事实，不要求先收旧搬离成功 |
 | 实际终位不符/姿态不符 | 保存公开位置事实，不补认动作成功；可选集合仍须原成功、实际工作位及直接条件均匹配 |
 | 左右独立与原授权 | 新左架不重领合法右侧后继；原已取离盘的目标/报告继续。只检查所选架/安全交出直接依赖，物理交接归ECS/RCS，不加全线门禁 |
 
-- [ ] **步骤1：写RED。** 验上表全部场景、初始空架通知早于进场结果不伪造到位、跨版单成员取消、旧进出场重报和同架新轮不接旧授权；来源变动不提前WAIT、不重开终局箱。
+- [ ] **步骤1：写RED。** 验上表全部场景、初始空架通知早于进场结果不伪造到位、跨版单成员取消、旧进出场重报和同架新轮不接旧授权；来源变动不提前物料WAIT、不重开终局箱。补原CTU03/F01离场有效接纳即完成调度，覆盖ZONE及不同RACK_POSITION去向、后续原地终位/失败仅备查不回占；无ACK不推接纳，进场/换面失败或未知仍不授成功/重建；共用离场WAIT仍沿到期或相关新事实规则，不套逐盘计时。按模型§10.2验单层全部覆盖撤回可退架、部分/其他版本有效覆盖不退、未决授权/可能授权求值/未知取盘仍阻该架；已取离盘放盘/报告不统一阻原架。原离场依据/撤回引用与唯一departure原子登记，不填取尽、不增wire字段、撤回重放不二次搬架，新覆盖不重建已登记动作；首次departure_decide意图后追加同架成员保持未选中、不绑旧visit，待独立新进场真实到位再关联，验旧visit关联不可切换且新需求不永久挂旧退架过程。
+- [ ] **步骤1a：补交接/离场链RED。** 原成员集合为空/缺引用不能认全撤回；ENTER在途/位置未知保留原责任，FAILED/CANCELLED可靠在本点位且NONE/可交出时按公共安全清架，原执行责任已终结、无继续执行/更正/未决核对且可靠未进入、无冲突则NOT_ARRIVED，不补认生产成功或虚构离场。独立PostgreSQL交错验证较早快照等待WorkLine锁后新plan先提交，以及潜在授权求值先登记/全撤回先登记两种顺序；inbound三类advance均首SQL前SERIALIZABLE、真实读取相关集合并锁后重读task/成员/visit，40001含commit整笔重试，不能出现有效覆盖/可取授权与原搬离同时新获许可。重复撤回/后到取尽/WAIT重报/到期或新事实竞争只一条离场根、一个合法后继、一次原搬离；回滚无半份依据/意图。按冻结来源映射区分潜在取料与已取离盘的目标决定/报告，物料WAIT新集合排除撤回来源，empty WAIT/RETRY原处责任仍阻架，不静默丢弃旧授权。
 - [ ] **步骤2：观察RED。** `rtk uv run pytest tests/businesses/smt_auto/inbound/test_source_racks.py tests/businesses/smt_auto/inbound/test_source_transport.py -q`。
-- [ ] **步骤3：最小实现。** 单层RACK_MOVE/F01，无动态target_face，departure.current_face=null；READY只登记原搬离，WAIT/未知独立履约。事实更新/旧责任/下一意图同事务，不套CTU03接纳即释放，不新增安全轮询或库位查询。
-- [ ] **步骤4：GREEN。** 重跑步骤2，验证最新集合只影响合法新求值，不改历史source/原授权；缺departure或窄位置读口时只验隔离输入，真实接入记D6未完成，不补产品占位实现。
+- [ ] **步骤3：最小实现。** 单层RACK_MOVE/F01，无动态target_face，departure.current_face=null；READY只登记原搬离，WAIT/未知独立履约。事实更新/旧责任/下一意图同事务，CTU03/F01 DEPART沿公共有效接纳完成，去库区或不同工作位相同；ENTER/ROTATE按原结果；不新增安全轮询或库位查询。
+- [ ] **步骤4：GREEN。** 重跑步骤2，验证最新集合只影响合法新求值，不改历史source/原授权；departure及窄位置公开能力已经存在，自动适配未完成时只验隔离输入并记录自身接入缺口，不重建公共读口或补产品占位实现。
 
 <a id="inbound-normal"></a>
 ### I2：接料箱正常逐盘链、来源上下文与占用参数
@@ -224,7 +240,7 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 - [ ] **步骤1：写RED。** `test_archive_summary_keeps_original_task_owner`验证原任务行摘要仍提供完整TaskOwnerRef，工作线改配/业务明细清理及公共收据按原策略清理后，旧通知经共享入口仍到原inbound guard、固定STATE_CONFLICT且不重建任务；原收据尚在时身份漂移仍先冲突，不承诺恢复已删除的逐消息内容。原单层需求未取消者有WMS取尽/终局，五层需求与已受理生产独立核对；不额外列公共在途/SCAN1旁路或等单层空架全部离场。终态与直接收口分开，未决超过7天仍保留；收口满期前/后及重复消息不刷新分别验证，公开结果缺失不假成功/换号。
 - [ ] **步骤2：观察RED。** `rtk uv run pytest tests/businesses/smt_auto/inbound/test_completion.py tests/businesses/smt_auto/inbound/test_retention.py -q`；此阶段用明确的原终态/结果事实输入，S5再验共同确认与方向资格的实际组合。
 - [ ] **步骤3：最小实现。** 原任务行保留task_id、冻结task_type/business_type及原work_line_id/workline_code，并保存最终状态/关闭/直接收口/清理完成时间和标记；原business_code由宿主固定提供，不从当前线配置补值；终态且直接义务收口后完整7天才有界清理闭合业务明细，持续留最小终态摘要。清理前同事务重验，未决继续保留；原交互/决定/参数/消费及公共恢复所需引用不能随父任务级联丢失。不新增任务壳/拒绝表/归档调度器，不改RELIABLE_RETENTION_DAYS/TTL或全局收据清理。
-- [ ] **步骤4：GREEN。** 重跑步骤2及下列真实receiver归档断言；清理/原事实消费/接收并发用独立PostgreSQL证明，不以缓存计数或空查询作收口。
+- [ ] **步骤4：GREEN。** 重跑步骤2及下列真实receiver归档断言；清理/原事实消费/接收并发用独立PostgreSQL证明，不以缓存计数或空查询作收口。按[模型§8](../specs/2026-11-02-smt-auto-data-model-design.md#8-归档外部引用和历史保留)及M10验证：独立离场仍未决时，仅保留原架过程/动作及必要前驱的最小恢复子图，冻结原出处后解除待清明细FK；`details_cleaned=true`后同一pending仍能恢复原离场，guard继续固定拒绝，收口后不重新开启7天窗口；本任务直接未决不得标记为`recovery_only`绕过保留。全撤回离场须另外保留非空成员集合、各撤回input身份、首次departure_basis及唯一根/WAIT前驱；恢复不重新查空猜依据、不补第二根，报警取放尚未闭合时仍阻完整明细清理。
 
 <a id="inbound-archive-guard"></a>
 #### 入库只读归档准入与历史收据
@@ -249,9 +265,10 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 **Interfaces:** 消费S1来源顺序及首版target_rack、O2本盘最终ACCEPT，输出原来源面到位/arrived_at、目标就绪和搬运责任；不产生机械臂取盘或公共Feed。
 
-- [ ] **步骤1：写RED。** `test_rack_roles_keep_original_templates`验RETURN/TRANSFER进出F01、换面CK04，五层供箱仍走公共CTU01～03；`test_source_face_requires_own_applied_arrival`验原成功及实际位置/面向匹配才启动本面。`test_old_transport_result_keeps_new_process`验旧进出场只归原过程。`test_accept_target_preparation_uses_current_plate`验target_rack只准备初始面，ROTATE/REPLACE取本盘target_locator，不重新求物料资格、不指挥来源架换面；终位不符只留事实。
+- [ ] **步骤1：写RED。** `test_rack_roles_keep_original_templates`验RETURN/TRANSFER进出F01、换面CK04，五层供箱仍走公共CTU01～03；`test_source_face_requires_own_applied_arrival`验原成功及实际位置/面向匹配才启动本面。`test_old_transport_result_keeps_new_process`验旧进出场只归原过程。`test_accept_target_preparation_uses_current_plate`验target_rack只准备初始面，ROTATE/REPLACE取本盘target_locator，不重新求物料资格、不指挥来源架换面；终位不符只留事实。补RETURN/TRANSFER原离场接纳后即调度释放，包含直接送生产线工作位，后到原地终位或失败只备查；ENTER的CANCELLED/FAILED不授到位/完成资格，不因成员撤回重建Transport；F01/CTU03的DEPART按新公共规则有效接纳即完成，后续失败不重开；ENTER/ROTATE仍需原结果，不借未实施更正绕过。面首次work_plan登记即保护STARTED：之前可精确撤回，之后跳过且保留原终局义务；仅未开始面全撤回且无剩余直接责任才退架，不把全撤回单层策略移给TRANSFER。
+- [ ] **步骤1a：补撤回与搬运交错RED。** 验RETURN原进场已提交但尚未到位、且本面尚未登记work_plan时仍可撤回成员；不将进场在途等同生产STARTED。随后原进场成功仅按原身份认定到位，满足无剩余直接责任条件才登记唯一退架意图；原Transport为FAILED/CANCELLED/未知时保留原事实，不伪造已到位/已退场、不重建进场；失败/取消可靠在本点位且NONE/可交出时按公共安全清架，其他受管点位冲突/未知仍保护。
 - [ ] **步骤2：观察RED。** `rtk uv run pytest tests/businesses/smt_auto/outbound/test_racks.py tests/businesses/smt_auto/outbound/test_target_preparation.py tests/businesses/smt_auto/outbound/test_transports.py -q`。
-- [ ] **步骤3：最小实现。** 来源按架数组再面数组顺序，同任务同架面只安排一次，不预列SLOT。按原决定/阶段稳定client_request_id保存Transport/结果消费；departure用公共唯一模型，WAIT/未知独立履约，READY冻结去向。面终局由O4供给，新面仍须自己真实到位，首盘受S5的共同确认门槛约束；无猜库位/改模板兜底或CTU03规则外推。
+- [ ] **步骤3：最小实现。** 来源按架数组再面数组顺序，同任务同架面只安排一次，不预列SLOT。按原决定/阶段稳定client_request_id保存Transport/结果消费；departure用公共唯一模型，WAIT/未知独立履约，READY冻结去向。面终局由O4供给，新面仍须自己真实到位，首盘受S5的共同确认门槛约束；无猜库位/改模板兜底，CTU03/F01的DEPART接纳完成按原工作位业务意图判断，不按是否库区分支。
 - [ ] **步骤4：GREEN。** 重跑步骤2及受影响原Transport场景/结果测试；三类资源不混用、原直接依赖不变全线清场门槛。实际CK04支持由D7验，缺公共位置/离场交付记D6未完成。
 
 <a id="outbound-normal"></a>
@@ -287,7 +304,7 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 - [ ] **步骤1：写RED。** `test_face_terminal_closes_only_after_all_plate_obligations`验NO_WORK/正常末盘无后继两种终局都须原面授权/异常/RETRY/取放/正常NG必报全部结清；CLOSE/SOURCE_DONE不等于面结束，无额外面尾work_plan。`test_completion_uses_own_supply_and_production_progress`验供箱需求和BIN生产两组独立关联，无RackSlot计划不补面条件；单箱结束而本任务供箱未决仍不能整单完成。
 - [ ] **步骤2：观察RED。** `rtk uv run pytest tests/businesses/smt_auto/outbound/test_face_completion.py tests/businesses/smt_auto/outbound/test_completion.py -q`。
-- [ ] **步骤3：最小实现。** 只按原面/到位及其真实义务给出终局依据，全部收口后允许O1换面/离场；新面重新真实到位，不复用前面授权。BIN段终局及必报范围按第2节，原供箱/公共成员变化不改其生产事实；不新增入库7天清理或清理后拒绝。
+- [ ] **步骤3：最小实现。** 只按原面/到位及真实义务给出业务终局依据；O1独立评估点位需求与直接交出条件。无其他需求且可交出则原架离场，只有已完成动作的独立报告未收妥不占架，仍阻原面/整单闭合；合法下一面换面仍核对原生产前置，新面重新真实到位，不复用前面授权。BIN段终局及必报范围按第2节，原供箱/公共成员变化不改其生产事实；不新增入库7天清理或清理后拒绝。
 - [ ] **步骤4：GREEN。** 重跑步骤2；完整验证[末盘/WAIT/原释放/确认案例](../../integrations/smt-auto-api.md#outbound-exception-example-3)的方向资格部分，原释放及整单版本交错由S5统一测试。父任务终态后独立回流/离场继续，不反向放宽正常完成前置。
 
 <a id="common-completion"></a>
@@ -308,12 +325,12 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 
 **Files:** 根definition/composition/service及显式ENTRY_MODULES/MODEL_MODULES/COMMANDS；catalog.py、一份smt_auto_state迁移及迁移测试。Test根test_assembly.py、test_direction_handoff.py、test_pending.py、test_recovery.py、test_retention_boundaries.py。
 
-**Interfaces:** 完成1.1固定服务接口、一个业务/工厂/两组件映射和一份业务状态迁移；consume S1～S5完整分支及D1～D7实际交付，B7组件迁移/首宿主安排沿原计划，不因自动包统一而改动。
+**Interfaces:** 完成1.1固定服务接口、一个业务/工厂/两组件映射和一份自动业务状态迁移；consume S1～S5及D1～D7适用交付，复用已经合入的组件迁移/手工首宿主，不重新实施B7或将粗分结果更正纳入前置。
 
-- [ ] **步骤1：写装配/切换RED。** `test_first_plan_wait_configuration_is_injected_and_preserved`验证None继续PREPARING、有效T从原准备可靠时间起算、重启不刷新已登记期限。 `test_shared_inputs_and_commands_register_once`验两方向加隔离smt_manual消费者仍同源任务单份、四点唯一、一份严格命令联合、非消费者无权限；`test_direction_resources_are_checked_when_used`验证只做单方向的线无需另一方向专属绑定，本方向缺必需配置仍按原门禁阻止；`test_old_inbound_result_keeps_original_task_after_outbound_starts`验旧报告/释放/架结果仍归原任务，同码新arrival不串方向；`test_inbound_archive_policy_does_not_apply_to_outbound`验五通知仅原入库guard，出库不清理/拒绝，公共原Result仍可收口。
-- [ ] **步骤2：写恢复RED并运行。** `test_waiting_direction_does_not_starve_other_pending`覆盖本轮上界/游标、等待/失败也翻页、单条异常不阻塞其他类、新工作下一轮，终态仍发现生产和组件六类原责任。`test_original_owner_survives_rollback_and_restart`覆盖三种原owner外层提交后通知、保存点后外层回滚不通知、丢通知Beat恢复、提交不明重读原身份、不凭暂时查空换号。`test_result_consumption_and_next_intent_commit_together`验消费/原意图/结果版本同提交、回滚后无半个授权；`test_exception_trigger_survives_rollback_without_duplicate`按入库NG/SOURCE_ABSENT、出库NG收妥/SOURCE_DONE参数化，触发消费与原阶段/下一意图同回滚，提交后的重复不二次续问；`test_roller_isolation_does_not_leak_to_receiver`在真实PostgreSQL验覆盖表首SQL前隔离、连接归还、原锁序、含commit的40001新会话重试最多3次及超限保留pending、两线独立。`test_applied_results_wake_original_auto_owner`区分WMS决定可靠保存、ECS实际应用、Transport提交有效接纳和applied outcome_revision推进，仅外层提交后唤醒原smt_auto，旧终态责任也恢复；旧租约/无新应用不误唤醒；共享结果缺原归属不猜测/广播或认领历史null，原独占注册来源的既有回退保持。`test_two_worklines_keep_original_scope`在test_direction_handoff.py验两线同箱码/不同方向交错、回滚和旧回调不串task/arrival。`test_auto_host_preserves_scan3_round_and_scan4_pending`通过真实host receiver/runtime验新SCAN3不等旧轮/上游Result、原义务保留、原SCAN4成功资格/失败重扫不改FIFO，以及未分配SCAN4能从原SCAN待办推进求架；只验证宿主接入既有公开行为，不复制组件算法。运行 `rtk uv run pytest tests/businesses/smt_auto/test_assembly.py tests/businesses/smt_auto/test_direction_handoff.py tests/businesses/smt_auto/test_pending.py tests/businesses/smt_auto/test_recovery.py tests/businesses/smt_auto/test_retention_boundaries.py -q`。
-- [ ] **步骤3：最小装配。** 复用现有catalog._providers/模型加载/runtime，API/worker同一完整声明；COMPONENTS=(sorting_task.COMPONENT, bin_roller.COMPONENT)，PROGRESSION="scan_pending"，COMMANDS只来自根ecs_command。组件production指向宿主，工厂注入SMT_AUTO_FIRST_PLAN_WAIT_MS；业务只操作原公开门面；read方法用调用方session，组件推进用宿主事务；六类组件待办使用其get_pending_upper_id/list_pending公开分页，包含尚未生成DRAIN/RACK_CYCLE的SCAN4，不只扫已建协调记录。无第二通知路由/扫描器/事务runner。未交付合同/组件不以空工厂或local专用生产登记补缺。
-- [ ] **步骤4：迁移及数据库验证。** 一份迁移仅根/两方向必要表/唯一约束/归档标记，MODEL_MODULES显式加载，公共模型只一次；组件表归B7，position_observation已由f0b220261031交付不重复添加。实施时接唯一最新head，独立库验证升级/既有数据保留及 `rtk uv run alembic heads` 一个head；运行 `rtk uv run pytest tests/migrations/test_smt_auto_state.py -q`。不重算历史、导入别项目任务或复制配置。
+- [ ] **步骤1：写装配/切换RED。** `test_first_plan_wait_configuration_is_injected_and_preserved`验证None继续PREPARING、有效T从原准备可靠时间起算、重启不刷新已登记期限。 `test_shared_inputs_and_commands_register_once`在隔离资源中组合既有完整smt_manual与新完整smt_auto，验两方向仍同源任务单份、四点各原业务唯一、一份自动严格命令联合、非消费者无权限；保留coarse_sorting原声明，不造手工占位消费者。`test_direction_resources_are_checked_when_used`验证只做单方向的线无需另一方向专属绑定，本方向缺必需配置仍按原门禁阻止；`test_old_inbound_result_keeps_original_task_after_outbound_starts`验旧报告/释放/架结果仍归原任务，同码新arrival不串方向；`test_inbound_archive_policy_does_not_apply_to_outbound`验五通知仅原入库guard，出库不清理/拒绝，公共原Result仍可收口。
+- [ ] **步骤2：写恢复RED并运行。** `test_waiting_direction_does_not_starve_other_pending`覆盖本轮上界/游标、等待/失败也翻页、单条异常不阻塞其他类、新工作下一轮，终态仍发现生产和组件六类原责任。`test_original_owner_survives_rollback_and_restart`覆盖三种原owner外层提交后通知、保存点后外层回滚不通知、丢通知Beat恢复、提交不明重读原身份、不凭暂时查空换号。`test_result_consumption_and_next_intent_commit_together`验消费/原意图/结果版本同提交、回滚后无半个授权；`test_exception_trigger_survives_rollback_without_duplicate`按入库NG/SOURCE_ABSENT、出库NG收妥/SOURCE_DONE参数化，触发消费与原阶段/下一意图同回滚，提交后的重复不二次续问；`test_roller_isolation_does_not_leak_to_receiver`在真实PostgreSQL验组件及AUTO inbound三类首SQL前SERIALIZABLE、outbound自有目标架/盘共同SERIALIZABLE与真实相关读集合、归档/原释放按原范围、receiver/手工隔离不变；含原task/成员/visit锁后核对、相关读集合、连接归还、含commit的40001新会话重试最多3次及超限保留pending、两线独立。`test_applied_results_wake_original_auto_owner`区分WMS决定可靠保存、ECS实际应用、Transport提交有效接纳和applied outcome_revision推进，仅外层提交后唤醒原smt_auto，旧终态责任也恢复；旧租约/无新应用不误唤醒；共享结果缺原归属不猜测/广播或认领历史null，原独占注册来源的既有回退保持。`test_two_worklines_keep_original_scope`在test_direction_handoff.py验两线同箱码/不同方向交错、回滚和旧回调不串task/arrival。`test_auto_host_preserves_scan3_round_and_scan4_pending`通过真实host receiver/runtime验新SCAN3不等旧轮/上游Result、原义务保留、原SCAN4成功资格/失败重扫不改FIFO，以及未分配SCAN4能从原SCAN待办推进求架；只验证宿主接入既有公开行为，不复制组件算法。运行 `rtk uv run pytest tests/businesses/smt_auto/test_assembly.py tests/businesses/smt_auto/test_direction_handoff.py tests/businesses/smt_auto/test_pending.py tests/businesses/smt_auto/test_recovery.py tests/businesses/smt_auto/test_retention_boundaries.py -q`。
+- [ ] **步骤3：最小装配。** 复用现有catalog装配/模型加载/runtime，API/worker同一完整声明；COMPONENTS=(sorting_task.COMPONENT, bin_roller.COMPONENT)，PROGRESSION="scan_pending"，COMMANDS只来自根ecs_command。组件production指向宿主，工厂注入SMT_AUTO_FIRST_PLAN_WAIT_MS；业务只操作原公开门面；read方法用调用方session，组件推进用宿主事务；六类组件待办使用其get_pending_upper_id/list_pending公开分页，包含尚未生成DRAIN/RACK_CYCLE的SCAN4，不只扫已建协调记录，合表后仍按原具名ID构造RollerWorkRef。额度沿原WorkLine配置和组件计数；不读取TABLES内部键、导入手工私有service或另建事务runner。无第二通知路由/扫描器。未交付合同/组件不以空工厂或local专用生产登记补缺。
+- [ ] **步骤4：迁移及数据库验证。** 一份迁移仅自动根/两方向必要表/唯一约束/归档标记，MODEL_MODULES显式加载，公共模型只一次；不再创建或收敛既有BIN_Roller10表、手工7表，也不重复position_observation或five_rack_request_limit列。实施时接唯一最新head（本轮fiveracklimit），独立库验证既有手工/组件填数在升级及可支持降级后均保留、有损降级先拒绝、`rtk uv run alembic heads`仍一条链；运行 `rtk uv run pytest tests/migrations/test_smt_auto_state.py -q`。不重算历史、导入别项目任务或复制配置。
 - [ ] **步骤5：GREEN与真实事务。** 重跑步骤2，在独立PostgreSQL按上述受控交错验证真实receiver→组件→生产→原释放/公开结果、原owner通知→同一pending及SupplyChange精确范围；保存点/锁序/隔离/40001/提交未知均须原始证据，Mock/SQLite不算实际组合通过。
 
 <a id="common-acceptance"></a>
@@ -324,6 +341,8 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 **Interfaces:** 消费S1～S6、下文统一矩阵和D1～D8；产出每项可追溯的实现/测试/实际联调状态，严格区分隔离、正式接入和物理验收。
 
 - [ ] **步骤1：写综合RED。** `test_wait_deadline_survives_wakeup_and_restart`按入库三类/出库五类决定参数化共同计时：首次有效WAIT固定到期、补架/报告/新扫码/通知不提前或刷新，原未知/503恢复原身份，当前未决晚到WAIT消费、旧WAIT不回退。 `test_bin_ng_to_original_release_and_completion`、`test_rackslot_empty_to_other_slot_and_face_completion`及入库正常/NG/PICK_EMPTY流程在同一应用装配下验各自正常收口；`test_completion_conflict_preserves_new_work`验晚到计划/新首盘暂缓；`test_frozen_history_is_not_rebuilt_by_new_contract`验旧operation/身份/正文/期限/路由/附录及重复结果原义务。`test_original_result_drives_own_decision`、`test_report_recovery_never_repeats_put`、`test_wms_authorized_later_plate_does_not_wait_for_prior_ack`按实际方向参数化，覆盖Result先于ACK、缺码/矛盾不补造、三类时间和WMS同码裁决，不各建同形回归。
+- [ ] **步骤1a：补原命令恢复RED。** 同一组测试按inbound/outbound及取盘扫码/目标放盘参数化：原命令已接纳但公开结果未终结时，通知/Beat/重启/超时不生成第二命令或虚假失败，不提前decide/report/放箱/关单/归档；原合法最终SUCCESS才沿原盘推进，最终FAILED保留且不因随后矛盾SUCCESS或人工已处理说明解除责任。验证原数量/阶段/扫码时间/finish_time及方向报告范围，不把报警注入不存在的ALARM Result或HELD状态。软件替身只证明WES等待/消费行为；硬件确实停机报警、持久保留原阶段、人工处理后不重取/重放已完成部分、重启及原命令最终补报，单独记D3/D4对端验收，不写成Mock已证明。
+- [ ] **步骤1b：补恢复阶段/身份交错RED。** 参数化取盘扫码、正常放盘、已交付映射的NG放盘（outbound D5未交付的产品分支仍记未完成）；合法原Result先于ACK/迟到/重复只消费一次、原设备/command/授权不变，矛盾或缺必需字段不推进。取到扫码台成功后目标仍未决，不记整盘physical_closure_basis、不放箱；物理成功但本方向必报未收妥，不记direct_obligations_closed/不关单归档。UNKNOWN/HELD无合法原结果时报警解除/IDLE不清保护，已应用FAILED不被后到SUCCESS覆盖；确认未决/切任务/停用/改绑后原结果仍归原盘，阻碍新的相关动作而不误丢报告。重启、外层回滚及消费后崩溃仍恢复同一命令/decide/report，原来源已安全取离时不因目标处恢复重新冻结原架。D3/D4用设备证据证明只恢复未完成部分，WES软件测试不模拟不存在的中间报警接口。
 - [ ] **步骤2：观察RED并补实际缺口。** `rtk uv run pytest tests/businesses/smt_auto/test_application.py tests/businesses/smt_auto/test_history_contracts.py tests/businesses/smt_auto/test_waits.py -q`；只有新发现行为缺口才先RED再最小修复，已有行为直接保留GREEN，不为制造RED改既有结果。不以截断/改名样例伪造历史迁移。
 - [ ] **步骤2a：编写并执行非eager真实worker验收。** `rtk uv run pytest tests/tasks/test_smt_auto_worker.py -q`使用显式TEST_DATABASE_URL/TEST_REDIS_URL的独占测试资源，关闭eager，以真实broker/worker执行原business.advance_pending及同一Beat入口，只连测试WMS/ECS/RCS替身。test_auto_worker_recovers_wait_completion_and_roller_pending覆盖WAIT到期、完成确认响应、两方向/组件混合待办、通知丢失/重复、进程停止重建后原请求/命令/Transport身份不变；无配置跳过记未验，不用直接service调用/eager代替。此证据不要求或证明真实设备发送，现场另按步骤4验。
 - [ ] **步骤3：统一GREEN。** 运行步骤2、全部smt_auto及受影响共享组件/receiver/Transport/ECS/原owner/任务/粗分回归，再一次适当全量 `rtk uv run pytest -q`，以及 `rtk uv run ruff check .`、`rtk uv run ruff format --check .`、`rtk git diff --check`。未配置隔离库的跳过不算数据库验收；只在新失败/改动需要时重跑，不用自动修复脚本扩大差异。
@@ -364,7 +383,7 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 | A24 | outbound | BIN NG 成功但原 NG 报告未收妥；报告收妥后 CONTINUE | [O3](#outbound-exceptions) | 出/test_ng.py |
 | A25 | outbound | BIN CLOSE 或 RackSlot REJECT/CLOSE 后，新 work_plan 仍返回已关闭 Cell/SLOT | [O3](#outbound-exceptions) | 出/test_ng.py；出/test_exception_continuation.py |
 | A26 | outbound | RackSlot NG 报告收妥，或原 SLOT 的 SOURCE_DONE 已应用后取得同面其他 SLOT 的 READY | [O3](#outbound-exceptions) | 出/test_exception_continuation.py |
-| A27 | outbound | 普通 FAILED/PICK_FAILED/actual_qty=0、超时或位置未知 | [O3](#outbound-exceptions) | 出/test_empty.py |
+| A27 | outbound | 普通失败/超时/位置未知与原未结束命令的可恢复报警分别处理 | [O3](#outbound-exceptions) / [S7](#common-acceptance)步骤1a～1b | 出/test_empty.py；根/test_application.py；D3/D4对端证据 |
 | A28 | outbound | 料箱已与货架解绑，原取盘明确空取，且没有原供箱架号/面或其记录已变化 | [O3](#outbound-exceptions) | 出/test_empty.py |
 | A29 | outbound | BIN 已在制，原供箱架换面/离场、原成员撤销或投箱批次归档 | [O2](#outbound-normal) / [O3](#outbound-exceptions) | 出/test_normal_flow.py；出/test_exception_continuation.py |
 | A30 | outbound | BIN 正常/NG 报告恢复时，原供箱关联缺失或已变化，但实际目标是 TRANSFER 架或 NG 区域 | [O2](#outbound-normal) / [O3](#outbound-exceptions) | 出/test_reports.py；出/test_ng.py |
@@ -398,11 +417,11 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 | B03 | 共同（按方向合同） | A 原报告已收妥，后续盘已获授权，A 的延迟副本再到达 | [S7](#common-acceptance) | 根/test_application.py |
 | B04 | 共同（按方向合同） | 新报告无匹配授权、多份匹配授权或目标冲突 | [S7](#common-acceptance) | 根/test_application.py；D2/D8对端证据 |
 | B05 | 共同（按方向合同） | WMS 报告事务回滚，或已提交但响应丢失；WES 消费确认时崩溃 | [S7](#common-acceptance) / [S6](#common-runtime) | 根/test_application.py；根/test_recovery.py；D2/D8对端证据 |
-| B06 | 共同（按方向合同） | 自动线请求货架离场 | [I1](#inbound-racks) / [O1](#outbound-racks) | 入/test_source_transport.py；出/test_transports.py |
+| B06 | 共同（按方向合同） | 原在位离场、全撤回与取尽重复/WAIT竞争的唯一原链 | [I1](#inbound-racks)步骤1～1a / [O1](#outbound-racks) | 入/test_source_transport.py；出/test_transports.py |
 | I01 | inbound | source_racks=[]及WMS累计等待 | [I2](#inbound-normal) / [I3](#inbound-exceptions) | 入/test_material_flow.py；入/test_waits.py |
-| I02 | inbound | 左右独立换架及原授权延续 | [I1](#inbound-racks) / [I2](#inbound-normal) | 入/test_source_racks.py；入/test_material_flow.py |
+| I02 | inbound | 左右独立、非空完整覆盖全撤回退架及新覆盖/潜在授权交错 | [I1](#inbound-racks)步骤1～1a / [I2](#inbound-normal) | 入/test_source_racks.py；入/test_source_transport.py；入/test_material_flow.py |
 | I03 | inbound | 单层取盘/SCAN2放盘与占用参数 | [I2](#inbound-normal) | 入/test_arm_contracts.py |
-| I04 | inbound | 正常成功、NG和FAILED报告范围 | [I2](#inbound-normal) / [I3](#inbound-exceptions) | 入/test_material_flow.py；入/test_exceptions.py |
+| I04 | inbound | 正常成功/NG/FAILED报告范围及原命令报警恢复后的原盘推进 | [I2](#inbound-normal) / [I3](#inbound-exceptions) / [S7](#common-acceptance)步骤1a～1b | 入/test_material_flow.py；入/test_exceptions.py；根/test_application.py；D3/D4对端证据 |
 | I05 | inbound | 明确空取与一次RETRY | [I3](#inbound-exceptions) | 入/test_exceptions.py |
 | I06 | inbound | 接料箱/原需求与整单完成 | [I4](#inbound-retention) / [S5](#common-completion) | 入/test_completion.py；根/test_completion.py |
 | I07 | inbound | 7天保留、只读guard与方向隔离 | [I4](#inbound-retention) / [S6](#common-runtime) | 入/test_retention.py；根/test_retention_boundaries.py |
@@ -422,7 +441,7 @@ ST1以隔离operation独立验公共扩展/旧默认、原收据并发及冻结�
 | --- | --- | --- |
 | G01 | WMS原决定/ECS已应用结果/Transport提交接纳与实际outcome更新只在外层提交后唤醒原宿主；回滚/旧租约不误通知，共享缺归属不猜测、原独占来源回退保持；两线同箱码及旧回调不串原关联 | S6；根/test_recovery.py、test_direction_handoff.py |
 | G02 | 非eager真实broker/worker、同一Beat、通知丢失/重复及进程重建后能恢复WAIT/完成/生产和组件待办，保留所有原身份；只用独占测试资源/对端替身 | S7步骤2a；tests/tasks/test_smt_auto_worker.py |
-| G03 | 六类公开pending含未形成DRAIN/RACK_CYCLE的SCAN4；宿主实际接入保持新SCAN3轮次和旧义务、原SCAN4资格/FIFO，不自建或遗漏公共分支 | S6；根/test_pending.py、test_recovery.py |
+| G03 | 六类公开pending含未形成DRAIN/RACK_CYCLE的SCAN4，合表后具名demand/release/round ID不变；真实手工+自动同catalog合同单份且各线原关联独立；宿主保持新SCAN3/旧义务及原SCAN4资格/FIFO，CTU01额度沿既有配置恢复/释放不重复计数 | S6；根/test_assembly.py、test_pending.py、test_recovery.py |
 | G04 | 首批等待配置可选正整数/默认None，工厂实际注入；原prepare可靠时间和已登记期限不随重放/重启/配置变化刷新，无有效配置或待处理计划不得确认0 | S5/S6；根/test_completion.py、test_assembly.py |
 
 ST1原收据锁/刷新/5秒等待、历史@v1冻结及ST2正式callback登记只按[共享计划](2026-10-31-sorting-task-implementation.md#sorting-task-ownership)验收；自动宿主消费其实际交付证据，不再设计并发收据机制或复制一套公共用例。
@@ -436,14 +455,14 @@ ST1原收据锁/刷新/5秒等待、历史@v1冻结及ST2正式callback登记只
 | --- | --- | --- | --- | --- |
 | D1 平台集成/smt_auto/共享任务实施方 | ST1/ST2唯一六操作/可信归属、新错误/业务503/recheck/可选guard，旧接口/历史收据兼容；早到原503→202→200真实受理 | I4五通知只读guard/固定拒绝时间，不能扩到公共结果 | 不启用入库清理/拒绝；严格资源联合不丢三类字段 | S1/S2/I4/S6 |
 | D2 WMS接口及库存负责人 | 已签认任务/资源/逐盘/完整授权/报告/完成合同及版本；同键唯一授权、报告先去重/库存入账原子、计划封口和关单交错实测 | 单层来源/放盘前占用、空集合等待、NG不报及SOURCE_ABSENT | BIN裁剪空取DTO、RackSlot完整参数、NG收妥续问、SOURCE_DONE；同码WAIT/旧报不关后盘 | S1/I/O/S5；正式注册门槛与S7真实WMS证据，不阻塞隔离测试 |
-| D3 ECS供应商/设备集成方 | 两臂严格附录、原command_code/device_code/Result、完整barcode/scanned_at、ACK/Result先后/重报；实际路径/单位/成功数量一致 | ARM02单层取、ARM01入BIN，目标占用原值 | BIN/RackSlot路径、ARM02正常FIVE_LAYER_RACK精确目标及本盘原尺寸 | S2/I2/O2/S6/S7 |
-| D4 ECS供应商/现场设备负责人 | 原厂code/msg、扫码/取放失败、未知/重启补报和实物恢复说明；权威无料事实唯一关联原取盘及观察时间 | 已定FAILED/0/PICK_EMPTY及finish_time、一次RETRY；不得把普通失败泛化为空取 | 权威载体仍待签认，未交付不猜PICK_EMPTY/错误码；一次RETRY/SOURCE_DONE无报告 | I3/O3；对应产品解析/实机分支未交付即保持未完成 |
+| D3 ECS供应商/设备集成方 | 两臂严格附录、原command_code/device_code/Result、完整barcode/scanned_at、ACK/Result先后/重报；可恢复报警期间原命令持久保留，最终严格结果不增枚举，实际路径/单位/成功数量一致 | ARM02单层取、ARM01入BIN，目标占用原值 | BIN/RackSlot路径、ARM02正常FIVE_LAYER_RACK精确目标及本盘原尺寸 | S2/I2/O2/S6/S7 |
+| D4 ECS供应商/现场设备负责人 | 硬件停机报警/人工处理后原未结束命令恢复，不先发FAILED，只恢复未完成部分；重启保留原command/盘/目标/阶段，原期限不自动延长，最终FAILED不更正或重发。原厂code/msg及权威无料事实仍精确关联原取盘/观察 | 已定FAILED/0/PICK_EMPTY及finish_time、一次RETRY；不把普通故障或处置中报警泛化为空取 | 权威无料载体仍待签认，不猜PICK_EMPTY/错误码；一次RETRY/SOURCE_DONE无报告 | I3/O3/S6/S7；软件待结果/原身份可隔离验，对端阶段恢复及实机能力未交付即保持未完成 |
 | D5 ECS/现场负责人，WMS给NG定义 | 原NG区域到实际设备/位置/完整参数、成功失败说明和实际证据；不直接把NG_ZONE当ECS location_type | 已定STATION_NG/SCAN_NG及原臂，NG不向WMS报告 | NG设备映射未交付不得猜ARM01/02/位置；成功且位置确定报告，收妥才合法续问 | S2/I3/O3/S6/S7 |
-| D6 公共组件/平台集成方 | B1～B7组件/ports/单份departure、窄位置、供箱进度/释放原结果、原owner通知和组件迁移；真实receiver/供箱/释放/公平pending可追溯 | 原单层架离场与可靠位置消费，不复制公共架流 | RETURN/TRANSFER原直接架过程，不将其当Feed/drain | S2/I1/O1/S6；B7首宿主既有人工优先安排保持，不要求人工完整生产作为隔离测试前置 |
-| D7 现场部署/设备集成/WMS/RCS | 实际工作线设备/位置/角色/模板/拓扑及超时、首批等待显式配置，无示例默认；30秒设备示例不代替业务期限 | STATION_A/B单层F01、两臂/SCAN2/NG实际绑定 | RETURN/TRANSFER的F01/CK04/F01，供箱CTU；真实面向/CK04对端支持，CTU03接纳规则不扩F01 | I1/O1/S6实配、S7真实搬运 |
+| D6 公共组件/平台集成方 | 已合入B1～B7首宿主及后续10表/额度交付；复用原ports/单份departure、窄位置、供箱进度/释放原结果与owner通知，自动实际消费仍须验证 | 原单层架离场与可靠位置消费，不复制公共架流 | RETURN/TRANSFER原直接架过程，不将其当Feed/drain | S2/I1/O1/S6；不重复B7/组件迁移，不复制手工生产或将其现场验收作为自动隔离测试前置 |
+| D7 现场部署/设备集成/WMS/RCS | 实际工作线设备/位置/角色/模板/拓扑及超时、首批等待显式配置，无示例默认；30秒设备示例不代替业务期限 | STATION_A/B单层F01、两臂/SCAN2/NG实际绑定 | RETURN/TRANSFER的F01/CK04/F01，供箱CTU；真实面向/CK04对端支持，CTU03/F01的DEPART接纳完成（ZONE/生产线等不同工作位均可），其他动作仍需原结果 | I1/O1/S6实配、S7真实搬运 |
 | D8 smt_auto实施/测试及WMS/ECS/RCS/现场验收方 | 一份完整业务/目录/迁移、冻结历史兼容及统一矩阵证据；单head/保留既有数据；隔离、worker、真实对端、部署、物理分层记录 | I1～I4全部差异及归档/原公共恢复边界证据 | O1～O4全部差异、正常/NG/空取/面收口证据 | S6/S7，未交付/未验列示，不以ACK或单项Mock宣称可启用 |
 
-依赖不齐仍可做不依赖它的隔离步骤，对应严格分支/正式接入/物理验收保持未完成；不加默认值、补参查询、假组件、启用开关、维护端点或自动重建动作消缺。完整smt_auto正式接入须满足两方向适用合同及共同装配；本计划不改变B7首宿主安排或顺带实施人工业务，B6独立维护TODO不加为正常接入门槛。
+依赖不齐仍可做不依赖它的隔离步骤，对应严格分支/正式接入/物理验收保持未完成；不加默认值、补参查询、假组件、启用开关、维护端点或自动重建动作消缺。完整smt_auto正式接入须满足两方向适用合同及共同装配；手工首宿主已合入，本计划只增自动消费，不顺带修改人工业务，B6独立维护TODO不加为正常接入门槛。
 
 <a id="previous-task-map"></a>
 ## 5. 原任务归并位置、顺序与自查

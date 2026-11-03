@@ -1,6 +1,8 @@
 # BIN_Roller Implementation Plan
 
-2026-11-02 后续增量：原 M/B 任务和下文数字保持原日期范围；[模型收敛与额度实施计划](2026-11-02-smt-persistence-and-capacity-implementation.md) Task1～3 已本地实现并通过分项独立复审。当前 SMT/BIN_Roller 为 7/10 张表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit` 单 head；管理字段 `five_rack_request_limit` 与开始前 WITHDRAWN 服务的兼容边界见[当前设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。永久 KT16/KT18 专项已 12 passed / 0 skipped，当前最终全仓及整体复核待执行；[当前结果和旧失败](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)分开保存。无提交或部署。
+> 2026-11-02 新目标决定：[公共货架调度设计](../specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
+2026-11-02 当前源码：手工首宿主正式接入、组件迁移、后续模型收敛/请求额度及修复已随 [PR #47](https://github.com/kaizhoumasha/maintenance-admin/pull/47) 合入（064b5c8）。SMT/BIN_Roller 为7/10表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit`单head；当前软件证据统一见[最终交付记录](../../testing/smt-manual.md#current-delivery)，本轮未重跑。管理字段`five_rack_request_limit`、具名原ID及WITHDRAWN边界见[持久化设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。原M/B任务和下文“15表/未提交/未完成”等状态、数字保留各日期快照含义；自动只增自己的接入/迁移，不重复B7首宿主或组件建表。本轮仅修文档，未部署或操作运行库。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after separate implementation authorization. Steps use checkbox (`- [ ]`) syntax for tracking。B1～B5 已按授权完成本地实现及分项验证；B6 文档边界核对已完成；B7共享声明及隔离测试装配已完成；后续手工M5/M6已完成本地正式接入、组件状态迁移及软件验收，对端/现场未验；组件及测试已随 [PR #42](https://github.com/kaizhoumasha/maintenance-admin/pull/42) 合入 develop（`e265ad7`），未部署。
 
