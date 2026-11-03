@@ -8,8 +8,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  pytest:
+    name: pytest (${{ matrix.group }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: migrations
+            args: tests/migrations
+          - group: workflows
+            args: tests/businesses/bin_roller tests/businesses/smt_manual
+          - group: remaining
+            args: >-
+              --ignore=tests/migrations
+              --ignore=tests/businesses/bin_roller
+              --ignore=tests/businesses/smt_manual
     services:
       postgres:
         # 与 docker-compose.yml 同一镜像
@@ -40,4 +54,14 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest -ra --durations=30 --durations-min=1
+      - run: uv run pytest ${{ matrix.args }} -ra --durations=30 --durations-min=1
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: pytest
+    if: ${{ always() }}
+    steps:
+      - name: Require every test group to pass
+        env:
+          PYTEST_RESULT: ${{ needs.pytest.result }}
+        run: test "$PYTEST_RESULT" = success

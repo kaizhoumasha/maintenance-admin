@@ -1,6 +1,7 @@
 import importlib
 import json
 import sys
+from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
 import pytest
@@ -29,22 +30,16 @@ async def manual_host(manual_bins, manual_racks, monkeypatch):
 
 
 @pytest.fixture
-async def manual_sessions(request, tmp_path):
+async def manual_sessions(request, tmp_path, postgres_tables):
     url = (
         f"sqlite+aiosqlite:///{tmp_path / 'manual.db'}"
         if getattr(request, "param", "postgres") == "sqlite"
         else request.getfixturevalue("pg_url")
     )
-    from sqlalchemy.schema import CreateSchema, DropSchema
-
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
     from app.database import SCHEMA
     from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, TransportTask
 
-    schema = "test_manual_" + uuid7().hex if url.startswith("postgres") else None
-    engine = create_database_engine(
-        url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
-    )
     metadata = MetaData(schema=SCHEMA)
     for model in (
         RackJob,
@@ -60,18 +55,21 @@ async def manual_sessions(request, tmp_path):
         EcsSendEvidence,
     ):
         model.__table__.to_metadata(metadata)
-    try:
-        async with engine.begin() as connection:
-            if schema:
-                await connection.execute(CreateSchema(schema))
-            await connection.run_sync(metadata.create_all)
-        yield async_sessionmaker(engine, expire_on_commit=False)
-    finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
-            if schema:
-                await connection.execute(DropSchema(schema, cascade=True))
-        await engine.dispose()
+    async with AsyncExitStack() as stack:
+        postgres = url.startswith("postgres")
+        if postgres:
+            engine = await stack.enter_async_context(postgres_tables(url, "manual", metadata))
+        else:
+            engine = create_database_engine(url)
+            stack.push_async_callback(engine.dispose)
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.create_all)
+        try:
+            yield async_sessionmaker(engine, expire_on_commit=False)
+        finally:
+            if not postgres:
+                async with engine.begin() as connection:
+                    await connection.run_sync(metadata.drop_all)
 
 
 @pytest.fixture
@@ -332,8 +330,9 @@ async def manual_flow(manual_sessions, monkeypatch):
             notices=notices,
         )
     finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
+        if engine.dialect.name == "sqlite":
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.drop_all)
         async with manual_sessions.begin() as session:
             await session.execute(
                 delete(CallbackReceipt).where(CallbackReceipt.operation_id.in_(operations))
@@ -1056,8 +1055,9 @@ async def native_manual_sessions(manual_sessions):
     try:
         yield manual_sessions
     finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
+        if engine.dialect.name == "sqlite":
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.drop_all)
 
 
 @pytest.fixture

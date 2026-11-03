@@ -1,3 +1,4 @@
+from contextlib import AsyncExitStack
 from functools import partial
 from types import SimpleNamespace
 
@@ -1018,21 +1019,13 @@ async def roller_scans(roller_store, monkeypatch):
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
-async def roller_store(request):
+async def roller_store(request, postgres_tables):
     from app.businesses._components.bin_roller.models import TABLES
     from app.businesses._components.bin_roller.repository import RollerRepository
 
     url = "sqlite+aiosqlite://"
     if request.param == "postgres":
         url = request.getfixturevalue("pg_url")
-    from sqlalchemy.schema import CreateSchema, DropSchema
-
-    from app.core.identifiers import uuid7
-
-    schema = "test_roller_" + uuid7().hex if request.param == "postgres" else None
-    engine = create_database_engine(
-        url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
-    )
     metadata = MetaData(schema=SCHEMA)
     tables = {
         key: table.to_metadata(metadata, name="test_bin_roller_" + key)
@@ -1045,25 +1038,29 @@ async def roller_store(request):
             index.name = "test_bin_roller_" + index.name
     for model in (RackJob, RackAction):
         model.__table__.to_metadata(metadata)
-    async with engine.begin() as connection:
-        if schema:
-            await connection.execute(CreateSchema(schema))
-        await connection.run_sync(metadata.create_all)
-    try:
-        yield SimpleNamespace(
-            schema=schema,
-            factory=async_sessionmaker(engine, expire_on_commit=False),
-            repo=RollerRepository(
-                "first", 1, rack_dispatch=RackDispatch("first", None), tables=tables
-            ),
-            tables=tables,
-        )
-    finally:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
-            if schema:
-                await connection.execute(DropSchema(schema, cascade=True))
-        await engine.dispose()
+    async with AsyncExitStack() as stack:
+        if request.param == "postgres":
+            engine = await stack.enter_async_context(postgres_tables(url, "roller", metadata))
+            schema = engine.get_execution_options()["schema_translate_map"][SCHEMA]
+        else:
+            schema = None
+            engine = create_database_engine(url)
+            stack.push_async_callback(engine.dispose)
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.create_all)
+        try:
+            yield SimpleNamespace(
+                schema=schema,
+                factory=async_sessionmaker(engine, expire_on_commit=False),
+                repo=RollerRepository(
+                    "first", 1, rack_dispatch=RackDispatch("first", None), tables=tables
+                ),
+                tables=tables,
+            )
+        finally:
+            if schema is None:
+                async with engine.begin() as connection:
+                    await connection.run_sync(metadata.drop_all)
 
 
 @pytest.fixture
