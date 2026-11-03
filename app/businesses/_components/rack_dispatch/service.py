@@ -297,8 +297,14 @@ class RackDispatch:
             select(RackAction.id)
             .where(
                 RackAction.job_id == RackJob.id,
-                RackAction.phase == "REVIEW",
-                RackAction.actual_position["location_code"].as_string() == point,
+                (
+                    (RackAction.phase == "REVIEW")
+                    & (RackAction.actual_position["location_code"].as_string() == point)
+                )
+                | (
+                    RackAction.basis["unconsumed_locations"][point].as_integer()
+                    > func.coalesce(RackAction.outcome_revision, 0)
+                ),
             )
             .exists()
         )
@@ -367,7 +373,11 @@ class RackDispatch:
         original = next((a for a in actions if a.kind == kind and a.source_ref == source_ref), None)
         if original:
             return (
-                original.id if original.target == target and original.target_face == face else None
+                original.id
+                if original.phase != "WITHDRAWN"
+                and original.target == target
+                and original.target_face == face
+                else None
             )
         if (
             job.state != "ACTIVE"
@@ -521,7 +531,7 @@ class RackDispatch:
 
     async def _applied(self, session, job, actions):
         """Refresh only original moves. Older unresolved observations still protect the line."""
-        moves = [a for a in actions if a.kind in ("ENTER", "ROTATE")]
+        moves = [a for a in actions if a.kind in ("ENTER", "ROTATE") and a.phase != "WITHDRAWN"]
         if not moves:
             return False
         reason = None
@@ -716,37 +726,46 @@ class RackDispatch:
             return _snapshot(job, actions)
         if unbound:
             if not (
-                authorized
-                and applied
+                applied
                 and position
                 and position.id == job.position_action_id
                 and position.position_revision == original_position_revision
                 and position.outcome
-                and position.outcome["status"] == "SUCCEEDED"
                 and job.actual_position == _point(job.point)
             ):
                 return _snapshot(job, actions)
-            if original.kind == "ROTATE":
-                if (
-                    demand.state != "CONTINUE"
-                    or job.state != "ACTIVE"
-                    or job.actual_face == original.target_face
-                ):
+            if original.kind == "ROTATE" and job.state == "ACTIVE":
+                if none and clear:
+                    if await self.has_position_conflict(session, point=job.point):
+                        job.review_reason = "OTHER_POSITION_CONFLICT"
+                        return _snapshot(job, actions)
+                    original.phase = "WITHDRAWN"
+                    original.basis = {
+                        **original.basis,
+                        "withdrawn_at_ms": now_ms,
+                        "withdrawal_reason": "NO_FACE_DEMAND",
+                        "demand": _json(asdict(demand)),
+                        "handoff": _json(asdict(handoff)),
+                    }
+                else:
+                    if (
+                        authorized
+                        and demand.state == "CONTINUE"
+                        and position.outcome["status"] == "SUCCEEDED"
+                        and job.actual_face != original.target_face
+                    ):
+                        await self._bind_move(session, job, original)
                     return _snapshot(job, actions)
-            elif original.kind == "DEPART" and previous and previous.phase == "READY":
-                destination = previous.decision["rack_destination"]
-                if (
-                    job.state != "RELEASING"
-                    or demand.state not in ("CONTINUE", "NONE")
-                    or previous.id != original.previous_action_id
-                    or original.target
-                    != {"kind": destination["type"], "location_code": destination["location_code"]}
-                ):
-                    return _snapshot(job, actions)
-            else:
+            elif not (
+                authorized
+                and original.kind == "DEPART"
+                and job.state == "RELEASING"
+                and previous
+                and previous.kind == "DEPARTURE_DECIDE"
+                and previous.phase == "READY"
+                and previous.id == original.previous_action_id
+            ):
                 return _snapshot(job, actions)
-            await self._bind_move(session, job, original)
-            return _snapshot(job, actions)
         if not applied:
             return _snapshot(job, actions)
         actual = job.actual_position
@@ -761,17 +780,6 @@ class RackDispatch:
                     select(RackJob.id).where(RackJob.pending, RackJob.point == location).limit(1)
                 )
                 or await self._position_conflict(session, location, exclude_job_id=job.id)
-                or await session.scalar(
-                    select(RackAction.id)
-                    .join(RackJob, RackAction.job_id == RackJob.id)
-                    .where(
-                        RackJob.pending,
-                        RackJob.id != job.id,
-                        RackAction.basis["unconsumed_locations"][location].as_integer()
-                        > func.coalesce(RackAction.outcome_revision, 0),
-                    )
-                    .limit(1)
-                )
             )
             move = actions[-1]
             if (
@@ -878,7 +886,8 @@ class RackDispatch:
         )
 
         last = actions[-1]
-        previous = last if last.kind == "DEPARTURE_DECIDE" else None
+        predecessor = actions[-2] if last.kind == "DEPART" else last
+        previous = predecessor if predecessor.kind == "DEPARTURE_DECIDE" else None
         position = next(a for a in actions if a.id == job.position_action_id)
         # JSON-normalized original facts also allow a stable comparison after a database round trip.
         basis = _json(
@@ -901,15 +910,25 @@ class RackDispatch:
         if previous:
             if previous.phase == "READY":
                 destination = previous.decision["rack_destination"]
-                await self._move(
-                    session,
-                    job,
-                    actions,
-                    "DEPART",
-                    previous.decision_operation_id,
-                    {"kind": destination["type"], "location_code": destination["location_code"]},
-                    None,
-                )
+                target = {
+                    "kind": destination["type"],
+                    "location_code": destination["location_code"],
+                }
+                if last.kind == "DEPART":
+                    if last.target == target:
+                        await self._bind_move(session, job, last)
+                    else:
+                        job.review_reason = "INVALID_DEPARTURE_INTENT"
+                else:
+                    await self._move(
+                        session,
+                        job,
+                        actions,
+                        "DEPART",
+                        previous.decision_operation_id,
+                        target,
+                        None,
+                    )
                 return
             if now_ms < previous.due_at_ms:
                 before = previous.basis or {}

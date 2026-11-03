@@ -501,9 +501,7 @@ async def first_registration(roller, session, job, demand, handoff):
             move
             and move.phase == "APPLIED"
             and move.outcome
-            and move.outcome["status"] == "SUCCEEDED"
             and move.actual_position == move.target
-            and move.actual_face == move.target_face
             and matches_position(
                 await repo.current_position(session, "RACK", origin.rack_id), job, move
             )
@@ -511,6 +509,8 @@ async def first_registration(roller, session, job, demand, handoff):
             return None
         if action.kind == "DEPART":
             return action.id
+        if move.outcome["status"] != "SUCCEEDED" or move.actual_face != move.target_face:
+            return None
     elif action.target_face != origin.initial_face or not await entry_available(
         roller, session, job, line
     ):

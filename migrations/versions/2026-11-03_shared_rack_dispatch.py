@@ -140,7 +140,18 @@ def _create_shared(schema):
             "(kind='DEPARTURE_DECIDE' AND completion_rule IS NULL AND phase IN "
             "('REGISTERED','REVIEW','READY','WAIT')) OR (kind IN ('ENTER','ROTATE') AND "
             "completion_rule IS NOT NULL AND completion_rule='APPLIED_RESULT' AND phase IN "
-            "('REGISTERED','APPLIED','REVIEW')) OR (kind='DEPART' AND completion_rule IS NOT "
+            "('REGISTERED','APPLIED','REVIEW')) OR "
+            "(kind='ROTATE' AND phase='WITHDRAWN' AND completion_rule IS NOT NULL AND "
+            "completion_rule='APPLIED_RESULT' AND client_request_id IS NOT NULL AND "
+            "COALESCE(basis ->> 'registration_at_cutover','')='LOCAL_ONLY' AND "
+            "COALESCE(basis ->> 'withdrawal_reason','')='NO_FACE_DEMAND' AND "
+            "transport_task_id IS NULL AND submit_message_id IS NULL AND "
+            "submit_operation_id IS NULL AND submit_target IS NULL AND "
+            "outcome_revision IS NULL AND outcome IS NULL AND position_observation IS NULL AND "
+            "observation_revision IS NULL AND pending_revision IS NULL AND "
+            "position_revision IS NULL AND actual_position IS NULL AND actual_face IS NULL AND "
+            "acceptance_basis IS NULL AND accepted_at_ms IS NULL) OR "
+            "(kind='DEPART' AND completion_rule IS NOT "
             "NULL AND ((completion_rule='ACCEPTED_DEPARTURE' AND phase IN "
             "('REGISTERED','ACCEPTED','REVIEW')) OR "
             "(completion_rule='LEGACY_RECORDED_CLOSURE' AND phase='LEGACY_CLOSED' AND basis "
@@ -1743,13 +1754,15 @@ def _plan(data, transports, wire_rows, configured_points):
                 review_reason=None,
             )
     pending_ids = {j["id"] for j in jobs if j["pending"]}
-    accepted_only = {
+    bound_departures = {
         a["job_id"] for a in actions if a["kind"] == "DEPART" and a.get("transport_task_id")
     }
     for a in actions:
         if a["job_id"] in pending_ids and a.get("transport_task_id"):
+            if a["job_id"] in bound_departures and a["kind"] != "DEPART":
+                continue
             originals = [a["submit_operation_id"]]
-            if a["job_id"] not in accepted_only:
+            if a["job_id"] not in bound_departures:
                 originals.append(
                     a["job_id"]
                 )  # Public predecessor reader requires the original cycle UUID.

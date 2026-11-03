@@ -94,6 +94,16 @@ async def test_action_graph_and_external_identities_cannot_fork(backend, request
         await rejects(
             other, "DEPARTURE_DECIDE", 1, previous_action_id=root, previous_decision_phase="WAIT"
         )
+        await rejects(
+            other,
+            "ROTATE",
+            1,
+            phase="WITHDRAWN",
+            client_request_id="local-turn",
+            basis={"registration_at_cutover": "LOCAL_ONLY", "withdrawal_reason": "NO_FACE_DEMAND"},
+            transport_task_id="submitted-turn",
+        )
+        await rejects(other, "ROTATE", 1, phase="WITHDRAWN", client_request_id="unproven")
         await rejects(other, "ROTATE", 1, previous_action_id=entry)
         await rejects(job, "ROTATE", 4, owner_domain="other")
         await rejects(job, "ROTATE", 4, work_line_id=99)
