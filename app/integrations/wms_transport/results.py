@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from typing import Literal
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +12,7 @@ from app.integrations.wms_envelope import RESPONSE_COLUMNS, outgoing_message, st
 from app.models import ReliableMessage, TransportTask
 
 from .adapter import TransportSubmitAdapter
-from .callback.payloads import Resulted
+from .callback.payloads import RackPositionRef, Resulted
 from .protocol import OPERATION
 from .types import (
     BinExchangePair,
@@ -173,10 +174,28 @@ def validate_frozen(task: dict) -> dict:
     return frozen
 
 
+class _StoredZone(RackPositionRef):
+    kind: Literal["ZONE"]
+
+
+class _StoredRackFailure(Resulted):
+    final_position: _StoredZone
+
+
 def validate_outcome(task: dict, raw: dict, revision: int, *, applied: bool) -> tuple[dict, str]:
-    data = Resulted.model_validate(raw).model_dump(mode="json")
+    # Older applied rack failures can locate the rack in a zone. Callback admission stays separate.
+    model = (
+        _StoredRackFailure
+        if applied
+        and task["kind"] == "RACK_MOVE"
+        and raw.get("status") in ("FAILED", "CANCELLED")
+        and (raw.get("final_position") or {}).get("kind") == "ZONE"
+        else Resulted
+    )
+    data = model.model_validate(raw).model_dump(mode="json")
     if (
-        type(revision) is not int
+        (model is _StoredRackFailure and raw != data)
+        or type(revision) is not int
         or data["outcome_revision"] != revision
         or data["transport_task_id"] != task["transport_task_id"]
         or data["kind"] != task["kind"]

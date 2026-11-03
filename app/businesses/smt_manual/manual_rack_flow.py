@@ -285,6 +285,23 @@ class ManualRackFlow:
             else:
                 if not unbound:
                     continue
+                if job:
+                    entry = next((a for a in job.actions if a.kind == "ENTER"), None)
+                    triggers = await self._rows(
+                        session, "member", members.c.id == job.origin.source_ref
+                    )
+                    if job.origin.source_ref == f"legacy/manual/{job.id}" or not any(
+                        m["rack_work_id"] == job.id
+                        and m["task_id"] == task_id
+                        and m["kind"] == "DIRECT"
+                        and m["rack_id"] == job.origin.rack_id
+                        and m["rack_face"] == job.origin.initial_face
+                        and _member_key(m) in planned
+                        and plans[m["plan_revision"]]["state"] == "APPLIED"
+                        and (entry is None or m["preparation_action_id"] == entry.id)
+                        for m in triggers
+                    ):
+                        continue
                 rack_id = job.origin.rack_id if job else unbound[0]["rack_id"]
                 selected = [m for m in unbound if m["rack_id"] == rack_id]
                 if not selected:

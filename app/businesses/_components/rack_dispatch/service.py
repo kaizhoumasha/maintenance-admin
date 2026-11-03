@@ -6,7 +6,7 @@ from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -376,6 +376,7 @@ class RackDispatch:
             or not job.workline_code
             or not job.caller
             or job.resources is None
+            or await self.has_position_conflict(session, point=job.point)
         ):
             return None
         if actions:
@@ -637,6 +638,7 @@ class RackDispatch:
         demand: PointDemand,
         handoff: DirectHandoff,
         now_ms: int,
+        authorized_original_id: str | None = None,
     ) -> RackProgress:
         job = await self._job(session, job_id, lock=True)
         if not job:
@@ -644,20 +646,30 @@ class RackDispatch:
         actions = await self._actions(session, job, lock=True)
         if not job.pending:
             return _snapshot(job, actions)
-        if actions:
-            original = actions[-1]
-            if (
-                original.transport_task_id is None
-                and original.phase == "REGISTERED"
-                and (original.basis or {}).get("legacy_table") == "bin_roller_rack_action"
-            ):
-                await self._bind_move(session, job, original)
-        if actions and actions[-1].kind == "DEPART":
+        original = actions[-1] if actions else None
+        unbound = (
+            original
+            and original.kind in ("ENTER", "ROTATE", "DEPART")
+            and original.phase == "REGISTERED"
+            and original.transport_task_id is None
+        )
+        if unbound and (original.basis or {}).get("registration_at_cutover") != "LOCAL_ONLY":
+            job.review_reason = "ORIGINAL_REGISTRATION_UNPROVED"
+            return _snapshot(job, actions)
+        if original and original.kind == "DEPART" and not unbound:
             await self._accept(session, job, actions, now_ms)
             return _snapshot(job, actions)
-        applied = await self._applied(session, job, actions)
-        if actions and actions[-1].kind == "DEPARTURE_DECIDE":
-            if not await self._consume_decision(session, job, actions[-1], now_ms):
+        predecessors = actions[:-1] if unbound else actions
+        position = (
+            next((a for a in predecessors if a.id == job.position_action_id), None)
+            if unbound
+            else None
+        )
+        original_position_revision = position.position_revision if position else None
+        applied = await self._applied(session, job, predecessors)
+        previous = predecessors[-1] if predecessors else None
+        if previous and previous.kind == "DEPARTURE_DECIDE":
+            if not await self._consume_decision(session, job, previous, now_ms):
                 return _snapshot(job, actions)
         known_demand = isinstance(demand, PointDemand) and _at_point(demand, job)
         none = known_demand and demand.state == "NONE"
@@ -671,15 +683,69 @@ class RackDispatch:
             job.release_basis = _json(asdict(demand))
         elif known_demand and demand.state == "CONTINUE" and job.state == "ACTIVE":
             job.release_requested = False
-        if not actions:
+        authorized = (
+            unbound
+            and authorized_original_id == original.id
+            and known_demand
+            and clear
+            and not await self.has_position_conflict(session, point=job.point)
+        )
+        if not actions or (unbound and original.kind == "ENTER" and not predecessors):
             if none and clear and not job.position_action_id and not job.actual_position:
                 _close(
                     job,
                     "WITHDRAWN",
                     "WITHDRAWN",
-                    dict(demand=asdict(demand), handoff=asdict(handoff)),
+                    dict(
+                        demand=asdict(demand),
+                        handoff=asdict(handoff),
+                        **(
+                            {
+                                "action_id": original.id,
+                                "client_request_id": original.client_request_id,
+                                "registration_at_cutover": "LOCAL_ONLY",
+                            }
+                            if unbound
+                            else {}
+                        ),
+                    ),
                     now_ms,
                 )
+            elif authorized and demand.state == "CONTINUE" and job.state == "ACTIVE":
+                await self._bind_move(session, job, original)
+            return _snapshot(job, actions)
+        if unbound:
+            if not (
+                authorized
+                and applied
+                and position
+                and position.id == job.position_action_id
+                and position.position_revision == original_position_revision
+                and position.outcome
+                and position.outcome["status"] == "SUCCEEDED"
+                and job.actual_position == _point(job.point)
+            ):
+                return _snapshot(job, actions)
+            if original.kind == "ROTATE":
+                if (
+                    demand.state != "CONTINUE"
+                    or job.state != "ACTIVE"
+                    or job.actual_face == original.target_face
+                ):
+                    return _snapshot(job, actions)
+            elif original.kind == "DEPART" and previous and previous.phase == "READY":
+                destination = previous.decision["rack_destination"]
+                if (
+                    job.state != "RELEASING"
+                    or demand.state not in ("CONTINUE", "NONE")
+                    or previous.id != original.previous_action_id
+                    or original.target
+                    != {"kind": destination["type"], "location_code": destination["location_code"]}
+                ):
+                    return _snapshot(job, actions)
+            else:
+                return _snapshot(job, actions)
+            await self._bind_move(session, job, original)
             return _snapshot(job, actions)
         if not applied:
             return _snapshot(job, actions)
@@ -687,12 +753,25 @@ class RackDispatch:
         if actual != _point(job.point):
             location = actual["location_code"] if actual else None
             bindings = await session.scalars(select(WorkLine.position_bindings))
+            frozen = await session.scalars(select(RackJob.resources).where(RackJob.pending))
             managed = location and (
-                any(location in b.values() for b in bindings)
+                any(location in ((r or {}).get("positions") or {}).values() for r in frozen)
+                or any(location in b.values() for b in bindings)
                 or await session.scalar(
                     select(RackJob.id).where(RackJob.pending, RackJob.point == location).limit(1)
                 )
                 or await self._position_conflict(session, location, exclude_job_id=job.id)
+                or await session.scalar(
+                    select(RackAction.id)
+                    .join(RackJob, RackAction.job_id == RackJob.id)
+                    .where(
+                        RackJob.pending,
+                        RackJob.id != job.id,
+                        RackAction.basis["unconsumed_locations"][location].as_integer()
+                        > func.coalesce(RackAction.outcome_revision, 0),
+                    )
+                    .limit(1)
+                )
             )
             move = actions[-1]
             if (

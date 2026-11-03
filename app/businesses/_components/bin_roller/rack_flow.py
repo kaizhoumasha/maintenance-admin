@@ -298,18 +298,20 @@ async def evaluate_roller_point(
     feeding = any(r["feed_id"] and r["feed_state"] != "COMPLETED" for r in members)
     open_opportunity = any(not r["ended"] for r in opportunities)
     responsibility = feeding or open_opportunity or any(r["pending"] for r in (*segments, *batches))
+    bound_preparations = {a.id for a in job.actions if a.transport_task_id}
     failed = {
         a.id
         for a in job.actions
         if a.phase == "APPLIED" and a.outcome and a.outcome["status"] in ("FAILED", "CANCELLED")
     }
+    registered = bound_preparations - failed
     remaining = any(
         r["service_state"] not in ("COMPLETED", "WITHDRAWN")
         and (
             r["cycle_id"] == job.id
             and (
                 r["demand_state"] == "ACTIVE"
-                or (r["preparation_action_id"] and r["preparation_action_id"] not in failed)
+                or (r["preparation_action_id"] in registered)
                 or r["feed_id"]
             )
             or r["cycle_id"] is None
@@ -413,6 +415,7 @@ async def can_use_face(roller, session, service):
     expected_kind = "ROLLER_DRAIN" if service["purpose"] == "DRAIN" else "ROLLER_ORDINARY"
     if (
         not move
+        or await dispatch.has_position_conflict(session, point=job.origin.point)
         or move.id != action_id
         or (
             job.origin.source_kind,
@@ -450,10 +453,127 @@ async def can_use_face(roller, session, service):
     return True
 
 
+async def entry_available(roller, session, job, line):
+    from .service import ROLLER_SOURCES
+
+    if not line or not line.is_enabled or line.business_code != roller.context.domain:
+        return False
+    if line.five_rack_request_limit is None:
+        return True
+    active = await roller.rack_dispatch.jobs(
+        session, work_line_id=line.id, source_kinds=ROLLER_SOURCES, pending=True
+    )
+    return (
+        sum(
+            any(a.template == "CTU01" and a.transport_task_id for a in other.actions)
+            for other in active
+            if other.id != job.id
+        )
+        < line.five_rack_request_limit
+    )
+
+
+async def first_registration(roller, session, job, demand, handoff):
+    """Recheck the original host grant for a movement cutover proved never submitted."""
+    action = job.actions[-1] if job.actions else None
+    if (
+        not action
+        or action.transport_task_id
+        or (action.basis or {}).get("registration_at_cutover") != "LOCAL_ONLY"
+        or action.phase != "REGISTERED"
+        or handoff.state != "CLEAR"
+    ):
+        return None
+    origin = job.origin
+    repo = roller.repository(origin.work_line_id)
+    line = await session.get(WorkLine, origin.work_line_id)
+    if not (
+        line
+        and line.is_enabled
+        and line.business_code == repo.owner_domain
+        and line.line_code == origin.workline_code
+        and line.position_bindings.get("FIVE_RACK") == origin.point
+    ):
+        return None
+    if action.kind != "ENTER":
+        move = next((a for a in job.actions if a.id == job.position_action_id), None)
+        if not (
+            move
+            and move.phase == "APPLIED"
+            and move.outcome
+            and move.outcome["status"] == "SUCCEEDED"
+            and move.actual_position == move.target
+            and move.actual_face == move.target_face
+            and matches_position(
+                await repo.current_position(session, "RACK", origin.rack_id), job, move
+            )
+        ):
+            return None
+        if action.kind == "DEPART":
+            return action.id
+    elif action.target_face != origin.initial_face or not await entry_available(
+        roller, session, job, line
+    ):
+        return None
+    if demand.state != "CONTINUE":
+        return None
+    faces = repo.tables["face_work"]
+    if origin.source_kind == "ROLLER_ORDINARY":
+        current = await roller.production.read_current_task(session, work_line_id=line.id)
+        if (
+            not current.is_valid
+            or current.task_id != origin.task_id
+            or any(c.collection == "task_inputs" and c.rows for c in demand.coverage)
+        ):
+            return None
+        original_face = (
+            faces.c.demand_id == origin.source_ref
+            if action.kind == "ENTER"
+            else faces.c.service_id == action.source_ref
+        )
+        face = await repo._one(
+            session,
+            faces,
+            faces.c.cycle_id == job.id,
+            original_face,
+            faces.c.purpose == "SUPPLY",
+            faces.c.demand_state == "ACTIVE",
+            faces.c.service_state == "PENDING",
+            faces.c.rack_face == action.target_face,
+        )
+        if not face or action.source_ref not in (job.id, face["service_id"]):
+            return None
+    else:
+        if not await roller.get_return_candidates(session, work_line_id=line.id):
+            return None
+        drain = await roller.original_record(session, "drain", origin.source_ref)
+        if drain["status"] != "READY" or origin.rack_id in drain["unused_racks"]:
+            return None
+        if action.kind == "ROTATE" or action.source_ref != job.id:
+            face = await repo._one(
+                session,
+                faces,
+                faces.c.cycle_id == job.id,
+                faces.c.service_id == action.source_ref,
+                faces.c.purpose == "DRAIN",
+                faces.c.source_ref == origin.source_ref + ":" + action.target_face,
+                faces.c.service_state == "PENDING",
+                faces.c.rack_face == action.target_face,
+            )
+            if not face:
+                return None
+    return action.id
+
+
 async def refresh_job(roller, session, job):
     demand, handoff = await evaluate_roller_point(roller, session, job)
     job = await roller.rack_dispatch.advance(
-        session, job_id=job.id, demand=demand, handoff=handoff, now_ms=int(time() * 1000)
+        session,
+        job_id=job.id,
+        demand=demand,
+        handoff=handoff,
+        now_ms=int(time() * 1000),
+        authorized_original_id=await first_registration(roller, session, job, demand, handoff),
     )
     repo = roller.repository(job.origin.work_line_id)
     for action in job.actions:
@@ -541,10 +661,18 @@ async def advance_cycle(roller, session, cycle_id):
         )
         job = await roller.rack_dispatch.progress(session, job_id=cycle_id)
     if ordinary:
-        failed = [
+        unused = [
             a.id
             for a in job.actions
-            if a.phase == "APPLIED" and a.outcome and a.outcome["status"] in ("FAILED", "CANCELLED")
+            if (
+                not a.transport_task_id
+                and (a.basis or {}).get("registration_at_cutover") == "LOCAL_ONLY"
+            )
+            or (
+                a.phase == "APPLIED"
+                and a.outcome
+                and a.outcome["status"] in ("FAILED", "CANCELLED")
+            )
         ]
         cancelled = [
             *repo.scoped(services),
@@ -553,7 +681,7 @@ async def advance_cycle(roller, session, cycle_id):
             services.c.feed_id.is_(None),
             (
                 services.c.preparation_action_id.is_(None)
-                | services.c.preparation_action_id.in_(failed)
+                | services.c.preparation_action_id.in_(unused)
             ),
         ]
         await session.execute(
@@ -676,20 +804,8 @@ async def advance_cycle(roller, session, cycle_id):
         if service["service_state"] != "READY":
             if entry is None:
                 line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
-                if not line or not line.is_enabled or line.business_code != repo.owner_domain:
+                if not await entry_available(roller, session, job, line):
                     return "WAITING_FOR_RACK"
-                if line.five_rack_request_limit is not None:
-                    active = await roller.rack_dispatch.jobs(
-                        session,
-                        work_line_id=repo.work_line_id,
-                        source_kinds=ROLLER_SOURCES,
-                        pending=True,
-                    )
-                    if (
-                        sum(any(a.template == "CTU01" for a in j.actions) for j in active)
-                        >= line.five_rack_request_limit
-                    ):
-                        return "WAITING_FOR_RACK"
                 kind = "ENTER"
             else:
                 move = applied_preparation(job)

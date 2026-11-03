@@ -674,3 +674,12 @@ async def test_waiting_for_a_task_row_lock_is_bounded(client, callback_store, mo
     assert response.status_code == 503 and response.json()["code"] == "UNAVAILABLE"
     assert await receipts(callback_store) == []
     assert (await task_row(callback_store, task_id)).outcome_status is None
+
+
+async def test_live_rack_cancellation_rejects_zone_result(client, callback_store):
+    task_id = await add_task(callback_store, rack_data())
+    data = rack_result(
+        task_id, status="CANCELLED", final_position={"kind": "ZONE", "location_code": "Z"}
+    )
+    assert (await send(client, RESULTED, data)).status_code == 422
+    assert (await task_row(callback_store, task_id)).applied_outcome is None

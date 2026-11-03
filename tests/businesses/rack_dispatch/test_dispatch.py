@@ -601,7 +601,9 @@ async def test_jobs_filter_original_source_and_include_terminal_candidates(rack)
 
 
 @pytest.mark.parametrize("already_registered", [False, True])
-async def test_unbound_roller_move_recovers_original_client_identity(rack, already_registered):
+async def test_missing_binding_without_proven_cutover_absence_denies_first_registration(
+    rack, already_registered
+):
     from sqlalchemy import func, select
 
     from app.businesses._components.rack_dispatch.models import RackAction
@@ -648,13 +650,12 @@ async def test_unbound_roller_move_recovers_original_client_identity(rack, alrea
         progress = await dispatch.advance(
             db, job_id=job, **evidence(job, demand="CONTINUE"), now_ms=10
         )
-    (recovered,) = progress.actions
-    assert recovered.transport_task_id and recovered.client_request_id == client
-    if already_registered:
-        assert (
-            recovered.transport_task_id,
-            recovered.submit_operation_id,
-            recovered.submit_message_id,
-        ) == (action.transport_task_id, action.submit_operation_id, action.submit_message_id)
-    assert await db.scalar(select(func.count()).select_from(TransportTask)) == 1
-    assert await db.scalar(select(func.count()).select_from(ReliableMessage)) == 1
+    (retained,) = progress.actions
+    assert progress.pending and progress.review_reason == "ORIGINAL_REGISTRATION_UNPROVED"
+    assert retained.transport_task_id is None and retained.client_request_id == client
+    assert await db.scalar(select(func.count()).select_from(TransportTask)) == int(
+        already_registered
+    )
+    assert await db.scalar(select(func.count()).select_from(ReliableMessage)) == int(
+        already_registered
+    )

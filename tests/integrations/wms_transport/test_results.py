@@ -492,3 +492,42 @@ async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
         )
     assert result.state == state
     assert (result.basis is not None) == (state == "ACCEPTED")
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({}, "FOUND"),
+        ({"status": "FAILED", "failure_code": "MANUAL_ABORTED"}, "FOUND"),
+        ({"status": "SUCCEEDED"}, "INVALID"),
+        ({"rack_id": "foreign"}, "INVALID"),
+        ({"outcome_revision": 2}, "INVALID"),
+        ({"arrival_face": "A"}, "INVALID"),
+        ({"extra": True}, "INVALID"),
+    ],
+)
+async def test_historical_zone_failure_requires_canonical_original(transport_rig, change, expected):
+    task = await result_task(transport_rig.factory)
+    original = dict(
+        transport_task_id=task.handle.transport_task_id,
+        kind="RACK_MOVE",
+        rack_id="R1",
+        outcome_revision=1,
+        status="CANCELLED",
+        final_position={"kind": "ZONE", "location_code": "Z"},
+        arrival_face=None,
+        results=None,
+        failure_code=None,
+        position_unknown=None,
+    )
+    raw = original | change
+    async with transport_rig.factory.begin() as db:
+        await db.execute(
+            update(TransportTask)
+            .where(TransportTask.transport_task_id == task.handle.transport_task_id)
+            .values(applied_outcome=raw, applied_outcome_revision=1, outcome_status=raw["status"])
+        )
+    result = await read(transport_rig.factory, task)
+    assert result.availability == expected
+    if expected == "FOUND":
+        assert result.outcome == raw and result.closure == "CLOSED"

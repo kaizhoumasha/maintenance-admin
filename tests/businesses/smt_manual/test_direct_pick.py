@@ -148,3 +148,17 @@ async def test_prior_unfulfilled_member_stays_with_original_not_arrived_job(manu
     assert await flow.rack_advance(later["id"]) == "WAITING_FOR_DEPARTURE"
     member = next(m for m in await flow.rows("member") if m["plan_revision"] == 1)
     assert (member["rack_work_id"], member["status"]) == (prior["id"], "PENDING")
+
+
+async def test_missing_original_trigger_cannot_capture_later_grant(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    member = flow.tables["member"]
+    async with flow.factory.begin() as db:
+        await db.execute(member.update().values(preparation_action_id=None))
+    await flow.plan(revision=2)
+    await flow.host.advance("TASK", "T1")
+    later = next(m for m in await flow.rows("member") if m["plan_revision"] == 2)
+    assert later["rack_work_id"] is None

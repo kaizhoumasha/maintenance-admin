@@ -652,6 +652,8 @@ def _move(job, r, manual, tasks, messages, positions):
             "unbound movement",
             i,
         )
+        # Stopped-writer lookup covered every original client/cycle before private-table removal.
+        a["basis"]["registration_at_cutover"] = "LOCAL_ONLY"
         return a
     _require(
         t
@@ -827,8 +829,29 @@ def _move(job, r, manual, tasks, messages, positions):
             "position revision",
             i,
         )
+        actual = None
+        for p in positions:
+            equivalent = [
+                e for e in (outcome, obs) if e and e.get("outcome_revision") == p["source_revision"]
+            ]
+            for e in equivalent:
+                position = e.get("final_position") or {}
+                _require(
+                    (e.get("transport_task_id"), e.get("kind"), e.get("rack_id"))
+                    == (a["transport_task_id"], k, job["rack_id"])
+                    and (e is not outcome or t["applied_outcome_revision"] == p["source_revision"])
+                    and position.get("kind") in ("ZONE", "RACK_POSITION")
+                    and position == equivalent[0].get("final_position")
+                    and (position.get("location_code"), e.get("arrival_face"))
+                    == (p["location_code"], p["rack_face"]),
+                    "contradictory roller position evidence",
+                    p["id"],
+                )
+                if p["source_revision"] == prev:
+                    actual = position
+        _require(actual, "unprovable roller position kind", i)
         a.update(
-            actual_position=_point(matches[0]["location_code"]),
+            actual_position=actual,
             actual_face=matches[0]["rack_face"],
             position_revision=prev,
         )
@@ -1290,7 +1313,7 @@ def _report(job, entry, trigger, records, messages, report_wires, updates):
     )
 
 
-def _plan(data, transports, wire_rows):
+def _plan(data, transports, wire_rows, configured_points):
     tasks = _unique(data["smt_manual_task"], "task_id", "manual tasks")
     plans = {
         (r["task_id"], r["plan_revision"]): r
@@ -1331,12 +1354,13 @@ def _plan(data, transports, wire_rows):
     orig_moves = _unique(data[PRIVATE[1]] + data[PRIVATE[3]], "id", "colliding movement identities")
     _require(positions.keys() <= {r["id"] for r in data[PRIVATE[3]]}, "orphan rack position")
     messages = defaultdict(list)
+    submits = _unique(transports, "operation_id", "duplicate transport submit operation")
     report_wires = defaultdict(list)
     for m in wire_rows:
         messages[m["id"]] = m
         messages[m["operation"], m["operation_id"]].append(m)
         if m["operation"] == SUBMIT:
-            expected = next((t for t in transports if t["operation_id"] == m["operation_id"]), None)
+            expected = submits.get(m["operation_id"])
             _require(
                 expected and expected["transport_task_id"] == m["business_key"],
                 "orphan transport submission",
@@ -1671,50 +1695,70 @@ def _plan(data, transports, wire_rows):
         "migration decision count",
     )
     # Compare cancellations only after all original jobs and observations have been read.
-    if cancelled_entries:
-        live = {j["id"]: j for j in jobs if j["pending"]}
-        held = defaultdict(set)
-        for key, job in live.items():
-            held[job["point"]].add(key)
-            for location in ((job["resources"] or {}).get("positions") or {}).values():
-                held[location].add(key)
-            held[(job.get("actual_position") or {}).get("location_code")].add(key)
-        for a in actions:
-            if a["job_id"] not in live or a["kind"] == "DEPARTURE_DECIDE":
-                continue
-            if a["phase"] == "REVIEW":
-                held[(a.get("actual_position") or {}).get("location_code")].add(a["job_id"])
-            for fact in positions.get(a["id"], ()):
-                if fact["is_current"]:
-                    held[fact["location_code"]].add(a["job_id"])
-            original = transport.get(a["client_request_id"])
-            if original:
-                for evidence in (
-                    original["position_observation"],
-                    (original["pending_outcome"] or {}).get("data"),
-                    original["applied_outcome"],
-                ):
-                    if evidence and evidence["outcome_revision"] > (a.get("outcome_revision") or 0):
-                        held[(evidence.get("final_position") or {}).get("location_code")].add(
-                            a["job_id"]
-                        )
-        for job, entry in cancelled_entries:
-            location = entry["actual_position"]["location_code"]
-            observation = transport[entry["client_request_id"]]["position_observation"]
-            if (
-                location
-                and location != job["point"]
-                and not (held[location] - {job["id"]})
-                and (
-                    not observation or observation["outcome_revision"] <= entry["outcome_revision"]
-                )
+    live = {j["id"]: j for j in jobs if j["pending"]}
+    held = defaultdict(set)
+    for key, job in live.items():
+        held[job["point"]].add(key)
+        configured_points.update(((job["resources"] or {}).get("positions") or {}).values())
+        held[(job.get("actual_position") or {}).get("location_code")].add(key)
+    for a in actions:
+        if a["job_id"] not in live or a["kind"] == "DEPARTURE_DECIDE":
+            continue
+        if a["phase"] == "REVIEW":
+            held[(a.get("actual_position") or {}).get("location_code")].add(a["job_id"])
+        for fact in positions.get(a["id"], ()):
+            if fact["is_current"]:
+                held[fact["location_code"]].add(a["job_id"])
+        original = transport.get(a["client_request_id"])
+        if original:
+            for evidence in (
+                original["position_observation"],
+                (original["pending_outcome"] or {}).get("data"),
+                original["applied_outcome"],
             ):
-                job.update(
-                    state="NOT_ARRIVED",
-                    pending=False,
-                    closure_reason="NOT_ARRIVED",
-                    closure_basis=job["release_basis"],
-                    review_reason=None,
+                if evidence and evidence["outcome_revision"] > (a.get("outcome_revision") or 0):
+                    location = (evidence.get("final_position") or {}).get("location_code")
+                    if location:
+                        held[location].add(a["job_id"])
+                        # Keep newer locations protected until host consumption.
+                        protected = a["basis"].setdefault("unconsumed_locations", {})
+                        protected[location] = max(
+                            protected.get(location, 0), evidence["outcome_revision"]
+                        )
+    for job, entry in cancelled_entries:
+        location = entry["actual_position"]["location_code"]
+        observation = transport[entry["client_request_id"]]["position_observation"]
+        if (
+            location
+            and location != job["point"]
+            and location not in configured_points
+            and not (held[location] - {job["id"]})
+            and (not observation or observation["outcome_revision"] <= entry["outcome_revision"])
+        ):
+            job.update(
+                state="NOT_ARRIVED",
+                pending=False,
+                closure_reason="NOT_ARRIVED",
+                closure_basis=job["release_basis"],
+                review_reason=None,
+            )
+    pending_ids = {j["id"] for j in jobs if j["pending"]}
+    accepted_only = {
+        a["job_id"] for a in actions if a["kind"] == "DEPART" and a.get("transport_task_id")
+    }
+    for a in actions:
+        if a["job_id"] in pending_ids and a.get("transport_task_id"):
+            originals = [a["submit_operation_id"]]
+            if a["job_id"] not in accepted_only:
+                originals.append(
+                    a["job_id"]
+                )  # Public predecessor reader requires the original cycle UUID.
+            for original in originals:
+                parsed = UUID(original)
+                _require(
+                    parsed.version == 7 and str(parsed) == original,
+                    "pending transport identity",
+                    a["id"],
                 )
     return jobs, actions, updates
 
@@ -1812,7 +1856,8 @@ def upgrade():
         ).mappings()
     )
     try:
-        jobs, actions, updates = _plan(data, ts, wire)
+        configured = bind.scalars(sa.select(_table(bind, "work_lines").c.position_bindings))
+        jobs, actions, updates = _plan(data, ts, wire, {p for b in configured for p in b.values()})
         _create_shared(schema)
         for name, columns in NEW_COLUMNS.items():
             for key, typ in columns.items():

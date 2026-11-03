@@ -33,7 +33,7 @@ async def summarize_drain(roller, session, drain_id):
     unused = drain["unused_racks"]
     if await roller.return_channel_empty(session, work_line_id=repo.work_line_id):
         for job in originals:
-            if job.actions or job.state not in ("ACTIVE", "WITHDRAWN"):
+            if job.state != "WITHDRAWN" and (job.actions or job.state != "ACTIVE"):
                 continue
             opportunities = repo.tables["return_opportunity"]
             started = await session.scalar(
