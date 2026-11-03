@@ -1,5 +1,7 @@
 # 出站结果读取与前序闭合
 
+**2026-11-03 实施状态。** 手工与 BIN_Roller 的 RackDispatch 通过公开 Transport 结果及原提交接纳接口核对 owner、caller、cycle、动作和冻结去向。进场与换面需要原已应用成功及相符位置、面向和版本。离场提交接纳只结束原工作线调度，报告、箱履约和后续可更正结果仍使用各自原身份。
+
 业务首次接入见[快速开始](business-development-quickstart.md)；受理 A、推进 B、失败恢复与对应 PostgreSQL 断言见[事务配方](business-transaction-recipes.md)。
 
 本文是正式读接口参考。WMS／Transport 的协议身份、回调应用、重试、TTL 和终态清理规则保持；本地原归属与提交后通知见下文。读接口不发HTTP、不修改行、不加框架写锁、不提交／回滚／flush；调用方未提交的修改不会被隐式flush。返回冻结的数据对象外壳及独立数据副本，不返回ORM、原始响应字节或pending结果内容。数据库临时错误原样抛出，不能当作未找到或全部闭合。

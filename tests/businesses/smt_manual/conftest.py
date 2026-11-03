@@ -35,18 +35,42 @@ async def manual_sessions(request, tmp_path):
         if getattr(request, "param", "postgres") == "sqlite"
         else request.getfixturevalue("pg_url")
     )
-    engine = create_database_engine(url)
-    metadata = MetaData(schema=WorkLine.__table__.schema)
-    if engine.dialect.name == "sqlite":
-        for model in (WorkLine, DeviceRoute, Device, CallbackReceipt, ReliableMessage):
-            model.__table__.to_metadata(metadata)
+    from sqlalchemy.schema import CreateSchema, DropSchema
+
+    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+    from app.database import SCHEMA
+    from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, TransportTask
+
+    schema = "test_manual_" + uuid7().hex if url.startswith("postgres") else None
+    engine = create_database_engine(
+        url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
+    )
+    metadata = MetaData(schema=SCHEMA)
+    for model in (
+        RackJob,
+        RackAction,
+        WorkLine,
+        DeviceRoute,
+        Device,
+        CallbackReceipt,
+        ReliableMessage,
+        TransportTask,
+        EcsCommand,
+        EcsResultEvidence,
+        EcsSendEvidence,
+    ):
+        model.__table__.to_metadata(metadata)
     try:
         async with engine.begin() as connection:
+            if schema:
+                await connection.execute(CreateSchema(schema))
             await connection.run_sync(metadata.create_all)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(metadata.drop_all)
+            if schema:
+                await connection.execute(DropSchema(schema, cascade=True))
         await engine.dispose()
 
 
@@ -98,7 +122,9 @@ async def manual_flow(manual_sessions, monkeypatch):
             PositionSlot(slot_key="TRANSFER_RACK", display_name="Transfer", required=False),
         ),
     )
-    entry.COMPONENTS = (TASK, ROLLER)
+    from app.businesses._components.rack_dispatch.composition import COMPONENT as DISPATCH
+
+    entry.COMPONENTS = (TASK, ROLLER, DISPATCH)
     entry.ENTRY_MODULES = ()
     entry.PROGRESSION = "scan_pending"
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
@@ -137,13 +163,25 @@ async def manual_flow(manual_sessions, monkeypatch):
     capabilities = Capabilities(None, wms, None, manual_sessions)
     repository = TaskRepository(tables=tables)
     ports = RollerPorts(repository)
-    roller = BinRoller(CommandOwner("smt_manual"), capabilities, ports, tables=roller_tables)
+    from app.businesses._components.rack_dispatch.service import RackDispatch
+
+    roller = BinRoller(
+        CommandOwner("smt_manual"),
+        capabilities,
+        ports,
+        rack_dispatch=RackDispatch("smt_manual", capabilities),
+        tables=roller_tables,
+    )
     task = SmtManualTaskFlow(capabilities, roller, repository=repository)
     runtime = BusinessRuntime(
         definitions={"smt_manual": entry.DEFINITION},
         services={
             "smt_manual": SimpleNamespace(
-                components={"sorting_task": SortingTask("smt_manual", task), "bin_roller": roller}
+                components={
+                    "sorting_task": SortingTask("smt_manual", task),
+                    "bin_roller": roller,
+                    "rack_dispatch": roller.rack_dispatch,
+                }
             )
         },
     )
@@ -207,8 +245,20 @@ async def manual_flow(manual_sessions, monkeypatch):
             return await deliver(message("issued", data))
 
         async def rows(key, *, component=False):
-            from tests.helpers import bin_roller_query, smt_manual_query
+            from tests.helpers import bin_roller_query, roller_dispatch_rows, smt_manual_query
 
+            if component and key in ("rack_cycle", "rack_action", "departure"):
+                async with manual_sessions() as session:
+                    return [
+                        r
+                        for line in lines
+                        for r in await roller_dispatch_rows(session, roller, key, line)
+                    ]
+            if not component and key in {"rack", "rack_action", "rack_departure"}:
+                from tests.helpers import manual_dispatch_rows
+
+                async with manual_sessions() as session:
+                    return await manual_dispatch_rows(session, roller.rack_dispatch, key, lines)
             query = (
                 bin_roller_query(roller_tables, key) if component else smt_manual_query(tables, key)
             )
@@ -522,6 +572,22 @@ async def manual_bins(manual_flow, monkeypatch):
             )
             assert response.status_code == 200
 
+    async def ready_for_bin_work(*, direction="outbound"):
+        await flow.ready(direction=direction)
+        if direction == "outbound":
+            decision = await flow.deliver(
+                flow.message(
+                    "plan_delta",
+                    dict(
+                        task_id="T1",
+                        plan_revision=1,
+                        added_bin_source_racks=[dict(rack_id="R", rack_face=["A"])],
+                    ),
+                )
+            )
+            assert decision.status_code == 202
+
+    flow.ready_for_bin_work = ready_for_bin_work
     flow.scan, flow.advance, flow.decision = scan, advance, decision
     flow.completion, flow.result = completion, result
     try:
@@ -578,7 +644,7 @@ async def manual_racks(manual_flow, monkeypatch):
             importlib.reload(sys.modules[name])
         else:
             importlib.import_module(name)
-    name = "app.businesses._components.bin_roller.request.rack_departure_decide_v1"
+    name = "app.businesses._components.rack_dispatch.request.rack_departure_decide_v1"
     if name in sys.modules:
         operation.request_operation("rack.departure_decide@v1", operation.Endpoint.DECISIONS)(
             sys.modules[name].DepartureRequest
@@ -604,7 +670,9 @@ async def manual_racks(manual_flow, monkeypatch):
     capabilities = replace(flow.task.capabilities, transport=transport)
     flow.task.capabilities = capabilities
     flow.roller.capabilities = capabilities
-    flow.racks = ManualRackFlow(capabilities, repository=flow.task.repository)
+    flow.roller.rack_dispatch.capabilities = capabilities
+    flow.racks = ManualRackFlow(capabilities, flow.roller, repository=flow.task.repository)
+    flow.task.manual_racks = flow.racks
     service = flow.runtime.services["smt_manual"]
     service.read_task_owner = flow.task.read_task_owner
     service.accept_direct_pick_completed = flow.racks.accept_direct_pick_completed
@@ -648,7 +716,11 @@ async def manual_racks(manual_flow, monkeypatch):
         rack_id = rack_id or (await flow.rows("rack"))[0]["id"]
         async with flow.factory() as session, session.begin():
             if session.get_bind().dialect.name == "postgresql":
-                await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+            job = await flow.racks.dispatch.progress(session, job_id=rack_id)
+            await flow.task.repository.lock_dispatch_line(
+                session, flow.roller, job.origin.work_line_id, task_id=job.origin.task_id
+            )
             state = await flow.racks.advance_rack(session, rack_work_id=rack_id, now_ms=now_ms)
             if rollback:
                 await session.rollback()
@@ -702,6 +774,29 @@ async def manual_racks(manual_flow, monkeypatch):
                 )
             )
 
+    async def acknowledge(action):
+        async with flow.factory.begin() as session:
+            message = await session.get(ReliableMessage, action["submit_message_id"])
+            message.status, message.last_http_status, message.last_verdict = (
+                "DONE",
+                202,
+                "DELIVERED",
+            )
+            message.response_raw = json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="RECEIVED",
+                    timestamp=100,
+                    data=dict(transport_task_id=action["transport_task_id"]),
+                )
+            ).encode()
+
+    async def consume_report():
+        (report,) = await flow.rows("rack_report")
+        async with flow.factory.begin() as session:
+            return await flow.racks.advance_report(session, operation_id=report["operation_id"])
+
+    flow.acknowledge, flow.consume_report = acknowledge, consume_report
     flow.notification, flow.plan, flow.reconcile = notification, plan, reconcile
     flow.rack_advance, flow.rack_outcome, flow.rack_response = advance, outcome, response
     try:
@@ -841,9 +936,8 @@ async def manual_completion_tools(manual_flow, monkeypatch):
 @pytest.fixture
 async def manual_supply(manual_racks, manual_completion_tools):
     from app.businesses import catalog
-    from app.businesses._components.bin_roller.feed_flow import advance_feed, start_feed
+    from app.businesses._components.bin_roller.feed_flow import advance_feed
     from app.integrations.wms_request import operation
-    from app.integrations.wms_transport import HandoffPosition, TransportCaller
 
     flow = manual_racks
     module = "app.businesses._components.bin_roller.request.outbound_bin_inbound_batch_v1"
@@ -857,46 +951,16 @@ async def manual_supply(manual_racks, manual_completion_tools):
     catalog.validate_business_contracts()
 
     async def started(*, feed=False):
+        from app.businesses._components.bin_roller.ports import RollerWorkRef
+
         original = (await flow.rows("supply_demand", component=True))[0]
         async with flow.factory.begin() as session:
-            repo = flow.roller.repository(flow.lines[0])
-            cycle = await repo.create_cycle(
-                session,
-                cycle_id=str(uuid7()),
-                rack_id="R",
-                purpose="ORDINARY",
-                task_id="T1",
-                source_ref=original["id"],
-            )
-            await repo.register_rack_action(
-                session,
-                cycle_id=cycle["id"],
-                kind="CTU01",
-                source_ref=cycle["id"],
-                action_id=str(uuid7()),
-                client_request_id=str(uuid7()),
-                transport_task_id=None,
-                operation_id=None,
-                target=dict(kind="RACK_POSITION", location_code="FIVE"),
-                target_face="A",
-                caller_workline_id=str(flow.lines[0]),
-            )
-            service_id = str(uuid7())
-            await repo.bind_supply(
-                session, demand_id=original["id"], cycle_id=cycle["id"], service_id=service_id
-            )
-            faces = flow.roller_tables["face_work"]
-            await session.execute(
-                faces.update().where(faces.c.service_id == service_id).values(service_state="READY")
-            )
-            if feed:
-                await start_feed(
-                    flow.roller,
-                    session,
-                    demand_id=original["id"],
-                    caller=TransportCaller(str(flow.lines[0])),
-                    target=HandoffPosition("IN"),
-                )
+            await flow.roller.advance(session, RollerWorkRef("FEED", original["id"]))
+        if feed:
+            entry = (await flow.rows("rack_action", component=True))[0]
+            await flow.rack_outcome(entry, face=entry["target_face"])
+            async with flow.factory.begin() as session:
+                await flow.roller.advance(session, RollerWorkRef("RACK_CYCLE", entry["cycle_id"]))
         return original["id"]
 
     async def withdraw():
@@ -978,10 +1042,39 @@ async def manual_supply(manual_racks, manual_completion_tools):
 
 
 @pytest.fixture
-async def profile_flow(pg_sessions, monkeypatch, tmp_path, request):
+async def native_manual_sessions(manual_sessions):
+    from app.businesses._components.bin_roller.models import TABLES as ROLLER
+    from app.businesses.smt_manual.models import TABLES
+    from app.models import AuditLog
+
+    metadata = MetaData()
+    for table in (*TABLES.values(), *ROLLER.values(), AuditLog.__table__):
+        table.to_metadata(metadata)
+    engine = manual_sessions.kw["bind"]
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    try:
+        yield manual_sessions
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.drop_all)
+
+
+@pytest.fixture
+async def formal_manual(native_manual_sessions, monkeypatch):
+    from tests.helpers import formal_manual_fixture
+
+    async with formal_manual_fixture(native_manual_sessions, monkeypatch) as state:
+        yield state
+
+
+@pytest.fixture
+async def profile_flow(native_manual_sessions, monkeypatch, tmp_path, request):
     from app import business_wakeups
     from tests.businesses.smt_manual.factory_profile import profile_fixture
 
-    async with profile_fixture(pg_sessions, monkeypatch, tmp_path, request.node.name) as flow:
+    async with profile_fixture(
+        native_manual_sessions, monkeypatch, tmp_path, request.node.name
+    ) as flow:
         monkeypatch.setattr(business_wakeups, "enqueue_business", flow.notices.append)
         yield flow

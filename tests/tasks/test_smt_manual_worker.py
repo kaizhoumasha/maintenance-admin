@@ -204,6 +204,7 @@ celery_app.conf.beat_schedule = {"advance-business-smt_manual":
         print("M6 owned process logs: " + json.dumps(paths))
 
 
+@pytest.mark.parametrize("formal_manual", [4], indirect=True)
 async def test_manual_worker_advances_wait_completion_and_roller_pending(
     manual_worker, monkeypatch
 ):
@@ -274,7 +275,7 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
     release = next(r for r in before_restart if r["task_id"] == tasks[0])
     assert release["state"] == "RELEASED" and release["command_code"]
     await run.stop("worker")
-    cycle, action = await manual_departure_obligation(flow, line=1)
+    cycle, action = await manual_departure_obligation(flow, line=2)
     flow.admission["A000000002"] = {"result": "NO_WORK"}
 
     def unavailable(business):
@@ -313,7 +314,9 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
         ]
         == "WAIT"
     )
-    fallback_cycle, fallback_action = await manual_departure_obligation(flow, line=0)
+    with monkeypatch.context() as setup:
+        setup.setattr(business_wakeups, "enqueue_business", flow.notices.append)
+        fallback_cycle, fallback_action = await manual_departure_obligation(flow, line=3)
     with monkeypatch.context() as missed:
         missed.setattr(business_wakeups, "enqueue_business", unavailable)
         await flow.dispatch()
@@ -348,7 +351,7 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
         len(admissions) == 2 and admissions[0]["operation_id"] == original_admission["operation_id"]
     )
     assert len(await flow.rows("completion")) == 1
-    assert len(await flow.rows("confirmation")) == 1
+    assert len([r for r in await flow.rows("confirmation") if r["task_id"] == tasks[0]]) == 1
     original_work = next(
         r for r in await flow.rows("manual_bin") if r["arrival_id"] == release["arrival_id"]
     )

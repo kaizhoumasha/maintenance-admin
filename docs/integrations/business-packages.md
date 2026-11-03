@@ -1,5 +1,7 @@
 # 新增工作线业务包
 
+**2026-11-03 实施状态。** 手工宿主构造一个绑定原 owner 的 RackDispatch，手工流程与 BIN_Roller 共用此实例。原接收方事务落地事实，提交后唤醒同一 scan_pending，5 秒 Beat 扫描同一待办。详情查询使用 progress/jobs 保留原 cycle 与动作引用。
+
 业务流程与消息先看[工作线业务 API 索引](workline-business-api.md)：SMT 手工入库/出库采用[当前人工线 API 设计](manual-picking-api.md)，粗分机按其独立合同与已交付阶段处理；
 当前接入路线见[快速开始](business-development-quickstart.md)，原子受理、独立推进及恢复证据见[事务配方](business-transaction-recipes.md)。
 当前业务仅使用模型 WMS send/ECS create、`device_roles` 和 composition 的 `COMMANDS`；
@@ -190,14 +192,14 @@ async def advance(self, execution_id):
 
 **BIN_Roller 的目标隔离例外（测试宿主与正式手工宿主已本地验证）：** 仅会进入其架流/正常求架检查的原宿主单条独立 advance 首 SQL 前设 SERIALIZABLE，复用原 session_factory/业务幂等/Outbox。判定、登记和消费整笔同入口，不按内部 DRAIN 分支拆事务或另建隔离选择器；原 40001 有界重试包括外层 commit，提交未知仍由原 work 进入完整 SERIALIZABLE 推进，已见原引用就恢复；暂时查空不证明回滚，登记须经完整业务判定/唯一性/集合依赖及最终提交，不新增确认状态。receiver 保留事实/待办及 SCAN2 合法即时意图受理，不消费 drain 业务进度/收批/新求架；短扫描、已有无关纯生产及其他业务不一律升级。不改共享 factory/引擎/连接池默认，沿原连接执行选项关闭后恢复，不复制手工锁或新增任务/连接重置钩子。见[U06 范围及恢复](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#roller-u06-minimal-transaction)。
 
-以下锁序描述现有基线，不要求为 BIN_Roller 目标业务复制锁；其专项遵循“不新增组件/宿主手工锁”的边界。
+普通业务沿用以下锁序。手工与 BIN_Roller 共用原推进事务，在 Devices 后按 ID 锁 RackJob，再按固定类型和主键锁宿主事实，最后按 ID 锁 RackAction。涉及共享架的手工 MANUAL_RACK、MANUAL_BIN、MANUAL_COMPLETION 同样在首条 SQL 前采用 SERIALIZABLE。
 
 `advance` 是业务单条推进入口，`_advance` 示意其事务内实现，不是平台接口。扫描调用 `advance` 时不额外包裹整轮事务。先无锁定位原执行的配置，再按工作线（ID顺序）→
 设备（ID顺序）→业务动作（固定顺序）取锁、重读和校验当前许可。不得在这些锁内改写/settle/hold
 既有命令或消息，避免和先锁命令的发送门禁构成反向等待。结果接收事务先提交，之后再独立推进。
 网络请求始终在事务外，下一意图复用原 Outbox 和唯一 Sender。
 
-只通过 `WmsRequests.get_result`、`TransportService.get_result` 和
+只通过 `WmsRequests.get_result`、`TransportService.get_result`、`get_submission_acceptance` 和
 `list_unclosed_predecessors` 按原身份读取结果，不读取 ReliableMessage/TransportTask 列或 response_raw。
 每次前序判断固定完整身份集合及 caller/cycle/资源范围；超过100条分批，跨轮逐个或混合读取也在同一
 统一快照事务内进行（通用基线 REPEATABLE READ；上述目标业务相关独立 advance SERIALIZABLE）。快照保证事实曾同时成立，不替代当前许可或物理资源门禁。

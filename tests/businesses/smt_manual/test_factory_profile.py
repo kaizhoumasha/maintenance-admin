@@ -79,7 +79,7 @@ async def saved_transports(flow):
 @pytest.mark.parametrize("line", [0, 1], ids=["KT16", "KT18"])
 @pytest.mark.parametrize("role", ["RETURN", "TRANSFER"])
 @pytest.mark.parametrize("same_source", [True, False])
-async def test_manual_role_zone_departure_uses_actual_final_position(
+async def test_accepted_manual_departure_keeps_closure_after_late_position(
     profile_flow, line, role, same_source
 ):
     flow = profile_flow
@@ -173,12 +173,8 @@ async def test_manual_role_zone_departure_uses_actual_final_position(
         ).status_code == 202
     await asyncio.gather(*(flow.host.advance("MANUAL_RACK", own["id"]) for _ in range(2)))
     other = next(w for w in works if w["id"] != own["id"])
-    assert await flow.host.advance("MANUAL_RACK", other["id"]) == "DEPARTED"
-    saved = next(w for w in await flow.rows("rack") if w["id"] == own["id"])
-    assert (saved["state"] == "DEPARTED") is not same_source
-    assert await flow.host.advance("MANUAL_RACK", own["id"]) == (
-        "POSITION_CONFLICT" if same_source else "DEPARTED"
-    )
+    assert await flow.host.advance("MANUAL_RACK", other["id"]) == "COMPLETED"
+    assert await flow.host.advance("MANUAL_RACK", own["id"]) == "COMPLETED"
     assert len(await flow.rows("rack_action")) == 4
 
 
@@ -265,7 +261,8 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
 async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
     flow = profile_flow
     assert flow.runtime.services["smt_manual"] is flow.host
-    assert set(flow.host.components) == {"sorting_task", "bin_roller"}
+    assert set(flow.host.components) == {"sorting_task", "bin_roller", "rack_dispatch"}
+    assert flow.host.components["rack_dispatch"] is flow.roller.rack_dispatch
     async with flow.factory() as session:
         lines = list(await session.scalars(select(WorkLine).order_by(WorkLine.line_code)))
         assert [(r.line_code, r.version, r.is_enabled, r.business_code) for r in lines] == [
@@ -340,6 +337,7 @@ async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
 async def test_wait_due_work_required_completion_original_release(profile_flow, line, completion):
     flow = profile_flow
     task = await ready(flow, line=line)
+    await plan(flow, task, [flow.prefix + "-source"])
     flow.admission["A000000001"] = dict(result="WAIT", retry_after_ms=200)
     await flow.scan("SCAN2", line=line)
     await flow.dispatch()
@@ -529,8 +527,13 @@ async def test_ctu03_submit_acceptance_releases_original_cycle_without_final_res
     departure = await cycle_departure(flow, action)
     cycles = await flow.rows("rack_cycle", roller=True)
     assert cycles[0]["status"] == "RELEASED"
-    assert cycles[0]["release_basis"]["submission_response_code"] == "RECEIVED"
-    assert cycles[0]["release_basis"]["outcome_revision"] is None
+    assert cycles[0]["release_basis"]["response_code"] == "RECEIVED"
+    async with flow.factory() as session:
+        assert (
+            await flow.roller.rack_dispatch.final_result(
+                session, job_id=departure["cycle_id"], action_id=departure["id"]
+            )
+        ).outcome is None
     original = next(
         r
         for r in await saved_transports(flow)
@@ -741,3 +744,91 @@ async def test_known_cancelled_entry_blocks_only_its_conflict_destination(
     assert not [r for r in works if r["rack_id"] == blocked]
     assert any(r["rack_id"] == unrelated for r in works)
     assert {a["rack_work_id"] for a in await flow.rows("rack_action")} == {r["id"] for r in works}
+
+
+@pytest.mark.parametrize("stage", ["entry", "ready", "registered"])
+async def test_manual_position_blocks_fresh_roller_work(profile_flow, stage):
+    ready_face = stage != "entry"
+    flow = profile_flow
+    task = await ready(flow)
+    rack, manual = flow.prefix + "-supply", flow.prefix + "-manual"
+    await plan(
+        flow, task, [rack] if ready_face else [], target_rack=dict(rack_id=manual, rack_face="A")
+    )
+    await flow.host.advance("TASK", task)
+    if ready_face:
+        await flow.host.scan_pending()
+        (entry,) = await flow.rows("rack_action", roller=True)
+        flow.inbound_decision = dict(
+            result="READY",
+            bins=[
+                dict(
+                    bin_code="A000000003",
+                    source_locator=dict(
+                        type="RACK_BIN_SLOT", rack_id=rack, rack_face="A", slot_id="S1"
+                    ),
+                )
+            ],
+        )
+        await rack_result(flow, entry)
+        await flow.dispatch()
+        if stage == "registered":
+            (face,) = await flow.rows("face_work", roller=True)
+            await flow.host.advance("FEED", face["id"])
+            (segment,) = await flow.rows("feed_segment", roller=True)
+    (work,) = await flow.rows("rack")
+    (manual_entry,) = await flow.rows("rack_action")
+    assert (
+        await flow.callback(
+            "transport.task.resulted@v1",
+            dict(
+                transport_task_id=manual_entry["transport_task_id"],
+                kind="RACK_MOVE",
+                rack_id=manual,
+                outcome_revision=1,
+                status="CANCELLED",
+                final_position=dict(
+                    kind="RACK_POSITION", location_code=flow.positions[0]["FIVE_RACK"]
+                ),
+            ),
+        )
+    ).status_code == 202
+    assert await flow.host.advance("MANUAL_RACK", work["id"]) == "POSITION_CONFLICT"
+    if stage == "registered":
+        assert (
+            await flow.callback(
+                "transport.task.resulted@v1",
+                dict(
+                    transport_task_id=segment["transport_task_id"],
+                    kind="BIN_MOVE",
+                    outcome_revision=1,
+                    results=[
+                        dict(
+                            container_id="A000000003",
+                            status="SUCCEEDED",
+                            final_position={
+                                "kind": "HANDOFF_POSITION",
+                                "location_code": flow.positions[0]["INLET"],
+                            },
+                        )
+                    ],
+                ),
+            )
+        ).status_code == 202
+        await flow.host.advance("FEED", face["id"])
+        (consumed,) = await flow.rows("feed_segment", roller=True)
+        assert consumed["id"] == segment["id"] and consumed["consumed_revision"] == 1
+    elif ready_face:
+        (face,) = await flow.rows("face_work", roller=True)
+        assert face["service_state"] == "READY"
+        await flow.host.advance("FEED", face["id"])
+        assert not [t for t in await saved_transports(flow) if t["kind"] == "BIN_MOVE"]
+    else:
+        await plan(flow, task, [rack], revision=2)
+        await flow.host.scan_pending()
+        assert not await flow.rows("rack_action", roller=True)
+        other = await ready(flow, line=1)
+        await plan(flow, other, [flow.prefix + "-other"])
+        await flow.host.scan_pending()
+        (allowed,) = await flow.rows("rack_action", roller=True)
+        assert allowed["target"]["location_code"] == flow.positions[1]["FIVE_RACK"]

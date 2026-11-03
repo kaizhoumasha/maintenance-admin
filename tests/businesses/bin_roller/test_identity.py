@@ -52,337 +52,165 @@ async def test_original_message_cannot_be_rebound(roller_store):
         await fact(store, "one", "B")
 
 
-async def test_original_owner_and_request_identity_survive_restart(roller_store):
-    from app.businesses._components.bin_roller.repository import RollerRepository
-
-    store = roller_store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id="cycle",
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
-        )
-        original = await store.repo.register_rack_action(
-            session,
-            cycle_id="cycle",
-            kind="CTU01",
-            source_ref="source",
-            action_id="action",
-            client_request_id="request",
-            transport_task_id="transport",
-            operation_id="operation",
-            target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-            target_face="A",
-            caller_workline_id="1",
-        )
-    restarted = RollerRepository("first", 1, tables=store.tables)
-    async with store.factory.begin() as session:
-        replay = await restarted.register_rack_action(
-            session,
-            cycle_id="cycle",
-            kind="CTU01",
-            source_ref="source",
-            action_id=str(uuid7()),
-            client_request_id=str(uuid7()),
-            transport_task_id="new",
-            operation_id="new",
-            target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-            target_face="A",
-            caller_workline_id="1",
-        )
-        assert replay["id"] == original["id"]
-        assert (
-            replay["owner_domain"],
-            replay["client_request_id"],
-            replay["transport_task_id"],
-            replay["operation_id"],
-        ) == ("first", "request", "transport", "operation")
-        assert (
-            await RollerRepository("second", 1, tables=store.tables).get_action(session, "action")
-            is None
-        )
-
-
-async def test_same_business_action_has_one_original_intent_across_work_kinds(roller_store):
-    store = roller_store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id="cycle",
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
-        )
-        for work in ["FEED", "RACK_CYCLE", "DRAIN"]:
-            action = await store.repo.register_rack_action(
-                session,
-                cycle_id="cycle",
-                kind="CTU02",
-                source_ref="service-A-to-B",
-                action_id=work,
-                client_request_id=work,
-                transport_task_id=work,
-                operation_id=work,
-                target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-                target_face="B",
-                caller_workline_id="1",
-            )
-            assert action["client_request_id"] == "FEED"
-        assert len((await session.execute(select(store.tables["rack_action"]))).all()) == 1
-
-
-async def test_business_progress_and_outbox_roll_back_together(roller_transport):
-    from app.businesses._components.bin_roller.ports import RollerWorkRef
-    from app.businesses._components.bin_roller.rack_flow import apply_rack_result
-    from app.businesses._components.bin_roller.repository import RollerRepository
+async def test_original_owner_and_request_identity_survive_restart(roller_lifecycle):
+    from app.businesses._components.rack_dispatch.service import RackDispatch
     from app.models import ReliableMessage, TransportTask
 
-    rig, cycle_id = roller_transport, str(uuid7())
-    store = rig.store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id=cycle_id,
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
-        )
-        original = await rig.create_action(
-            session, cycle_id=cycle_id, kind="CTU01", source_ref="source", target_face="A"
-        )
-    work = RollerWorkRef("RACK_CYCLE", cycle_id)
-    await rig.callback(original)
-    async with store.factory() as session:
-        original_task = await session.scalar(
-            select(TransportTask).where(
-                TransportTask.transport_task_id == original["transport_task_id"]
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    original = (await flow.all_rows("rack_action"))[0]
+    job_id = original["cycle_id"]
+    async with flow.factory.begin() as session:
+        dispatch = RackDispatch("first", flow.roller.capabilities)
+        job = await dispatch.progress(session, job_id=job_id)
+        action = job.actions[0]
+        assert await dispatch.register(session, job.origin) == job_id
+        assert (
+            await dispatch.prepare(
+                session,
+                job_id=job_id,
+                kind="ENTER",
+                source_ref=action.source_ref,
+                face=action.target_face,
             )
+            == action.id
         )
-        original_frozen = dict(original_task.frozen)
-        original_raw = await session.scalar(
+        retained = (await dispatch.progress(session, job_id=job_id)).actions
+        assert retained == (action,)
+        assert (
+            await RackDispatch("second", flow.roller.capabilities).progress(session, job_id=job_id)
+            is None
+        )
+        original_wire = await session.scalar(
             select(ReliableMessage.request_raw).where(
-                ReliableMessage.operation_id == original["operation_id"]
+                ReliableMessage.operation_id == action.submit_operation_id
             )
+        )
+        frozen = await session.scalar(
+            select(TransportTask.frozen).where(
+                TransportTask.transport_task_id == action.transport_task_id
+            )
+        )
+        assert frozen["rack_id"] == "R1" and frozen["target_face"] == "A"
+    await flow.advance("RACK_CYCLE", job_id)
+    async with flow.factory() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(
+                ReliableMessage.operation_id == action.submit_operation_id
+            )
+        )
+        assert (
+            message.business_key == action.transport_task_id
+            and message.request_raw == original_wire
         )
 
-    async def advance_original(session):
-        repository = RollerRepository("first", 1, tables=store.tables)
-        actions = store.tables["rack_action"]
-        entry = (
-            (
-                await session.execute(
-                    select(actions).where(
-                        actions.c.owner_domain == "first",
-                        actions.c.work_line_id == 1,
-                        actions.c.cycle_id == work.record_id,
-                        actions.c.kind == "CTU01",
-                    )
-                )
-            )
-            .mappings()
-            .one()
-        )
-        applied = await apply_rack_result(
-            session,
-            action_id=entry["id"],
-            result=await rig.read_result(session, entry),
-            repository=repository,
-        )
-        successor = await rig.create_action(
-            session,
-            cycle_id=work.record_id,
-            kind="CTU02",
-            source_ref=entry["id"] + ":A-to-B",
-            target_face="B",
-        )
-        return applied, successor
 
-    with pytest.raises(RuntimeError, match="rollback after successor"):
-        async with store.factory.begin() as session:
-            if session.get_bind().dialect.name == "postgresql":
-                await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
-            applied, successor = await advance_original(session)
-            assert applied.action_changed
-            consumed = await store.repo.get_action(session, original["id"])
-            assert consumed["consumed_revision"] == 1 and not consumed["pending"]
-            assert successor["target_face"] == "B" and successor["transport_task_id"]
-            assert (
-                len(
-                    (
-                        await session.execute(
-                            select(ReliableMessage).where(ReliableMessage.target == rig.target)
-                        )
-                    ).all()
-                )
-                == 2
-            )
-            raise RuntimeError("rollback after successor")
+async def test_applied_entry_and_prepared_rotation_share_outer_transaction(roller_lifecycle):
+    from app.businesses._components.bin_roller.ports import RollerWorkRef
+    from app.models import ReliableMessage, TransportTask
 
-    async with store.factory() as session:
-        retained = await store.repo.get_action(session, original["id"])
-        assert dict(retained) == dict(original)
-        assert (await store.repo.get_cycle(session, work.record_id))["status"] == "ACTIVE"
-        assert (await rig.read_result(session, retained)).outcome_revision == 1
-        task = await session.scalar(
-            select(TransportTask).where(
-                TransportTask.transport_task_id == retained["transport_task_id"]
-            )
-        )
-        assert task.frozen == original_frozen and task.owner_domain == "first"
+    flow = roller_lifecycle
+    first, job_id = await flow.ready_supply(count=1)
+    await flow.demand(face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    with pytest.raises(RuntimeError, match="abort"):
+        async with flow.factory.begin() as session:
+            await flow.roller.advance(session, RollerWorkRef("FEED", first))
+            job = await flow.roller.rack_dispatch.progress(session, job_id=job_id)
+            assert len(job.actions) == 2
+            rolled_back = job.actions[-1]
+            assert rolled_back.kind == "ROTATE"
+            raise RuntimeError("abort")
+    async with flow.factory() as session:
         assert (
             await session.scalar(
-                select(ReliableMessage.request_raw).where(
-                    ReliableMessage.operation_id == retained["operation_id"]
+                select(TransportTask).where(
+                    TransportTask.transport_task_id == rolled_back.transport_task_id
                 )
             )
-            == original_raw
+            is None
         )
-        assert len((await session.execute(select(store.tables["rack_action"]))).all()) == 1
         assert (
-            len(
-                (
-                    await session.execute(
-                        select(ReliableMessage).where(ReliableMessage.target == rig.target)
-                    )
-                ).all()
-            )
-            == 1
-        )
-
-    for attempt in range(2):
-        async with store.factory.begin() as session:
-            if session.get_bind().dialect.name == "postgresql":
-                await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
-            applied, recovered = await advance_original(session)
-            assert applied.action_changed is (attempt == 0)
-            wire = await session.scalar(
-                select(ReliableMessage.request_raw).where(
-                    ReliableMessage.operation_id == recovered["operation_id"]
+            await session.scalar(
+                select(ReliableMessage).where(
+                    ReliableMessage.operation_id == rolled_back.submit_operation_id
                 )
             )
-            if attempt == 0:
-                committed = dict(recovered)
-                committed_wire = wire
-            else:
-                assert dict(recovered) == committed
-                assert wire == committed_wire
-    async with store.factory() as session:
-        progress = await store.repo.get_action(session, original["id"])
-        assert progress["consumed_revision"] == 1 and not progress["pending"]
-        assert progress["client_request_id"] == original["client_request_id"]
-        assert progress["transport_task_id"] == original["transport_task_id"]
-        assert progress["operation_id"] == original["operation_id"]
-        assert len((await session.execute(select(store.tables["rack_action"]))).all()) == 2
-        messages = list(
-            await session.scalars(
-                select(ReliableMessage).where(ReliableMessage.target == rig.target)
+            is None
+        )
+        assert len((await flow.roller.rack_dispatch.progress(session, job_id=job_id)).actions) == 1
+    await flow.advance("FEED", first)
+    await flow.advance("RACK_CYCLE", job_id)
+    actions = await flow.all_rows("rack_action")
+    assert [a["kind"] for a in actions] == ["CTU01", "CTU02"]
+    async with flow.factory() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(
+                ReliableMessage.operation_id == actions[-1]["operation_id"]
             )
         )
-        assert len(messages) == 2
-        successor_message = next(
-            row for row in messages if row.operation_id == committed["operation_id"]
-        )
-        successor_task = await session.scalar(
-            select(TransportTask).where(
-                TransportTask.transport_task_id == committed["transport_task_id"]
-            )
-        )
-        assert successor_task.kind == "RACK_ROTATE" and successor_task.owner_domain == "first"
-        assert successor_task.workline_id == "1" and successor_task.station_id is None
-        assert successor_task.client_request_id == committed["client_request_id"]
-        assert successor_task.frozen["rack_id"] == "R1"
-        assert successor_task.frozen["source"] == {
-            "kind": "RACK_POSITION",
-            "location_code": "CTU01",
-        }
-        assert successor_task.frozen["target"] == {
-            "kind": "RACK_POSITION",
-            "location_code": "CTU01",
-        }
-        assert (
-            successor_task.frozen["target_face"] == "B"
-            and successor_task.frozen["rcs_template_id"] == "CK04"
-        )
-        assert successor_message.business_key == committed["transport_task_id"]
-        assert (
-            next(
-                row for row in messages if row.operation_id == original["operation_id"]
-            ).request_raw
-            == original_raw
-        )
+        assert message.business_key == actions[-1]["transport_task_id"]
 
 
-async def test_cycle_has_one_entry_and_departure_but_distinct_face_transitions(roller_store):
-    store = roller_store
-    async with store.factory.begin() as session:
-        await store.repo.create_cycle(
-            session,
-            cycle_id="cycle",
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref="source",
-        )
-        for kind in ["CTU01", "CTU03"]:
-            await store.repo.register_rack_action(
-                session,
-                cycle_id="cycle",
-                kind=kind,
-                source_ref="original",
-                action_id=kind,
-                client_request_id=kind,
-                transport_task_id=kind,
-                operation_id=kind,
-                target={"kind": "RACK_POSITION", "location_code": "P"},
-                caller_workline_id="1",
-            )
-    for kind in ["CTU01", "CTU03"]:
-        with pytest.raises(ValueError, match="original business input"):
-            async with store.factory.begin() as session:
-                await store.repo.register_rack_action(
+async def test_distinct_business_origins_can_request_same_rack(roller_store):
+    from app.businesses._components.rack_dispatch.contracts import JobOrigin
+    from app.businesses._components.rack_dispatch.service import RackDispatch
+
+    dispatch = RackDispatch("first", None)
+    async with roller_store.factory.begin() as session:
+        for source in ("source-A", "source-B"):
+            job_id = str(uuid7())
+            assert (
+                await dispatch.register(
                     session,
-                    cycle_id="cycle",
-                    kind=kind,
-                    source_ref="replacement",
-                    action_id=kind + "-new",
-                    client_request_id=kind + "-new",
-                    transport_task_id=kind + "-new",
-                    operation_id=kind + "-new",
-                    target={"kind": "RACK_POSITION", "location_code": "P"},
-                    caller_workline_id="1",
+                    JobOrigin(
+                        "ROLLER_ORDINARY",
+                        source,
+                        1,
+                        "R1",
+                        "T1",
+                        None,
+                        None,
+                        None,
+                        None,
+                        job_id,
+                        None,
+                    ),
                 )
-    async with store.factory.begin() as session:
-        for transition in ["service-A-to-B", "service-B-to-A"]:
-            await store.repo.register_rack_action(
-                session,
-                cycle_id="cycle",
-                kind="CTU02",
-                source_ref=transition,
-                action_id=transition,
-                client_request_id=transition,
-                transport_task_id=transition,
-                operation_id=transition,
-                target={"kind": "RACK_POSITION", "location_code": "P"},
-                caller_workline_id="1",
+                == job_id
             )
-        assert len((await session.execute(select(store.tables["rack_action"]))).all()) == 4
+        jobs = await dispatch.jobs(session, work_line_id=1, source_kinds=("ROLLER_ORDINARY",))
+        assert {j.origin.source_ref for j in jobs} == {"source-A", "source-B"}
 
 
-async def test_rack_cycles_are_business_identity_not_physical_occupancy(roller_store):
-    store = roller_store
-    async with store.factory.begin() as session:
-        for cycle, source in [("first", "source-1"), ("second", "source-2")]:
-            await store.repo.create_cycle(
-                session,
-                cycle_id=cycle,
-                rack_id="R1",
-                purpose="ORDINARY",
-                task_id="T1",
-                source_ref=source,
-            )
-        assert len((await session.execute(select(store.tables["rack_cycle"]))).all()) == 2
+async def test_three_face_rounds_reuse_only_their_original_movements(roller_lifecycle):
+    flow = roller_lifecycle
+    first, job_id = await flow.ready_supply(count=1)
+    second = await flow.demand(face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", first)
+    first_rotation = (await flow.all_rows("rack_action"))[-1]
+    await flow.rack_result(first_rotation)
+    await flow.advance("FEED", second)
+    third = await flow.demand(face="A", revision=3)
+    feed = (await flow.all_rows("feed"))[-1]
+    await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+    await flow.advance("FEED", second)
+    second_rotation = (await flow.all_rows("rack_action"))[-1]
+    await flow.rack_result(second_rotation)
+    await flow.advance("FEED", third)
+    feed = (await flow.all_rows("feed"))[-1]
+    await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+    await flow.advance("FEED", third)
+    await flow.finish_departure(job_id)
+    await flow.advance("RACK_CYCLE", job_id)
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=job_id)
+        assert [(a.kind, a.template, a.target_face) for a in job.actions if a.template] == [
+            ("ENTER", "CTU01", "A"),
+            ("ROTATE", "CTU02", "B"),
+            ("ROTATE", "CTU02", "A"),
+            ("DEPART", "CTU03", None),
+        ]
+        assert len({a.transport_task_id for a in job.actions if a.template}) == 4

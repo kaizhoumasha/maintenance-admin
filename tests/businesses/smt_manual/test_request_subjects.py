@@ -36,22 +36,41 @@ async def test_admission_pointer_keeps_original_arrival(manual_bins):
     assert await flow.rows("scan2_release", component=True) == []
 
 
-async def test_departure_pointer_keeps_original_rack(manual_racks):
+async def test_report_pointer_keeps_original_rack(manual_racks):
     flow = manual_racks
     await flow.ready()
     await flow.plan()
     await flow.reconcile()
     await flow.rack_outcome()
-    await flow.deliver(flow.notification())
-    assert await flow.rack_advance() == "WAITING_FOR_DEPARTURE"
-    original = (await flow.rows("rack_departure"))[0]
+    await flow.rack_advance()
+    await flow.rack_response("rack_report", {}, code="RECORDED")
     requests = flow.tables["request"]
     async with flow.factory.begin() as session:
         await session.execute(
             update(requests)
-            .where(requests.c.kind == "RACK_DEPARTURE")
+            .where(requests.c.kind == "RACK_ARRIVAL_REPORT")
             .values(rack_work_id="ANOTHER")
         )
-    assert await flow.rack_advance() == "WAITING_FOR_DEPARTURE"
-    current = await flow.rows("rack_departure")
-    assert len(current) == 1 and current[0]["operation_id"] == original["operation_id"]
+    assert await flow.consume_report() == "OWNER_CONFLICT"
+    assert (await flow.rows("rack_report"))[0]["state"] == "REQUESTED"
+
+
+async def test_task_confirmation_requires_consumed_original_release_permission(
+    manual_bins, manual_completion_tools
+):
+    flow = manual_bins
+    await flow.ready()
+    await flow.bin_plan(cancel=True)
+    await flow.scan()
+    (work,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="NO_WORK"))
+    assert await flow.advance("bin", work["arrival_id"]) == "RELEASED"
+    async with flow.factory.begin() as session:
+        requests = flow.tables["request"]
+        await session.execute(
+            requests.update()
+            .where(requests.c.operation_id == work["admission_operation_id"])
+            .values(decision_code="WORK_REQUIRED")
+        )
+    await flow.confirm()
+    assert not await flow.confirmations()

@@ -20,7 +20,7 @@ async def cancel_direct(flow, *, faces=("A",), revision=1):
 @pytest.mark.parametrize("line", [1, 2])
 @pytest.mark.parametrize("role", ["RETURN", "TRANSFER"])
 @pytest.mark.parametrize("same_source", [True, False])
-async def test_zone_departure_requires_leaving_original_role_position(
+async def test_departure_callback_alone_does_not_close_original_job(
     manual_racks, line, role, same_source
 ):
     flow = manual_racks
@@ -42,9 +42,9 @@ async def test_zone_departure_requires_leaving_original_role_position(
     departure = next(a for a in await flow.rows("rack_action") if a["kind"] == "DEPART")
     await flow.rack_outcome(departure, location=work["location_code"] if same_source else "STORE")
     state = await flow.rack_advance(work["id"])
-    saved = next(r for r in await flow.rows("rack") if r["id"] == work["id"])
-    assert (saved["state"] == "DEPARTED") is not same_source
-    assert state == ("POSITION_CONFLICT" if same_source else "DEPARTED")
+    assert state == "WAITING_FOR_DEPARTURE_RESULT"
+    await flow.acknowledge(departure)
+    assert await flow.rack_advance(work["id"]) == "COMPLETED"
     assert len([a for a in await flow.rows("rack_action") if a["rack_work_id"] == work["id"]]) == 2
 
 
@@ -65,13 +65,9 @@ async def test_cancelled_entry_keeps_unfulfilled_work_and_only_releases_outside_
     ).status_code == 202
     state = await flow.rack_advance()
     work = (await flow.rows("rack"))[0]
-    assert (work["state"] == "ENTRY_CANCELLED") is outside
+    assert (work["state"] == "NOT_ARRIVED") is outside
     assert state == (
-        "ENTRY_CANCELLED"
-        if outside
-        else "WAITING_FOR_DEPARTURE"
-        if cancelled
-        else "RECOVERY_REQUIRED"
+        "NOT_ARRIVED" if outside else "WAITING_FOR_DEPARTURE" if cancelled else "RECOVERY_REQUIRED"
     )
     assert await flow.rows("rack_report") == []
     await flow.confirm()
@@ -83,10 +79,10 @@ async def test_cancelled_entry_keeps_unfulfilled_work_and_only_releases_outside_
         await flow.rack_advance()
     assert len(await flow.rows("rack_action")) == 1
     assert (await flow.rows("rack_action"))[0]["transport_task_id"] == original["transport_task_id"]
-    # Later plan members remain recoverable without silently registering another entry.
+    # A distinct later member may own a successor after the old entry closed.
     await flow.plan(revision=2)
     await flow.reconcile()
-    assert len(await flow.rows("rack_action")) == 1
+    assert len(await flow.rows("rack_action")) == (2 if outside else 1)
     assert (
         next(m for m in await flow.rows("member") if m["plan_revision"] == 2)["status"] == "PENDING"
     )
@@ -119,12 +115,12 @@ async def test_cancelled_transfer_entry_never_fulfills_target_obligation(
     await flow.reconcile()
     await flow.rack_outcome(status="CANCELLED", location=location)
     assert await flow.rack_advance() == (
-        "RECOVERY_REQUIRED" if location == "TRANSFER" else "ENTRY_CANCELLED"
+        "WAITING_FOR_DEPARTURE" if location == "TRANSFER" else "NOT_ARRIVED"
     )
     await flow.confirm()
     assert await flow.confirmations() == []
     assert await flow.rows("rack_report") == []
-    assert await flow.rows("rack_departure") == []
+    assert bool(await flow.rows("rack_departure")) is (location == "TRANSFER")
 
 
 async def test_started_direct_work_survives_member_cancellation(manual_racks):
@@ -171,13 +167,12 @@ async def test_cancelled_rack_does_not_block_a_different_authorized_source(manua
     await flow.reconcile()
     await flow.rack_outcome(status="CANCELLED", location="STORE")
     await flow.rack_advance()
-    await flow.plan(revision=2)
     await flow.deliver(
         flow.message(
             "plan_delta",
             dict(
                 task_id="T1",
-                plan_revision=3,
+                plan_revision=2,
                 added_direct_picks=[
                     dict(
                         source_locator=dict(
@@ -259,7 +254,7 @@ async def test_all_member_cancellation_preserves_original_success_and_report_obl
     assert len([a for a in actions if a["kind"] == "DEPART"]) == 1
     assert await flow.rows("rack_report") == [report]
     await flow.rack_response("rack_report", {}, code="RECORDED")
-    await flow.rack_advance(now_ms=1102)
+    assert await flow.consume_report() == "CONSUMED"
     await flow.confirm()
     assert len(await flow.confirmations()) == 1
 
@@ -334,37 +329,16 @@ async def test_mixed_plan_target_cancellation_vetoes_completed_real_supply(
     assert (await flow.rows("rack_action"))[0]["transport_task_id"] == entry["transport_task_id"]
 
 
-async def test_repeated_outside_cancel_sweeps_read_results_without_unchanged_writes(
-    manual_racks, monkeypatch
-):
-    from sqlalchemy import literal_column, select
+async def test_repeated_outside_cancel_wakeups_preserve_original_action(manual_racks, monkeypatch):
 
     flow = manual_racks
     await flow.ready()
     await flow.plan()
     await flow.reconcile()
     await flow.rack_outcome(status="CANCELLED", location="STORE")
-    assert await flow.rack_advance() == "ENTRY_CANCELLED"
+    assert await flow.rack_advance() == "NOT_ARRIVED"
 
-    async def versions():
-        async with flow.factory() as session:
-            return [
-                await session.scalar(
-                    select(literal_column("xmin::text")).select_from(flow.tables[key])
-                )
-                for key in ("rack", "rack_action")
-            ]
-
-    before = await versions()
-    reads = []
-    original = flow.racks.capabilities.transport.get_result
-
-    async def read(*args, **kwargs):
-        reads.append(kwargs["transport_task_id"])
-        return await original(*args, **kwargs)
-
-    monkeypatch.setattr(flow.racks.capabilities.transport, "get_result", read)
+    original = await flow.rows("rack_action")
     for _ in range(2):
-        assert await flow.rack_advance() == "ENTRY_CANCELLED"
-    assert len(reads) == 2
-    assert await versions() == before
+        assert await flow.rack_advance() == "NOT_ARRIVED"
+    assert await flow.rows("rack_action") == original

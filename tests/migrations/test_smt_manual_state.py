@@ -14,7 +14,7 @@ async def test_manual_state_matches_models_and_preserves_platform_data(state_mig
     store = state_migration
     original_schema = await store.schema_snapshot("smt_manual_")
     assert len(original_schema) == 13
-    await store.migrate("upgrade", "smtmanualcompact")
+    await store.migrate("upgrade", "head")
     async with store.engine.connect() as connection:
 
         def check(sync):

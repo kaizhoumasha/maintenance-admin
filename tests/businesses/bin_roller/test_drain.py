@@ -125,7 +125,13 @@ async def test_original_supply_request_survives_head_change_and_restart(roller_l
             .values(removed=True)
         )
     old = flow.roller
-    flow.roller = BinRoller(old.context, old.capabilities, old.production, tables=old.tables)
+    flow.roller = BinRoller(
+        old.context,
+        old.capabilities,
+        old.production,
+        rack_dispatch=old.rack_dispatch,
+        tables=old.tables,
+    )
     await flow.advance("SCAN", scans[1]["id"])
     current = (await flow.all_rows("drain"))[0]
     assert len(await flow.all_rows("drain")) == 1
@@ -333,7 +339,6 @@ async def test_completed_or_removed_round_is_not_pending_scan_work(roller_lifecy
 
 
 async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_lifecycle):
-    from app.core.identifiers import uuid7
 
     flow = roller_lifecycle
     flow.successor = "NONE"
@@ -356,16 +361,20 @@ async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_
     first = (await flow.all_rows("rack_cycle"))[0]
     # An already selected original candidate keeps its independent arrival obligation.
     async with flow.factory.begin() as session:
-        second = await flow.roller.repository(1).create_cycle(
+        from app.businesses._components.bin_roller.rack_flow import register_job
+
+        second_id = await register_job(
+            flow.roller,
             session,
-            cycle_id=str(uuid7()),
-            rack_id="D2",
-            purpose="DRAIN",
-            task_id=None,
-            source_ref=drain["id"],
-            resources=first["resources"],
+            flow.roller.repository(1),
+            "ROLLER_DRAIN",
+            drain["id"],
+            "D2",
+            "A",
+            None,
+            first["resources"],
         )
-    await flow.advance("RACK_CYCLE", second["id"])
+    await flow.advance("RACK_CYCLE", second_id)
     entries = await flow.all_rows("rack_action")
     await flow.rack_result(entries[0])
     await flow.advance("RACK_CYCLE", first["id"])
@@ -374,8 +383,8 @@ async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_
     await flow.finish_departure(first["id"])
     assert (await flow.all_rows("drain"))[0]["status"] == "READY"
     await flow.rack_result(entries[1])
-    await flow.advance("RACK_CYCLE", second["id"])
-    await flow.finish_departure(second["id"])
+    await flow.advance("RACK_CYCLE", second_id)
+    await flow.finish_departure(second_id)
     assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
     assert [a["kind"] for a in await flow.all_rows("rack_action")].count("CTU02") == 0
 

@@ -2,12 +2,9 @@ import asyncio
 import os
 import subprocess
 import sys
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.database import create_database_engine
 from app.models import Permission
@@ -21,23 +18,6 @@ async def run_alembic(url: str, *arguments: str) -> subprocess.CompletedProcess[
         capture_output=True,
         text=True,
     )
-
-
-@pytest.fixture
-async def schema_database(pg_url):
-    database = "schema_test_" + uuid4().hex
-    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
-    async with admin.connect() as connection:
-        await connection.execute(text(f'CREATE DATABASE "{database}"'))
-    url = make_url(pg_url).set(database=database).render_as_string(hide_password=False)
-    engine = create_async_engine(url)
-    try:
-        yield url, engine
-    finally:
-        await engine.dispose()
-        async with admin.connect() as connection:
-            await connection.execute(text(f'DROP DATABASE "{database}" WITH (FORCE)'))
-        await admin.dispose()
 
 
 async def legacy_database(url, engine):
@@ -115,8 +95,11 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
         )
         assert await connection.scalar(text("SELECT payload FROM public.other_system")) == "keep me"
         assert await connection.scalar(text("SELECT to_regclass('public.alembic_version')")) is None
-        assert await connection.scalar(
-            text("SELECT version_num FROM enterprise_backend.alembic_version")
+        assert (
+            await connection.scalar(
+                text("SELECT version_num FROM enterprise_backend.alembic_version")
+            )
+            == "sharedrackdispatch"
         )
 
 

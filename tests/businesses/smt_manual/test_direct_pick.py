@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from sqlalchemy import update
 
 
@@ -75,3 +76,89 @@ async def test_rack_callback_contracts_remain_operation_specific(manual_racks):
         assert (
             await flow.deliver(flow.notification(task_id="INBOUND", face=face))
         ).status_code == 422
+
+
+async def test_mixed_face_members_reuse_only_their_own_preparation(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    (entry,) = await flow.rows("rack_action")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    await flow.plan(revision=2, faces=("B", "A"))
+    await flow.host.advance("TASK", "T1")
+    later = {m["rack_face"]: m for m in await flow.rows("member") if m["plan_revision"] == 2}
+    assert later["A"]["preparation_action_id"] == entry["id"]
+    assert later["B"]["preparation_action_id"] is None
+    await flow.deliver(flow.notification(face="A", revision=1))
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WORKING"
+    await flow.deliver(flow.notification(face="A", revision=2))
+    for _ in range(2):
+        assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WAITING_FOR_ROTATION"
+    enter, rotate = await flow.rows("rack_action")
+    assert (enter["id"], rotate["kind"], rotate["target_face"]) == (entry["id"], "ROTATE", "B")
+    later = next(m for m in await flow.rows("member") if m["id"] == later["B"]["id"])
+    assert later["preparation_action_id"] == rotate["id"]
+
+
+@pytest.mark.parametrize("binding", ["missing", "incompatible"])
+async def test_orphaned_same_rack_member_retains_return(manual_host, binding):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(faces=("A", "B"), target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    jobs = await flow.rows("rack")
+    job = next(j for j in jobs if j["role"] == "RETURN")
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.rack_outcome(entry, face="A")
+    await flow.deliver(flow.notification(face="A"))
+    async with flow.factory.begin() as session:
+        t = flow.tables["member"]
+        await session.execute(
+            t.update()
+            .where(t.c.rack_face == "B")
+            .values(
+                rack_work_id=(
+                    "missing-job"
+                    if binding == "missing"
+                    else next(j["id"] for j in jobs if j["role"] == "TRANSFER")
+                )
+            )
+        )
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    assert not await flow.rows("rack_departure")
+
+
+async def test_prior_unfulfilled_member_stays_with_original_not_arrived_job(manual_racks):
+    flow = manual_racks
+    await flow.ready()
+    await flow.plan()
+    await flow.reconcile()
+    (prior,) = await flow.rows("rack")
+    await flow.rack_outcome(status="CANCELLED", location="STORE")
+    assert await flow.rack_advance(prior["id"]) == "NOT_ARRIVED"
+    await flow.plan(revision=2)
+    await flow.reconcile()
+    later = next(j for j in await flow.rows("rack") if j["id"] != prior["id"])
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == later["id"])
+    await flow.rack_outcome(entry, face="A")
+    await flow.deliver(flow.notification(face="A", revision=2))
+    assert await flow.rack_advance(later["id"]) == "WAITING_FOR_DEPARTURE"
+    member = next(m for m in await flow.rows("member") if m["plan_revision"] == 1)
+    assert (member["rack_work_id"], member["status"]) == (prior["id"], "PENDING")
+
+
+async def test_missing_original_trigger_cannot_capture_later_grant(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    member = flow.tables["member"]
+    async with flow.factory.begin() as db:
+        await db.execute(member.update().values(preparation_action_id=None))
+    await flow.plan(revision=2)
+    await flow.host.advance("TASK", "T1")
+    later = next(m for m in await flow.rows("member") if m["plan_revision"] == 2)
+    assert later["rack_work_id"] is None

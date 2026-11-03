@@ -24,7 +24,9 @@ host = runtime.services['smt_manual']
 assert host.first_plan_wait_ms == 4321
 assert host.repository.tables is TABLES
 assert host.components['bin_roller'].tables is roller_tables
-assert set(host.components) == {'sorting_task', 'bin_roller'}
+assert set(host.components) == {'sorting_task', 'bin_roller', 'rack_dispatch'}
+assert host.components['bin_roller'].rack_dispatch is host.components['rack_dispatch']
+assert catalog.contract_consumers(('wms_request','rack.departure_decide@v1',None)) == {'smt_manual'}
 assert host.components['sorting_task'].production is host
 assert host.components['bin_roller'].context.domain == 'smt_manual'
 assert host.capabilities.wms.owner_domain == 'smt_manual'

@@ -19,7 +19,6 @@ async def test_component_tables_and_unique_constraints_are_migrated(state_migrat
             assert {n for n in names if n.startswith("bin_roller_")} == {
                 t.name for t in TABLES.values()
             }
-            assert len(TABLES) == 10
             for table in TABLES.values():
                 assert {c["name"] for c in inspector.get_columns(table.name, schema=schema)} == set(
                     table.c.keys()

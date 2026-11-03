@@ -46,6 +46,30 @@ async def test_final_face_done_prepares_departure_without_fake_feed(roller_lifec
         current_location=dict(type="RACK_POSITION", location_code="RACK-WORK"),
         current_face="A",
     )
+    import json
+
+    from app.models import ReliableMessage
+
+    async with flow.factory() as session:
+        message = await session.get(ReliableMessage, departure["message_id"])
+        assert (message.operation, message.operation_id, message.business_key) == (
+            "rack.departure_decide@v1",
+            departure["operation_id"],
+            "business:first",
+        )
+        timestamp = json.loads(message.request_raw)["timestamp"]
+        assert (
+            message.request_raw
+            == json.dumps(
+                dict(
+                    operation_id=departure["operation_id"],
+                    operation="rack.departure_decide@v1",
+                    timestamp=timestamp,
+                    data=departure["request"],
+                ),
+                separators=(",", ":"),
+            ).encode()
+        )
     await flow.decision(
         "departure",
         departure["id"],
@@ -312,7 +336,9 @@ async def test_old_cycle_does_not_use_new_tasks_arrival_for_departure(roller_lif
     assert not [d for d in await flow.all_rows("departure") if d["cycle_id"] == cycle]
 
 
-async def test_departure_wait_keeps_due_point_then_registers_one_recheck(roller_lifecycle):
+async def test_departure_wait_keeps_due_point_then_registers_one_recheck(
+    roller_lifecycle, monkeypatch
+):
     flow = roller_lifecycle
     demand, cycle = await flow.ready_supply(count=1)
     await flow.feed_success((await flow.all_rows("feed_segment"))[0])
@@ -323,18 +349,14 @@ async def test_departure_wait_keeps_due_point_then_registers_one_recheck(roller_
     due = (await flow.all_rows("departure"))[0]["due_at"]
     await flow.advance("RACK_CYCLE", cycle)
     assert (await flow.all_rows("departure"))[0]["due_at"] == due
-    async with flow.factory.begin() as session:
-        table = flow.store.tables["decision"]
-        await session.execute(
-            table.update()
-            .where(table.c.kind == "DEPARTURE", table.c.id == original["id"])
-            .values(due_at=0)
-        )
+    monkeypatch.setattr(
+        "app.businesses._components.bin_roller.rack_flow.time", lambda: (due + 1) / 1000
+    )
     await flow.advance("RACK_CYCLE", cycle)
     await flow.advance("FEED", demand)
     requests = await flow.all_rows("departure")
     assert len(requests) == 2
-    assert requests[1]["source_ref"] == original["id"]
+    assert requests[1]["previous_action_id"] == original["id"]
     assert len(await flow.all_rows("rack_action")) == 1
 
 
@@ -430,7 +452,8 @@ async def test_newer_mismatch_blocks_continuation_after_older_success(
         for a in originals
     ]
     assert await flow.all_rows("feed") == feeds
-    assert actions[-1]["status"] == "SUCCEEDED" and not actions[-1]["pending"]
+    assert actions[-1]["outcome"]["status"] == "SUCCEEDED"
+    assert actions[-1]["phase"] == "REVIEW"
     assert (actions[-1]["consumed_revision"], actions[-1]["position_revision"]) == (2, 3)
     current = [p for p in await flow.all_rows("position_fact") if p["is_current"]]
     assert [
@@ -438,3 +461,345 @@ async def test_newer_mismatch_blocks_continuation_after_older_success(
     ] == [(location, face, action["id"], 3)]
     assert (await flow.all_rows("rack_cycle"))[0]["pending"]
     assert progress == "WAITING_FOR_ORIGINAL_POSITION"
+
+
+async def test_departure_result_without_original_submit_acceptance_keeps_capacity(roller_lifecycle):
+    flow = roller_lifecycle
+    demand, cycle = await flow.ready_supply(count=1)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", demand)
+    decision = (await flow.all_rows("departure"))[0]
+    await flow.decision(
+        "departure",
+        decision["id"],
+        dict(
+            result="READY", rack_destination=dict(type="RACK_POSITION", location_code="STORAGE-P1")
+        ),
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    departure = (await flow.all_rows("rack_action"))[-1]
+    await flow.rack_result(departure)
+    await flow.advance("RACK_CYCLE", cycle)
+    assert (await flow.all_rows("rack_cycle"))[0]["pending"]
+
+
+async def test_face_end_waits_for_original_scan_round_before_handoff(roller_lifecycle):
+    flow = roller_lifecycle
+    demand, cycle = await flow.ready_supply(count=1)
+    await flow.scan("SCAN3", "A000000008-B", timestamp=10)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", demand)
+    assert not await flow.all_rows("departure")
+    await flow.scan("SCAN4", "A000000008-B", timestamp=11)
+    arrival = next(r for r in await flow.all_rows("scan_arrival") if r["point"] == "SCAN4")
+    await flow.result(arrival["command_code"], "SCAN4")
+    await flow.advance("RACK_CYCLE", cycle)
+    assert len(await flow.all_rows("return_batch")) == 1
+    await flow.complete_return(no_batch=True)
+    assert len(await flow.all_rows("departure")) == 1
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_submit_ack_alone_never_supplies_another_face(roller_lifecycle, rotate):
+    flow = roller_lifecycle
+    if rotate:
+        first, _ = await flow.ready_supply(count=1)
+        await flow.demand(face="B", revision=2)
+        await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+        await flow.advance("FEED", first)
+    else:
+        first = await flow.demand()
+        await flow.advance("FEED", first)
+    action = (await flow.all_rows("rack_action"))[-1]
+    assert action["kind"] == ("CTU02" if rotate else "CTU01")
+    existing = await flow.all_rows("feed")
+    await flow.accepted(action)
+    await flow.advance("RACK_CYCLE", action["cycle_id"])
+    assert await flow.all_rows("feed") == existing
+    await flow.rack_result(action)
+    await flow.advance("RACK_CYCLE", action["cycle_id"])
+    assert len(await flow.all_rows("feed")) == len(existing) + 1
+
+
+@pytest.mark.parametrize("at_work_point", [False, True])
+async def test_withdrawn_failed_entry_uses_observed_location_without_starting_feed(
+    roller_lifecycle, at_work_point
+):
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[0]
+    async with flow.factory.begin() as session:
+        await flow.roller.apply_supply_change(
+            session,
+            SupplyChange(1, flow.current_task, "cancel-face", (), (SourceFaceRef(1, "R1", "A"),)),
+        )
+    await flow.rack_callback(
+        dict(
+            transport_task_id=entry["transport_task_id"],
+            rack_id="R1",
+            kind="RACK_MOVE",
+            outcome_revision=1,
+            status="FAILED",
+            failure_code="RCS_EXECUTION_FAILED",
+            final_position=dict(
+                kind="RACK_POSITION", location_code="RACK-WORK" if at_work_point else "OTHER"
+            ),
+            arrival_face="A",
+        )
+    )
+    for _ in range(3):
+        await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    assert not await flow.all_rows("feed")
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert job.actions[0].outcome["status"] == "FAILED"
+        assert job.state == ("RELEASING" if at_work_point else "NOT_ARRIVED")
+        assert len([a for a in job.actions if a.kind == "DEPARTURE_DECIDE"]) == int(at_work_point)
+
+
+async def test_missing_original_face_cannot_authorize_departure(roller_lifecycle):
+    flow = roller_lifecycle
+    demand = await flow.demand()
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[0]
+    # The task and another face exist, but cannot stand in for the missing original.
+    await flow.demand(rack="OTHER", revision=2)
+    async with flow.factory.begin() as session:
+        faces = flow.store.tables["face_work"]
+        await session.execute(faces.delete().where(faces.c.demand_id == demand))
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    assert not await flow.all_rows("departure")
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert job.pending and len(job.actions) == 1 and not job.release_requested
+
+
+async def test_original_face_authorization_cannot_be_replaced_on_result(roller_lifecycle):
+    flow = roller_lifecycle
+    first, cycle = await flow.ready_supply(count=1)
+    second = await flow.demand(face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", first)
+    entry, rotation = await flow.all_rows("rack_action")
+    await flow.rack_result(rotation)
+    async with flow.factory.begin() as session:
+        faces = flow.store.tables["face_work"]
+        await session.execute(
+            faces.update()
+            .where(faces.c.demand_id == second)
+            .values(preparation_action_id=entry["id"])
+        )
+    await flow.advance("RACK_CYCLE", cycle)
+    row = next(r for r in await flow.all_rows("face_work") if r["id"] == second)
+    assert row["preparation_action_id"] == entry["id"] and row["feed_id"] is None
+
+
+async def awaiting_allocation(flow, rack):
+    demand = await flow.demand(rack=rack)
+    await flow.advance("FEED", demand)
+    entry = (await flow.all_rows("rack_action"))[-1]
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    feed = (await flow.all_rows("feed"))[-1]
+    return demand, entry, feed
+
+
+@pytest.mark.parametrize("work", ["FEED", "RETURN_BATCH"])
+@pytest.mark.parametrize("invalid", ["replaced", "newer_observation"])
+async def test_new_box_transport_requires_current_original_face(
+    roller_lifecycle, monkeypatch, work, invalid
+):
+    from sqlalchemy import select
+
+    from app.models import TransportTask
+
+    flow = roller_lifecycle
+    demand, entry, feed = await awaiting_allocation(flow, "R1")
+    if work == "RETURN_BATCH":
+        await flow.bins(1)
+        await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+        await flow.advance("FEED", demand)
+        batch = (await flow.all_rows("return_batch"))[0]
+    if invalid == "replaced":
+        await awaiting_allocation(flow, "R2")
+    else:
+        # A recovered newer observation is independent of the lower applied original success.
+        from dataclasses import replace
+
+        port = flow.roller.capabilities.transport
+        original = port.get_result
+
+        async def observed(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            if result.transport_task_id != entry["transport_task_id"]:
+                return result
+            return replace(
+                result,
+                position_observation=dict(
+                    result.outcome,
+                    outcome_revision=2,
+                    final_position=dict(kind="RACK_POSITION", location_code="OTHER"),
+                ),
+            )
+
+        monkeypatch.setattr(port, "get_result", observed)
+    if work == "FEED":
+        await flow.decision(
+            "feed",
+            feed["id"],
+            dict(
+                result="READY",
+                bins=[
+                    dict(
+                        bin_code="A000000001",
+                        source_locator=dict(
+                            type="RACK_BIN_SLOT", rack_id="R1", rack_face="A", slot_id="1"
+                        ),
+                    )
+                ],
+            ),
+        )
+        record = demand
+    else:
+        await flow.decision(
+            "return_batch",
+            batch["id"],
+            dict(
+                result="READY",
+                moves=[
+                    dict(
+                        sequence_no=1,
+                        bin_code=batch["members"][0]["bin_code"],
+                        target=dict(type="RACK_BIN_SLOT", rack_id="R1", rack_face="A", slot_id="1"),
+                    )
+                ],
+            ),
+        )
+        record = batch["id"]
+    await flow.advance(work, record)
+    async with flow.factory() as session:
+        assert not await session.scalar(
+            select(TransportTask.transport_task_id).where(
+                TransportTask.cycle_id == entry["cycle_id"], TransportTask.kind == "BIN_MOVE"
+            )
+        )
+    assert not await flow.all_rows("feed_segment")
+
+
+@pytest.mark.parametrize("has_root", [False, True])
+async def test_superseded_original_position_stays_invalid_when_point_becomes_empty(
+    roller_lifecycle, has_root
+):
+    flow = roller_lifecycle
+    if has_root:
+        first, entry, feed = await awaiting_allocation(flow, "R1")
+        await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+        await flow.advance("FEED", first)
+        root = (await flow.all_rows("departure"))[0]
+    else:
+        first = await flow.demand()
+        await flow.advance("FEED", first)
+        entry = (await flow.all_rows("rack_action"))[0]
+        await flow.rack_result(entry, status="FAILED")
+        await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    second, replacement, new_feed = await awaiting_allocation(flow, "R2")
+    await flow.decision("feed", new_feed["id"], dict(result="RACK_FACE_DONE"))
+    await flow.advance("FEED", second)
+    await flow.finish_departure(replacement["cycle_id"])
+    if has_root:
+        await flow.decision(
+            "departure",
+            root["id"],
+            dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORAGE")),
+        )
+    else:
+        async with flow.factory.begin() as session:
+            await flow.roller.apply_supply_change(
+                session,
+                SupplyChange(1, flow.current_task, "withdraw", (), (SourceFaceRef(1, "R1", "A"),)),
+            )
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    own = [a for a in await flow.all_rows("rack_action") if a["cycle_id"] == entry["cycle_id"]]
+    roots = [a for a in await flow.all_rows("departure") if a["cycle_id"] == entry["cycle_id"]]
+    assert [a["kind"] for a in own] == ["CTU01"] and len(roots) == int(has_root)
+
+
+@pytest.mark.parametrize("association", ["missing", "older_same_face"])
+async def test_ready_face_cannot_grant_box_work_from_missing_or_old_authority(
+    roller_lifecycle, association
+):
+    flow = roller_lifecycle
+    first, job = await flow.ready_supply(count=1)
+    second = await flow.demand(face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FEED", first)
+    await flow.rack_result((await flow.all_rows("rack_action"))[-1])
+    await flow.advance("FEED", second)
+    third = await flow.demand(face="A", revision=3)
+    feed = (await flow.all_rows("feed"))[-1]
+    await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+    await flow.advance("FEED", second)
+    actions = await flow.all_rows("rack_action")
+    assert [a["target_face"] for a in actions] == ["A", "B", "A"]
+    await flow.rack_result(actions[-1])
+    async with flow.factory.begin() as session:
+        table = flow.store.tables["face_work"]
+        await session.execute(
+            table.update()
+            .where(table.c.demand_id == third)
+            .values(
+                service_state="READY",
+                preparation_action_id=actions[0]["id"]
+                if association == "older_same_face"
+                else None,
+            )
+        )
+    await flow.advance("RACK_CYCLE", job)
+    row = next(r for r in await flow.all_rows("face_work") if r["demand_id"] == third)
+    assert row["feed_id"] is None and row["service_state"] == "READY"
+
+
+@pytest.mark.parametrize("work", ["FEED", "RETURN_BATCH"])
+async def test_inflight_box_result_is_consumed_after_rack_replacement(roller_lifecycle, work):
+    from sqlalchemy import select
+
+    from app.models import TransportTask
+
+    flow = roller_lifecycle
+    if work == "FEED":
+        demand, cycle = await flow.ready_supply(count=5)
+        original = (await flow.all_rows("feed_segment"))[0]
+        record = demand
+    else:
+        demand, entry, feed = await awaiting_allocation(flow, "R1")
+        cycle = entry["cycle_id"]
+        await flow.bins(1)
+        await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
+        await flow.advance("FEED", demand)
+        batch = (await flow.all_rows("return_batch"))[0]
+        async with flow.factory.begin() as session:
+            await flow.decide(session, batch["id"])
+        await flow.advance("RETURN_BATCH", batch["id"])
+        original = (await flow.all_rows("return_batch"))[0]
+        record = batch["id"]
+    assert original["transport_task_id"]
+    await awaiting_allocation(flow, "R2")
+    if work == "FEED":
+        await flow.feed_success(original)
+    else:
+        await flow.success(record)
+    await flow.advance(work, record)
+    await flow.advance(work, record)
+    rows = await flow.all_rows("feed_segment" if work == "FEED" else "return_batch")
+    retained = next(r for r in rows if r["id"] == original["id"])
+    assert (retained["status"], retained["consumed_revision"]) == ("SUCCEEDED", 1)
+    async with flow.factory() as session:
+        assert list(
+            await session.scalars(
+                select(TransportTask.transport_task_id).where(
+                    TransportTask.cycle_id == cycle, TransportTask.kind == "BIN_MOVE"
+                )
+            )
+        ) == [original["transport_task_id"]]

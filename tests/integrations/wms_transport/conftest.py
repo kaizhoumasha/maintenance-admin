@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from app.integrations.wms_transport import (
     TransportService,
     TransportSubmitAdapter,
 )
-from app.models import Base, Menu, ReliableMessage, TransportTask
+from app.models import Base, CallbackReceipt, Menu, ReliableMessage, TransportTask
 from app.reliable import Outbox
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
@@ -143,3 +144,40 @@ def transport_http_server():
             await server.wait_closed()
 
     return serve
+
+
+@pytest.fixture
+async def rack_failure_callback():
+    from app.integrations.wms_callback import receive
+
+    receipts = []
+
+    async def apply(rig, session, handle, rack):
+        operation_id = str(uuid7())
+        receipts.append((rig.factory, operation_id))
+        body = json.dumps(
+            dict(
+                operation="transport.task.resulted@v1",
+                operation_id=operation_id,
+                timestamp=1,
+                data=dict(
+                    transport_task_id=handle.transport_task_id,
+                    kind="RACK_MOVE",
+                    rack_id=rack,
+                    outcome_revision=1,
+                    status="FAILED",
+                    failure_code="MANUAL_ABORTED",
+                    final_position=dict(kind="RACK_POSITION", location_code="FROM"),
+                ),
+            )
+        ).encode()
+        assert (await receive(session, body)).status_code == 202
+
+    try:
+        yield apply
+    finally:
+        for factory, operation_id in receipts:
+            async with factory.begin() as session:
+                await session.execute(
+                    delete(CallbackReceipt).where(CallbackReceipt.operation_id == operation_id)
+                )

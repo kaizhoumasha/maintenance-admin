@@ -114,7 +114,7 @@ async def test_direct_report_and_production_motion_are_task_obligations(
     await flow.confirm()
     assert await flow.confirmations() == []
     await flow.rack_response("rack_report", {}, code="RECORDED")
-    await flow.rack_advance()
+    assert await flow.consume_report() == "CONSUMED"
     await flow.confirm()
     assert await flow.confirmations() == []
     await flow.rack_outcome(status="FAILED", unknown=True)

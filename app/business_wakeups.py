@@ -76,6 +76,7 @@ def notify_business_committed(business_code: str) -> None:
 
 
 async def transport_submit_delivered(session: AsyncSession, message: OutgoingMessage) -> None:
+    """Legacy finish hook. Application senders record Transport evidence before finish."""
     if message.operation != OPERATION or message.business_key is None:
         return
     owner = await session.scalar(

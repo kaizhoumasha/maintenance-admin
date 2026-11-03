@@ -44,9 +44,9 @@ async def test_serialization_retries_whole_advance_in_new_session(manual_host, f
 
 
 @pytest.mark.parametrize(
-    "kind", ["MANUAL_BIN", "MANUAL_COMPLETION", "MANUAL_RACK", "SCAN2_RELEASE"]
+    "kind", ["MANUAL_BIN", "MANUAL_COMPLETION", "MANUAL_RACK", "SCAN2_RELEASE", "RACK_REPORT"]
 )
-async def test_production_only_advance_keeps_repeatable_read(manual_host, kind, monkeypatch):
+async def test_isolation_matches_original_work_kind(manual_host, kind, monkeypatch):
     flow = manual_host
     seen = []
 
@@ -58,7 +58,13 @@ async def test_production_only_advance_keeps_repeatable_read(manual_host, kind, 
 
     monkeypatch.setattr(flow.host, "_advance", inspect_scope)
     assert await flow.host.advance(kind, "original") == "WAIT"
-    assert seen == [(kind, "original", "repeatable read")]
+    assert seen == [
+        (
+            kind,
+            "original",
+            "repeatable read" if kind in {"SCAN2_RELEASE", "RACK_REPORT"} else "serializable",
+        )
+    ]
     async with flow.factory() as session:
         assert await session.scalar(text("SHOW transaction_isolation")) == "read committed"
 

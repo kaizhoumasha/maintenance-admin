@@ -64,7 +64,9 @@ class Sender:
         budget=None,
         dispose=None,
         provider=None,
+        observe_delivered=None,
     ):
+        self.observe_delivered = observe_delivered
         self.store, self.targets, self.adapters, self.clients = store, targets, adapters, clients
         self.clock, self.monotonic, self.uniform, self.wait = clock, monotonic, uniform, wait
         self.budget = budget or ReliableConfig(targets)
@@ -126,6 +128,7 @@ class Sender:
                     clock=self.clock,
                     uniform=self.uniform,
                     provider=self.provider,
+                    observe_delivered=self.observe_delivered,
                 )
             )
             self.inflight[task] = claim

@@ -34,7 +34,13 @@ async def candidates(flow):
 
 async def rebuild(flow):
     old = flow.roller
-    flow.roller = BinRoller(old.context, old.capabilities, old.production, tables=flow.store.tables)
+    flow.roller = BinRoller(
+        old.context,
+        old.capabilities,
+        old.production,
+        rack_dispatch=old.rack_dispatch,
+        tables=flow.store.tables,
+    )
     flow.runtime.services[old.context.domain].components["bin_roller"] = flow.roller
     async with flow.factory.begin() as session:
         await session.execute(

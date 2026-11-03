@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import JSON, delete, select, update
 
 from app.integrations.wms_transport import TransportCaller, TransportService
 from app.models import ReliableMessage, TransportTask
@@ -404,3 +404,130 @@ async def test_refusal_and_applied_position_milestones_require_reconciliation(
     resolved = await read(factory, task)
     assert resolved.closure == "CLOSED" and resolved.closure_reason == "APPLIED_RESULT"
     assert resolved.member_facts == result.member_facts
+
+
+@pytest.mark.parametrize(
+    "case,state",
+    [
+        ("valid", "ACCEPTED"),
+        ("rejected", "INVALID"),
+        ("echo", "INVALID"),
+        ("request", "INVALID"),
+        ("duplicate_key", "INVALID"),
+        ("corrupt_preferred", "INVALID"),
+        ("json_null", "INVALID"),
+        ("corrupt_digest", "INVALID"),
+        ("settled", "MISSING"),
+        ("owner", "IDENTITY_MISMATCH"),
+        ("empty_target", "INVALID"),
+        ("ambiguous_target", "INVALID"),
+        ("caller", "IDENTITY_MISMATCH"),
+    ],
+)
+async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
+    transport_rig, case, state
+):
+    factory = transport_rig.factory
+    task = await result_task(factory)
+    async with factory.begin() as session:
+        row = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.target == task.target)
+        )
+        row.status = "DONE"
+        row.last_http_status, row.last_verdict = 202, "DELIVERED"
+        row.response_raw = json.dumps(
+            {
+                "operation_id": row.operation_id,
+                "code": "RECEIVED",
+                "timestamp": 1,
+                "data": {"transport_task_id": task.handle.transport_task_id},
+            }
+        ).encode()
+        if case == "rejected":
+            row.last_http_status = 422
+            row.response_raw = row.response_raw.replace(b"RECEIVED", b"REJECTED")
+        if case == "echo":
+            row.response_raw = row.response_raw.replace(
+                task.handle.transport_task_id.encode(), b"wrong"
+            )
+        if case == "request":
+            row.request_raw += b" "
+        if case == "duplicate_key":
+            row.response_raw = b'{"code":"RECEIVED",' + row.response_raw[1:]
+        if case == "settled":
+            row.response_raw = None
+        if case == "corrupt_preferred":
+            await session.execute(
+                update(TransportTask).values(submission_acceptance={"partial": True})
+            )
+        if case == "json_null":
+            await session.execute(update(TransportTask).values(submission_acceptance=JSON.NULL))
+        if case == "corrupt_digest":
+            await session.execute(update(TransportTask).values(input_digest="a" * 64))
+        if case == "empty_target":
+            row.target = ""
+        if case == "ambiguous_target":
+            session.add(
+                ReliableMessage(
+                    **{
+                        c.name: ("other-target" if c.name == "target" else getattr(row, c.name))
+                        for c in ReliableMessage.__table__.c
+                        if c.name != "id"
+                    }
+                )
+            )
+        if case == "owner":
+            task.service.owner_domain = "other"
+        await session.execute(
+            update(TransportTask)
+            .where(TransportTask.transport_task_id == task.handle.transport_task_id)
+            .values(applied_outcome={"bad": "outcome"})
+        )
+    async with factory() as session:
+        result = await task.service.get_submission_acceptance(
+            session,
+            transport_task_id=task.handle.transport_task_id,
+            client_request_id=task.handle.client_request_id,
+            caller=TransportCaller("other") if case == "caller" else task.caller,
+        )
+    assert result.state == state
+    assert (result.basis is not None) == (state == "ACCEPTED")
+
+
+@pytest.mark.parametrize(
+    "change,expected",
+    [
+        ({}, "FOUND"),
+        ({"status": "FAILED", "failure_code": "MANUAL_ABORTED"}, "FOUND"),
+        ({"status": "SUCCEEDED"}, "INVALID"),
+        ({"rack_id": "foreign"}, "INVALID"),
+        ({"outcome_revision": 2}, "INVALID"),
+        ({"arrival_face": "A"}, "INVALID"),
+        ({"extra": True}, "INVALID"),
+    ],
+)
+async def test_historical_zone_failure_requires_canonical_original(transport_rig, change, expected):
+    task = await result_task(transport_rig.factory)
+    original = dict(
+        transport_task_id=task.handle.transport_task_id,
+        kind="RACK_MOVE",
+        rack_id="R1",
+        outcome_revision=1,
+        status="CANCELLED",
+        final_position={"kind": "ZONE", "location_code": "Z"},
+        arrival_face=None,
+        results=None,
+        failure_code=None,
+        position_unknown=None,
+    )
+    raw = original | change
+    async with transport_rig.factory.begin() as db:
+        await db.execute(
+            update(TransportTask)
+            .where(TransportTask.transport_task_id == task.handle.transport_task_id)
+            .values(applied_outcome=raw, applied_outcome_revision=1, outcome_status=raw["status"])
+        )
+    result = await read(transport_rig.factory, task)
+    assert result.availability == expected
+    if expected == "FOUND":
+        assert result.outcome == raw and result.closure == "CLOSED"

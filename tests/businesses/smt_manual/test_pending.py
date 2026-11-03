@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.businesses.runtime import Capabilities
 from app.businesses.smt_manual.service import KINDS, SmtManualService
 
@@ -18,6 +19,22 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
         for i in range(3):
             identity = f"pending-{i}"
             scope = dict(id=identity, owner_domain="smt_manual", work_line_id=flow.lines[0])
+            await flow.host.rack_dispatch.register(
+                session,
+                JobOrigin(
+                    "ROLLER_ORDINARY",
+                    identity,
+                    flow.lines[0],
+                    "R",
+                    "T0",
+                    None,
+                    None,
+                    "A",
+                    None,
+                    identity,
+                    None,
+                ),
+            )
             for key, values in {
                 "scan_arrival": dict(
                     business_key=identity,
@@ -38,7 +55,6 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                     rack_id="R",
                     rack_face="A",
                 ),
-                "rack_cycle": dict(rack_id="R", purpose="ORDINARY", source_ref=identity),
                 "return_batch": dict(
                     opportunity_id=identity,
                     source_ref=identity,
@@ -110,19 +126,34 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                     state="PENDING",
                 )
             )
+            job_id = await flow.host.rack_dispatch.register(
+                session,
+                JobOrigin(
+                    "MANUAL_RETURN",
+                    identity,
+                    flow.lines[0],
+                    "R",
+                    "T0",
+                    "SMT-M1-1",
+                    "RETURN",
+                    "A",
+                    None,
+                    "manual-" + identity,
+                    None,
+                ),
+            )
             await session.execute(
-                flow.tables["rack"]
+                flow.tables["request"]
                 .insert()
                 .values(
-                    id=identity,
+                    kind="RACK_ARRIVAL_REPORT",
+                    operation="outbound.return_rack.arrival_report@v1",
+                    operation_id=identity,
                     task_id="T0",
                     work_line_id=flow.lines[0],
-                    workline_code="SMT-M1-1",
-                    rack_id="R",
-                    role="RETURN",
-                    location_code="RETURN",
-                    initial_face="A",
-                    caller_workline_id=str(flow.lines[0]),
+                    rack_work_id=job_id,
+                    action_id=identity,
+                    message_id=i + 1,
                 )
             )
     visited = []
@@ -135,8 +166,8 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
         return "WAIT"
 
     monkeypatch.setattr(flow.host, "advance", waiting)
-    assert await flow.host.scan_pending(limit=1) == 30
-    assert [k for k, _ in visited[:10]] == list(KINDS)
+    assert await flow.host.scan_pending(limit=1) == len(KINDS) * 3
+    assert [k for k, _ in visited[: len(KINDS)]] == list(KINDS)
     assert all(sum(k == kind for k, _ in visited) == 3 for kind in KINDS)
     assert [rid for kind, rid in visited if kind == "SCAN2_RELEASE"] == [
         "pending-0",
@@ -145,7 +176,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
     ]
     assert ("TASK", later_task_id) not in visited
     visited.clear()
-    assert await flow.host.scan_pending(limit=2) == 31
+    assert await flow.host.scan_pending(limit=2) == len(KINDS) * 3 + 1
     assert ("TASK", later_task_id) in visited
 
 

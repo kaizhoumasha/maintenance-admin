@@ -14,8 +14,10 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import EcsEventContext
 from app.integrations.wms_callback import Accepted, CallbackContext, Outcome, Rejected, Unavailable
+from app.models import WorkLine
 
 from .contracts import ADMISSION_DECISION, ManualCompleted
+from .manual_rack_flow import ManualRackFlow
 from .models import BIN_COMPLETION_OPERATION
 from .repository import TaskRepository
 from .request.manual_bin_work_admission_decide_v1 import OPERATION, AdmissionRequest
@@ -29,6 +31,7 @@ class ManualBinFlow:
         self.roller = roller
         self.repository = repository
         self.tables = repository.tables
+        self.manual_racks = ManualRackFlow(capabilities, roller, repository=repository)
 
     def _pending(self, kind: str) -> tuple[ColumnElement[str], ColumnElement[bool]]:
         if kind == "MANUAL_BIN":
@@ -128,7 +131,7 @@ class ManualBinFlow:
 
     async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> None:
         table = self.tables["manual_bin"]
-        await self.repository.lock_line(ctx.session, arrival.work_line_id)
+        # The ECS binding resolver already holds the original line and source device.
         if await self._one(ctx.session, "manual_bin", table.c.arrival_id == arrival.arrival_id):
             return
         current = await self.roller.production.read_current_task(
@@ -167,12 +170,18 @@ class ManualBinFlow:
         if reason is None and not deferred:
             await self._request(ctx.session, values)
 
-    async def advance_bin(self, session: AsyncSession, *, arrival_id: str, now_ms: int) -> str:
+    async def advance_bin(
+        self, session: AsyncSession, *, arrival_id: str, now_ms: int, locked: bool = False
+    ) -> str:
         table = self.tables["manual_bin"]
         located = await self._one(session, "manual_bin", table.c.arrival_id == arrival_id)
         if located is None:
             return "NOT_FOUND"
-        line = await self.repository.lock_line(session, located["work_line_id"])
+        if not locked:
+            await self.repository.lock_dispatch_line(
+                session, self.roller, located["work_line_id"], task_id=located["task_id"]
+            )
+        line = await session.get(WorkLine, located["work_line_id"])
         work = await self._one(session, "manual_bin", table.c.arrival_id == arrival_id, lock=True)
         if work["state"] == "DEFERRED":
             task = await self.repository.task(session, work["task_id"])
@@ -237,8 +246,25 @@ class ManualBinFlow:
             decision = ADMISSION_DECISION.validate_python(result.response_data)
         except ValueError:
             return work["state"]
-        if decision.result == "WORK_REQUIRED" and decision.task_id != work["task_id"]:
-            return work["state"]
+        target = {}
+        if decision.result == "WORK_REQUIRED":
+            task = await self.repository.task(session, work["task_id"])
+            if (
+                not task
+                or decision.task_id != work["task_id"]
+                or task["work_line_id"] != work["work_line_id"]
+            ):
+                return work["state"]
+            plan = None
+            if task["business_type"] == "outbound":
+                plan = await self.manual_racks.original_target_plan(session, task)
+                if not plan or task["plan_revision"] < 1 or task["status"] != "EXECUTING":
+                    return work["state"]
+            if plan and plan["payload"].get("target_rack"):
+                proof = await self.manual_racks.target_permission(session, task, plan)
+                if proof is None:
+                    return work["state"]
+                target = dict(target_job_id=proof[0], target_action_id=proof[1])
         wait_until = now_ms + decision.retry_after_ms if decision.result == "WAIT" else None
         await self._save(
             session,
@@ -265,6 +291,7 @@ class ManualBinFlow:
             table.c.arrival_id == arrival_id,
             state=state,
             pending=state == "WAIT",
+            **target,
             command_code=command_code,
         )
         return state
@@ -274,7 +301,9 @@ class ManualBinFlow:
     ) -> Outcome:
         if payload.completed_at > ctx.timestamp:
             raise Rejected("INVALID_DATA")
-        _, task = await self.repository.original(ctx.session, payload.task_id)
+        _, task, _ = await self.repository.original_dispatch_task(
+            ctx.session, self.roller, payload.task_id
+        )
         if task is None:
             raise Unavailable()
         table = self.tables["input"]
@@ -302,12 +331,17 @@ class ManualBinFlow:
             )
         return Accepted()
 
-    async def advance_completion(self, session: AsyncSession, *, operation_id: str) -> str:
+    async def advance_completion(
+        self, session: AsyncSession, *, operation_id: str, locked: bool = False
+    ) -> str:
         table = self.tables["input"]
         located = await self._one(session, "input", table.c.operation_id == operation_id)
         if located is None:
             return "NOT_FOUND"
-        await self.repository.lock_line(session, located["work_line_id"])
+        if not locked:
+            await self.repository.lock_dispatch_line(
+                session, self.roller, located["work_line_id"], task_id=located["task_id"]
+            )
         notice = await self._one(session, "input", table.c.operation_id == operation_id, lock=True)
         if notice["state"] != "PENDING":
             return notice["state"]

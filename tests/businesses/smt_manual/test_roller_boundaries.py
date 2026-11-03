@@ -11,10 +11,10 @@ from tests.helpers import manual_return_opportunity
 @pytest.mark.parametrize("kind", ["departure", "drain"])
 async def test_formal_rack_decisions_return_valid_wait(formal_manual, monkeypatch, kind):
     from app.businesses._components.bin_roller.request import (
-        rack_departure_decide_v1 as departure,
-    )
-    from app.businesses._components.bin_roller.request import (
         workline_return_buffer_drain_rack_decide_v1 as drain,
+    )
+    from app.businesses._components.rack_dispatch.request import (
+        rack_departure_decide_v1 as departure,
     )
     from app.core.identifiers import uuid7
 

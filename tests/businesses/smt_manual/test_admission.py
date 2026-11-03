@@ -8,7 +8,7 @@ import pytest
 )
 async def test_admission_decisions_keep_original_arrival(manual_bins, decision, state):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     assert (await flow.scan()).status_code == 200
     arrival = (await flow.rows("manual_bin"))[0]["arrival_id"]
     data = {"result": decision}

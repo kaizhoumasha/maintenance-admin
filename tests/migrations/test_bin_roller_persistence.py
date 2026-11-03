@@ -1,15 +1,9 @@
 """Restore original public work IDs, frozen evidence, SQL nulls and the original schema."""
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import async_sessionmaker
-
-from app.businesses._components.bin_roller.ports import RollerWorkRef, SourceFaceRef, SupplyChange
-from app.businesses._components.bin_roller.service import BinRoller
-from app.integrations.ecs_command.service import CommandOwner, EcsCommands
 
 OWNER = "bin-roller-migration-fixture"
 OLD = "smtmanualcompact"
@@ -477,66 +471,58 @@ async def test_original_pending_and_frozen_effects_survive_round_trip(populated_
     assert len(await store.schema_snapshot("bin_roller_")) == 10
     assert len(await store.schema_snapshot("smt_manual_")) == 7
     assert await snapshot(store, new, platform=True) == frozen
-    roller = BinRoller(
-        CommandOwner(OWNER),
-        SimpleNamespace(ecs=EcsCommands(None, None)),
-        SimpleNamespace(),
-        tables={
-            k.removeprefix("bin_roller_"): v for k, v in new.items() if k.startswith("bin_roller_")
-        },
+    # This is the historical compact schema, before shared jobs existed. Verify its durable
+    # work identities and due times here; the current reader runs against the shared head.
+    compact = await snapshot(store, new)
+    decisions = {(d["kind"], d["id"]): d for d in compact["bin_roller_decision"]}
+    assert decisions["DEPARTURE", "same"]["due_at"] == 987654321
+    assert decisions["DRAIN", "same"]["status"] == "READY"
+    assert decisions["DRAIN", "previous-wait"]["due_at"] == 123456
+    assert {
+        a["release_record_id"]: a["release_command_code"]
+        for a in compact["bin_roller_scan_arrival"]
+        if a["release_state"] == "PENDING"
+    } == {"a-release": "cmd2", "z-release": "cmd1"}
+    faces = {(f["purpose"], f["id"]): f for f in compact["bin_roller_face_work"]}
+    assert faces["DRAIN", "d1"]["cycle_id"] == "drain-cycle"
+    assert faces["SUPPLY", "d1"]["cycle_id"] == "cycle"
+    feed = faces["SUPPLY", "d3"]
+    assert (feed["service_id"], feed["feed_id"], feed["message_id"], feed["operation_id"]) == (
+        "s3",
+        "f3",
+        101,
+        "in-3",
     )
-    async with async_sessionmaker(store.engine)() as session:
-        for kind, expect in (
-            ("SCAN2_RELEASE", ["a-release", "z-release"]),
-            ("FEED", ["d2", "d3", "new-demand"]),
-            ("DRAIN", ["same"]),
-        ):
-            upper = await roller.get_pending_upper_id(session, kind=kind)
-            assert upper == expect[-1]
-            page = await roller.list_pending(
-                session, kind=kind, after_id=None, upper_id=upper, limit=1
-            )
-            tail = await roller.list_pending(
-                session, kind=kind, after_id=page[0].record_id, upper_id=upper, limit=10
-            )
-            assert [w.record_id for w in (*page, *tail)] == expect
-        assert (
-            await roller.advance(session, RollerWorkRef("SCAN2_RELEASE", "z-release")) == "WAITING"
-        )
-        original = await roller.get_scan2_release_result(session, arrival_id="a1")
-        assert original.command_code == "cmd1" and original.status == "UNKNOWN"
-        assert (await roller.original_record(session, "departure", "same"))["due_at"] == 987654321
-        assert (await roller.original_record(session, "drain", "same"))["status"] == "READY"
-        assert (await roller.original_record(session, "drain", "previous-wait"))["due_at"] == 123456
-        assert (await roller.repository(1).position_at(session, "RACK", "F"))["object_code"] == "R2"
-        assert (await roller.original_record(session, "face_service", "d1"))["purpose"] == "DRAIN"
-        assert (await roller.original_record(session, "supply_demand", "d1"))["purpose"] == "SUPPLY"
-        progress = await roller.get_supply_progress(session, work_line_id=1, task_id="T")
-        assert [
-            (p.feed_complete, p.pending)
-            for p in sorted(progress, key=lambda p: p.source.plan_revision)
-        ] == [(True, False), (False, True), (False, True), (False, False), (False, True)]
-        assert {"d3", "s3", "f3", "101", "in-3", "cycle"} <= set(
-            next(p for p in progress if p.source.plan_revision == 3).original_ids
-        )
     await store.migrate("downgrade", OLD)
     restored = await tables(store)
     assert await store.schema_snapshot("bin_roller_") == schema
     assert await snapshot(store, restored) == baseline
     assert await snapshot(store, restored, platform=True) == frozen
     await store.migrate("upgrade", NEW)
-    # An object first created by the compact runtime can also return to the old code.
-    async with async_sessionmaker(store.engine).begin() as session:
-        await roller.apply_supply_change(
-            session, SupplyChange(2, "new-task", "changed", (SourceFaceRef(6, "R2", "B"),), ())
+    # A demand first recorded in the compact schema can also return to the old code.
+    async with store.engine.begin() as conn:
+        await conn.execute(
+            new["bin_roller_face_work"]
+            .insert()
+            .values(
+                purpose="SUPPLY",
+                id="new-compact",
+                demand_id="new-compact",
+                owner_domain=OWNER,
+                work_line_id=2,
+                task_id="new-task",
+                plan_revision=6,
+                rack_id="R2",
+                rack_face="B",
+                change_id="changed",
+                demand_state="ACTIVE",
+            )
         )
-        entered = (await roller.get_supply_progress(session, work_line_id=2, task_id="new-task"))[0]
-        assert entered.pending and not entered.feed_complete
     await store.migrate("downgrade", OLD)
     old_demand = (await snapshot(store, old))["bin_roller_supply_demand"]
     saved = next(r for r in old_demand if r["task_id"] == "new-task")
     assert (saved["id"], saved["work_line_id"], saved["service_id"], saved["withdrawn"]) == (
-        entered.original_ids[0],
+        "new-compact",
         2,
         None,
         False,

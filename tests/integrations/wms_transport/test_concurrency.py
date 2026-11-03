@@ -126,3 +126,73 @@ async def test_concurrent_transport_registration_preserves_winner_owner(
             await first.rollback()
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_callback_can_settle_while_evidence_waits_on_task(
+    pg_transport_rig, wait_for_lock, rack_failure_callback
+):
+    import json
+
+    from app.core.identifiers import uuid7
+    from app.http_client import DeliveryState, HttpResult
+    from app.integrations.wms_transport.acceptance import submission_observer
+    from app.reliable.sender import Sender
+    from app.reliable.store import MessageStore
+    from app.reliable.testing import ScriptedHttpClient
+
+    rig = pg_transport_rig
+    caller = TransportCaller(rig.target.name)
+    async with rig.factory.begin() as session:
+        handle = await rig.service.move_rack(
+            session,
+            client_request_id=str(uuid7()),
+            caller=caller,
+            rack_id="R1",
+            source=Rack("R1"),
+            target=RackPosition("DEST"),
+        )
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+        )
+    raw = json.dumps(
+        dict(
+            operation_id=message.operation_id,
+            code="RECEIVED",
+            timestamp=1,
+            data=dict(transport_task_id=handle.transport_task_id),
+        )
+    ).encode()
+    peer = ScriptedHttpClient(HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 202, (), raw))
+    sender = Sender(
+        MessageStore(rig.factory, clock=rig.clock),
+        rig.outbox.targets,
+        rig.adapters,
+        {rig.target.name: peer},
+        clock=rig.clock,
+        observe_delivered=submission_observer(rig.outbox.targets, rig.factory, lambda _: None),
+    )
+    try:
+        async with rig.factory.begin() as callback:
+            await callback.scalar(
+                select(TransportTask)
+                .where(TransportTask.transport_task_id == handle.transport_task_id)
+                .with_for_update()
+            )
+            assert await sender.tick() == 1
+            (delivery,) = sender.inflight
+            await wait_for_lock(delivery)
+            assert not delivery.done()
+            await asyncio.wait_for(rack_failure_callback(rig, callback, handle, "R1"), 5)
+        await asyncio.wait_for(delivery, 5)
+        async with rig.factory() as session:
+            result = await rig.service.get_submission_acceptance(
+                session,
+                transport_task_id=handle.transport_task_id,
+                client_request_id=handle.client_request_id,
+                caller=caller,
+            )
+            assert result.state == "ACCEPTED" and result.basis.message_id == message.id
+            final = await session.get(ReliableMessage, message.id)
+            assert final.status == "DONE" and final.response_raw is None and len(peer.requests) == 1
+    finally:
+        await sender.aclose()

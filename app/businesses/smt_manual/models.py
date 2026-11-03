@@ -111,6 +111,8 @@ class ManualInput(Base):
     completed_at: Mapped[int | None] = mapped_column(BigInteger)
     completion_result: Mapped[str | None]
     original_operation_id: Mapped[str | None]
+    target_job_id: Mapped[str | None]
+    target_action_id: Mapped[str | None]
 
 
 class ManualRequest(Base):
@@ -121,8 +123,7 @@ class ManualRequest(Base):
             "(kind = 'COMPLETION_CONFIRM' AND operation = 'sorting.task.completion_confirm@v1') OR "
             "(kind = 'BIN_ADMISSION' AND operation = 'manual_bin.work_admission_decide@v1') OR "
             "(kind = 'RACK_ARRIVAL_REPORT' AND "
-            "operation = 'outbound.return_rack.arrival_report@v1') OR "
-            "(kind = 'RACK_DEPARTURE' AND operation = 'rack.departure_decide@v1')",
+            "operation = 'outbound.return_rack.arrival_report@v1')",
             name="smt_manual_request_kind",
         ),
         CheckConstraint(
@@ -131,7 +132,7 @@ class ManualRequest(Base):
         ),
         CheckConstraint(
             "(kind = 'BIN_ADMISSION' AND arrival_id IS NOT NULL AND rack_work_id IS NULL) OR "
-            "(kind IN ('RACK_ARRIVAL_REPORT','RACK_DEPARTURE') "
+            "(kind = 'RACK_ARRIVAL_REPORT' "
             "AND rack_work_id IS NOT NULL AND arrival_id IS NULL) OR "
             "(kind IN ('PREPARE','COMPLETION_CONFIRM') AND rack_work_id IS NULL AND "
             "arrival_id IS NULL)",
@@ -148,16 +149,12 @@ class ManualRequest(Base):
             name="smt_manual_request_revision",
         ),
         CheckConstraint(
-            "(kind IN ('COMPLETION_CONFIRM','RACK_DEPARTURE') AND basis IS NOT NULL) OR "
-            "(kind NOT IN ('COMPLETION_CONFIRM','RACK_DEPARTURE') AND basis IS NULL)",
+            "(kind = 'COMPLETION_CONFIRM' AND basis IS NOT NULL) OR "
+            "(kind != 'COMPLETION_CONFIRM' AND basis IS NULL)",
             name="smt_manual_request_basis",
         ),
         CheckConstraint(
             "state != 'WAITING' OR due_at_ms IS NOT NULL", name="smt_manual_request_due"
-        ),
-        CheckConstraint(
-            "kind != 'RACK_DEPARTURE' OR request_snapshot IS NOT NULL",
-            name="smt_manual_request_snapshot",
         ),
         CheckConstraint(
             "kind != 'COMPLETION_CONFIRM' OR state IN ('REQUESTED','CONFLICT') "
@@ -209,6 +206,8 @@ class TaskMember(Base):
     status: Mapped[str] = mapped_column(default="PENDING")
     cancelled_operation_id: Mapped[str | None]
     rack_work_id: Mapped[str | None]
+    preparation_action_id: Mapped[str | None]
+    arrival_report_operation_id: Mapped[str | None]
 
 
 class ManualBin(Base):
@@ -227,40 +226,8 @@ class ManualBin(Base):
     completed_operation_id: Mapped[str | None]
     completed_result: Mapped[str | None]
     command_code: Mapped[str | None]
-
-
-class ManualRack(Base):
-    __tablename__ = "smt_manual_rack"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    task_id: Mapped[str]
-    work_line_id: Mapped[int]
-    workline_code: Mapped[str]
-    rack_id: Mapped[str]
-    role: Mapped[str]
-    location_code: Mapped[str]
-    initial_face: Mapped[str]
-    caller_workline_id: Mapped[str]
-    station_id: Mapped[str | None]
-    state: Mapped[str] = mapped_column(default="ACTIVE")
-    pending: Mapped[bool] = mapped_column(default=True)
-    departure_operation_id: Mapped[str | None]
-
-
-class ManualRackAction(Base):
-    __tablename__ = "smt_manual_rack_action"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    rack_work_id: Mapped[str]
-    kind: Mapped[str]
-    source_ref: Mapped[str]
-    client_request_id: Mapped[str]
-    transport_task_id: Mapped[str]
-    target: Mapped[dict] = mapped_column(JSON)
-    target_face: Mapped[str | None]
-    state: Mapped[str] = mapped_column(default="PENDING")
-    outcome_revision: Mapped[int | None] = mapped_column(BigInteger)
-    observation_revision: Mapped[int | None] = mapped_column(BigInteger)
-    actual_position: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
-    actual_face: Mapped[str | None]
+    target_job_id: Mapped[str | None]
+    target_action_id: Mapped[str | None]
 
 
 TABLES = {
@@ -268,7 +235,5 @@ TABLES = {
     "input": ManualInput.__table__,
     "member": TaskMember.__table__,
     "manual_bin": ManualBin.__table__,
-    "rack": ManualRack.__table__,
-    "rack_action": ManualRackAction.__table__,
     "request": ManualRequest.__table__,
 }

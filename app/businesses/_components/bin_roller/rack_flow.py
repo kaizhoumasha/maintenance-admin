@@ -1,25 +1,50 @@
-"""One ordinary/drain rack lifecycle, using only the caller's transaction."""
+"""BIN_Roller owns face, feed and return responsibilities for each shared rack job."""
 
-from dataclasses import dataclass
+import json
 from time import time
-from typing import Literal
+from typing import TYPE_CHECKING
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.identifiers import uuid7
-from app.integrations.wms_transport import (
-    HandoffPosition,
-    Rack,
-    RackPosition,
-    TransportCaller,
-    TransportTaskResult,
-    Zone,
+from app.businesses._components.rack_dispatch.contracts import (
+    Coverage,
+    DirectHandoff,
+    FactRef,
+    JobOrigin,
+    PointDemand,
+    PointRef,
+    RackProgress,
 )
+from app.core.identifiers import uuid7
+from app.integrations.wms_transport import HandoffPosition, TransportCaller
 from app.models import WorkLine
 
-from .models import TABLES
-from .repository import RollerRepository
+if TYPE_CHECKING:
+    from .service import BinRoller
+
+
+async def register_job(
+    roller, session, repo, kind, source_ref, rack, face, task_id, resources, *, cycle_id=None
+):
+    return await roller.rack_dispatch.register(
+        session,
+        JobOrigin(
+            kind,
+            source_ref,
+            repo.work_line_id,
+            rack,
+            task_id,
+            resources["workline_code"] if resources else None,
+            resources["positions"]["FIVE_RACK"] if resources else None,
+            face,
+            TransportCaller(resources["caller_workline_id"], resources["station_id"])
+            if resources
+            else None,
+            cycle_id or str(uuid7()),
+            resources,
+        ),
+    )
 
 
 async def select_supply_cycle(roller, session, demand_id):
@@ -28,422 +53,652 @@ async def select_supply_cycle(roller, session, demand_id):
         return demand["cycle_id"]
     if demand["demand_state"] == "WITHDRAWN":
         return None
-    current = await roller.production.read_current_task(
-        session, work_line_id=demand["work_line_id"]
-    )
+    repo = roller.repository(demand["work_line_id"])
+    current = await roller.production.read_current_task(session, work_line_id=repo.work_line_id)
     if not current.is_valid or current.task_id != demand["task_id"]:
         return None
-    repo = roller.repository(demand["work_line_id"])
-    cycles = repo.tables["rack_cycle"]
-    original = await repo._one(
+    jobs = await roller.rack_dispatch.jobs(
         session,
-        cycles,
-        cycles.c.rack_id == demand["rack_id"],
-        cycles.c.task_id == demand["task_id"],
-        cycles.c.purpose == "ORDINARY",
-        cycles.c.status == "ACTIVE",
+        work_line_id=repo.work_line_id,
+        source_kinds=("ROLLER_ORDINARY",),
+        task_id=demand["task_id"],
+        pending=True,
     )
-    if original is not None:
-        departure = repo.tables["decision"]
-        if await session.scalar(
-            select(departure.c.id)
-            .where(
-                *repo.scoped(departure),
-                departure.c.kind == "DEPARTURE",
-                departure.c.cycle_id == original["id"],
-            )
-            .limit(1)
-        ):
-            return None
-        return original["id"]
-    else:
-        resources = await roller.read_resources(session, repo.work_line_id)
-        if resources is None:
-            return None
-        demands = repo.tables["face_work"]
-        demand_id = await session.scalar(
-            select(demands.c.demand_id)
-            .where(
-                *repo.scoped(demands),
-                demands.c.purpose == "SUPPLY",
-                demands.c.task_id == demand["task_id"],
-                demands.c.rack_id == demand["rack_id"],
-                demands.c.demand_state == "ACTIVE",
-                demands.c.cycle_id.is_(None),
-                demands.c.service_id.is_(None),
-            )
-            .order_by(demands.c.id)
-            .limit(1)
-        )
-        original = await repo.create_cycle(
-            session,
-            cycle_id=str(uuid7()),
-            rack_id=demand["rack_id"],
-            purpose="ORDINARY",
-            task_id=demand["task_id"],
-            source_ref=demand_id,
-            resources=resources,
-        )
-    await repo.bind_supply(session, demand_id=demand_id, cycle_id=original["id"])
-    return original["id"]
-
-
-async def rack_action(roller, session, repo, cycle, *, kind, source_ref, target, face, source):
-    actions = repo.tables["rack_action"]
-    conditions = [actions.c.cycle_id == cycle["id"], actions.c.kind == kind]
-    if kind == "CTU02":
-        conditions.append(actions.c.source_ref == source_ref)
-    action = await repo._one(session, actions, *conditions)
-    if action is None:
-        if kind == "CTU01":
-            line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
-            if line is None or not line.is_enabled or line.business_code != roller.context.domain:
-                return None
-            if line.five_rack_request_limit is not None:
-                cycles = repo.tables["rack_cycle"]
-                occupied = await session.scalar(
-                    select(func.count())
-                    .select_from(cycles)
-                    .where(
-                        *repo.scoped(cycles),
-                        cycles.c.status != "RELEASED",
-                        select(actions.c.id)
-                        .where(
-                            *repo.scoped(actions),
-                            actions.c.cycle_id == cycles.c.id,
-                            actions.c.kind == "CTU01",
-                        )
-                        .exists(),
-                    )
-                )
-                if occupied >= line.five_rack_request_limit:
-                    return None
-        entry = await repo._one(
-            session, actions, actions.c.cycle_id == cycle["id"], actions.c.kind == "CTU01"
-        )
-        caller = (
-            TransportCaller(entry["caller_workline_id"], entry["station_id"])
-            if entry
-            else TransportCaller(
-                cycle["resources"]["caller_workline_id"], cycle["resources"]["station_id"]
-            )
-        )
-        action = await repo.register_rack_action(
-            session,
-            cycle_id=cycle["id"],
-            kind=kind,
-            source_ref=source_ref,
-            action_id=str(uuid7()),
-            client_request_id=str(uuid7()),
-            transport_task_id=None,
-            operation_id=None,
-            target=target,
-            target_face=face,
-            caller_workline_id=caller.workline_id,
-            station_id=caller.station_id,
-        )
-    if action["transport_task_id"] is None:
-        caller = TransportCaller(action["caller_workline_id"], action["station_id"])
-        args = dict(
-            client_request_id=action["client_request_id"],
-            caller=caller,
-            rack_id=cycle["rack_id"],
-            cycle_id=cycle["id"],
-            target_face=action["target_face"],
-            rcs_template_id=kind,
-        )
-        destination = action["target"]
-        if kind == "CTU02":
-            handle = await roller.capabilities.transport.rotate_rack(
-                session, **args, position=RackPosition(destination["location_code"])
-            )
-        else:
-            handle = await roller.capabilities.transport.move_rack(
-                session,
-                **args,
-                source=source,
-                target=(Zone if destination["kind"] == "ZONE" else RackPosition)(
-                    destination["location_code"]
-                ),
-            )
-        view = await roller.capabilities.transport.get_result(
-            session,
-            transport_task_id=handle.transport_task_id,
-            client_request_id=handle.client_request_id,
-            caller=caller,
-        )
-        await repo.bind_transport(
-            session,
-            action_id=action["id"],
-            transport_task_id=handle.transport_task_id,
-            operation_id=view.operation_id,
-        )
-    return await repo.get_action(session, action["id"])
-
-
-async def advance_departure(roller, session, repo, cycle, source_ref):
-    from .request.rack_departure_decide_v1 import DECISION, OPERATION, DepartureRequest
-
-    table = repo.tables["decision"]
-    original = (
+    for job in jobs:
+        if job.origin.rack_id == demand["rack_id"]:
+            return job.id if job.state == "ACTIVE" else None
+    resources = await roller.read_resources(session, repo.work_line_id)
+    if resources is None:
+        return None
+    faces = repo.tables["face_work"]
+    first = (
         (
             await session.execute(
-                select(table)
+                select(faces)
                 .where(
-                    *repo.scoped(table),
-                    table.c.kind == "DEPARTURE",
-                    table.c.cycle_id == cycle["id"],
+                    *repo.scoped(faces),
+                    faces.c.purpose == "SUPPLY",
+                    faces.c.task_id == demand["task_id"],
+                    faces.c.rack_id == demand["rack_id"],
+                    faces.c.demand_state == "ACTIVE",
+                    faces.c.cycle_id.is_(None),
+                    faces.c.service_id.is_(None),
                 )
-                .order_by(table.c.id.desc())
+                .order_by(faces.c.id)
                 .limit(1)
             )
         )
         .mappings()
-        .one_or_none()
+        .one()
     )
-    if original is not None and original["decision"] is None:
-        result = await roller.capabilities.wms.get_result(
-            session,
-            message_id=original["message_id"],
-            operation=OPERATION,
-            operation_id=original["operation_id"],
-        )
-        if (
-            result.availability != "FOUND"
-            or result.response_state != "VALID"
-            or result.message_id != original["message_id"]
-            or result.operation != OPERATION
-            or result.operation_id != original["operation_id"]
-            or (result.http_status, result.response_code) != (200, "DECIDED")
-        ):
-            return "WAITING_FOR_DEPARTURE"
-        try:
-            decision = DECISION.validate_python(result.response_data).model_dump(mode="json")
-        except ValueError:
-            return "INVALID_DEPARTURE"
-        if decision.get("rack_destination") == original["request"]["current_location"]:
-            return "INVALID_DEPARTURE"
-        await session.execute(
-            table.update()
-            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == original["id"])
-            .values(
-                decision=decision,
-                status=decision["result"],
-                due_at=int(time() * 1000) + decision["retry_after_ms"]
-                if decision["result"] == "WAIT"
-                else None,
-            )
-        )
-        original = await repo._one(
-            session, table, table.c.kind == "DEPARTURE", table.c.id == original["id"]
-        )
-    if original is not None and original["status"] == "READY":
-        destination = original["decision"]["rack_destination"]
-        await rack_action(
-            roller,
-            session,
-            repo,
-            cycle,
-            kind="CTU03",
-            source_ref=original["id"],
-            target=dict(kind=destination["type"], location_code=destination["location_code"]),
-            face=None,
-            source=RackPosition(original["request"]["current_location"]["location_code"]),
-        )
-        return "WAITING_FOR_DEPARTURE_ACCEPTANCE"
-    if original is not None:
-        if original["status"] != "WAIT" or original["due_at"] > int(time() * 1000):
-            return "WAITING_FOR_DEPARTURE"
-        source_ref = original["id"]
-    position = await repo.current_position(session, "RACK", cycle["rack_id"])
-    if position is None:
-        return "WAITING_FOR_ORIGINAL_POSITION"
-    position_action = await repo.get_action(session, position["source_id"])
-    if position_action is None or position_action["cycle_id"] != cycle["id"]:
-        return "WAITING_FOR_ORIGINAL_POSITION"
-    payload = DepartureRequest(
-        workline_code=cycle["resources"]["workline_code"],
-        rack_id=cycle["rack_id"],
-        current_location=dict(type="RACK_POSITION", location_code=position["location_code"]),
-        current_face=position["rack_face"],
-    )
-    new = await repo._register(
+    job_id = await register_job(
+        roller,
         session,
-        table,
-        dict(
-            id=str(uuid7()),
-            **repo.scope,
-            kind="DEPARTURE",
-            cycle_id=cycle["id"],
-            source_ref=source_ref,
-            operation_id=str(uuid7()),
-            request=payload.model_dump(mode="json"),
-        ),
-        ("kind", "cycle_id", "source_ref"),
-        (),
+        repo,
+        "ROLLER_ORDINARY",
+        first["id"],
+        first["rack_id"],
+        first["rack_face"],
+        first["task_id"],
+        resources,
     )
-    if new["message_id"] is None:
-        reference = await roller.capabilities.wms.send(
-            session, payload, operation_id=new["operation_id"]
+    await repo.bind_supply(session, demand_id=first["id"], cycle_id=job_id)
+    return job_id
+
+
+def row_fact(name, table, row):
+    keys = tuple(col.name for col in table.primary_key)
+    return FactRef(
+        name,
+        tuple(str(row[k]) for k in keys),
+        tuple(
+            json.dumps(row[c.name], sort_keys=True, default=str, ensure_ascii=False)
+            for c in table.c
+            if c.name not in keys
+        ),
+    )
+
+
+async def evaluate_roller_point(
+    roller: "BinRoller", session: AsyncSession, job: RackProgress
+) -> tuple[PointDemand, DirectHandoff]:
+    origin = job.origin
+    if not origin.point:
+        raise ValueError("roller point evaluation requires the original bound point")
+    repo = roller.repository(origin.work_line_id)
+    point = PointRef(repo.owner_domain, repo.work_line_id, job.id, origin.rack_id, origin.point)
+    scope = (point.owner_domain, str(point.work_line_id), job.id, origin.rack_id, origin.point)
+    ordinary = origin.source_kind == "ROLLER_ORDINARY"
+    task = await roller.production.read_current_task(session, work_line_id=repo.work_line_id)
+    successor = await roller.production.read_successor(session, work_line_id=repo.work_line_id)
+    if ordinary:
+        task_coverage = await roller.production.read_task_coverage(
+            session, point=point, task_id=origin.task_id
         )
+        anchor = task_coverage.anchor if task_coverage else None
+    else:
+        drains = repo.tables["decision"]
+        decision = await repo._one(
+            session, drains, drains.c.kind == "DRAIN", drains.c.id == origin.source_ref
+        )
+        anchor = (
+            row_fact("drain_decision", drains, decision)
+            if decision and decision["decision"] and decision["decision"]["result"] == "READY"
+            else None
+        )
+    if not anchor:
+        return PointDemand(point, "UNKNOWN", ()), DirectHandoff(point, "UNKNOWN", ())
+    coverage = [task_coverage] if ordinary else []
+
+    async def rows(name, *criteria):
+        table = repo.tables[name]
+        originals = (
+            (
+                await session.execute(
+                    select(table).where(*repo.scoped(table), *criteria).order_by(*table.primary_key)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        coverage.append(
+            Coverage(name, scope, anchor, tuple(row_fact(name, table, r) for r in originals))
+        )
+        return originals
+
+    faces = repo.tables["face_work"]
+    valid_range = faces.c.cycle_id == job.id
+    if ordinary:
+        valid_range |= (
+            faces.c.cycle_id.is_(None)
+            & (faces.c.task_id == origin.task_id)
+            & (faces.c.rack_id == origin.rack_id)
+        )
+    members = await rows("face_work", valid_range)
+    own_actions = {a.id for a in job.actions}
+    preparations = {(a.id, a.target_face) for a in job.actions if a.kind in ("ENTER", "ROTATE")}
+    if (
+        ordinary
+        and not any(
+            r["purpose"] == "SUPPLY" and r["demand_id"] == origin.source_ref for r in members
+        )
+        or any(
+            r["rack_id"] != origin.rack_id
+            or r["task_id"] != origin.task_id
+            or (
+                r["preparation_action_id"]
+                and (r["preparation_action_id"], r["rack_face"]) not in preparations
+            )
+            for r in members
+        )
+    ):
+        return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
+            point, "UNKNOWN", tuple(coverage)
+        )
+    segments = await rows(
+        "feed_segment",
+        repo.tables["feed_segment"].c.feed_id.in_([r["feed_id"] for r in members if r["feed_id"]]),
+    )
+    opportunities = await rows(
+        "return_opportunity",
+        repo.tables["return_opportunity"].c.service_id.in_(
+            [r["service_id"] for r in members if r["service_id"]]
+        ),
+    )
+    batch_table = repo.tables["return_batch"]
+    opportunity_ids = {o["id"] for o in opportunities}
+    selected_batches = batch_table.c.opportunity_id.in_(opportunity_ids)
+    if not ordinary:
+        selected_batches |= batch_table.c.pending
+    line_batches = await rows("return_batch", selected_batches)
+    batches = [row for row in line_batches if row["opportunity_id"] in opportunity_ids]
+    drains = repo.tables["decision"]
+    await rows("decision", drains.c.pending | (drains.c.id == origin.source_ref))
+    fifo = await repo.return_queue(session)
+    arrivals = repo.tables["scan_arrival"]
+    rounds = {r["id"] for r in fifo if r["id"]} | {
+        m["round_id"] for batch in line_batches for m in batch["members"]
+    }
+    await rows(
+        "scan_arrival",
+        arrivals.c.point.in_(("SCAN3", "SCAN4")),
+        arrivals.c.round_id.in_(rounds)
+        | arrivals.c.id.in_([r["fifo_arrival_id"] for r in fifo])
+        | (
+            repo.current_round_condition()
+            & arrivals.c.removed.is_(False)
+            & (arrivals.c.return_state != "COMPLETED")
+        ),
+    )
+    # A FIFO entry can be pending before its SCAN3/SCAN4 pair is fully associated.
+    coverage.append(
+        Coverage(
+            "return_queue",
+            scope,
+            anchor,
+            tuple(
+                FactRef(
+                    "fifo",
+                    (r["fifo_arrival_id"],),
+                    (json.dumps(dict(r), sort_keys=True, default=str),),
+                )
+                for r in fifo
+            ),
+        )
+    )
+    positions_table = repo.tables["position_fact"]
+    rack_positions = (positions_table.c.object_kind == "RACK") & (
+        (positions_table.c.object_code == origin.rack_id)
+        | ((positions_table.c.location_code == origin.point) & positions_table.c.is_current)
+    )
+    bins = {m["bin_code"] for record in (*segments, *batches) for m in record["members"]}
+    positions = await rows(
+        "position_fact",
+        rack_positions
+        | (
+            (positions_table.c.object_kind == "BIN")
+            & positions_table.c.object_code.in_(bins)
+            & positions_table.c.is_current
+        ),
+    )
+    coverage.append(
+        Coverage(
+            "current_task",
+            scope,
+            anchor,
+            (FactRef("task", (task.task_id,), (str(task.is_valid),)),) if task.task_id else (),
+        )
+    )
+    original_successor = successor.evidence
+    successor_keys = [
+        original_successor[k]
+        for k in (
+            "task_id",
+            "prepare_operation_id",
+            "confirmation_operation_id",
+            "cancel_operation_id",
+        )
+        if original_successor.get(k)
+    ]
+    successor_keys.extend(original_successor.get("queued_task_ids", ()))
+    coverage.append(
+        Coverage(
+            "successor",
+            scope,
+            anchor,
+            (
+                FactRef(
+                    "successor",
+                    tuple(successor_keys) or (str(repo.work_line_id),),
+                    (successor.state, json.dumps(original_successor, sort_keys=True)),
+                ),
+            ),
+        )
+    )
+    feeding = any(r["feed_id"] and r["feed_state"] != "COMPLETED" for r in members)
+    open_opportunity = any(not r["ended"] for r in opportunities)
+    responsibility = feeding or open_opportunity or any(r["pending"] for r in (*segments, *batches))
+    bound_preparations = {a.id for a in job.actions if a.transport_task_id}
+    failed = {
+        a.id
+        for a in job.actions
+        if a.phase == "APPLIED" and a.outcome and a.outcome["status"] in ("FAILED", "CANCELLED")
+    }
+    registered = bound_preparations - failed
+    remaining = any(
+        r["service_state"] not in ("COMPLETED", "WITHDRAWN")
+        and (
+            r["cycle_id"] == job.id
+            and (
+                r["demand_state"] == "ACTIVE"
+                or (r["preparation_action_id"] in registered)
+                or r["feed_id"]
+            )
+            or r["cycle_id"] is None
+            and task.is_valid
+            and task.task_id == origin.task_id
+            and r["demand_state"] == "ACTIVE"
+            and job.state == "ACTIVE"
+        )
+        for r in members
+    )
+    if not ordinary:
+        candidate = next(
+            (r for r in decision["decision"]["racks"] if r["rack_id"] == origin.rack_id), None
+        )
+        if not candidate:
+            return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
+                point, "UNKNOWN", tuple(coverage)
+            )
+        done = {r["rack_face"] for r in members if r["service_state"] == "COMPLETED"}
+        remaining = bool(
+            not await roller.return_channel_empty(session, work_line_id=repo.work_line_id)
+            and set(candidate["rack_face"]) - done
+            and origin.rack_id not in decision["unused_racks"]
+        )
+    if ordinary and task_coverage.rows and not remaining:
+        return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
+            point, "UNKNOWN", tuple(coverage)
+        )
+    conflict = any(
+        r["object_kind"] == "RACK" and r["is_current"] and r["source_id"] not in own_actions
+        for r in positions
+    )
+    if (
+        job.position_action_id
+        and job.actual_position
+        and job.actual_position["location_code"] == origin.point
+    ):
+        move = next((a for a in job.actions if a.id == job.position_action_id), None)
+        conflict |= not any(matches_position(r, job, move) for r in positions)
+    return PointDemand(point, "CONTINUE" if remaining else "NONE", tuple(coverage)), DirectHandoff(
+        point, "BLOCKED" if responsibility or conflict else "CLEAR", tuple(coverage)
+    )
+
+
+def matches_position(position, job, move):
+    return bool(
+        move
+        and position
+        and position["is_current"]
+        and (
+            position["object_kind"],
+            position["object_code"],
+            position["source_kind"],
+            position["source_id"],
+            position["source_revision"],
+            position["location_code"],
+            position["rack_face"],
+        )
+        == (
+            "RACK",
+            job.origin.rack_id,
+            "RACK",
+            move.id,
+            move.position_revision,
+            job.origin.point,
+            job.actual_face,
+        )
+    )
+
+
+def applied_preparation(job):
+    if not job or job.state != "ACTIVE" or job.review_reason or not job.actions:
+        return None
+    move = job.actions[-1]
+    if (
+        move.id != job.current_action_id
+        or move.id != job.position_action_id
+        or move.kind not in ("ENTER", "ROTATE")
+        or move.phase != "APPLIED"
+        or not move.outcome
+        or move.outcome["status"] != "SUCCEEDED"
+        or move.target_face != job.actual_face
+        or move.actual_face != job.actual_face
+        or move.target != {"kind": "RACK_POSITION", "location_code": job.origin.point}
+        or move.actual_position != move.target
+        or job.actual_position != move.target
+        or move.position_revision != move.outcome_revision
+    ):
+        return None
+    return move
+
+
+async def can_use_face(roller, session, service):
+    """Verify the saved face preparation and current position before new box work."""
+    action_id = service["preparation_action_id"]
+    if service["service_state"] != "READY" or not action_id or not service["cycle_id"]:
+        return False
+    dispatch = roller.rack_dispatch
+    job = await dispatch.progress(session, job_id=service["cycle_id"])
+    move = applied_preparation(job)
+    expected_kind = "ROLLER_DRAIN" if service["purpose"] == "DRAIN" else "ROLLER_ORDINARY"
+    if (
+        not move
+        or await dispatch.has_position_conflict(session, point=job.origin.point)
+        or move.id != action_id
+        or (
+            job.origin.source_kind,
+            job.origin.work_line_id,
+            job.origin.rack_id,
+            job.origin.task_id,
+            job.actual_face,
+        )
+        != (
+            expected_kind,
+            service["work_line_id"],
+            service["rack_id"],
+            service["task_id"],
+            service["rack_face"],
+        )
+    ):
+        return False
+    repo = roller.repository(service["work_line_id"])
+    position = await repo.current_position(session, "RACK", service["rack_id"])
+    if not matches_position(position, job, move):
+        return False
+    # A callback can arrive before the host consumes it, including on a predecessor.
+    for action in job.actions:
+        result = await dispatch.final_result(session, job_id=job.id, action_id=action.id)
+        if (
+            action.phase != "APPLIED"
+            or not result
+            or result.closure != "CLOSED"
+            or result.has_pending_outcome
+            or result.outcome_revision != action.outcome_revision
+            or result.outcome != action.outcome
+            or result.position_observation != action.position_observation
+        ):
+            return False
+    return True
+
+
+async def entry_available(roller, session, job, line):
+    from .service import ROLLER_SOURCES
+
+    if not line or not line.is_enabled or line.business_code != roller.context.domain:
+        return False
+    if line.five_rack_request_limit is None:
+        return True
+    active = await roller.rack_dispatch.jobs(
+        session, work_line_id=line.id, source_kinds=ROLLER_SOURCES, pending=True
+    )
+    return (
+        sum(
+            any(a.template == "CTU01" and a.transport_task_id for a in other.actions)
+            for other in active
+            if other.id != job.id
+        )
+        < line.five_rack_request_limit
+    )
+
+
+async def first_registration(roller, session, job, demand, handoff):
+    """Recheck the original host grant for a movement cutover proved never submitted."""
+    action = job.actions[-1] if job.actions else None
+    if (
+        not action
+        or action.transport_task_id
+        or (action.basis or {}).get("registration_at_cutover") != "LOCAL_ONLY"
+        or action.phase != "REGISTERED"
+        or handoff.state != "CLEAR"
+    ):
+        return None
+    origin = job.origin
+    repo = roller.repository(origin.work_line_id)
+    line = await session.get(WorkLine, origin.work_line_id)
+    if not (
+        line
+        and line.is_enabled
+        and line.business_code == repo.owner_domain
+        and line.line_code == origin.workline_code
+        and line.position_bindings.get("FIVE_RACK") == origin.point
+    ):
+        return None
+    if action.kind != "ENTER":
+        move = next((a for a in job.actions if a.id == job.position_action_id), None)
+        if not (
+            move
+            and move.phase == "APPLIED"
+            and move.outcome
+            and move.actual_position == move.target
+            and matches_position(
+                await repo.current_position(session, "RACK", origin.rack_id), job, move
+            )
+        ):
+            return None
+        if action.kind == "DEPART":
+            return action.id
+        if move.outcome["status"] != "SUCCEEDED" or move.actual_face != move.target_face:
+            return None
+    elif action.target_face != origin.initial_face or not await entry_available(
+        roller, session, job, line
+    ):
+        return None
+    if demand.state != "CONTINUE":
+        return None
+    faces = repo.tables["face_work"]
+    if origin.source_kind == "ROLLER_ORDINARY":
+        current = await roller.production.read_current_task(session, work_line_id=line.id)
+        if (
+            not current.is_valid
+            or current.task_id != origin.task_id
+            or any(c.collection == "task_inputs" and c.rows for c in demand.coverage)
+        ):
+            return None
+        original_face = (
+            faces.c.demand_id == origin.source_ref
+            if action.kind == "ENTER"
+            else faces.c.service_id == action.source_ref
+        )
+        face = await repo._one(
+            session,
+            faces,
+            faces.c.cycle_id == job.id,
+            original_face,
+            faces.c.purpose == "SUPPLY",
+            faces.c.demand_state == "ACTIVE",
+            faces.c.service_state == "PENDING",
+            faces.c.rack_face == action.target_face,
+        )
+        if not face or action.source_ref not in (job.id, face["service_id"]):
+            return None
+    else:
+        if not await roller.get_return_candidates(session, work_line_id=line.id):
+            return None
+        drain = await roller.original_record(session, "drain", origin.source_ref)
+        if drain["status"] != "READY" or origin.rack_id in drain["unused_racks"]:
+            return None
+        if action.kind == "ROTATE" or action.source_ref != job.id:
+            face = await repo._one(
+                session,
+                faces,
+                faces.c.cycle_id == job.id,
+                faces.c.service_id == action.source_ref,
+                faces.c.purpose == "DRAIN",
+                faces.c.source_ref == origin.source_ref + ":" + action.target_face,
+                faces.c.service_state == "PENDING",
+                faces.c.rack_face == action.target_face,
+            )
+            if not face:
+                return None
+    return action.id
+
+
+async def refresh_job(roller, session, job):
+    demand, handoff = await evaluate_roller_point(roller, session, job)
+    job = await roller.rack_dispatch.advance(
+        session,
+        job_id=job.id,
+        demand=demand,
+        handoff=handoff,
+        now_ms=int(time() * 1000),
+        authorized_original_id=await first_registration(roller, session, job, demand, handoff),
+    )
+    repo = roller.repository(job.origin.work_line_id)
+    for action in job.actions:
+        if action.actual_position and action.position_revision is not None:
+            await repo.record_position(
+                session,
+                object_kind="RACK",
+                object_code=job.origin.rack_id,
+                location_code=action.actual_position["location_code"],
+                rack_face=action.actual_face,
+                source_kind="RACK",
+                source_id=action.id,
+                source_revision=action.position_revision,
+                history_only=not job.pending or action.id != job.position_action_id,
+            )
+    if not job.pending:
+        positions = repo.tables["position_fact"]
         await session.execute(
-            table.update()
-            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == new["id"])
-            .values(message_id=reference.message_id)
+            positions.update()
+            .where(
+                *repo.scoped(positions),
+                positions.c.source_kind == "RACK",
+                positions.c.source_id.in_([a.id for a in job.actions]),
+                positions.c.is_current,
+            )
+            .values(is_current=False)
         )
-    if original is not None:
-        await session.execute(
-            table.update()
-            .where(*repo.scoped(table), table.c.kind == "DEPARTURE", table.c.id == original["id"])
-            .values(pending=False)
+    return job, demand.state
+
+
+def cycle_progress(job):
+    if job.closure_reason == "DEPARTURE_ACK":
+        return "RELEASED"
+    if job.state == "RELEASING":
+        if job.review_reason in (
+            "INVALID_DEPARTURE_REQUEST",
+            "INVALID_DEPARTURE_DECISION",
+            "INVALID_DEPARTURE_DESTINATION",
+        ):
+            return "INVALID_DEPARTURE"
+        return (
+            "WAITING_FOR_DEPARTURE_ACCEPTANCE"
+            if job.actions[-1].kind == "DEPART"
+            else "WAITING_FOR_DEPARTURE"
         )
-    return "WAITING_FOR_DEPARTURE"
+    return job.state
 
 
 async def advance_cycle(roller, session, cycle_id):
-    """The only rack lifecycle. Box results are consumed by their original work owner."""
     from .feed_flow import opportunity, prepare_feed, start_feed
+    from .service import ROLLER_SOURCES
 
-    cycle = await roller.original_record(session, "rack_cycle", cycle_id)
-    repo = roller.repository(cycle["work_line_id"])
-    actions, services, departures = (
-        repo.tables[k] for k in ("rack_action", "face_work", "decision")
-    )
-    originals = (
-        (
-            await session.execute(
-                select(actions)
-                .where(*repo.scoped(actions), actions.c.cycle_id == cycle_id)
-                .order_by(actions.c.id)
-            )
-        )
-        .mappings()
-        .all()
-    )
-    for action in originals:
-        if action["transport_task_id"] is not None and action["pending"]:
-            result = await roller.capabilities.transport.get_result(
-                session,
-                transport_task_id=action["transport_task_id"],
-                client_request_id=action["client_request_id"],
-                caller=TransportCaller(action["caller_workline_id"], action["station_id"]),
-            )
-            await apply_rack_result(session, action_id=action["id"], result=result, repository=repo)
-    cycle = await repo.get_cycle(session, cycle_id)
-    if cycle["status"] == "RELEASED":
-        await session.execute(
-            services.update()
-            .where(
-                *repo.scoped(services),
-                services.c.cycle_id == cycle_id,
-                services.c.service_id.is_not(None),
-                services.c.service_state != "WITHDRAWN",
-            )
-            .values(service_state="COMPLETED")
-        )
-        await session.execute(
-            departures.update()
-            .where(
-                *repo.scoped(departures),
-                departures.c.kind == "DEPARTURE",
-                departures.c.cycle_id == cycle_id,
-            )
-            .values(pending=False)
-        )
-        return "RELEASED"
+    job = await roller.rack_dispatch.progress(session, job_id=cycle_id)
+    if job is None or job.origin.source_kind not in ROLLER_SOURCES:
+        raise ValueError("original roller job is missing")
+    repo = roller.repository(job.origin.work_line_id)
+    services = repo.tables["face_work"]
+    ordinary = job.origin.source_kind == "ROLLER_ORDINARY"
+    if not job.pending:
+        return cycle_progress(job)
     if (
-        cycle["purpose"] == "ORDINARY"
-        and not originals
-        and cycle["release_basis"] is None
-        and not await session.scalar(
-            select(services.c.id)
-            .where(
-                *repo.scoped(services),
-                services.c.cycle_id == cycle_id,
-                services.c.feed_id.is_not(None),
-            )
-            .limit(1)
-        )
-    ):
-        # Preserve the cancelled service's identity without later inheriting a sibling's entry.
-        await session.execute(
-            services.update()
-            .where(
-                *repo.scoped(services),
-                services.c.cycle_id == cycle_id,
-                services.c.demand_state == "WITHDRAWN",
-                services.c.service_state.in_(("PENDING", "READY")),
-            )
-            .values(service_state="WITHDRAWN")
-        )
-        await session.execute(
-            services.update()
-            .where(
-                *repo.scoped(services),
-                services.c.cycle_id == cycle_id,
-                services.c.service_id.is_(None),
-                services.c.demand_state == "WITHDRAWN",
-            )
-            .values(cycle_id=None)
-        )
-        cycles = repo.tables["rack_cycle"]
-        valid = await session.scalar(
-            select(services.c.id)
-            .where(
-                *repo.scoped(services),
-                services.c.purpose == "SUPPLY",
-                services.c.task_id == cycle["task_id"],
-                services.c.rack_id == cycle["rack_id"],
-                services.c.demand_state == "ACTIVE",
-                or_(services.c.cycle_id == cycle_id, services.c.cycle_id.is_(None)),
-            )
-            .limit(1)
-        )
-        if valid is None:
-            await session.execute(
-                cycles.update()
-                .where(*repo.scoped(cycles), cycles.c.id == cycle_id)
-                .values(status="WITHDRAWN", pending=False)
-            )
-            return "WITHDRAWN"
-        selected = await session.scalar(
-            select(services.c.id)
-            .where(
-                *repo.scoped(services),
-                services.c.cycle_id == cycle_id,
-                services.c.demand_state == "ACTIVE",
-                services.c.service_state.in_(("PENDING", "READY")),
-            )
-            .limit(1)
-        )
-        if cycle["status"] == "WITHDRAWN" and selected is not None:
-            await session.execute(
-                cycles.update()
-                .where(*repo.scoped(cycles), cycles.c.id == cycle_id)
-                .values(status="ACTIVE", pending=True)
-            )
-            cycle = await repo.get_cycle(session, cycle_id)
-    if cycle["status"] == "WITHDRAWN":
-        return "WITHDRAWN"
-    if await session.scalar(
-        select(departures.c.id)
-        .where(
-            *repo.scoped(departures),
-            departures.c.kind == "DEPARTURE",
-            departures.c.cycle_id == cycle_id,
-        )
-        .limit(1)
-    ):
-        return await advance_departure(roller, session, repo, cycle, cycle_id)
-    if (
-        cycle["purpose"] == "DRAIN"
-        and not originals
+        not ordinary
+        and not job.actions
         and not await roller.get_return_candidates(session, work_line_id=repo.work_line_id)
     ):
         from .return_flow import summarize_drain
 
-        drain = await summarize_drain(roller, session, cycle["source_ref"])
-        return "WITHDRAWN" if cycle["rack_id"] in drain["unused_racks"] else "WAITING_FOR_RACK"
+        await summarize_drain(roller, session, job.origin.source_ref)
+        return (await roller.rack_dispatch.progress(session, job_id=cycle_id)).state
+    if not job.origin.resources:
+        resources = await roller.read_resources(session, repo.work_line_id)
+        if resources is None:
+            return "WAITING_FOR_RACK"
+        await register_job(
+            roller,
+            session,
+            repo,
+            job.origin.source_kind,
+            job.origin.source_ref,
+            job.origin.rack_id,
+            job.origin.initial_face,
+            job.origin.task_id,
+            resources,
+            cycle_id=job.id,
+        )
+        job = await roller.rack_dispatch.progress(session, job_id=cycle_id)
+    if ordinary:
+        unused = [
+            a.id
+            for a in job.actions
+            if (
+                not a.transport_task_id
+                and (a.basis or {}).get("registration_at_cutover") == "LOCAL_ONLY"
+            )
+            or (
+                a.phase == "APPLIED"
+                and a.outcome
+                and a.outcome["status"] in ("FAILED", "CANCELLED")
+            )
+        ]
+        cancelled = [
+            *repo.scoped(services),
+            services.c.cycle_id == cycle_id,
+            services.c.demand_state == "WITHDRAWN",
+            services.c.feed_id.is_(None),
+            (
+                services.c.preparation_action_id.is_(None)
+                | services.c.preparation_action_id.in_(unused)
+            ),
+        ]
+        await session.execute(
+            services.update()
+            .where(*cancelled, services.c.service_state.in_(("PENDING", "READY")))
+            .values(service_state="WITHDRAWN")
+        )
+        await session.execute(
+            services.update()
+            .where(*cancelled, services.c.service_id.is_(None))
+            .values(cycle_id=None)
+        )
+    job, demand_state = await refresh_job(roller, session, job)
+    if demand_state == "UNKNOWN":
+        return "WAITING_FOR_ORIGINAL_FACTS"
+    if job.state != "ACTIVE" or (job.release_requested and not job.actions):
+        return cycle_progress(job)
     while True:
         service = await repo._one(
             session,
@@ -452,6 +707,9 @@ async def advance_cycle(roller, session, cycle_id):
             services.c.service_state.in_(("PENDING", "READY")),
         )
         if service is None:
+            if job.release_requested:
+                job, _ = await refresh_job(roller, session, job)
+                return cycle_progress(job)
             completed = (
                 (
                     await session.execute(
@@ -468,7 +726,7 @@ async def advance_cycle(roller, session, cycle_id):
                 .all()
             )
             demand = None
-            if cycle["purpose"] == "ORDINARY":
+            if ordinary:
                 current_task = await roller.production.read_current_task(
                     session, work_line_id=repo.work_line_id
                 )
@@ -476,13 +734,13 @@ async def advance_cycle(roller, session, cycle_id):
                 query = select(demands).where(
                     *repo.scoped(demands),
                     demands.c.purpose == "SUPPLY",
-                    demands.c.task_id == cycle["task_id"],
-                    demands.c.rack_id == cycle["rack_id"],
+                    demands.c.task_id == job.origin.task_id,
+                    demands.c.rack_id == job.origin.rack_id,
                     demands.c.service_id.is_(None),
                     or_(
                         demands.c.cycle_id == cycle_id,
                         demands.c.cycle_id.is_(None)
-                        & (current_task.is_valid and current_task.task_id == cycle["task_id"]),
+                        & (current_task.is_valid and current_task.task_id == job.origin.task_id),
                     ),
                     or_(demands.c.demand_state == "ACTIVE", demands.c.cycle_id == cycle_id),
                 )
@@ -494,9 +752,9 @@ async def advance_cycle(roller, session, cycle_id):
                 if demand is not None:
                     source_ref, face = demand["id"], demand["rack_face"]
             else:
-                drain = await roller.original_record(session, "drain", cycle["source_ref"])
+                drain = await roller.original_record(session, "drain", job.origin.source_ref)
                 candidate = next(
-                    c for c in drain["decision"]["racks"] if c["rack_id"] == cycle["rack_id"]
+                    c for c in drain["decision"]["racks"] if c["rack_id"] == job.origin.rack_id
                 )
                 remaining = [
                     f
@@ -513,16 +771,9 @@ async def advance_cycle(roller, session, cycle_id):
                     source_ref = drain["id"] + ":" + face
                 else:
                     remaining = []
-            if (cycle["purpose"] == "ORDINARY" and demand is None) or (
-                cycle["purpose"] == "DRAIN" and not remaining
-            ):
-                return await advance_departure(
-                    roller,
-                    session,
-                    repo,
-                    cycle,
-                    completed[-1]["service_id"] if completed else cycle_id,
-                )
+            if (ordinary and demand is None) or (not ordinary and not remaining):
+                job, _ = await refresh_job(roller, session, job)
+                return cycle_progress(job)
             service_id = str(uuid7())
             if demand is not None:
                 await repo.bind_supply(
@@ -540,69 +791,58 @@ async def advance_cycle(roller, session, cycle_id):
                         service_id=service_id,
                         cycle_id=cycle_id,
                         source_ref=source_ref,
-                        rack_id=cycle["rack_id"],
+                        rack_id=job.origin.rack_id,
                         rack_face=face,
-                        task_id=cycle["task_id"],
+                        task_id=job.origin.task_id,
                         service_state="PENDING",
                     ),
                     ("cycle_id", "source_ref"),
                     ("purpose", "rack_face", "task_id"),
                 )
-        resources = cycle["resources"]
-        entry = await repo._one(
-            session, actions, actions.c.cycle_id == cycle_id, actions.c.kind == "CTU01"
-        )
+        resources = job.origin.resources
+        entry = next((a for a in job.actions if a.kind == "ENTER"), None)
         if service["service_state"] != "READY":
             if entry is None:
-                await rack_action(
-                    roller,
-                    session,
-                    repo,
-                    cycle,
-                    kind="CTU01",
-                    source_ref=service["service_id"],
-                    target=dict(
-                        kind="RACK_POSITION", location_code=resources["positions"]["FIVE_RACK"]
-                    ),
-                    face=service["rack_face"],
-                    source=Rack(cycle["rack_id"]),
+                line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
+                if not await entry_available(roller, session, job, line):
+                    return "WAITING_FOR_RACK"
+                kind = "ENTER"
+            else:
+                move = applied_preparation(job)
+                position = await repo.current_position(session, "RACK", job.origin.rack_id)
+                if not matches_position(position, job, move):
+                    return "WAITING_FOR_ORIGINAL_POSITION"
+                if service["preparation_action_id"] and move.id != service["preparation_action_id"]:
+                    return "WAITING_FOR_ORIGINAL_POSITION"
+                kind = "ROTATE" if job.actual_face != service["rack_face"] else None
+            action_id = (
+                (
+                    await roller.rack_dispatch.prepare(
+                        session,
+                        job_id=job.id,
+                        kind=kind,
+                        source_ref=service["service_id"],
+                        face=service["rack_face"],
+                    )
                 )
-                return "WAITING_FOR_RACK"
-            if entry["status"] != "SUCCEEDED":
-                return "WAITING_FOR_RACK"
-            position = await repo.current_position(session, "RACK", cycle["rack_id"])
-            position_action = (
-                await repo.get_action(session, position["source_id"]) if position else None
+                if kind
+                else move.id
             )
-            # A newer mismatch fact cannot authorize the older successful action's successor.
-            if (
-                position_action is None
-                or position_action["cycle_id"] != cycle_id
-                or position_action["status"] != "SUCCEEDED"
-                or position["location_code"] != position_action["target"]["location_code"]
-                or position["rack_face"] != position_action["target_face"]
-            ):
-                return "WAITING_FOR_ORIGINAL_POSITION"
-            if position["rack_face"] != service["rack_face"]:
-                await rack_action(
-                    roller,
-                    session,
-                    repo,
-                    cycle,
-                    kind="CTU02",
-                    source_ref=service["service_id"],
-                    target=entry["target"],
-                    face=service["rack_face"],
-                    source=RackPosition(entry["target"]["location_code"]),
+            if action_id and not service["preparation_action_id"]:
+                await session.execute(
+                    services.update()
+                    .where(*repo.scoped(services), services.c.service_id == service["service_id"])
+                    .values(preparation_action_id=action_id)
                 )
+            if kind:
                 return "WAITING_FOR_RACK"
             await session.execute(
                 services.update()
                 .where(*repo.scoped(services), services.c.service_id == service["service_id"])
                 .values(service_state="READY")
             )
-        caller = TransportCaller(entry["caller_workline_id"], entry["station_id"])
-        if cycle["purpose"] == "ORDINARY":
+        caller = job.origin.caller
+        if ordinary:
             feed_id = await start_feed(
                 roller,
                 session,
@@ -610,9 +850,24 @@ async def advance_cycle(roller, session, cycle_id):
                 caller=caller,
                 target=HandoffPosition(resources["positions"]["INLET"]),
             )
+            if feed_id is None:
+                return "WAITING_FOR_ORIGINAL_POSITION"
             await prepare_feed(roller, session, service["source_ref"])
             feed = await roller.original_record(session, "feed", feed_id)
         else:
+            opportunities = repo.tables["return_opportunity"]
+            selected = await repo._one(
+                session,
+                opportunities,
+                opportunities.c.service_id == service["service_id"],
+                opportunities.c.source_ref == service["service_id"],
+            )
+            if selected is None and not await can_use_face(
+                roller,
+                session,
+                await roller.original_record(session, "face_service", service["service_id"]),
+            ):
+                return "WAITING_FOR_ORIGINAL_POSITION"
             await opportunity(
                 repo,
                 session,
@@ -652,155 +907,18 @@ async def advance_cycle(roller, session, cycle_id):
             )
             if batch_id is not None:
                 return "WAITING_FOR_RETURN"
+            unresolved = await repo._one(
+                session, opportunities, opportunities.c.id == current["id"]
+            )
+            if not unresolved["ended"]:
+                return "WAITING_FOR_RETURN"
             if current["kind"] == "SEGMENT":
                 await prepare_feed(roller, session, service["source_ref"])
                 return "WAITING_FOR_FEED"
-        if cycle["purpose"] == "ORDINARY" and feed["feed_state"] != "COMPLETED":
+        if ordinary and feed["feed_state"] != "COMPLETED":
             return "WAITING_FOR_FEED"
         await session.execute(
             services.update()
             .where(*repo.scoped(services), services.c.service_id == service["service_id"])
             .values(service_state="COMPLETED")
         )
-
-
-@dataclass(frozen=True, slots=True)
-class RackApplyResult:
-    action_changed: bool
-    projection_update: Literal["UPDATED", "HISTORY_ONLY", "NEEDS_ASSOCIATION"]
-
-
-async def apply_rack_result(
-    session: AsyncSession,
-    *,
-    action_id: str,
-    result: TransportTaskResult,
-    repository: RollerRepository | None = None,
-) -> RackApplyResult:
-    if repository is None:
-        table = TABLES["rack_action"]
-        original = (
-            (await session.execute(select(table).where(table.c.id == action_id)))
-            .mappings()
-            .one_or_none()
-        )
-        if original is None:
-            return RackApplyResult(False, "NEEDS_ASSOCIATION")
-        repository = RollerRepository(original["owner_domain"], original["work_line_id"])
-    action = await repository.get_action(session, action_id)
-    if action is None:
-        return RackApplyResult(False, "NEEDS_ASSOCIATION")
-    cycle = await repository.get_cycle(session, action["cycle_id"])
-    expected_kind = "RACK_ROTATE" if action["kind"] == "CTU02" else "RACK_MOVE"
-    if cycle is None or (
-        result.availability != "FOUND"
-        or result.transport_task_id != action["transport_task_id"]
-        or result.client_request_id != action["client_request_id"]
-        or result.owner_domain != action["owner_domain"]
-        or result.operation_id != action["operation_id"]
-        or result.workline_id != action["caller_workline_id"]
-        or result.station_id != action["station_id"]
-        or result.cycle_id != cycle["id"]
-        or result.kind != expected_kind
-    ):
-        return RackApplyResult(False, "NEEDS_ASSOCIATION")
-    actions, cycles = repository.tables["rack_action"], repository.tables["rack_cycle"]
-    scope = repository.scoped(actions)
-    if action["kind"] == "CTU03":
-        accepted = (
-            result.submission_state == "AVAILABLE"
-            and result.submission_response_state == "VALID"
-            and (result.submission_http_status, result.submission_response_code)
-            in {(202, "RECEIVED"), (200, "DUPLICATE")}
-        )
-        succeeded = result.outcome is not None and result.outcome["status"] == "SUCCEEDED"
-        if (accepted or succeeded) and cycle["status"] != "RELEASED":
-            basis = dict(
-                transport_task_id=result.transport_task_id,
-                client_request_id=result.client_request_id,
-                operation_id=result.operation_id,
-                submission_message_id=result.submission_message_id,
-                submission_target=result.submission_target,
-                submission_http_status=result.submission_http_status,
-                submission_response_code=result.submission_response_code,
-                outcome_revision=result.outcome_revision if succeeded else None,
-            )
-            await session.execute(
-                actions.update()
-                .where(*scope, actions.c.id == action_id)
-                .values(status="ACCEPTED", pending=False, acceptance_basis=basis)
-            )
-            await session.execute(
-                cycles.update()
-                .where(*repository.scoped(cycles), cycles.c.id == cycle["id"])
-                .values(status="RELEASED", pending=False, release_basis=basis)
-            )
-            positions = repository.tables["position_fact"]
-            original_actions = select(actions.c.id).where(*scope, actions.c.cycle_id == cycle["id"])
-            await session.execute(
-                positions.update()
-                .where(
-                    *repository.scoped(positions),
-                    positions.c.source_kind == "RACK",
-                    positions.c.source_id.in_(original_actions),
-                    positions.c.is_current.is_(True),
-                )
-                .values(is_current=False)
-            )
-            return RackApplyResult(True, "HISTORY_ONLY")
-        return RackApplyResult(False, "HISTORY_ONLY")
-    changed = False
-    projection = "HISTORY_ONLY"
-    outcome, observation = result.outcome, result.position_observation
-    for data in (outcome, observation):
-        if data is not None and (
-            data["rack_id"] != cycle["rack_id"]
-            or data["transport_task_id"] != action["transport_task_id"]
-            or data["kind"] != expected_kind
-        ):
-            return RackApplyResult(False, "NEEDS_ASSOCIATION")
-    position = outcome
-    # Only revisions of this original task decide whether its observation supersedes its outcome.
-    if observation is not None and (
-        position is None or observation["outcome_revision"] > position["outcome_revision"]
-    ):
-        position = observation
-    if (
-        position is not None
-        and position["final_position"] is not None
-        and not position.get("position_unknown")
-    ):
-        revision = position["outcome_revision"]
-        projection = await repository.record_position(
-            session,
-            object_kind="RACK",
-            object_code=cycle["rack_id"],
-            location_code=position["final_position"]["location_code"],
-            rack_face=position.get("arrival_face"),
-            source_kind="RACK",
-            source_id=action_id,
-            source_revision=revision,
-            history_only=cycle["status"] == "RELEASED",
-        )
-        if action["position_revision"] is None or revision > action["position_revision"]:
-            await session.execute(
-                actions.update()
-                .where(*scope, actions.c.id == action_id)
-                .values(position_revision=revision)
-            )
-    if outcome is not None and (
-        action["consumed_revision"] is None
-        or outcome["outcome_revision"] > action["consumed_revision"]
-    ):
-        status = "UNKNOWN" if outcome.get("position_unknown") else outcome["status"]
-        await session.execute(
-            actions.update()
-            .where(*scope, actions.c.id == action_id)
-            .values(
-                status=status,
-                consumed_revision=outcome["outcome_revision"],
-                pending=status != "SUCCEEDED",
-            )
-        )
-        changed = True
-    return RackApplyResult(changed, projection)

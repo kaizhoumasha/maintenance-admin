@@ -2,8 +2,9 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from typing import Literal
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import json_object
@@ -11,7 +12,7 @@ from app.integrations.wms_envelope import RESPONSE_COLUMNS, outgoing_message, st
 from app.models import ReliableMessage, TransportTask
 
 from .adapter import TransportSubmitAdapter
-from .callback.payloads import Resulted
+from .callback.payloads import RackPositionRef, Resulted
 from .protocol import OPERATION
 from .types import (
     BinExchangePair,
@@ -60,23 +61,37 @@ class TransportTaskResult:
     closure_basis: dict | None = None
 
 
-async def read_rows(session: AsyncSession, ids: tuple[str, ...]) -> dict:
+async def read_rows(
+    session: AsyncSession, ids: tuple[str, ...], *, check_conflicts: bool = False
+) -> dict:
     """One statement includes all original submission matches, including ambiguity."""
     if not ids:
         return {}
     task, message = TransportTask.__table__, ReliableMessage.__table__
+    match_identity = or_ if check_conflicts else and_
+    columns = (*RESPONSE_COLUMNS, "delivery_snapshot") if check_conflicts else RESPONSE_COLUMNS
+    task_columns = [c for c in task.c if c.name != "submission_acceptance"]
+    if check_conflicts:
+        task_columns.extend(
+            (
+                task.c.submission_acceptance,
+                task.c.submission_acceptance.is_not(None).label("has_acceptance"),
+            )
+        )
     query = (
         select(
-            *[c.label("task_" + c.name) for c in task.c],
-            *[message.c[n].label("submit_" + n) for n in RESPONSE_COLUMNS],
+            *[c.label("task_" + c.name) for c in task_columns],
+            *[message.c[n].label("submit_" + n) for n in columns],
         )
         .select_from(
             task.outerjoin(
                 message,
                 and_(
-                    message.c.operation_id == task.c.operation_id,
                     message.c.operation == OPERATION,
-                    message.c.business_key == task.c.transport_task_id,
+                    match_identity(
+                        message.c.operation_id == task.c.operation_id,
+                        message.c.business_key == task.c.transport_task_id,
+                    ),
                 ),
             )
         )
@@ -88,9 +103,9 @@ async def read_rows(session: AsyncSession, ids: tuple[str, ...]) -> dict:
     for row in rows:
         key = row["task_transport_task_id"]
         if key not in grouped:
-            grouped[key] = ({c.name: row["task_" + c.name] for c in task.c}, [])
+            grouped[key] = ({c.name: row["task_" + c.name] for c in task_columns}, [])
         if row["submit_id"] is not None:
-            grouped[key][1].append({n: row["submit_" + n] for n in RESPONSE_COLUMNS})
+            grouped[key][1].append({n: row["submit_" + n] for n in columns})
     return grouped
 
 
@@ -159,10 +174,28 @@ def validate_frozen(task: dict) -> dict:
     return frozen
 
 
+class _StoredZone(RackPositionRef):
+    kind: Literal["ZONE"]
+
+
+class _StoredRackFailure(Resulted):
+    final_position: _StoredZone
+
+
 def validate_outcome(task: dict, raw: dict, revision: int, *, applied: bool) -> tuple[dict, str]:
-    data = Resulted.model_validate(raw).model_dump(mode="json")
+    # Older applied rack failures can locate the rack in a zone. Callback admission stays separate.
+    model = (
+        _StoredRackFailure
+        if applied
+        and task["kind"] == "RACK_MOVE"
+        and raw.get("status") in ("FAILED", "CANCELLED")
+        and (raw.get("final_position") or {}).get("kind") == "ZONE"
+        else Resulted
+    )
+    data = model.model_validate(raw).model_dump(mode="json")
     if (
-        type(revision) is not int
+        (model is _StoredRackFailure and raw != data)
+        or type(revision) is not int
         or data["outcome_revision"] != revision
         or data["transport_task_id"] != task["transport_task_id"]
         or data["kind"] != task["kind"]

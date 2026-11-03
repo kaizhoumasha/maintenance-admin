@@ -27,6 +27,7 @@ from app.integrations.wms_callback import (
     Outcome,
     Unavailable,
 )
+from app.models import WorkLine
 
 from .contracts import (
     Cancel,
@@ -57,6 +58,7 @@ class SmtManualTaskFlow:
         self.first_plan_wait_ms = first_plan_wait_ms
         self.capabilities, self.roller = capabilities, roller
         self.repository = repository or TaskRepository()
+        self.manual_racks = ManualRackFlow(capabilities, roller, repository=self.repository)
 
     async def read_task_owner(self, session: AsyncSession, *, task_id: str) -> TaskOwnerRef | None:
         task = await self.repository.task(session, task_id)
@@ -125,7 +127,9 @@ class SmtManualTaskFlow:
         return Accepted()
 
     async def accept_task_plan_delta(self, ctx: CallbackContext, payload: PlanDelta) -> Outcome:
-        line, task = await self.repository.original(ctx.session, payload.task_id)
+        line, task, jobs = await self.repository.original_dispatch_task(
+            ctx.session, self.roller, payload.task_id
+        )
         if task is None:
             return Conflict({"reason_code": "REFERENCE_CONFLICT"})
         validate_task_branch(
@@ -212,6 +216,16 @@ class SmtManualTaskFlow:
                 (),
             ),
         )
+        if added:
+            await self.roller.rack_dispatch.note_facts_changed(
+                ctx.session,
+                job_ids=tuple(
+                    j.id
+                    for j in jobs
+                    if j.origin.task_id == payload.task_id
+                    and j.origin.rack_id in {f.rack_id for f in added}
+                ),
+            )
         await self.repository.save_task(
             ctx.session,
             payload.task_id,
@@ -248,7 +262,9 @@ class SmtManualTaskFlow:
         return await self.accept_task_plan_delta(ctx, payload)
 
     async def accept_task_cancel(self, ctx: CallbackContext, payload: Cancel) -> Outcome:
-        _, task = await self.repository.original(ctx.session, payload.task_id)
+        _, task, jobs = await self.repository.original_dispatch_task(
+            ctx.session, self.roller, payload.task_id
+        )
         if task is None:
             return Conflict({"reason_code": "REFERENCE_CONFLICT"})
         validate_task_branch(
@@ -312,13 +328,27 @@ class SmtManualTaskFlow:
                     tuple(withdrawn),
                 ),
             )
+            if withdrawn:
+                await self.roller.rack_dispatch.note_facts_changed(
+                    ctx.session,
+                    job_ids=tuple(
+                        j.id
+                        for j in jobs
+                        if j.origin.task_id == payload.task_id
+                        and j.origin.rack_id in {f.rack_id for f in withdrawn}
+                    ),
+                )
         await self.repository.save_input(ctx, payload, applied=True)
         return Accepted()
 
     async def prepare_next(
-        self, session: AsyncSession, *, work_line_id: int, now_ms: int
+        self, session: AsyncSession, *, work_line_id: int, now_ms: int, locked: bool = False
     ) -> str | None:
-        line = await self.repository.lock_line(session, work_line_id)
+        line = (
+            await session.get(WorkLine, work_line_id)
+            if locked
+            else await self.repository.lock_line(session, work_line_id)
+        )
         if line is None or not line.is_enabled or line.business_code != "smt_manual":
             return None
         table = self.repository.tables["task"]
@@ -376,9 +406,13 @@ class SmtManualTaskFlow:
         )
         return row["task_id"]
 
-    async def advance_task(self, session: AsyncSession, *, task_id: str) -> str:
+    async def advance_task(
+        self, session: AsyncSession, *, task_id: str, locked: bool = False
+    ) -> str:
         """Consume original prepare/confirmation in the caller's independent transaction."""
-        _, task = await self.repository.original(session, task_id)
+        if not locked:
+            await self.repository.original_dispatch_task(session, self.roller, task_id)
+        task = await self.repository.task(session, task_id)
         if task is None:
             return "NOT_FOUND"
         terminal = task["status"] in {"CANCELLED", "COMPLETED"}
@@ -650,8 +684,9 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        if any(b["state"] != "RELEASED" or not b["command_code"] for b in bins):
-            return False, {}
+        for work in bins:
+            if not await self.repository.bin_release_evidence(session, self.roller, work):
+                return False, {}
         inputs = tables["input"]
         if await session.scalar(
             select(inputs.c.operation_id)
@@ -667,8 +702,7 @@ class SmtManualTaskFlow:
             .limit(1)
         ):
             return False, {}
-        racks = ManualRackFlow(self.capabilities, repository=self.repository)
-        if await racks.has_report_obligations(session, task_id=task["task_id"]):
+        if await self.manual_racks.has_report_obligations(session, task_id=task["task_id"]):
             return False, {}
         if not await self._rack_completion_ready(session, task, members):
             return False, {}
@@ -684,13 +718,13 @@ class SmtManualTaskFlow:
     async def _rack_completion_ready(
         self, session: AsyncSession, task: RowMapping, members: Sequence[RowMapping]
     ) -> bool:
-        from app.integrations.wms_transport import TransportCaller
+        from .manual_rack_flow import MANUAL_SOURCES
 
-        racks, actions = (self.repository.tables[k] for k in ("rack", "rack_action"))
-        works = (
-            (await session.execute(select(racks).where(racks.c.task_id == task["task_id"])))
-            .mappings()
-            .all()
+        jobs = await self.roller.rack_dispatch.jobs(
+            session,
+            work_line_id=task["work_line_id"],
+            source_kinds=MANUAL_SOURCES,
+            task_id=task["task_id"],
         )
         target_required = (
             task["business_type"] == "outbound"
@@ -698,59 +732,44 @@ class SmtManualTaskFlow:
             and not any(m["kind"] == "BIN" for m in members)
         )
         target_ready = not target_required
-        for work in works:
-            original = (
-                (
-                    await session.execute(
-                        select(actions)
-                        .where(
-                            actions.c.rack_work_id == work["id"],
-                            actions.c.kind.in_(("ENTER", "ROTATE")),
-                        )
-                        .order_by(actions.c.id)
-                    )
+        target = (
+            await self.manual_racks.original_target_plan(session, task)
+            if task["target_rack"]
+            else None
+        )
+        for job in jobs:
+            if job.review_reason in {"POSITION_CONFLICT", "OTHER_POSITION_CONFLICT"}:
+                return False
+            transfer = job.origin.source_kind == "MANUAL_TRANSFER"
+            for action in job.actions:
+                if action.kind not in ("ENTER", "ROTATE"):
+                    continue
+                result = await self.roller.rack_dispatch.final_result(
+                    session, job_id=job.id, action_id=action.id
                 )
-                .mappings()
-                .all()
-            )
-            for action in original:
-                result = await self.capabilities.transport.get_result(
-                    session,
-                    transport_task_id=action["transport_task_id"],
-                    client_request_id=action["client_request_id"],
-                    caller=TransportCaller(work["caller_workline_id"], work["station_id"]),
-                )
-                outcome = result.outcome
-                if work["role"] == "TRANSFER" and not target_required:
-                    if (
-                        action["kind"] == "ENTER"
-                        and result.availability == "FOUND"
-                        and result.owner_domain == "smt_manual"
-                        and result.cycle_id == work["id"]
-                        and outcome is not None
-                        and outcome["status"] == "CANCELLED"
-                    ):
+                outcome = result.outcome if result else None
+                if transfer and not target_required:
+                    if action.kind == "ENTER" and outcome and outcome["status"] == "CANCELLED":
                         return False
                     continue
-                if (
-                    result.availability != "FOUND"
-                    or result.owner_domain != "smt_manual"
-                    or result.cycle_id != work["id"]
-                    or outcome is None
-                    or result.has_pending_outcome
-                    or outcome["position_unknown"]
+                if not (
+                    result
+                    and outcome
+                    and not result.has_pending_outcome
+                    and not outcome["position_unknown"]
+                    and result.closure == "CLOSED"
+                    and not (
+                        result.position_observation
+                        and result.position_observation["outcome_revision"]
+                        > result.outcome_revision
+                    )
                 ):
                     return False
-                if (
-                    result.position_observation
-                    and result.position_observation["outcome_revision"] > result.outcome_revision
-                ):
-                    return False
-                if action["kind"] == "ENTER" and outcome["status"] == "CANCELLED":
-                    associated = [m for m in members if m["rack_work_id"] == work["id"]]
+                if action.kind == "ENTER" and outcome["status"] == "CANCELLED":
+                    associated = [m for m in members if m["rack_work_id"] == job.id]
                     if (
-                        action["state"] != "CANCELLED"
-                        or work["role"] != "RETURN"
+                        action.phase != "APPLIED"
+                        or transfer
                         or not associated
                         or any(
                             m["status"] != "CANCELLED" or not m["cancelled_operation_id"]
@@ -758,13 +777,20 @@ class SmtManualTaskFlow:
                         )
                     ):
                         return False
-                if work["role"] == "TRANSFER":
-                    target_ready = bool(
-                        action["kind"] == "ENTER"
-                        and outcome["status"] == "SUCCEEDED"
-                        and work["rack_id"] == task["target_rack"]["rack_id"]
+                if (
+                    transfer
+                    and action.kind == "ENTER"
+                    and target
+                    and target["target_job_id"] == job.id
+                    and target["target_action_id"] == action.id
+                    and task["task_id"] == job.origin.source_ref
+                ):
+                    target_ready = (
+                        outcome["status"] == "SUCCEEDED"
+                        and action.phase == "APPLIED"
                         and outcome["final_position"]
-                        == dict(kind="RACK_POSITION", location_code=work["location_code"])
+                        == {"kind": "RACK_POSITION", "location_code": job.origin.point}
                         and outcome["arrival_face"] == task["target_rack"]["rack_face"]
+                        and job.origin.rack_id == task["target_rack"]["rack_id"]
                     )
         return bool(target_ready)

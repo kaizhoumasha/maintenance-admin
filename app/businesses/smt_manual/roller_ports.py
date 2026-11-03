@@ -1,3 +1,4 @@
+import json
 from time import time
 from typing import TYPE_CHECKING
 
@@ -5,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.businesses._components.bin_roller.ports import CurrentTask, Scan2Arrival, SuccessorContext
+from app.businesses._components.rack_dispatch.contracts import Coverage, FactRef, PointRef
 from app.integrations.ecs_callback import EcsEventContext
 from app.models import WorkLine
 
@@ -21,10 +23,76 @@ class RollerPorts:
         self.repository = repository
         self.manual_bins = manual_bins
 
+    async def lock_scan2_task(self, session: AsyncSession, *, work_line_id: int) -> None:
+        # The event resolver owns the line and source device before any scan row is written.
+        table = self.repository.tables["task"]
+        await session.execute(
+            select(table.c.task_id)
+            .where(
+                table.c.work_line_id == work_line_id, table.c.status.in_(("PREPARING", "EXECUTING"))
+            )
+            .order_by(table.c.task_id)
+            .with_for_update()
+        )
+
     async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> None:
         if self.manual_bins is None:
             raise RuntimeError("manual bin production must be assembled")
         await self.manual_bins.accept_scan2(ctx, arrival)
+
+    async def read_task_coverage(
+        self, session: AsyncSession, *, point: PointRef, task_id: str
+    ) -> Coverage | None:
+        task = await self.repository.task(session, task_id)
+        if (
+            point.owner_domain != "smt_manual"
+            or not task
+            or task["work_line_id"] != point.work_line_id
+        ):
+            return None
+        inputs = self.repository.tables["input"]
+        pending = (
+            await session.execute(
+                select(inputs)
+                .where(
+                    inputs.c.task_id == task_id,
+                    inputs.c.work_line_id == point.work_line_id,
+                    inputs.c.state.in_(("DEFERRED", "PENDING")),
+                    inputs.c.operation.in_(
+                        ("sorting.task.plan_delta@v1", "sorting.task.cancel@v1")
+                    ),
+                )
+                .order_by(*inputs.primary_key)
+            )
+        ).mappings()
+        return Coverage(
+            "task_inputs",
+            (
+                point.owner_domain,
+                str(point.work_line_id),
+                point.job_id,
+                point.rack_id,
+                point.point,
+                task_id,
+            ),
+            FactRef(
+                "task",
+                (task_id,),
+                (
+                    str(task["plan_revision"]),
+                    task["status"],
+                    json.dumps(task["received_work"], sort_keys=True),
+                ),
+            ),
+            tuple(
+                FactRef(
+                    "pending_input",
+                    (r["operation"], r["operation_id"]),
+                    (r["state"], str(r["plan_revision"]), json.dumps(r["payload"], sort_keys=True)),
+                )
+                for r in pending
+            ),
+        )
 
     async def read_current_task(self, session: AsyncSession, *, work_line_id: int) -> CurrentTask:
         table = self.repository.tables["task"]

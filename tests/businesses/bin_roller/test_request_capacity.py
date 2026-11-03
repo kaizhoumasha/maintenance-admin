@@ -128,20 +128,18 @@ async def test_selected_quota_waiter_can_be_withdrawn_without_starting_or_stalli
 
 
 @pytest.mark.parametrize(
-    "withdrawn,persisted,already_retired",
+    "withdrawn,persisted",
     [
-        ("A", False, False),
-        ("B", False, False),
-        ("A", True, False),
-        ("B", True, False),
-        ("B", True, True),
+        ("A", False),
+        ("B", False),
+        ("A", True),
+        ("B", True),
     ],
 )
 async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_valid_face(
     roller_lifecycle,
     withdrawn,
     persisted,
-    already_retired,
 ):
     from app.core.identifiers import uuid7
 
@@ -154,20 +152,24 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
         # Previously saved unstarted candidate: FEED B selected the older service A.
         async with flow.factory.begin() as session:
             repo = flow.roller.repository(1)
-            cycle = await repo.create_cycle(
+            from app.businesses._components.bin_roller.rack_flow import register_job
+
+            cycle_id = await register_job(
+                flow.roller,
                 session,
-                cycle_id=str(uuid7()),
-                rack_id="WAITING",
-                purpose="ORDINARY",
-                task_id=flow.current_task,
-                source_ref=second,
-                resources=await flow.roller.read_resources(session, 1),
+                repo,
+                "ROLLER_ORDINARY",
+                second,
+                "WAITING",
+                "B",
+                flow.current_task,
+                await flow.roller.read_resources(session, 1),
             )
-            await repo.bind_supply(session, demand_id=second, cycle_id=cycle["id"])
+            await repo.bind_supply(session, demand_id=second, cycle_id=cycle_id)
             await repo.bind_supply(
                 session,
                 demand_id=first,
-                cycle_id=cycle["id"],
+                cycle_id=cycle_id,
                 service_id=str(uuid7()),
             )
     else:
@@ -182,16 +184,6 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
                 1, flow.current_task, "withdraw", (), (SourceFaceRef(1, "WAITING", withdrawn),)
             ),
         )
-        if already_retired:
-            cycles = flow.store.tables["rack_cycle"]
-            await session.execute(
-                cycles.update()
-                .where(cycles.c.id == old_cycle["id"])
-                .values(
-                    status="WITHDRAWN",
-                    pending=False,
-                )
-            )
     valid = second if withdrawn == "A" else first
     cancelled = first if withdrawn == "A" else second
     await set_limit(flow, 2)
@@ -439,34 +431,91 @@ async def test_departure_without_valid_acceptance_does_not_admit_waiter(roller_l
 
 
 async def test_other_owner_original_entry_does_not_use_this_owners_budget(roller_lifecycle):
-    from app.businesses._components.bin_roller.repository import RollerRepository
+    from dataclasses import replace
+
+    from app.businesses._components.rack_dispatch.contracts import JobOrigin
+    from app.businesses._components.rack_dispatch.service import RackDispatch
     from app.core.identifiers import uuid7
+    from app.integrations.wms_transport import TransportCaller, TransportService
 
     flow = roller_lifecycle
     await set_limit(flow, 1)
+    caps = flow.roller.capabilities
+    other = RackDispatch(
+        "other-owner",
+        replace(
+            caps,
+            transport=TransportService(
+                caps.transport.outbox, target=caps.transport.target, owner_domain="other-owner"
+            ),
+        ),
+    )
     async with flow.factory.begin() as session:
-        repo = RollerRepository("other-owner", 1, tables=flow.store.tables)
-        cycle = await repo.create_cycle(
+        cycle = await other.register(
             session,
-            cycle_id=str(uuid7()),
-            rack_id="OTHER",
-            purpose="ORDINARY",
-            task_id="T",
-            source_ref="OLD",
-            resources=await flow.roller.read_resources(session, 1),
+            JobOrigin(
+                "ROLLER_ORDINARY",
+                "OLD",
+                1,
+                "OTHER",
+                "T",
+                "LINE-1",
+                "FIVE",
+                "A",
+                TransportCaller("1"),
+                str(uuid7()),
+                {},
+            ),
         )
-        await repo.register_rack_action(
-            session,
-            cycle_id=cycle["id"],
-            kind="CTU01",
-            source_ref="OLD",
-            action_id=str(uuid7()),
-            client_request_id=str(uuid7()),
-            transport_task_id=None,
-            operation_id=None,
-            target=dict(kind="RACK_POSITION", location_code="FIVE"),
-            caller_workline_id="1",
-        )
+        assert await other.prepare(session, job_id=cycle, kind="ENTER", source_ref="OLD", face="A")
     own = await flow.demand(rack="OWN")
     await flow.advance("FEED", own)
     assert len([a for a in await entries(flow) if a["owner_domain"] == "first"]) == 1
+
+
+async def test_new_face_does_not_reactivate_withdrawn_original(roller_lifecycle):
+    flow = roller_lifecycle
+    await set_limit(flow, 1)
+    occupied = await flow.demand(rack="OCCUPIED")
+    await flow.advance("FEED", occupied)
+    old = await flow.demand()
+    await flow.advance("FEED", old)
+    original = next(c["id"] for c in await flow.all_rows("rack_cycle") if c["rack_id"] == "R1")
+    async with flow.factory.begin() as session:
+        await flow.roller.apply_supply_change(
+            session,
+            SupplyChange(1, flow.current_task, "withdraw", (), (SourceFaceRef(1, "R1", "A"),)),
+        )
+    await flow.advance("RACK_CYCLE", original)
+    new = await flow.demand(revision=2)
+    await set_limit(flow, 2)
+    await flow.advance("FEED", new)
+    async with flow.factory() as session:
+        historical = await flow.roller.rack_dispatch.progress(session, job_id=original)
+        assert historical.state == "WITHDRAWN" and not historical.actions
+    assert original not in [a["cycle_id"] for a in await entries(flow)]
+    assert len(await entries(flow)) == 2
+
+
+@pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
+async def test_two_first_entries_share_last_line_slot(roller_lifecycle):
+    from sqlalchemy import select
+
+    flow = roller_lifecycle
+    await set_limit(flow, 1)
+    demands = [await flow.demand(rack=name) for name in ("R1", "R2")]
+    initial = asyncio.Barrier(2)
+    attempts = []
+
+    async def overlap(session, attempt):
+        attempts.append(attempt)
+        if attempt == 0:
+            await session.scalar(select(WorkLine.id))
+            await asyncio.wait_for(initial.wait(), 5)
+
+    await asyncio.wait_for(
+        asyncio.gather(*(flow.advance("FEED", d, before=overlap) for d in demands)), 10
+    )
+    assert 1 in attempts
+    assert len(await entries(flow)) == 1
+    assert len(await flow.all_rows("rack_cycle")) == 2

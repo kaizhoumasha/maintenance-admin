@@ -74,7 +74,12 @@ async def test_serializable_advance_does_not_leak_to_receiver_or_other_business(
     await flow.application_scan("first", "SCAN1", "A000000001-B")
     async with flow.factory() as session:
         scan = (await flow.rows(session, "scan_arrival"))[0]
-    engine = create_database_engine(flow.factory.kw["bind"].url, pool_size=1, max_overflow=0)
+    engine = create_database_engine(
+        flow.factory.kw["bind"].url,
+        pool_size=1,
+        max_overflow=0,
+        execution_options=flow.factory.kw["bind"].get_execution_options(),
+    )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     host = flow.hosts["first"]
     host.capabilities = replace(host.capabilities, session_factory=factory)
@@ -128,7 +133,7 @@ async def test_commit_serialization_retry_reopens_whole_transaction_and_retains_
         f"test_{name}_{suffix}" for name in ("commit", "attempt", "retry")
     )
     table = flow.store.tables["scan_arrival"]
-    qualified = f"{table.schema}.{table.name}"
+    qualified = f"{flow.store.schema}.{table.name}"
     async with engine.begin() as connection:
         await connection.execute(text(f"CREATE SEQUENCE {sequence}"))
         await connection.execute(
@@ -259,7 +264,11 @@ async def test_ctu03_acceptance_wakes_original_owner_and_recovers_without_final_
         )
         assert action["cycle_id"] in {work.record_id for work in pending}
     flow.roller = BinRoller(
-        flow.roller.context, flow.roller.capabilities, flow.production, tables=flow.store.tables
+        flow.roller.context,
+        flow.roller.capabilities,
+        flow.production,
+        rack_dispatch=flow.roller.rack_dispatch,
+        tables=flow.store.tables,
     )
     await flow.advance("RACK_CYCLE", action["cycle_id"])
     await flow.advance("RACK_CYCLE", action["cycle_id"])

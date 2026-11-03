@@ -41,6 +41,63 @@ class TaskRepository:
         )
         return line
 
+    async def lock_dispatch_line(
+        self, session, roller, work_line_id, *, task_id=None, lock_actions=True
+    ):
+        line = await self.lock_line(session, work_line_id)
+        from app.businesses._components.bin_roller.service import ROLLER_SOURCES, RackLockSetChanged
+
+        from .manual_rack_flow import MANUAL_SOURCES
+
+        kinds = (*ROLLER_SOURCES, *MANUAL_SOURCES)
+        jobs = await roller.rack_dispatch.jobs(
+            session, work_line_id=work_line_id, source_kinds=kinds, pending=True
+        )
+        await roller.rack_dispatch.lock_jobs(session, job_ids=tuple(j.id for j in jobs))
+        task_ids = {job.origin.task_id for job in jobs if job.origin.task_id}
+        if task_id is not None:
+            task_ids.add(task_id)
+        await self.lock_dispatch_subjects(session, work_line_id, task_ids)
+        await roller.lock_production_subjects(session, work_line_id, jobs)
+        confirmed = await roller.rack_dispatch.jobs(
+            session, work_line_id=work_line_id, source_kinds=kinds, pending=True
+        )
+        if tuple(j.id for j in jobs) != tuple(j.id for j in confirmed):
+            raise RackLockSetChanged("original dispatch jobs changed during lock acquisition")
+        if lock_actions:
+            await roller.rack_dispatch.lock_actions(session, job_ids=tuple(job.id for job in jobs))
+        return line, jobs
+
+    async def lock_dispatch_subjects(self, session, work_line_id, task_ids):
+        tasks = self.tables["task"]
+        active = select(tasks.c.task_id).where(
+            tasks.c.work_line_id == work_line_id,
+            tasks.c.status.in_(("QUEUED", "PREPARING", "EXECUTING"))
+            | tasks.c.task_id.in_(task_ids),
+        )
+        for key in ("task", "input", "member", "manual_bin", "request"):
+            table = self.tables[key]
+            condition = table.c.task_id.in_(active)
+            if key == "manual_bin":
+                condition |= (table.c.work_line_id == work_line_id) & (
+                    table.c.pending | (table.c.state == "WORK_REQUIRED")
+                )
+            await session.execute(
+                select(*table.primary_key)
+                .where(condition)
+                .order_by(*table.primary_key)
+                .with_for_update()
+            )
+
+    async def original_dispatch_task(self, session, roller, task_id):
+        located = await self.task(session, task_id)
+        if located is None:
+            return None, None, ()
+        line, jobs = await self.lock_dispatch_line(
+            session, roller, located["work_line_id"], task_id=task_id, lock_actions=False
+        )
+        return line, await self.task(session, task_id), jobs
+
     async def original(
         self, session: AsyncSession, task_id: str
     ) -> tuple[WorkLine | None, RowMapping | None]:
@@ -113,6 +170,121 @@ class TaskRepository:
     async def line_by_code(self, session: AsyncSession, code: str) -> WorkLine | None:
         line_id = await session.scalar(select(WorkLine.id).where(WorkLine.line_code == code))
         return None if line_id is None else await self.lock_line(session, line_id)
+
+    async def bin_release_evidence(self, session, roller, work):
+        """Read the original permission and SCAN2 release intent without waiting for its result."""
+        from app.businesses._components.rack_dispatch.contracts import FactRef
+
+        from .contracts import ADMISSION_DECISION
+        from .models import BIN_COMPLETION_OPERATION
+        from .request.manual_bin_work_admission_decide_v1 import OPERATION
+
+        if (
+            work["state"] != "RELEASED"
+            or not work["admission_operation_id"]
+            or not work["command_code"]
+        ):
+            return None
+        requests = self.tables["request"]
+        original = (
+            (
+                await session.execute(
+                    select(requests).where(
+                        requests.c.operation == OPERATION,
+                        requests.c.operation_id == work["admission_operation_id"],
+                        requests.c.kind == "BIN_ADMISSION",
+                        requests.c.task_id == work["task_id"],
+                        requests.c.work_line_id == work["work_line_id"],
+                        requests.c.arrival_id == work["arrival_id"],
+                        requests.c.state == "CONSUMED",
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if not original or original["request_snapshot"] != {
+            k: work[k] for k in ("task_id", "bin_code", "scanned_at")
+        }:
+            return None
+        response = original["response"] or {}
+        if (
+            response.get("code") != "DECIDED"
+            or type(response.get("timestamp")) is not int
+            or response["timestamp"] <= 0
+        ):
+            return None
+        try:
+            decision = ADMISSION_DECISION.validate_python(response.get("data"))
+        except ValueError:
+            return None
+        if decision.result != original["decision_code"]:
+            return None
+        notices = self.tables["input"]
+        applied = (
+            (
+                await session.execute(
+                    select(notices)
+                    .where(
+                        notices.c.operation == BIN_COMPLETION_OPERATION,
+                        notices.c.arrival_id == work["arrival_id"],
+                        notices.c.state == "APPLIED",
+                    )
+                    .limit(2)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if decision.result == "NO_WORK":
+            if applied or work["completed_operation_id"] or work["completed_result"]:
+                return None
+        elif decision.result == "WORK_REQUIRED":
+            if not work["completed_operation_id"] or decision.task_id != work["task_id"]:
+                return None
+            if len(applied) != 1:
+                return None
+            completion = applied[0]
+            if (
+                completion["operation_id"] != work["completed_operation_id"]
+                or any(
+                    completion[k] != work[k]
+                    for k in ("work_line_id", "task_id", "arrival_id", "bin_code")
+                )
+                or completion["completion_result"] != work["completed_result"]
+                or work["completed_result"] not in ("NORMAL", "NG")
+            ):
+                return None
+        else:
+            return None
+        try:
+            scan = await roller.original_arrival(session, work["arrival_id"])
+        except ValueError:
+            return None
+        if (
+            scan["point"] != "SCAN2"
+            or scan["release_command_code"] != work["command_code"]
+            or not scan["release_call_key"]
+            or not scan["release_record_id"]
+            or any(
+                scan[k] != work[k]
+                for k in ("work_line_id", "device_code", "bin_code", "scanned_at")
+            )
+        ):
+            return None
+        return FactRef(
+            "scan2_release",
+            (scan["id"], scan["release_record_id"]),
+            (
+                scan["release_call_key"],
+                work["command_code"],
+                original["operation_id"],
+                str(original["message_id"]),
+                decision.result,
+                str(work["completed_operation_id"]),
+                str(work["completed_result"]),
+            ),
+        )
 
     async def confirmation(self, session: AsyncSession, task: RowMapping) -> RowMapping | None:
         table = self.tables["request"]

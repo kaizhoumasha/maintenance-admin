@@ -5,8 +5,96 @@ import pytest
 from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from app.database import create_database_engine
-from tests.helpers import bin_roller_query
+from app.businesses._components.rack_dispatch.contracts import Coverage, FactRef, JobOrigin
+from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+from app.businesses._components.rack_dispatch.service import RackDispatch
+from app.database import SCHEMA, create_database_engine
+from tests.helpers import bin_roller_query, roller_dispatch_rows
+
+
+async def arrived_face(roller, session, cycle_id, service_id, receipts):
+    """Drive the selected fixture face through its original Transport callback and projection."""
+    import json
+
+    from app.businesses._components.bin_roller.rack_flow import row_fact
+    from app.businesses._components.rack_dispatch.contracts import (
+        DirectHandoff,
+        PointDemand,
+        PointRef,
+    )
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_callback import receive
+
+    dispatch = roller.rack_dispatch
+    face = await roller.original_record(session, "face_service", service_id)
+    repo = roller.repository(face["work_line_id"])
+    job = await dispatch.progress(session, job_id=cycle_id)
+    if job.position_action_id and job.actual_face == face["rack_face"]:
+        action_id = job.position_action_id
+    else:
+        action_id = await dispatch.prepare(
+            session,
+            job_id=cycle_id,
+            kind="ROTATE" if job.actions else "ENTER",
+            source_ref=service_id,
+            face=face["rack_face"],
+        )
+        assert action_id
+        move = (await dispatch.progress(session, job_id=cycle_id)).actions[-1]
+        original_id = str(uuid7())
+        receipts.add(original_id)
+        response = await receive(
+            session,
+            json.dumps(
+                dict(
+                    operation="transport.task.resulted@v1",
+                    operation_id=original_id,
+                    timestamp=1,
+                    data=dict(
+                        transport_task_id=move.transport_task_id,
+                        kind="RACK_MOVE" if move.kind == "ENTER" else "RACK_ROTATE",
+                        rack_id=job.origin.rack_id,
+                        outcome_revision=1,
+                        status="SUCCEEDED",
+                        final_position=move.target,
+                        arrival_face=face["rack_face"],
+                    ),
+                )
+            ).encode(),
+        )
+        assert response.status_code == 202
+        point = PointRef(
+            repo.owner_domain, repo.work_line_id, job.id, job.origin.rack_id, job.origin.point
+        )
+        source = row_fact("face_work", repo.tables["face_work"], face)
+        coverage = (
+            Coverage(
+                "selected_face",
+                (point.owner_domain, str(point.work_line_id), job.id, point.rack_id, point.point),
+                source,
+                (source,),
+            ),
+        )
+        job = await dispatch.advance(
+            session,
+            job_id=cycle_id,
+            demand=PointDemand(point, "CONTINUE", coverage),
+            handoff=DirectHandoff(point, "BLOCKED", coverage),
+            now_ms=1,
+        )
+        move = job.actions[-1]
+        assert move.phase == "APPLIED" and move.outcome["status"] == "SUCCEEDED"
+        await repo.record_position(
+            session,
+            object_kind="RACK",
+            object_code=job.origin.rack_id,
+            location_code=move.actual_position["location_code"],
+            rack_face=move.actual_face,
+            source_kind="RACK",
+            source_id=move.id,
+            source_revision=move.position_revision,
+        )
+    return action_id
 
 
 @pytest.fixture
@@ -31,12 +119,27 @@ async def roller_lifecycle(roller_return, monkeypatch):
     prefix = "app.businesses._components.bin_roller.request."
     for entry in catalog.entries():
         entry.COMPONENTS = tuple(
-            replace(c, entry_modules=(*c.entry_modules, *(prefix + m for m in modules)))
+            replace(
+                c,
+                entry_modules=(
+                    *c.entry_modules,
+                    *(prefix + m for m in modules if m != "rack_departure_decide_v1"),
+                ),
+            )
             for c in entry.COMPONENTS
         )
+    from app.businesses._components.rack_dispatch.composition import COMPONENT as dispatch_component
+
+    for entry in catalog.entries():
+        entry.COMPONENTS += (dispatch_component,)
+        entry.PROGRESSION = "scan_pending"
     monkeypatch.setattr(catalog, "_validated_entries", None)
     for name, (op, model) in modules.items():
-        module = prefix + name
+        module = (
+            prefix + name
+            if name != "rack_departure_decide_v1"
+            else "app.businesses._components.rack_dispatch.request." + name
+        )
         if module in sys.modules:
             operation.request_operation(op, operation.Endpoint.DECISIONS)(
                 getattr(sys.modules[module], model)
@@ -47,6 +150,11 @@ async def roller_lifecycle(roller_return, monkeypatch):
     metadata = MetaData(schema=WorkLine.__table__.schema)
     for model in (WorkLine, DeviceRoute, Device):
         model.__table__.to_metadata(metadata)
+    from app.businesses.smt_manual.repository import TaskRepository
+
+    original_tasks = TaskRepository()
+    for key in ("task", "input", "member", "manual_bin", "request"):
+        original_tasks.tables[key].to_metadata(metadata)
     engine = flow.factory.kw["bind"]
     async with engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
@@ -77,6 +185,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
     from app.models import CallbackReceipt, ReliableMessage, TransportTask
 
     receipts = set()
+    flow.lock_scan_line = original_tasks.lock_line
     flow.current_task = "task-original"
     flow.successor = "UNKNOWN"
 
@@ -99,6 +208,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
                         )
                     if before:
                         await before(session, attempt)
+                    await original_tasks.lock_dispatch_line(session, flow.roller, 1)
                     return await flow.roller.advance(session, RollerWorkRef(kind, record_id))
             except DBAPIError as error:
                 if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
@@ -138,7 +248,15 @@ async def roller_lifecycle(roller_return, monkeypatch):
 
     async def decision(key, record_id, data):
         async with flow.factory.begin() as session:
-            row = await flow.roller.original_record(session, key, record_id)
+            row = (
+                next(
+                    r
+                    for r in await roller_dispatch_rows(session, flow.roller, key)
+                    if r["id"] == record_id
+                )
+                if key == "departure"
+                else await flow.roller.original_record(session, key, record_id)
+            )
             await session.execute(
                 ReliableMessage.__table__.update()
                 .where(ReliableMessage.id == row["message_id"])
@@ -181,7 +299,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
             data["failure_code"] = "RCS_EXECUTION_FAILED"
         await callback(data)
 
-    async def accepted(action, *, code="RECEIVED", http=202):
+    async def accepted(action, *, code="RECEIVED", http=202, response_task=None):
         async with flow.factory.begin() as session:
             await session.execute(
                 ReliableMessage.__table__.update()
@@ -195,7 +313,9 @@ async def roller_lifecycle(roller_return, monkeypatch):
                             operation_id=action["operation_id"],
                             code=code,
                             timestamp=2,
-                            data=dict(transport_task_id=action["transport_task_id"]),
+                            data=dict(
+                                transport_task_id=response_task or action["transport_task_id"]
+                            ),
                         )
                     ).encode(),
                 )
@@ -398,16 +518,20 @@ async def roller_feed(roller_transport, monkeypatch):
         owner_domain="first",
         contract_consumers=catalog.contract_consumers,
     )
+    capabilities = Capabilities(None, wms, roller_transport.service, store.factory)
     roller = BinRoller(
         CommandOwner("first"),
-        Capabilities(None, wms, roller_transport.service, store.factory),
+        capabilities,
         SimpleNamespace(),
+        rack_dispatch=RackDispatch("first", capabilities),
         tables=store.tables,
     )
     receipts = set()
     from app.businesses._components.bin_roller.feed_flow import advance_feed
 
     async def rows(session, key):
+        if key in ("rack_cycle", "rack_action", "departure"):
+            return await roller_dispatch_rows(session, roller, key)
         return (await session.execute(bin_roller_query(store.tables, key))).mappings().all()
 
     async def demand(session, *, task="T1", revision=1, change="M1", face="A"):
@@ -422,37 +546,39 @@ async def roller_feed(roller_transport, monkeypatch):
 
     async def ready(session, original, *, cycle_id=None, in_progress=True):
         repo = roller.repository(1)
+        from app.integrations.wms_transport import TransportCaller
+
         if cycle_id is None:
-            cycle = await repo.create_cycle(
+            cycle_id = await roller.rack_dispatch.register(
                 session,
-                cycle_id=str(uuid7()),
-                rack_id="R1",
-                purpose="ORDINARY",
-                task_id=original["task_id"],
-                source_ref=original["id"],
-            )
-            cycle_id = cycle["id"]
-        if in_progress:
-            await repo.register_rack_action(
-                session,
-                cycle_id=cycle_id,
-                kind="CTU01",
-                source_ref=cycle_id,
-                action_id=str(uuid7()),
-                client_request_id=str(uuid7()),
-                transport_task_id=None,
-                operation_id=None,
-                target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-                target_face=original["rack_face"],
-                caller_workline_id="LINE-ORIGINAL",
+                JobOrigin(
+                    "ROLLER_ORDINARY",
+                    original["id"],
+                    1,
+                    "R1",
+                    original["task_id"],
+                    "LINE-ORIGINAL",
+                    "CTU01",
+                    original["rack_face"],
+                    TransportCaller("LINE-ORIGINAL"),
+                    str(uuid7()),
+                    {},
+                ),
             )
         service_id = str(uuid7())
         await repo.bind_supply(
             session, demand_id=original["id"], cycle_id=cycle_id, service_id=service_id
         )
+        action_id = (
+            await arrived_face(roller, session, cycle_id, service_id, receipts)
+            if in_progress
+            else None
+        )
         faces = store.tables["face_work"]
         await session.execute(
-            faces.update().where(faces.c.service_id == service_id).values(service_state="READY")
+            faces.update()
+            .where(faces.c.service_id == service_id)
+            .values(service_state="READY", preparation_action_id=action_id)
         )
         return service_id, cycle_id
 
@@ -713,11 +839,47 @@ async def roller_scans(roller_store, monkeypatch):
         release_requested = False
         fail = False
 
+        async def read_task_coverage(self, session, *, point, task_id):
+            from sqlalchemy import select
+
+            faces = store.tables["face_work"]
+            members = (
+                (
+                    await session.execute(
+                        select(faces).where(
+                            faces.c.task_id == task_id, faces.c.work_line_id == point.work_line_id
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            return (
+                Coverage(
+                    "test_original_task",
+                    (
+                        point.owner_domain,
+                        str(point.work_line_id),
+                        point.job_id,
+                        point.rack_id,
+                        point.point,
+                        task_id,
+                    ),
+                    FactRef("task", (task_id,), tuple(str(r["change_id"]) for r in members)),
+                    (),
+                )
+                if members
+                else None
+            )
+
         async def read_current_task(self, session, *, work_line_id):
             return CurrentTask("task-original", self.current_valid)
 
         async def read_successor(self, session, *, work_line_id):
             return SuccessorContext("UNKNOWN", {})
+
+        async def lock_scan2_task(self, session, *, work_line_id):
+            pass
 
         async def accept_scan2(self, ctx, arrival):
             facts = await rows(ctx.session, "scan_fact")
@@ -751,12 +913,20 @@ async def roller_scans(roller_store, monkeypatch):
     )
 
     def rebuild(owner="first"):
-        flow.roller = BinRoller(CommandOwner(owner), capabilities, production, tables=store.tables)
+        flow.roller = BinRoller(
+            CommandOwner(owner),
+            capabilities,
+            production,
+            rack_dispatch=RackDispatch(owner, capabilities),
+            tables=store.tables,
+        )
         flow.runtime = BusinessRuntime(
             {}, {owner: SimpleNamespace(components={"bin_roller": flow.roller})}
         )
 
     async def binding(session, device_code):
+        if hasattr(flow, "lock_scan_line"):
+            await flow.lock_scan_line(session, flow.work_line_id)
         point = next(point for point, code in devices.items() if code == device_code)
         return DeviceBinding(
             device_id=1,
@@ -791,6 +961,8 @@ async def roller_scans(roller_store, monkeypatch):
         )
 
     async def rows(session, key):
+        if key in ("rack_cycle", "rack_action", "departure"):
+            return await roller_dispatch_rows(session, flow.roller, key)
         return (await session.execute(bin_roller_query(store.tables, key))).mappings().all()
 
     async def messages(session):
@@ -853,8 +1025,15 @@ async def roller_store(request):
     url = "sqlite+aiosqlite://"
     if request.param == "postgres":
         url = request.getfixturevalue("pg_url")
-    engine = create_database_engine(url)
-    metadata = MetaData()
+    from sqlalchemy.schema import CreateSchema, DropSchema
+
+    from app.core.identifiers import uuid7
+
+    schema = "test_roller_" + uuid7().hex if request.param == "postgres" else None
+    engine = create_database_engine(
+        url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
+    )
+    metadata = MetaData(schema=SCHEMA)
     tables = {
         key: table.to_metadata(metadata, name="test_bin_roller_" + key)
         for key, table in TABLES.items()
@@ -864,35 +1043,36 @@ async def roller_store(request):
             constraint.name = f"{table.name}_constraint_{number}"
         for index in table.indexes:
             index.name = "test_bin_roller_" + index.name
+    for model in (RackJob, RackAction):
+        model.__table__.to_metadata(metadata)
     async with engine.begin() as connection:
+        if schema:
+            await connection.execute(CreateSchema(schema))
         await connection.run_sync(metadata.create_all)
     try:
         yield SimpleNamespace(
+            schema=schema,
             factory=async_sessionmaker(engine, expire_on_commit=False),
-            repo=RollerRepository("first", 1, tables=tables),
+            repo=RollerRepository(
+                "first", 1, rack_dispatch=RackDispatch("first", None), tables=tables
+            ),
             tables=tables,
         )
     finally:
         async with engine.begin() as connection:
             await connection.run_sync(metadata.drop_all)
+            if schema:
+                await connection.execute(DropSchema(schema, cascade=True))
         await engine.dispose()
 
 
 @pytest.fixture
 async def roller_transport(roller_store):
-    import json
 
-    from sqlalchemy import delete
-
-    from app.businesses._components.bin_roller.repository import RollerRepository
     from app.core.identifiers import uuid7
-    from app.integrations.wms_callback import receive
     from app.integrations.wms_transport import (
         ADAPTERS,
         PROTOCOL,
-        Rack,
-        RackPosition,
-        TransportCaller,
         TransportService,
     )
     from app.models import CallbackReceipt, ReliableMessage, TransportTask
@@ -910,117 +1090,9 @@ async def roller_transport(roller_store):
     service = TransportService(
         Outbox({target.name: target}, ADAPTERS), target=target.name, owner_domain="first"
     )
-    caller = TransportCaller("1")
-    task_ids, operation_ids = set(), set()
-
-    async def create_action(session, *, cycle_id, kind, source_ref, target_face):
-        repository = RollerRepository("first", 1, tables=store.tables)
-        action = await repository.register_rack_action(
-            session,
-            cycle_id=cycle_id,
-            kind=kind,
-            source_ref=source_ref,
-            action_id=str(uuid7()),
-            client_request_id=str(uuid7()),
-            transport_task_id=None,
-            operation_id=None,
-            target={"kind": "RACK_POSITION", "location_code": "CTU01"},
-            target_face=target_face,
-            caller_workline_id=caller.workline_id,
-        )
-        args = dict(
-            client_request_id=action["client_request_id"],
-            caller=caller,
-            rack_id="R1",
-            target_face=target_face,
-            cycle_id=cycle_id,
-        )
-        if kind == "CTU01":
-            handle = await service.move_rack(
-                session, **args, source=Rack("R1"), target=RackPosition("CTU01")
-            )
-        else:
-            handle = await service.rotate_rack(
-                session, **args, position=RackPosition("CTU01"), rcs_template_id="CK04"
-            )
-        task_ids.add(handle.transport_task_id)
-        view = await service.get_result(
-            session,
-            transport_task_id=handle.transport_task_id,
-            client_request_id=handle.client_request_id,
-            caller=caller,
-        )
-        await repository.bind_transport(
-            session,
-            action_id=action["id"],
-            transport_task_id=handle.transport_task_id,
-            operation_id=view.operation_id,
-        )
-        return await repository.get_action(session, action["id"])
-
-    async def read_result(session, action):
-        return await service.get_result(
-            session,
-            transport_task_id=action["transport_task_id"],
-            client_request_id=action["client_request_id"],
-            caller=caller,
-        )
-
-    async def callback(
-        action, *, revision=1, status="SUCCEEDED", location="CTU01", face="A", operation_id=None
-    ):
-        operation_id = operation_id or str(uuid7())
-        operation_ids.add(operation_id)
-        data = dict(
-            transport_task_id=action["transport_task_id"],
-            kind="RACK_MOVE",
-            rack_id="R1",
-            outcome_revision=revision,
-            status=status,
-            final_position=dict(kind="RACK_POSITION", location_code=location)
-            if location is not None
-            else None,
-            arrival_face=face,
-        )
-        if status == "FAILED":
-            data["failure_code"] = (
-                "POSITION_UNKNOWN" if location is None else "RCS_EXECUTION_FAILED"
-            )
-            if location is None:
-                data["position_unknown"] = True
-        raw = json.dumps(
-            dict(
-                operation="transport.task.resulted@v1",
-                operation_id=operation_id,
-                timestamp=1,
-                data=data,
-            )
-        ).encode()
-        async with store.factory.begin() as session:
-            response = await receive(session, raw)
-            assert response.status_code in {200, 202}, response
-        return operation_id
-
     try:
-        yield SimpleNamespace(
-            store=store,
-            create_action=create_action,
-            read_result=read_result,
-            callback=callback,
-            target=target.name,
-            service=service,
-        )
+        yield SimpleNamespace(store=store, target=target.name, service=service)
     finally:
-        async with store.factory.begin() as session:
-            await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.operation_id.in_(operation_ids))
-            )
-            await session.execute(
-                delete(ReliableMessage).where(ReliableMessage.target == target.name)
-            )
-            await session.execute(
-                delete(TransportTask).where(TransportTask.transport_task_id.in_(task_ids))
-            )
         if engine.dialect.name == "sqlite":
             async with engine.begin() as connection:
                 await connection.run_sync(metadata.drop_all)
@@ -1091,6 +1163,7 @@ async def roller_return(roller_scans, monkeypatch):
         contract_consumers=catalog.contract_consumers,
     )
     flow.roller.capabilities = Capabilities(flow.ecs, wms, transport, store.factory)
+    flow.roller.rack_dispatch = RackDispatch("first", flow.roller.capabilities)
     from app.businesses._components.bin_roller.return_flow import advance_return_batch
 
     flow.consume_return = partial(advance_return_batch, flow.roller)
@@ -1104,13 +1177,21 @@ async def roller_return(roller_scans, monkeypatch):
             await session.scalar(select(func.max(faces.c.plan_revision)).where(*repo.scoped(faces)))
             or 0
         )
-        cycle = await repo.create_cycle(
+        cycle_id = await flow.roller.rack_dispatch.register(
             session,
-            cycle_id=str(uuid7()),
-            rack_id="R1",
-            purpose="ORDINARY",
-            task_id="T1",
-            source_ref=demand_id,
+            JobOrigin(
+                "ROLLER_ORDINARY",
+                demand_id,
+                line,
+                "R1",
+                "T1",
+                "RETURN-LINE",
+                "CTU01",
+                face,
+                TransportCaller(str(line)),
+                str(uuid7()),
+                {},
+            ),
         )
         await session.execute(
             faces.insert().values(
@@ -1123,12 +1204,18 @@ async def roller_return(roller_scans, monkeypatch):
                 plan_revision=revision,
                 rack_id="R1",
                 **repo.scope,
-                cycle_id=cycle["id"],
+                cycle_id=cycle_id,
                 source_ref=demand_id,
                 rack_face=face,
                 demand_state="ACTIVE",
                 service_state="READY",
             )
+        )
+        action_id = await arrived_face(flow.roller, session, cycle_id, service_id, receipts)
+        await session.execute(
+            faces.update()
+            .where(faces.c.service_id == service_id)
+            .values(preparation_action_id=action_id)
         )
         await session.execute(
             store.tables["return_opportunity"]
@@ -1292,6 +1379,8 @@ def roller_declaration(monkeypatch):
     from tests.helpers import business_composition
 
     assert hasattr(composition, "COMPONENT"), "bin_roller must export its actual declaration"
+    from app.businesses._components.rack_dispatch.composition import COMPONENT as dispatch_component
+
     component = composition.COMPONENT
     entries = []
     for code in ("first", "second"):
@@ -1302,7 +1391,7 @@ def roller_declaration(monkeypatch):
             device_roles=(DeviceRole(role_key="PRODUCTION", display_name="Production"),),
         )
         entry.ENTRY_MODULES = ()
-        entry.COMPONENTS = (component,)
+        entry.COMPONENTS = (component, dispatch_component)
         entry.PROGRESSION = "scan_pending"
         entries.append(entry)
     monkeypatch.setattr(catalog, "entries", lambda: tuple(entries))
@@ -1316,7 +1405,7 @@ def roller_declaration(monkeypatch):
         "workline_return_buffer_drain_rack_decide_v1": "DrainRequest",
         "rack_departure_decide_v1": "DepartureRequest",
     }
-    for name in component.entry_modules:
+    for name in (*component.entry_modules, *dispatch_component.entry_modules):
         if name not in sys.modules:
             importlib.import_module(name)
         elif name.rsplit(".", 1)[-1] in request_models:
@@ -1362,6 +1451,9 @@ async def roller_application(roller_scans, request):
         async def read_successor(self, session, *, work_line_id):
             return SuccessorContext("UNKNOWN", {})
 
+        async def lock_scan2_task(self, session, *, work_line_id):
+            pass
+
         async def accept_scan2(self, ctx, arrival):
             assert await ctx.session.scalar(
                 select(flow.store.tables["scan_fact"].c.id).where(
@@ -1390,10 +1482,16 @@ async def roller_application(roller_scans, request):
         def __init__(self, owner, capabilities):
             self.capabilities = capabilities
             self.production = Production(owner)
+            dispatch = RackDispatch(owner, capabilities)
             self.components = {
+                "rack_dispatch": dispatch,
                 "bin_roller": BinRoller(
-                    CommandOwner(owner), capabilities, self.production, tables=flow.store.tables
-                )
+                    CommandOwner(owner),
+                    capabilities,
+                    self.production,
+                    rack_dispatch=dispatch,
+                    tables=flow.store.tables,
+                ),
             }
             self.attempts = []
             self.visited = []

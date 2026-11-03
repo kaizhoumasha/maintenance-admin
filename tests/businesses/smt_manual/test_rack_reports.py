@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import update
 
-from app.models import WorkLine
+from app.models import Device, WorkLine
 
 
 async def test_direct_pick_requires_original_rack_arrival(manual_racks):
@@ -18,7 +18,7 @@ async def test_direct_pick_requires_original_rack_arrival(manual_racks):
     report = (await flow.rows("rack_report"))[0]
     assert report["state"] == "REQUESTED"
     await flow.rack_response("rack_report", {}, code="RECORDED")
-    await flow.rack_advance()
+    assert await flow.consume_report() == "CONSUMED"
     assert (await flow.rows("rack_report"))[0]["state"] == "CONSUMED"
 
 
@@ -93,7 +93,7 @@ async def test_registered_entry_keeps_report_obligation_before_result_consumptio
         assert await flow.racks.has_report_obligations(session, task_id="T1")
     await flow.rack_advance()
     await flow.rack_response("rack_report", {}, code="RECORDED")
-    await flow.rack_advance()
+    assert await flow.consume_report() == "CONSUMED"
     async with flow.factory() as session:
         assert not await flow.racks.has_report_obligations(session, task_id="T1")
 
@@ -172,8 +172,8 @@ async def test_old_report_and_late_result_keep_original_rack_after_current_task_
         dict(result="READY", rack_destination=dict(type="RACK_POSITION", location_code="EXIT")),
     )
     await flow.rack_advance()
-    await flow.rack_outcome()
-    assert await flow.rack_advance() == "DEPARTED"
+    await flow.acknowledge((await flow.rows("rack_action"))[-1])
+    assert await flow.rack_advance() == "COMPLETED"
     report = (await flow.rows("rack_report"))[0]
     async with flow.factory.begin() as session:
         await session.execute(update(flow.tables["task"]).values(status="COMPLETED"))
@@ -182,7 +182,7 @@ async def test_old_report_and_late_result_keep_original_rack_after_current_task_
     await flow.reconcile("T2")
     successor = next(r for r in await flow.rows("rack") if r["task_id"] == "T2")
     await flow.rack_outcome(original_entry, revision=2, location="WRONG")
-    assert await flow.rack_advance(original_work["id"]) == "DEPARTED"
+    assert await flow.rack_advance(original_work["id"]) == "COMPLETED"
     assert (
         next(r for r in await flow.rows("rack") if r["id"] == successor["id"])["state"] == "ACTIVE"
     )
@@ -190,7 +190,6 @@ async def test_old_report_and_late_result_keep_original_rack_after_current_task_
     async with flow.factory() as session:
         upper = await flow.racks.get_pending_upper_id(session)
         assert set(await flow.racks.list_pending(session, upper_id=upper)) == {
-            original_work["id"],
             successor["id"],
         }
     await flow.rack_response("rack_report", {}, code="DUPLICATE")
@@ -205,10 +204,169 @@ async def test_old_report_and_late_result_keep_original_rack_after_current_task_
                     )
                 )
             )
-    await flow.rack_advance(original_work["id"])
+    async with flow.factory.begin() as session:
+        assert (
+            await flow.racks.advance_report(session, operation_id=report["operation_id"])
+            == "CONSUMED"
+        )
     assert not next(r for r in await flow.rows("rack") if r["id"] == original_work["id"])["pending"]
     assert all(
         r["state"] == "REQUESTED"
         for r in await flow.rows("rack_report")
         if r["operation_id"].startswith("other-")
     )
+
+
+async def test_independent_report_survives_deleted_line(manual_host):
+    from sqlalchemy import delete
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.reconcile()
+    await flow.rack_outcome(face="A")
+    await flow.rack_advance()
+    (report,) = await flow.rows("rack_report")
+    await flow.rack_response("rack_report", {}, code="RECORDED")
+    async with flow.factory.begin() as session:
+        await session.execute(update(flow.tables["task"]).values(status="COMPLETED"))
+        await session.execute(delete(Device).where(Device.work_line_id == flow.lines[0]))
+        await session.execute(delete(WorkLine).where(WorkLine.id == flow.lines[0]))
+    assert await flow.host.advance("RACK_REPORT", report["operation_id"]) == "CONSUMED"
+
+
+async def test_missing_expected_report_blocks_confirmation_without_a_second_send(
+    manual_racks, manual_completion_tools
+):
+    from sqlalchemy import delete, select
+
+    from app.models import ReliableMessage
+
+    flow = manual_racks
+    await flow.ready()
+    await flow.plan()
+    await flow.reconcile()
+    await flow.rack_outcome(face="A")
+    await flow.rack_advance()
+    (report,) = await flow.rows("rack_report")
+    async with flow.factory.begin() as session:
+        r = flow.tables["request"]
+        await session.execute(
+            delete(r).where(
+                r.c.operation == report["operation"], r.c.operation_id == report["operation_id"]
+            )
+        )
+    await flow.deliver(flow.notification())
+    await flow.rack_advance()
+    await flow.confirm()
+    assert not await flow.confirmations()
+    assert not await flow.rows("rack_report")
+    async with flow.factory() as session:
+        assert list(
+            await session.scalars(
+                select(ReliableMessage.id).where(ReliableMessage.operation == report["operation"])
+            )
+        ) == [report["message_id"]]
+
+
+async def test_missing_original_member_preparation_cannot_free_rack(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    await flow.deliver(flow.notification())
+    async with flow.factory.begin() as session:
+        members = flow.tables["member"]
+        await session.execute(
+            members.update()
+            .where(members.c.rack_work_id == job["id"])
+            .values(preparation_action_id=None)
+        )
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    assert not await flow.rows("rack_departure")
+
+
+async def test_missing_member_from_original_plan_keeps_handoff_unknown(manual_host):
+    from sqlalchemy import delete
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(faces=("A", "B"))
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.deliver(flow.notification(face="A"))
+    async with flow.factory.begin() as session:
+        members = flow.tables["member"]
+        await session.execute(delete(members).where(members.c.rack_face == "B"))
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    assert not await flow.rows("rack_departure")
+
+
+async def test_original_report_identity_survives_missing_row_and_result_review(
+    manual_host, monkeypatch
+):
+    from dataclasses import replace
+
+    from sqlalchemy import delete, select
+
+    from app.models import ReliableMessage
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    (report,) = await flow.rows("rack_report")
+    async with flow.factory.begin() as session:
+        r = flow.tables["request"]
+        await session.execute(
+            delete(r).where(
+                r.c.operation == report["operation"], r.c.operation_id == report["operation_id"]
+            )
+        )
+    transport = flow.host.capabilities.transport
+    original = transport.get_result
+
+    async def unavailable(*args, **kwargs):
+        return replace(await original(*args, **kwargs), availability="MISSING")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transport, "get_result", unavailable)
+        await flow.host.advance("MANUAL_RACK", job["id"])
+    assert (await flow.rows("rack_action"))[0]["phase"] == "REVIEW"
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory() as session:
+        assert list(
+            await session.scalars(
+                select(ReliableMessage.id).where(ReliableMessage.operation == report["operation"])
+            )
+        ) == [report["message_id"]]
+        assert await flow.host.manual_racks.has_report_obligations(session, task_id="T1")
+    assert not await flow.rows("rack_report")
+
+
+async def test_report_consumption_requires_its_original_saved_report_identity(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    (report,) = await flow.rows("rack_report")
+    await flow.rack_response("rack_report", {}, code="RECORDED")
+    async with flow.factory.begin() as session:
+        members = flow.tables["member"]
+        await session.execute(
+            members.update()
+            .where(members.c.id == job["source_ref"])
+            .values(arrival_report_operation_id="other")
+        )
+    assert await flow.host.advance("RACK_REPORT", report["operation_id"]) == "OWNER_CONFLICT"
+    assert (await flow.rows("rack_report"))[0]["state"] == "REQUESTED"

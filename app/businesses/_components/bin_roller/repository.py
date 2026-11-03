@@ -11,6 +11,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest
 
@@ -20,8 +21,14 @@ from .ports import SourceFaceRef, SupplyChange, SupplyProgress
 
 class RollerRepository:
     def __init__(
-        self, owner_domain: str, work_line_id: int, *, tables: Mapping[str, Table] | None = None
+        self,
+        owner_domain: str,
+        work_line_id: int,
+        *,
+        rack_dispatch: RackDispatch,
+        tables: Mapping[str, Table] | None = None,
     ) -> None:
+        self.rack_dispatch = rack_dispatch
         self.owner_domain = owner_domain
         self.work_line_id = work_line_id
         self.tables = TABLES if tables is None else tables
@@ -107,13 +114,14 @@ class RollerRepository:
             return False
         if demand["feed_id"] is not None:
             return True
-        if demand["cycle_id"]:
-            table = self.tables["rack_action"]
-            return (
-                await self._one(
-                    session, table, table.c.cycle_id == demand["cycle_id"], table.c.kind == "CTU01"
+        if demand["cycle_id"] and demand["preparation_action_id"]:
+            job = await self.rack_dispatch.progress(session, job_id=demand["cycle_id"])
+            return bool(
+                job
+                and any(
+                    a.id == demand["preparation_action_id"] and a.kind in ("ENTER", "ROTATE")
+                    for a in job.actions
                 )
-                is not None
             )
         return False
 
@@ -121,14 +129,15 @@ class RollerRepository:
         self, session: AsyncSession, *, demand_id: str, cycle_id: str, service_id: str | None = None
     ) -> None:
         demand = await self.demand(session, demand_id)
-        cycle = await self.get_cycle(session, cycle_id)
+        cycle = await self.rack_dispatch.progress(session, job_id=cycle_id)
         if (
             demand is None
             or cycle is None
             or (
-                cycle["task_id"] != demand["task_id"]
-                or cycle["rack_id"] != demand["rack_id"]
-                or cycle["purpose"] != "ORDINARY"
+                cycle.origin.task_id != demand["task_id"]
+                or cycle.origin.rack_id != demand["rack_id"]
+                or cycle.origin.source_kind != "ROLLER_ORDINARY"
+                or cycle.origin.work_line_id != self.work_line_id
                 or (demand["cycle_id"] is not None and demand["cycle_id"] != cycle_id)
                 or (
                     service_id is not None
@@ -483,109 +492,6 @@ class RollerRepository:
         await session.execute(table.insert().values(**values, is_current=not history_only))
         return "HISTORY_ONLY" if history_only else "UPDATED"
 
-    async def create_cycle(
-        self,
-        session: AsyncSession,
-        *,
-        cycle_id: str,
-        rack_id: str,
-        purpose: str,
-        task_id: str | None,
-        source_ref: str,
-        resources: dict | None = None,
-    ) -> RowMapping:
-        if purpose not in {"ORDINARY", "DRAIN"}:
-            raise ValueError("invalid rack service purpose")
-        table = self.tables["rack_cycle"]
-        return await self._register(
-            session,
-            table,
-            dict(
-                **self.scope,
-                id=cycle_id,
-                rack_id=rack_id,
-                purpose=purpose,
-                task_id=task_id,
-                source_ref=source_ref,
-                resources=resources,
-                status="ACTIVE",
-                pending=True,
-            ),
-            ["owner_domain", "work_line_id", "source_ref", "rack_id"],
-            ["purpose", "task_id"],
-        )
-
-    async def get_cycle(self, session: AsyncSession, cycle_id: str) -> RowMapping | None:
-        table = self.tables["rack_cycle"]
-        return await self._one(session, table, table.c.id == cycle_id)
-
-    async def register_rack_action(
-        self,
-        session: AsyncSession,
-        *,
-        cycle_id: str,
-        kind: str,
-        source_ref: str,
-        action_id: str,
-        client_request_id: str,
-        transport_task_id: str | None,
-        operation_id: str | None,
-        target: dict,
-        caller_workline_id: str,
-        target_face: str | None = None,
-        station_id: str | None = None,
-    ) -> RowMapping:
-        if kind not in {"CTU01", "CTU02", "CTU03"}:
-            raise ValueError("invalid rack action")
-        if await self.get_cycle(session, cycle_id) is None:
-            raise ValueError("rack action requires its original cycle")
-        table = self.tables["rack_action"]
-        return await self._register(
-            session,
-            table,
-            dict(
-                **self.scope,
-                id=action_id,
-                cycle_id=cycle_id,
-                kind=kind,
-                source_ref=source_ref,
-                client_request_id=client_request_id,
-                transport_task_id=transport_task_id,
-                operation_id=operation_id,
-                target=target,
-                target_face=target_face,
-                station_id=station_id,
-                caller_workline_id=caller_workline_id,
-                status="PENDING",
-                pending=True,
-            ),
-            ["owner_domain", "work_line_id", "cycle_id", "kind"]
-            + (["source_ref"] if kind == "CTU02" else []),
-            ["source_ref", "target", "target_face", "station_id", "caller_workline_id"],
-        )
-
-    async def get_action(self, session: AsyncSession, action_id: str) -> RowMapping | None:
-        table = self.tables["rack_action"]
-        return await self._one(session, table, table.c.id == action_id)
-
-    async def bind_transport(
-        self, session: AsyncSession, *, action_id: str, transport_task_id: str, operation_id: str
-    ) -> None:
-        action = await self.get_action(session, action_id)
-        if action is None:
-            raise ValueError("original rack action missing")
-        for key, value in dict(
-            transport_task_id=transport_task_id, operation_id=operation_id
-        ).items():
-            if action[key] is not None and action[key] != value:
-                raise ValueError("original Transport identity cannot change")
-        table = self.tables["rack_action"]
-        await session.execute(
-            table.update()
-            .where(*self.scoped(table), table.c.id == action_id)
-            .values(transport_task_id=transport_task_id, operation_id=operation_id)
-        )
-
     def current_round_condition(self, root=None) -> ColumnElement[bool]:
         root = self.tables["scan_arrival"] if root is None else root
         scan3 = self.tables["scan_arrival"].alias("latest_scan3")
@@ -629,6 +535,8 @@ class RollerRepository:
         # The public candidate identity is the original round, ordered by first physical SCAN4.
         query = (
             select(
+                arrivals.c.id.label("fifo_arrival_id"),
+                arrivals.c.received_work.label("received_work"),
                 root.c.round_id.label("id"),
                 root.c.id.label("scan3_arrival_id"),
                 root.c.first_scan4_arrival_id.label("scan4_arrival_id"),
