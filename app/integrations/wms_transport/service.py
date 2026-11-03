@@ -106,7 +106,6 @@ class TransportService:
             client_request_id=client_request_id,
             caller=caller,
             owner=self.owner_domain,
-            target=self._target,
         )
 
     async def list_unclosed_predecessors(

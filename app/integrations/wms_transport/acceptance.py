@@ -169,7 +169,6 @@ async def get_submission_acceptance(
     client_request_id: str,
     caller: TransportCaller,
     owner: str | None,
-    target: str | None,
 ) -> SubmissionAcceptance:
     if not isinstance(caller, TransportCaller):
         raise ValueError("caller must be a TransportCaller")
@@ -195,7 +194,6 @@ async def get_submission_acceptance(
                 row["operation_id"] != task["operation_id"]
                 or row["business_key"] != transport_task_id
                 or row["delivery_snapshot"] is not None
-                or (target is not None and row["target"] != target)
             ):
                 return SubmissionAcceptance("INVALID")
             if row["response_raw"] is None:
@@ -211,8 +209,6 @@ async def get_submission_acceptance(
                 row["response_raw"],
             )
             basis = _basis(task, message, row["id"], result)
-        if target is not None and basis.target != target:
-            return SubmissionAcceptance("INVALID")
         return SubmissionAcceptance("ACCEPTED", basis)
     except (ValueError, KeyError, TypeError, AttributeError):
         return SubmissionAcceptance("INVALID")
@@ -253,6 +249,10 @@ def submission_observer(
             committing = False
             try:
                 async with session_factory() as session, session.begin():
+                    if session.get_bind().dialect.name == "postgresql":
+                        await session.connection(
+                            execution_options={"isolation_level": "REPEATABLE READ"}
+                        )
                     task = (await session.execute(query.with_for_update())).mappings().one_or_none()
                     if task is None:
                         return

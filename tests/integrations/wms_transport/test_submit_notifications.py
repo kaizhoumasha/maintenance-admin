@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.exc import OperationalError
 
 from app import business_wakeups
@@ -276,6 +276,38 @@ async def test_evidence_requires_original_claim_and_keeps_first_ack(submit, case
     assert flow.notices == (["original"] if case == "duplicate" else [])
 
 
+@pytest.mark.parametrize("stored", ["task", "historical"])
+async def test_original_target_survives_new_send_configuration(submit, transport_request, stored):
+    from app.reliable import Outbox
+
+    flow = submit
+    if stored == "task":
+        await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+            flow.claim, flow.outcome()
+        )
+    else:
+        assert await flow.store.finish(flow.claim, flow.outcome())
+    replacement = replace(flow.rig.target, name="replacement")
+    service = TransportService(
+        Outbox({replacement.name: replacement}, ADAPTERS), owner_domain="original"
+    )
+    args = dict(
+        transport_task_id=flow.handle.transport_task_id,
+        client_request_id=flow.handle.client_request_id,
+        caller=transport_request["caller"],
+    )
+    async with flow.rig.factory.begin() as session:
+        # The unrelated obligation is rolled back after exercising normal send-target resolution.
+        before = await service.get_submission_acceptance(session, **args)
+        await service.move_rack(
+            session, **(transport_request | {"client_request_id": str(uuid7())})
+        )
+        after = await service.get_submission_acceptance(session, **args)
+        assert before == after and after.state == "ACCEPTED"
+        assert after.basis.target == flow.rig.target.name
+        await session.rollback()
+
+
 async def test_saved_attempt_identity_is_revalidated_after_outbox_cleanup(
     submit, transport_request
 ):
@@ -317,6 +349,7 @@ async def test_evidence_transactions_retry_without_changing_the_original_claim(
 ):
     flow = submit
     attempts = []
+    initial_isolations = []
 
     class Failure(Exception):
         pass
@@ -325,6 +358,12 @@ async def test_evidence_transactions_retry_without_changing_the_original_claim(
     async def factory():
         async with flow.rig.factory() as session:
             attempts.append(session)
+            if session.get_bind().dialect.name == "postgresql":
+
+                @event.listens_for(session.sync_session, "after_begin")
+                def capture_isolation(_, transaction, connection):
+                    initial_isolations.append(connection.scalar(text("SHOW transaction_isolation")))
+
             if len(attempts) <= failures:
 
                 def fail(_):
@@ -345,6 +384,8 @@ async def test_evidence_transactions_retry_without_changing_the_original_claim(
             await observe(flow.claim, flow.outcome())
     else:
         await observe(flow.claim, flow.outcome())
+    if flow.rig.engine.dialect.name == "postgresql" and sqlstate in {"40001", "40P01"}:
+        assert initial_isolations == ["repeatable read"] * 3
     accepted = sqlstate in {"40001", "lost_reply"}
     assert len(attempts) == {"40001": 3, "40P01": 3, "other": 2, "lost_reply": 2}[sqlstate]
     assert flow.notices == (["original"] if accepted else [])

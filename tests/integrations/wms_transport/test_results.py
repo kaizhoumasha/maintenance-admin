@@ -419,6 +419,8 @@ async def test_refusal_and_applied_position_milestones_require_reconciliation(
         ("corrupt_digest", "INVALID"),
         ("settled", "MISSING"),
         ("owner", "IDENTITY_MISMATCH"),
+        ("empty_target", "INVALID"),
+        ("ambiguous_target", "INVALID"),
         ("caller", "IDENTITY_MISMATCH"),
     ],
 )
@@ -462,6 +464,18 @@ async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
             await session.execute(update(TransportTask).values(submission_acceptance=JSON.NULL))
         if case == "corrupt_digest":
             await session.execute(update(TransportTask).values(input_digest="a" * 64))
+        if case == "empty_target":
+            row.target = ""
+        if case == "ambiguous_target":
+            session.add(
+                ReliableMessage(
+                    **{
+                        c.name: ("other-target" if c.name == "target" else getattr(row, c.name))
+                        for c in ReliableMessage.__table__.c
+                        if c.name != "id"
+                    }
+                )
+            )
         if case == "owner":
             task.service.owner_domain = "other"
         await session.execute(
