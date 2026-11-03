@@ -549,3 +549,112 @@ async def test_committed_rack_notice_blocks_new_confirmation_registration(
     notice = (await flow.rows("rack_completion"))[0]
     assert notice["task_id"] == "T1" and notice["plan_revision"] == revision + 1
     assert not (notice["state"] == "APPLIED")
+
+
+@pytest.mark.parametrize("receiver_first", [True, False])
+@pytest.mark.parametrize("fact", ["plan", "withdrawal", "completion", "bin"])
+async def test_departure_serializes_with_original_production_facts(
+    manual_host, monkeypatch, receiver_first, fact
+):
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+
+    flow = manual_host
+    await flow.ready()
+    target = dict(rack_id="TARGET", rack_face="B") if fact == "bin" else None
+    await flow.plan(target=target)
+    await flow.host.advance("TASK", "T1")
+    role = "TRANSFER" if target else "RETURN"
+    job = next(r for r in await flow.rows("rack") if r["role"] == role)
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.rack_outcome(entry, face="B" if target else "A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    if fact in ("plan", "bin"):
+        await flow.deliver(flow.notification())
+
+    async def receive(before=None):
+        if fact == "bin":
+            return await flow.scan(before_commit=before)
+        raw = flow.notification()
+        if fact == "plan":
+            raw = flow.message(
+                "plan_delta",
+                dict(
+                    task_id="T1",
+                    plan_revision=2,
+                    added_direct_picks=[
+                        dict(
+                            source_locator=dict(
+                                type="RACK_SLOT", rack_id="DIRECT", rack_face="B", slot_id="NEXT"
+                            )
+                        )
+                    ],
+                ),
+            )
+        if fact == "withdrawal":
+            raw = flow.message(
+                "cancel",
+                dict(
+                    task_id="T1",
+                    cancel_scope="PLAN_MEMBERS",
+                    direct_pick_sources=[dict(plan_revision=1, rack_id="DIRECT", rack_face="A")],
+                ),
+            )
+        return await flow.deliver(raw, before_commit=before)
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold():
+        entered.set()
+        await asyncio.wait_for(release.wait(), 10)
+
+    async def advance():
+        return await flow.host.advance("MANUAL_RACK", job["id"])
+
+    if receiver_first:
+        incoming = asyncio.create_task(receive(hold))
+        await asyncio.wait_for(entered.wait(), 5)
+        original = flow.host.repository.lock_dispatch_line
+
+        async def resume_after_locating(*args, **kwargs):
+            release.set()
+            await incoming
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(flow.host.repository, "lock_dispatch_line", resume_after_locating)
+        await advance()
+    else:
+        original = flow.host.manual_racks.evaluate_manual_point
+
+        async def assessed(*args, **kwargs):
+            values = await original(*args, **kwargs)
+            assert values[0].state == ("NONE" if fact in ("plan", "bin") else "CONTINUE")
+            await hold()
+            return values
+
+        monkeypatch.setattr(flow.host.manual_racks, "evaluate_manual_point", assessed)
+        evaluating = asyncio.create_task(advance())
+        await asyncio.wait_for(entered.wait(), 5)
+
+        def receiver_began(*_):
+            release.set()
+
+        event.listen(Session, "after_begin", receiver_began, once=True)
+        try:
+            incoming = asyncio.create_task(receive())
+            await asyncio.wait_for(evaluating, 10)
+        finally:
+            event.remove(Session, "after_begin", receiver_began)
+    assert (await incoming).status_code == (200 if fact == "bin" else 202)
+    assert bool(await flow.rows("rack_departure")) is (
+        not receiver_first if fact in ("plan", "bin") else receiver_first
+    )
+    if fact == "plan":
+        await flow.host.advance("TASK", "T1")
+        later = next(m for m in await flow.rows("member") if m["plan_revision"] == 2)
+        assert (later["rack_work_id"] == job["id"]) is receiver_first
+    if fact == "bin":
+        (arrival,) = await flow.rows("manual_bin")
+        await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+        state = await flow.host.advance("MANUAL_BIN", arrival["arrival_id"])
+        assert (state == "WORK_REQUIRED") is receiver_first

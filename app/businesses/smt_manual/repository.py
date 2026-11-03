@@ -45,16 +45,22 @@ class TaskRepository:
         self, session, roller, work_line_id, *, task_id=None, lock_actions=True
     ):
         line = await self.lock_line(session, work_line_id)
-        jobs = await roller.lock_jobs_on_line(session, work_line_id)
+        from app.businesses._components.bin_roller.service import ROLLER_SOURCES, RackLockSetChanged
+
+        from .manual_rack_flow import MANUAL_SOURCES
+
+        kinds = (*ROLLER_SOURCES, *MANUAL_SOURCES)
+        jobs = await roller.rack_dispatch.jobs(
+            session, work_line_id=work_line_id, source_kinds=kinds, pending=True
+        )
+        await roller.rack_dispatch.lock_jobs(session, job_ids=tuple(j.id for j in jobs))
         task_ids = {job.origin.task_id for job in jobs if job.origin.task_id}
         if task_id is not None:
             task_ids.add(task_id)
         await self.lock_dispatch_subjects(session, work_line_id, task_ids)
         await roller.lock_production_subjects(session, work_line_id, jobs)
-        from app.businesses._components.bin_roller.service import ROLLER_SOURCES, RackLockSetChanged
-
         confirmed = await roller.rack_dispatch.jobs(
-            session, work_line_id=work_line_id, source_kinds=ROLLER_SOURCES, pending=True
+            session, work_line_id=work_line_id, source_kinds=kinds, pending=True
         )
         if tuple(j.id for j in jobs) != tuple(j.id for j in confirmed):
             raise RackLockSetChanged("original dispatch jobs changed during lock acquisition")
@@ -73,13 +79,24 @@ class TaskRepository:
             table = self.tables[key]
             condition = table.c.task_id.in_(active)
             if key == "manual_bin":
-                condition |= (table.c.work_line_id == work_line_id) & table.c.pending
+                condition |= (table.c.work_line_id == work_line_id) & (
+                    table.c.pending | (table.c.state == "WORK_REQUIRED")
+                )
             await session.execute(
                 select(*table.primary_key)
                 .where(condition)
                 .order_by(*table.primary_key)
                 .with_for_update()
             )
+
+    async def original_dispatch_task(self, session, roller, task_id):
+        located = await self.task(session, task_id)
+        if located is None:
+            return None, None, ()
+        line, jobs = await self.lock_dispatch_line(
+            session, roller, located["work_line_id"], task_id=task_id, lock_actions=False
+        )
+        return line, await self.task(session, task_id), jobs
 
     async def original(
         self, session: AsyncSession, task_id: str

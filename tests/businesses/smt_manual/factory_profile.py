@@ -273,6 +273,14 @@ async def profile_fixture(factory, monkeypatch, evidence_dir, evidence_name):
             raise AssertionError("loopback sender did not drain its bounded fixture work")
 
         async def rows(key, *, roller=False):
+            if not roller and key in {"rack", "rack_action", "rack_departure"}:
+                from tests.helpers import manual_dispatch_rows
+
+                async with factory() as session:
+                    return await manual_dispatch_rows(
+                        session, state.roller.rack_dispatch, key, state.lines
+                    )
+
             if roller and key in ("rack_cycle", "rack_action", "departure"):
                 from tests.helpers import roller_dispatch_rows
 

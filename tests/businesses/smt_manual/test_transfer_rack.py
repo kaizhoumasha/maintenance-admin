@@ -28,7 +28,7 @@ async def test_first_plan_transfer_creates_its_original_entry(manual_racks):
     assert len(await flow.rows("rack_action")) == 2
 
 
-async def test_transfer_departure_requires_task_completion_and_original_entry(manual_racks):
+async def test_idle_transfer_departs_before_parent_and_report(manual_racks):
     flow = manual_racks
     await flow.ready()
     await flow.plan(target=dict(rack_id="TRANSFER", rack_face="B"))
@@ -39,12 +39,8 @@ async def test_transfer_departure_requires_task_completion_and_original_entry(ma
     await flow.rack_advance(transfer["id"])
     assert await flow.rows("rack_departure") == []
     await flow.rack_outcome(action, face="B")
-    assert await flow.rack_advance(transfer["id"]) == "WORKING"
-    assert await flow.rows("rack_departure") == []
-    # M4 owns this authoritative task completion, independently of source-rack motion.
-    async with flow.factory.begin() as session:
-        await session.execute(update(flow.tables["task"]).values(status="COMPLETED"))
     assert await flow.rack_advance(transfer["id"]) == "WAITING_FOR_DEPARTURE"
+    assert (await flow.rows("task"))[0]["status"] == "EXECUTING"
     departures = await flow.rows("rack_departure")
     assert len(departures) == 1 and departures[0]["request_snapshot"]["rack_id"] == "TRANSFER"
 
@@ -97,11 +93,10 @@ async def test_departure_wait_and_unknown_keep_original_context(manual_racks):
                 data=dict(transport_task_id=departure["transport_task_id"]),
             )
         ).encode()
-    assert await flow.rack_advance() == "WAITING_FOR_DEPARTURE_RESULT"
-    assert (await flow.rows("rack"))[0]["state"] == "ACTIVE"
-    assert len(await flow.rows("rack_action")) == 2
+    assert await flow.rack_advance() == "COMPLETED"
+    assert (await flow.rows("rack"))[0]["state"] == "COMPLETED"
     await flow.rack_outcome(departure, location="STORE-POS")
-    assert await flow.rack_advance() == "DEPARTED"
+    assert await flow.rack_advance() == "COMPLETED"
 
 
 async def test_new_task_completion_can_recheck_saved_wait_before_its_deadline(manual_racks):
@@ -173,37 +168,96 @@ async def test_unknown_motion_retains_original_identity_and_requires_new_applied
     assert len(await flow.rows("rack_action")) == 1
 
 
-async def test_departure_retries_sort_after_original_uuid_in_same_millisecond(
-    manual_racks, monkeypatch
+async def test_transfer_open_later_member_blocks_departure_then_original_target_stays_closed(
+    manual_host,
 ):
-    from datetime import UTC, datetime
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(faces=(), target=dict(rack_id="TARGET", rack_face="A"))
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    (entry,) = await flow.rows("rack_action")
+    await flow.plan(revision=2)
+    await flow.rack_outcome(entry, face="A")
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WORKING"
+    assert not await flow.rows("rack_departure")
+    await flow.deliver(flow.notification(revision=2))
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WAITING_FOR_DEPARTURE"
+    await flow.rack_response(
+        "rack_departure",
+        dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORE")),
+    )
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    depart = next(a for a in await flow.rows("rack_action") if a["kind"] == "DEPART")
+    await flow.acknowledge(depart)
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "COMPLETED"
+    await flow.plan(revision=3)
+    for _ in range(2):
+        await flow.host.advance("TASK", "T1")
+    assert [r["id"] for r in await flow.rows("rack") if r["role"] == "TRANSFER"] == [job["id"]]
 
-    from app.businesses.smt_manual import manual_rack_flow
-    from app.core.identifiers import uuid7
 
-    flow = manual_racks
+async def test_new_bin_permission_requires_original_applied_target(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    job = next(r for r in await flow.rows("rack") if r["role"] == "TRANSFER")
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.scan()
+    (arrival,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+    assert await flow.host.advance("MANUAL_BIN", arrival["arrival_id"]) == "ADMISSION_PENDING"
+    await flow.rack_outcome(entry, face="B")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    assert await flow.host.advance("MANUAL_BIN", arrival["arrival_id"]) == "WORK_REQUIRED"
+    (applied,) = await flow.rows("manual_bin")
+    assert (applied["target_job_id"], applied["target_action_id"]) == (job["id"], entry["id"])
+    await flow.deliver(flow.notification())
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WORKING"
+    assert not await flow.rows("rack_departure")
+
+
+async def test_later_member_can_resume_original_return_before_departure_root(manual_host):
+    flow = manual_host
     await flow.ready()
     await flow.plan()
-    await flow.reconcile()
-    await flow.rack_outcome()
-    assert await flow.rack_advance() == "WORKING"
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    (entry,) = await flow.rows("rack_action")
     await flow.deliver(flow.notification())
-    clock = datetime(2026, 11, 2, tzinfo=UTC)
-    high = uuid7(clock, randbits=lambda _: (1 << 74) - 1)
-    low = uuid7(clock, randbits=lambda _: 0)
-    candidates = iter((high, low))
-    monkeypatch.setattr(
-        manual_rack_flow,
-        "uuid7",
-        lambda now=None: next(candidates) if now is None else uuid7(now, randbits=lambda _: 0),
-    )
-    assert await flow.rack_advance(now_ms=1000) == "WAITING_FOR_DEPARTURE"
-    await flow.rack_response("rack_departure", dict(result="WAIT", retry_after_ms=1))
-    assert await flow.rack_advance(now_ms=1000) == "WAITING_FOR_DEPARTURE"
-    assert await flow.rack_advance(now_ms=1001) == "WAITING_FOR_DEPARTURE"
-    attempts = await flow.rows("rack_departure")
-    assert len(attempts) == 2 and attempts[0]["operation_id"] == str(high)
-    current = (await flow.rows("rack"))[0]["departure_operation_id"]
-    assert current == max(r["operation_id"] for r in attempts)
-    assert current > str(high)
-    assert attempts[0]["due_at_ms"] == 1001
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory() as session:
+        assert (await flow.host.rack_dispatch.progress(session, job_id=job["id"])).release_requested
+    await flow.plan(revision=2, faces=("B",))
+    await flow.host.advance("TASK", "T1")
+    await flow.rack_outcome(entry, face="A")
+    assert await flow.host.advance("MANUAL_RACK", job["id"]) == "WAITING_FOR_ROTATION"
+    member = next(m for m in await flow.rows("member") if m["plan_revision"] == 2)
+    rotate = next(a for a in await flow.rows("rack_action") if a["kind"] == "ROTATE")
+    assert (member["rack_work_id"], member["preparation_action_id"]) == (job["id"], rotate["id"])
+    assert not await flow.rows("rack_departure")
+
+
+async def test_missing_original_target_association_is_not_rebound_by_task_wakeup(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    job = next(r for r in await flow.rows("rack") if r["role"] == "TRANSFER")
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.rack_outcome(entry, face="B")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory.begin() as session:
+        inputs = flow.tables["input"]
+        await session.execute(
+            inputs.update()
+            .where(inputs.c.is_plan_record)
+            .values(target_job_id=None, target_action_id=None)
+        )
+    await flow.host.advance("TASK", "T1")
+    await flow.scan()
+    (arrival,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+    assert await flow.host.advance("MANUAL_BIN", arrival["arrival_id"]) == "ADMISSION_PENDING"
+    assert not await flow.rows("rack_departure")

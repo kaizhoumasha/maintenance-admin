@@ -878,6 +878,9 @@ async def roller_scans(roller_store, monkeypatch):
         async def read_successor(self, session, *, work_line_id):
             return SuccessorContext("UNKNOWN", {})
 
+        async def lock_scan2_task(self, session, *, work_line_id):
+            pass
+
         async def accept_scan2(self, ctx, arrival):
             facts = await rows(ctx.session, "scan_fact")
             assert any(f["arrival_id"] == arrival.arrival_id for f in facts)
@@ -1447,6 +1450,9 @@ async def roller_application(roller_scans, request):
 
         async def read_successor(self, session, *, work_line_id):
             return SuccessorContext("UNKNOWN", {})
+
+        async def lock_scan2_task(self, session, *, work_line_id):
+            pass
 
         async def accept_scan2(self, ctx, arrival):
             assert await ctx.session.scalar(

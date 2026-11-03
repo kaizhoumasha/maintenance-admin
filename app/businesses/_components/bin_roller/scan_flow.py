@@ -89,6 +89,8 @@ async def accept_scan(
         jobs = await roller.lock_jobs_on_line(ctx.session, ctx.work_line_id)
         await roller.lock_production_subjects(ctx.session, ctx.work_line_id, jobs)
         fifo = await repository.return_queue(ctx.session)
+    if ctx.device_role == "SCAN2":
+        await roller.production.lock_scan2_task(ctx.session, work_line_id=ctx.work_line_id)
     previous = await repository.latest_scan(ctx.session, ctx.device_role)
     separator = None
     if previous is not None and previous["command_code"] is not None:

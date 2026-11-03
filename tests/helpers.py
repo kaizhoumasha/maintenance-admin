@@ -1565,6 +1565,12 @@ async def formal_manual_fixture(factory, monkeypatch):
             raise AssertionError("loopback sender did not drain its bounded fixture work")
 
         async def rows(key, *, roller=False):
+            if not roller and key in {"rack", "rack_action", "rack_departure"}:
+                async with factory() as session:
+                    return await manual_dispatch_rows(
+                        session, state.roller.rack_dispatch, key, state.lines
+                    )
+
             if roller and key in ("rack_cycle", "rack_action", "departure"):
                 async with factory() as session:
                     records = [
@@ -1683,6 +1689,41 @@ async def clear_test_rack_jobs(session, lines):
     await session.execute(
         delete(RackJob).where(RackJob.work_line_id.in_(lines), RackJob.owner_domain == "smt_manual")
     )
+
+
+async def manual_dispatch_rows(session, dispatch, key, lines):
+    from dataclasses import asdict
+
+    from app.businesses.smt_manual.manual_rack_flow import MANUAL_SOURCES
+
+    jobs = [
+        j
+        for line in lines
+        for j in await dispatch.jobs(session, work_line_id=line, source_kinds=MANUAL_SOURCES)
+    ]
+    if key == "rack":
+        return [
+            dict(
+                asdict(j.origin),
+                id=j.id,
+                role=j.origin.source_kind.removeprefix("MANUAL_"),
+                state=j.state,
+                pending=j.pending,
+                location_code=j.origin.point,
+            )
+            for j in jobs
+        ]
+    return [
+        dict(
+            asdict(a),
+            rack_work_id=j.id,
+            request_snapshot=a.request,
+            operation_id=a.decision_operation_id,
+        )
+        for j in jobs
+        for a in j.actions
+        if (key == "rack_departure") == (a.kind == "DEPARTURE_DECIDE")
+    ]
 
 
 async def roller_dispatch_rows(session, roller, key, line_id=1):

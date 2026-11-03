@@ -254,6 +254,11 @@ async def manual_flow(manual_sessions, monkeypatch):
                         for line in lines
                         for r in await roller_dispatch_rows(session, roller, key, line)
                     ]
+            if not component and key in {"rack", "rack_action", "rack_departure"}:
+                from tests.helpers import manual_dispatch_rows
+
+                async with manual_sessions() as session:
+                    return await manual_dispatch_rows(session, roller.rack_dispatch, key, lines)
             query = (
                 bin_roller_query(roller_tables, key) if component else smt_manual_query(tables, key)
             )
@@ -650,7 +655,8 @@ async def manual_racks(manual_flow, monkeypatch):
     flow.task.capabilities = capabilities
     flow.roller.capabilities = capabilities
     flow.roller.rack_dispatch.capabilities = capabilities
-    flow.racks = ManualRackFlow(capabilities, repository=flow.task.repository)
+    flow.racks = ManualRackFlow(capabilities, flow.roller, repository=flow.task.repository)
+    flow.task.manual_racks = flow.racks
     service = flow.runtime.services["smt_manual"]
     service.read_task_owner = flow.task.read_task_owner
     service.accept_direct_pick_completed = flow.racks.accept_direct_pick_completed
@@ -694,7 +700,11 @@ async def manual_racks(manual_flow, monkeypatch):
         rack_id = rack_id or (await flow.rows("rack"))[0]["id"]
         async with flow.factory() as session, session.begin():
             if session.get_bind().dialect.name == "postgresql":
-                await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+            job = await flow.racks.dispatch.progress(session, job_id=rack_id)
+            await flow.task.repository.lock_dispatch_line(
+                session, flow.roller, job.origin.work_line_id, task_id=job.origin.task_id
+            )
             state = await flow.racks.advance_rack(session, rack_work_id=rack_id, now_ms=now_ms)
             if rollback:
                 await session.rollback()
@@ -748,6 +758,29 @@ async def manual_racks(manual_flow, monkeypatch):
                 )
             )
 
+    async def acknowledge(action):
+        async with flow.factory.begin() as session:
+            message = await session.get(ReliableMessage, action["submit_message_id"])
+            message.status, message.last_http_status, message.last_verdict = (
+                "DONE",
+                202,
+                "DELIVERED",
+            )
+            message.response_raw = json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="RECEIVED",
+                    timestamp=100,
+                    data=dict(transport_task_id=action["transport_task_id"]),
+                )
+            ).encode()
+
+    async def consume_report():
+        (report,) = await flow.rows("rack_report")
+        async with flow.factory.begin() as session:
+            return await flow.racks.advance_report(session, operation_id=report["operation_id"])
+
+    flow.acknowledge, flow.consume_report = acknowledge, consume_report
     flow.notification, flow.plan, flow.reconcile = notification, plan, reconcile
     flow.rack_advance, flow.rack_outcome, flow.rack_response = advance, outcome, response
     try:
@@ -993,10 +1026,39 @@ async def manual_supply(manual_racks, manual_completion_tools):
 
 
 @pytest.fixture
-async def profile_flow(pg_sessions, monkeypatch, tmp_path, request):
+async def native_manual_sessions(manual_sessions):
+    from app.businesses._components.bin_roller.models import TABLES as ROLLER
+    from app.businesses.smt_manual.models import TABLES
+    from app.models import AuditLog
+
+    metadata = MetaData()
+    for table in (*TABLES.values(), *ROLLER.values(), AuditLog.__table__):
+        table.to_metadata(metadata)
+    engine = manual_sessions.kw["bind"]
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    try:
+        yield manual_sessions
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.drop_all)
+
+
+@pytest.fixture
+async def formal_manual(native_manual_sessions, monkeypatch):
+    from tests.helpers import formal_manual_fixture
+
+    async with formal_manual_fixture(native_manual_sessions, monkeypatch) as state:
+        yield state
+
+
+@pytest.fixture
+async def profile_flow(native_manual_sessions, monkeypatch, tmp_path, request):
     from app import business_wakeups
     from tests.businesses.smt_manual.factory_profile import profile_fixture
 
-    async with profile_fixture(pg_sessions, monkeypatch, tmp_path, request.node.name) as flow:
+    async with profile_fixture(
+        native_manual_sessions, monkeypatch, tmp_path, request.node.name
+    ) as flow:
         monkeypatch.setattr(business_wakeups, "enqueue_business", flow.notices.append)
         yield flow

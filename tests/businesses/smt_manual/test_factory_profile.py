@@ -79,7 +79,7 @@ async def saved_transports(flow):
 @pytest.mark.parametrize("line", [0, 1], ids=["KT16", "KT18"])
 @pytest.mark.parametrize("role", ["RETURN", "TRANSFER"])
 @pytest.mark.parametrize("same_source", [True, False])
-async def test_manual_role_zone_departure_uses_actual_final_position(
+async def test_accepted_manual_departure_keeps_closure_after_late_position(
     profile_flow, line, role, same_source
 ):
     flow = profile_flow
@@ -173,12 +173,8 @@ async def test_manual_role_zone_departure_uses_actual_final_position(
         ).status_code == 202
     await asyncio.gather(*(flow.host.advance("MANUAL_RACK", own["id"]) for _ in range(2)))
     other = next(w for w in works if w["id"] != own["id"])
-    assert await flow.host.advance("MANUAL_RACK", other["id"]) == "DEPARTED"
-    saved = next(w for w in await flow.rows("rack") if w["id"] == own["id"])
-    assert (saved["state"] == "DEPARTED") is not same_source
-    assert await flow.host.advance("MANUAL_RACK", own["id"]) == (
-        "POSITION_CONFLICT" if same_source else "DEPARTED"
-    )
+    assert await flow.host.advance("MANUAL_RACK", other["id"]) == "COMPLETED"
+    assert await flow.host.advance("MANUAL_RACK", own["id"]) == "COMPLETED"
     assert len(await flow.rows("rack_action")) == 4
 
 

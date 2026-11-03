@@ -23,6 +23,18 @@ class RollerPorts:
         self.repository = repository
         self.manual_bins = manual_bins
 
+    async def lock_scan2_task(self, session: AsyncSession, *, work_line_id: int) -> None:
+        # The event resolver owns the line and source device before any scan row is written.
+        table = self.repository.tables["task"]
+        await session.execute(
+            select(table.c.task_id)
+            .where(
+                table.c.work_line_id == work_line_id, table.c.status.in_(("PREPARING", "EXECUTING"))
+            )
+            .order_by(table.c.task_id)
+            .with_for_update()
+        )
+
     async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> None:
         if self.manual_bins is None:
             raise RuntimeError("manual bin production must be assembled")
