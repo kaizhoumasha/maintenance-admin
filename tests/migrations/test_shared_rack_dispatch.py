@@ -1506,6 +1506,9 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
         ("DEPART", "active"),
         ("DEPART", "failed_at_point"),
         ("DEPART", "cancelled_at_point"),
+        ("DEPART", "failed_with_return"),
+        ("DEPART", "cancelled_with_return"),
+        ("DEPART", "success_with_return"),
         ("ROTATE", "withdrawn"),
         ("ROTATE", "conflict"),
     ],
@@ -1592,8 +1595,8 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
                 )
             )
             prior = "pos-ordinary-ENTER"
-        if case in ("failed_at_point", "cancelled_at_point"):
-            status = "FAILED" if case == "failed_at_point" else "CANCELLED"
+        if case.startswith(("failed_", "cancelled_")):
+            status = "FAILED" if case.startswith("failed_") else "CANCELLED"
             face = "B" if status == "FAILED" else None
             tt = t["transport_task"]
             task = tt.c.transport_task_id == "tt-ack-ENTER"
@@ -1642,6 +1645,53 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
                 faces.update().where(faces.c.id == "turn-grant").values(demand_state="WITHDRAWN")
             )
         before = await snapshot(conn, ("transport_task", "reliable_message"))
+    if case.endswith("_with_return"):
+        from app.businesses._components.bin_roller.rack_flow import evaluate_roller_point
+        from app.businesses._components.bin_roller.scan_flow import bin_identity
+
+        repo = host.roller.repository(7)
+        async with host.capabilities.session_factory.begin() as db:
+            raw = "A000000001-B"
+            bin_code = bin_identity(raw)
+            assert bin_code
+            arrival = await repo.accept_scan_fact(
+                db,
+                digest="a" * 64,
+                receipt_id=1,
+                point="SCAN3",
+                device_code="SCAN3-L",
+                raw_bin_code=raw,
+                bin_code=bin_code,
+                scanned_at=42,
+            )
+            round_ = await repo.bind_scan_round(db, arrival, valid=True)
+            assert round_["return_state"] == "PENDING"
+            job = await host.rack_dispatch.progress(db, job_id=cycle)
+            demand, handoff = await evaluate_roller_point(host.roller, db, job)
+            assert (demand.state, handoff.state) == ("CONTINUE", "CLEAR")
+        if case != "success_with_return":
+            for _ in range(2):
+                await host.advance("RACK_CYCLE", cycle)
+                held = await original()
+                assert held.client_request_id == client and held.transport_task_id is None
+            async with host.capabilities.session_factory.begin() as db:
+                held = await host.rack_dispatch.advance(
+                    db,
+                    job_id=cycle,
+                    demand=demand,
+                    handoff=handoff,
+                    now_ms=43000,
+                    authorized_original_id=held.id,
+                )
+                assert held.actions[-1].transport_task_id is None
+            async with engine.connect() as conn:
+                assert await snapshot(conn, ("transport_task", "reliable_message")) == before
+            async with host.capabilities.session_factory.begin() as db:
+                # Clear that exact return round while keeping its original scan and identity.
+                await repo.update_scan(db, round_["id"], removed=True)
+                job = await host.rack_dispatch.progress(db, job_id=cycle)
+                demand, handoff = await evaluate_roller_point(host.roller, db, job)
+                assert (demand.state, handoff.state) == ("NONE", "CLEAR")
     for _ in range(3):
         await host.advance("RACK_CYCLE", cycle)
     if case in ("withdrawn", "conflict"):
@@ -1681,6 +1731,16 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
         after = await snapshot(conn, ("transport_task", "reliable_message"))
         assert len(after["transport_task"]) == len(before["transport_task"]) + 1
         assert len(after["reliable_message"]) == len(before["reliable_message"]) + 1
+        assert [
+            row["transport_task_id"]
+            for row in after["transport_task"]
+            if row["client_request_id"] == client
+        ] == [bound.transport_task_id]
+        assert [
+            row["id"]
+            for row in after["reliable_message"]
+            if row["business_key"] == bound.transport_task_id
+        ] == [bound.submit_message_id]
 
 
 async def retained_observation(conn, t, point):

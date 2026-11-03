@@ -760,6 +760,7 @@ class RackDispatch:
                 authorized
                 and original.kind == "DEPART"
                 and job.state == "RELEASING"
+                and (none or position.outcome["status"] == "SUCCEEDED")
                 and previous
                 and previous.kind == "DEPARTURE_DECIDE"
                 and previous.phase == "READY"
