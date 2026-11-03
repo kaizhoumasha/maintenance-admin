@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -334,8 +335,12 @@ async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
 
 @pytest.mark.parametrize("line", [0, 1], ids=["KT16", "KT18"])
 @pytest.mark.parametrize("completion", ["NORMAL", "NG"])
-async def test_wait_due_work_required_completion_original_release(profile_flow, line, completion):
+async def test_wait_due_work_required_completion_original_release(
+    profile_flow, line, completion, monkeypatch
+):
     flow = profile_flow
+    now = datetime.now(UTC)
+    monkeypatch.setattr(flow.host.capabilities.wms, "clock", lambda: now)
     task = await ready(flow, line=line)
     await plan(flow, task, [flow.prefix + "-source"])
     flow.admission["A000000001"] = dict(result="WAIT", retry_after_ms=200)
@@ -344,10 +349,11 @@ async def test_wait_due_work_required_completion_original_release(profile_flow, 
     work = (await flow.rows("manual_bin"))[0]
     assert await flow.host.advance("MANUAL_BIN", work["arrival_id"]) == "WAIT"
     original = next(r for r in await flow.rows("request") if r["kind"] == "BIN_ADMISSION")
+    now += timedelta(milliseconds=199)
     assert await flow.host.advance("MANUAL_BIN", work["arrival_id"]) == "WAIT"
     assert len([r for r in await flow.rows("request") if r["kind"] == "BIN_ADMISSION"]) == 1
     flow.admission["A000000001"] = dict(result="WORK_REQUIRED", task_id=task)
-    await asyncio.sleep(0.21)
+    now += timedelta(milliseconds=1)
     assert await flow.host.advance("MANUAL_BIN", work["arrival_id"]) == "ADMISSION_PENDING"
     await flow.dispatch()
     assert await flow.host.advance("MANUAL_BIN", work["arrival_id"]) == "WORK_REQUIRED"
