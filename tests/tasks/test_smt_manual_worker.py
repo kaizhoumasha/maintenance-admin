@@ -74,6 +74,24 @@ celery_app.conf.beat_schedule = {"advance-business-smt_manual":
         "SMT_MANUAL_FIRST_PLAN_WAIT_MS": "60000",
         "PYTHONPATH": str(tmp_path) + os.pathsep + str(Path.cwd()),
     }
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    (caller / ".env").write_text(
+        "RELIABLE_TARGETS="
+        + json.dumps(
+            {
+                "targets": {
+                    f"foreign-{protocol}": {
+                        "base_url": "http://127.0.0.1:1",
+                        "protocol": protocol,
+                    }
+                    for protocol in ("wms-facts", "wms-decisions", "wms-transport")
+                }
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.chdir(caller)
     processes, handles, paths, active_logs = {}, [], {}, {}
 
     async def start(role):
@@ -105,8 +123,9 @@ celery_app.conf.beat_schedule = {"advance-business-smt_manual":
                 "--pidfile",
                 str(tmp_path / "beat.pid"),
             ]
+        # Keep caller dotenv targets out of the worker/Beat's explicit test configuration.
         process = await asyncio.create_subprocess_exec(
-            *args, env=env, stdout=stream, stderr=asyncio.subprocess.STDOUT
+            *args, cwd=tmp_path, env=env, stdout=stream, stderr=asyncio.subprocess.STDOUT
         )
         processes[role] = process
         if role == "worker":

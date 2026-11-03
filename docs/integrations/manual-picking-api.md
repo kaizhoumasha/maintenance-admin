@@ -1,5 +1,7 @@
 # SMT 手工分拣、入库 WES 与 WMS API 对接文档
 
+> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
 2026-11-02 后续交付：SMT / BIN_Roller 已按[共同设计](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)收敛至 7 + 10 张业务表，新增可省略的[每线 CTU01 请求额度](#manual-request-limit)，原任务/operation/owner 和冻结身份保持。永久 KT16/KT18 配置专项为 12 passed / 0 skipped，最终全仓/整体复核待执行；[当前证据](../testing/smt-manual-kt16-kt18.md#current-factory-profile)与下文旧 M1～M6 软件快照分开记录。未提交、未部署。
 
 状态核对：2026-11-01。**SMT 手工 M1～M6 已完成本地实现及分项独立复核，最终软件门槛进展见统一验收记录；当前统一证据见[SMT 手工验收](../testing/smt-manual.md)。** 一个 smt_manual 业务承接 MANUAL 入库/出库，以不可变 business_type 区分方向；正式 catalog 复用已合入的 sorting_task 与 BIN_Roller，已交付组件/宿主状态迁移。AUTO 两方向的 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md) 仍待实施。手工增量未提交、未部署、未升级运行库，未执行真实 WMS/ECS/RCS 请求或现场验收；本地真实 worker/Beat 证据不代表对端签认或物理完成。
@@ -526,7 +528,7 @@ PLAN_REVISION_STALE 的 current_plan_revision 必须大于请求版本；版本�
 
 统一任务目标的[完成确认合同](smt-auto-api.md#task-completion)已本方确认沿既有三个互斥分支及版本 0 规则：prepare 已受理且显式配置的首批等待期限到达、无计划或其他本段待处理义务时才可发起版本 0；未配置则继续等待，不设猜测默认值。WMS COMPLETED 同事务封口，WES 消费前重验版本/待处理计划/义务；旧终局不应用于新工作，不通过换号绕过，矛盾由 WMS 处理。首批等待实际时长仍由双方配置。
 
-人工基线以原生产结果、供箱/来源和必报等本任务条件发起完成确认，不把 SCAN2 原释放 Result 作为统一前置；保存完工与原释放意图仍须同事务，原释放独立恢复。也不以 FIFO 清空、所有箱物理回架或所有货架离场作为整单完成的统一前提；完成后相关可靠义务仍独立履约。转运架需匹配本任务 COMPLETED、原进场成功及当前在位事实，再按离场合同申请，不等待独立来源架离场终态。
+人工基线以原生产结果、供箱/来源和必报等本任务条件发起完成确认，不把 SCAN2 原释放 Result 作为统一前置；保存完工与原释放意图仍须同事务，原释放独立恢复。也不以 FIFO 清空、所有箱物理回架或所有货架离场作为整单完成的统一前提；完成后相关可靠义务仍独立履约。转运架按公共新目标在本点位无其他可承接任务、原架可靠在位且直接执行责任可交出时申请离场，不等本任务COMPLETED、独立报告ACK或来源架离场；整单资格独立判断。064b5c8旧实现仍以前述整单终态及成功进场/在位为门槛。
 
 两方向的完整本地条件见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)：按原成员及撤销事实核对供箱、已受理 SCAN2 作业和原释放意图；出库再核对直接取料及必报事实。出库未声明供箱来源但指定 target_rack 时，原转运架进场成功及本线工作位/面向可靠到位是确认前置，未知/失败不补认；未指定不增门槛，也不扩大为等待该架离场。
 
@@ -544,7 +546,7 @@ PLAN_REVISION_STALE 的 current_plan_revision 必须大于请求版本；版本�
 | `workline.return_buffer.drain_rack_decide@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [公共尾箱清退](workline-bin-return-api.md#return-drain) |
 | SCAN3 / SCAN4 | ECS → WES Event、原命令与 Result | [公共设备交互](workline-bin-return-api.md#return-ecs) |
 
-共用离场的完整请求、正常/冲突响应及唯一 RACK_MOVE 关联已按[本方 P11-01](workline-business-api.md#rack-departure-confirmed-wire)固定，未注册/实施及对端签认状态分别记录。离场请求四个字段 `workline_code/rack_id/current_location/current_face` 必须存在；位置使用已确认 RACK_POSITION，面向不适用或无法确认时显式 null，不使用计划面代替。READY 只授予冻结目的地的离场许可；五层 CTU03 原请求明确接纳即释放 WES 周期，不等最终位置/Result，目的地运输由 WMS/RCS 管理；WAIT 保存固定到期点，到期/新事实可新身份求值，响应未知保持原身份。
+共用离场的完整请求、正常/冲突响应及唯一 RACK_MOVE 关联已按[本方 P11-01](workline-business-api.md#rack-departure-confirmed-wire)固定，未注册/实施及对端签认状态分别记录。离场请求四个字段 `workline_code/rack_id/current_location/current_face` 必须存在；位置使用已确认 RACK_POSITION，面向不适用或无法确认时显式 null，不使用计划面代替。READY 只授予冻结目的地的离场许可；新公共目标统一五层CTU03及RETURN/TRANSFER F01的DEPART原有效接纳即完成WES调度/释放，去向包括库区和生产线等不同RACK_POSITION工作位，不等最终位置/Result，后续失败只备查且不阻后继；进场/换面仍需原匹配结果，目的地运输由WMS/RCS管理；WAIT 保存固定到期点，到期/新事实可新身份求值，响应未知保持原身份。
 
 ### 进场取消与离场收口（2026-11-02 已实现）
 
@@ -565,9 +567,11 @@ Transport 的 `CANCELLED` 是原搬运应用结果，不等于 `sorting.task.can
 
 中间 `final-focused2` 的 **1 failed / 1821 passed / 11 skipped** 保留为失败历史：未改的 BIN_Roller 容量测试把最后创建的 demand 误当作当前 waiter，同毫秒 UUID 排序使该前置不成立；仅在测试本地排序三个 demand ID 修正前置，原 50 条断言与参数均保持。补验四例及关联 104 项通过，不与最终门禁或先前专项相加。修复独立复核见 [final-fix-review-report](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-fix-review-report.md)，测试前置修正复核见 [capacity-verification-review](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/capacity-verification-review.md)。
 
-正常 ENTER SUCCEEDED 后的成员全撤销，无论撤销先于或后于原成功应用，都可按原 departure 退场；真实到位形成的原 arrival report 继续保留。部分撤销的剩余 PENDING/STARTED 仍须按原面作业完成。正常 TRANSFER 离场仍要求本任务 COMPLETED、原进场成功和当前在位，不用取消补偿放宽此门禁。
+064b5c8的已实现规则：正常 ENTER SUCCEEDED 后的成员全撤销，无论撤销先于或后于原成功应用，都可按原 departure 退场；真实到位形成的原 arrival report 继续保留。部分撤销的剩余 PENDING/STARTED 仍须按原面作业完成。旧正常 TRANSFER 离场要求本任务 COMPLETED、原进场成功和当前在位。
 
-自有 RETURN/TRANSFER 的 DEPART 目标为 ZONE 时，SUCCEEDED 的可信终位仍等于原工作位就保持 `POSITION_CONFLICT` 与占位；可信异位且原公开 closure/predecessor 允许才可 DEPARTED。明确 RACK_POSITION 目标继续严格匹配。该规则不挪用五层 CTU03“原提交明确接纳即可释放周期”的独立规则。
+新公共目标按原点位实际需求判断：RETURN/TRANSFER均在本点位无其他可承接任务、原架可靠在位且直接执行责任可交出时安排离场，不再统一等待父任务COMPLETED或独立报告ACK。ENTER失败/取消但原架仍可靠在本点位时，也可沿公共无需求安全离场链释放；不补认进场成功、原成员完成或整单资格。其他有效成员/许可仍保留，位置未知/冲突先沿原事实核对；旧实现和旧测试不因本文更新而改变。
+
+064b5c8的旧实现按DEPART应用成功/终位收口。新目标覆盖该离场门槛：自有RETURN/TRANSFER以F01离开当前工作线货架位，目的地无论ZONE或不同的RACK_POSITION（例如生产线工作位），均按原有效提交接纳完成WES调度/释放；最终终位或失败仅备查，不回占或阻后继。原ENTER/ROTATE仍核对真实到位；旧验收不因目标修改改写为新功能已交付。
 
 角色预留释放、原 pending、任务完成、到位报告和公共回流义务分别判断。取消 ENTER 仅在 RETURN 全部关联成员有效撤销时满足该架的任务完成条件；有效成员未履约及 TRANSFER 取消不补认完成。无真实到位的取消不新增报告；任何已存在原报告仍须按原 scope 交付至 CONSUMED，并继续约束 completion_confirm。任务终态不阻止原 pending/公共义务推进，DEPART 已登记不等于物理离场。
 

@@ -1,5 +1,7 @@
 # Transport 接入参考
 
+> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+
 Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-command.md)处理快照路由和结果，两者不混用。正式能力、适配器和回调已实现；原身份结果读取与明确前序查询见[出站结果契约](outbound-results.md)。技术接纳不代表业务/物理完成。
 
 ## 请求与身份
@@ -41,6 +43,8 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 提交 SUBMIT_TTL 为 1 小时（暂定）；是否启用 max_not_received_attempts（如 3 次）、fixed_retry_interval_s 及对端最长去重/重发窗口仍需 WMS 合同确认。预算只数确认未送达，耗尽进 STALLED，不伪造业务拒绝；默认不设预算/固定间隔。
 
 ## ACK 与合同边界
+
+新增业务完成解释见[公共货架调度§4](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md#4-离场成功接纳即完成)：原业务为离开当前工作线货架工作位的DEPART/RACK_MOVE、使用CTU03或F01时（含ZONE或生产线等RACK_POSITION去向），下表有效DELIVERED响应是调度完成依据；回调只补记实际终位/失败备查，不重开调度。其他动作及Transport.outcome本身仍按原规则，不把FAILED改成SUCCEEDED。当前接收/读口源码尚未实施该公共调度增量。
 
 
 分类器按 Transport 合同 §4.2 实现，不按 HTTP 状态码单独判断。下面的具体响应可以直接转成测试输入，都针对 上面的请求示例 那条带合法任务 ID 的请求，JSON 响应头为 `Content-Type: application/json`。空响应体按原始字节 `b""` 判断，不能用 `{}`、`null` 或空白替代。
@@ -85,6 +89,8 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 - 任务收到任何回调即结束其提交消息的发送（`settle_submitted`）；对端长期不可用或回调缺失，靠 `transport.scan_stuck` 的卡住任务告警暴露，不做定时盲目重发。
 
 技术重提与业务重试必须分开。确定 `REJECTED/CANCELLED` 后，原任务保持终态；只有原业务需求仍有效，负责该业务的模块才按合同以全新 `client_request_id` 创建新任务及 submit ID。这不是第二套技术发送调度，不能因原请求超时或配置改址就自动创建新动作。
+
+2026-11-02 目标增量：[原任务结果更正设计](../superpowers/specs/2026-11-02-transport-result-correction-design.md)。粗分货架动作已限定为F01入场（携带target_face）与F01退场；新公共规则下CTU03/F01退场不按是否库区分支，均按有效接纳完成且回调仅备查，不需更正。更正设计继续用于事先采用窄合同且须物理结果的F01进场，保留原失败依据，不区分完成方式。**尚未实施，当前失败终态不可改写规则仍生效**；不能仅发送高版本 SUCCESS 就认为恢复成功，也不能将该目标增量用于原有未选择新合同的任务。
 
 
 完整请求能力见[Transport 出站设计](../superpowers/specs/2026-10-21-transport-outbound-design.md)，回调见[接收设计](../superpowers/specs/2026-10-22-transport-callback-design.md)。[离线实验](../reliable-transport-lab.md)与[开发测试](../testing/README.md)验证本方软件；真实 WMS 去重、合同矛盾、来源认证、时钟/容量和物理完成另行验收，不叠加 wes_backend 自带派发器。

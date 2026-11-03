@@ -147,6 +147,8 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。同事件／任务的多角色接入见[角色注册与运行时注入](docs/integrations/ecs-roles.md)：角色由业务常量声明，运行时注入绑定及路由，不依赖设备／工作线管理或 Status。
 
+自动入库的设备参数见[ECS 交互示例](docs/integrations/ECS%20已确认交互示例.md)；自动宿主仍待实施，样例不代表现场验收通过。
+
 其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
 业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
