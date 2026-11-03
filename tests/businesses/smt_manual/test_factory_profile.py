@@ -337,6 +337,7 @@ async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
 async def test_wait_due_work_required_completion_original_release(profile_flow, line, completion):
     flow = profile_flow
     task = await ready(flow, line=line)
+    await plan(flow, task, [flow.prefix + "-source"])
     flow.admission["A000000001"] = dict(result="WAIT", retry_after_ms=200)
     await flow.scan("SCAN2", line=line)
     await flow.dispatch()

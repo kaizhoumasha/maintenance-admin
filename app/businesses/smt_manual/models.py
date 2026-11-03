@@ -207,6 +207,7 @@ class TaskMember(Base):
     cancelled_operation_id: Mapped[str | None]
     rack_work_id: Mapped[str | None]
     preparation_action_id: Mapped[str | None]
+    arrival_report_operation_id: Mapped[str | None]
 
 
 class ManualBin(Base):

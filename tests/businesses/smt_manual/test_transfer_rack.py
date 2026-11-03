@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from sqlalchemy import select, update
 
 from app.models import ReliableMessage, WorkLine
@@ -261,3 +262,106 @@ async def test_missing_original_target_association_is_not_rebound_by_task_wakeup
     await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
     assert await flow.host.advance("MANUAL_BIN", arrival["arrival_id"]) == "ADMISSION_PENDING"
     assert not await flow.rows("rack_departure")
+
+
+@pytest.mark.parametrize(
+    "plan_kind", ["missing_projection", "awaiting_first_plan", "targetless", "inbound"]
+)
+async def test_bin_grant_uses_original_target_declaration(manual_host, plan_kind):
+    flow = manual_host
+    await flow.ready(direction="inbound" if plan_kind == "inbound" else "outbound")
+    if plan_kind == "missing_projection":
+        await flow.plan(target=dict(rack_id="TARGET", rack_face="A"))
+        await flow.host.advance("TASK", "T1")
+        async with flow.factory.begin() as session:
+            task = flow.tables["task"]
+            await session.execute(
+                task.update().where(task.c.task_id == "T1").values(target_rack=None)
+            )
+    elif plan_kind == "targetless":
+        await flow.plan()
+    await flow.scan()
+    (arrival,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+    state = await flow.host.advance("MANUAL_BIN", arrival["arrival_id"])
+    assert state == (
+        "WORK_REQUIRED" if plan_kind in ("inbound", "targetless") else "ADMISSION_PENDING"
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_command",
+        "wrong_command",
+        "missing_admission",
+        "wrong_decision",
+        "missing_completion",
+        "wrong_completion",
+        "conflicting_completion",
+        "no_work",
+        "completed_work",
+    ],
+)
+async def test_transfer_handoff_needs_original_bin_release(manual_host, fault):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    work = next(j for j in await flow.rows("rack") if j["role"] == "TRANSFER")
+    enter = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == work["id"])
+    await flow.rack_outcome(enter, face="B")
+    await flow.host.advance("MANUAL_RACK", work["id"])
+    await flow.scan()
+    (b,) = await flow.rows("manual_bin")
+    if fault in ("completed_work", "missing_completion", "wrong_completion"):
+        await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+        assert await flow.host.advance("MANUAL_BIN", b["arrival_id"]) == "WORK_REQUIRED"
+        await flow.deliver(flow.completion())
+        (notice,) = await flow.rows("completion")
+        assert await flow.host.advance("MANUAL_COMPLETION", notice["operation_id"]) == "APPLIED"
+    else:
+        await flow.decision(dict(result="NO_WORK"))
+        assert await flow.host.advance("MANUAL_BIN", b["arrival_id"]) == "RELEASED"
+    await flow.deliver(flow.notification())
+    async with flow.factory.begin() as session:
+        bins, r, inputs = (flow.tables[k] for k in ("manual_bin", "request", "input"))
+        changes = {
+            "missing_command": dict(command_code=None),
+            "wrong_command": dict(command_code="foreign"),
+            "missing_admission": dict(admission_operation_id=None),
+            "missing_completion": dict(completed_operation_id=None),
+        }
+        if fault in changes:
+            await session.execute(
+                bins.update().where(bins.c.arrival_id == b["arrival_id"]).values(**changes[fault])
+            )
+        elif fault == "wrong_decision":
+            await session.execute(
+                r.update().where(r.c.kind == "BIN_ADMISSION").values(decision_code="WORK_REQUIRED")
+            )
+        elif fault == "conflicting_completion":
+            await session.execute(
+                inputs.insert().values(
+                    operation="manual_bin.work_completed@v1",
+                    operation_id="other",
+                    receipt_id=100,
+                    work_line_id=b["work_line_id"],
+                    task_id="T1",
+                    timestamp=100,
+                    payload={},
+                    state="APPLIED",
+                    bin_code=b["bin_code"],
+                    arrival_id=b["arrival_id"],
+                    completion_result="NORMAL",
+                    completed_at=50,
+                )
+            )
+        elif fault == "wrong_completion":
+            await session.execute(
+                inputs.update()
+                .where(inputs.c.operation_id == notice["operation_id"])
+                .values(arrival_id="other")
+            )
+    await flow.host.advance("MANUAL_RACK", work["id"])
+    assert bool(await flow.rows("rack_departure")) is (fault in ("no_work", "completed_work"))

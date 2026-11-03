@@ -684,8 +684,9 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        if any(b["state"] != "RELEASED" or not b["command_code"] for b in bins):
-            return False, {}
+        for work in bins:
+            if not await self.repository.bin_release_evidence(session, self.roller, work):
+                return False, {}
         inputs = tables["input"]
         if await session.scalar(
             select(inputs.c.operation_id)
@@ -732,7 +733,9 @@ class SmtManualTaskFlow:
         )
         target_ready = not target_required
         target = (
-            await self.manual_racks._target_plan(session, task) if task["target_rack"] else None
+            await self.manual_racks.original_target_plan(session, task)
+            if task["target_rack"]
+            else None
         )
         for job in jobs:
             if job.review_reason in {"POSITION_CONFLICT", "OTHER_POSITION_CONFLICT"}:

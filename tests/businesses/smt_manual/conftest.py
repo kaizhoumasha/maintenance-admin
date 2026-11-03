@@ -572,6 +572,22 @@ async def manual_bins(manual_flow, monkeypatch):
             )
             assert response.status_code == 200
 
+    async def ready_for_bin_work(*, direction="outbound"):
+        await flow.ready(direction=direction)
+        if direction == "outbound":
+            decision = await flow.deliver(
+                flow.message(
+                    "plan_delta",
+                    dict(
+                        task_id="T1",
+                        plan_revision=1,
+                        added_bin_source_racks=[dict(rack_id="R", rack_face=["A"])],
+                    ),
+                )
+            )
+            assert decision.status_code == 202
+
+    flow.ready_for_bin_work = ready_for_bin_work
     flow.scan, flow.advance, flow.decision = scan, advance, decision
     flow.completion, flow.result = completion, result
     try:

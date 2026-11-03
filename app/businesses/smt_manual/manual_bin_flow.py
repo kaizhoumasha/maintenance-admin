@@ -255,8 +255,13 @@ class ManualBinFlow:
                 or task["work_line_id"] != work["work_line_id"]
             ):
                 return work["state"]
-            if task["target_rack"]:
-                proof = await self.manual_racks.target_permission(session, task)
+            plan = None
+            if task["business_type"] == "outbound":
+                plan = await self.manual_racks.original_target_plan(session, task)
+                if not plan or task["plan_revision"] < 1 or task["status"] != "EXECUTING":
+                    return work["state"]
+            if plan and plan["payload"].get("target_rack"):
+                proof = await self.manual_racks.target_permission(session, task, plan)
                 if proof is None:
                     return work["state"]
                 target = dict(target_job_id=proof[0], target_action_id=proof[1])

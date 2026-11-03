@@ -8,7 +8,7 @@ import pytest
 @pytest.mark.parametrize("direction", ["inbound", "outbound"])
 async def test_completed_receipt_precedes_application(manual_bins, result, direction):
     flow = manual_bins
-    await flow.ready(direction=direction)
+    await flow.ready_for_bin_work(direction=direction)
     assert (await flow.scan()).status_code == 200
     work = (await flow.rows("manual_bin"))[0]
     await flow.decision({"result": "WORK_REQUIRED", "task_id": "T1"})
@@ -30,7 +30,7 @@ async def test_completed_receipt_precedes_application(manual_bins, result, direc
 
 async def test_early_completion_is_never_autobound(manual_bins):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     raw = flow.completion()
     assert (await flow.deliver(raw)).status_code == 202
     operation_id = json.loads(raw)["operation_id"]
@@ -66,7 +66,7 @@ async def test_manual_callback_error_and_field_policy(manual_bins, change):
 
 async def test_completion_duplicates_and_conflicts_keep_first_work(manual_bins):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     assert (await flow.scan()).status_code == 200
     arrival = (await flow.rows("manual_bin"))[0]["arrival_id"]
     await flow.decision({"result": "WORK_REQUIRED", "task_id": "T1"})
@@ -88,7 +88,7 @@ async def test_completion_duplicates_and_conflicts_keep_first_work(manual_bins):
 
 async def test_new_arrival_does_not_inherit_old_release(manual_bins):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     assert (await flow.scan()).status_code == 200
     first = (await flow.rows("manual_bin"))[0]
     await flow.decision({"result": "WORK_REQUIRED", "task_id": "T1"})
@@ -120,7 +120,7 @@ async def test_new_arrival_does_not_inherit_old_release(manual_bins):
 @pytest.mark.parametrize("setup", ["ambiguous", "wrong_task", "no_work"])
 async def test_completion_binds_only_unique_original_work_required(manual_bins, setup):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     assert (await flow.scan()).status_code == 200
     first = (await flow.rows("manual_bin"))[0]
     await flow.decision(
@@ -152,7 +152,7 @@ async def test_completion_binds_only_unique_original_work_required(manual_bins, 
 
 async def test_replayed_early_evidence_retains_its_first_review(manual_bins):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     raw = flow.completion()
     assert (await flow.deliver(raw)).status_code == 202
     original_id = json.loads(raw)["operation_id"]
@@ -212,7 +212,7 @@ async def test_concurrent_completion_application_preserves_one_release(
     import asyncio
 
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     assert (await flow.scan()).status_code == 200
     arrival = (await flow.rows("manual_bin"))[0]["arrival_id"]
     await flow.decision({"result": "WORK_REQUIRED", "task_id": "T1"})
@@ -239,7 +239,7 @@ async def test_concurrent_completion_application_preserves_one_release(
 
 async def test_first_application_uses_original_work_even_if_receipt_was_earlier(manual_bins):
     flow = manual_bins
-    await flow.ready()
+    await flow.ready_for_bin_work()
     raw = flow.completion()
     assert (await flow.deliver(raw)).status_code == 202
     assert (await flow.scan()).status_code == 200
@@ -273,7 +273,7 @@ async def test_original_completion_retry_stays_with_first_work_after_another_bin
     manual_bins, first_result, direction
 ):
     flow = manual_bins
-    await flow.ready(direction=direction)
+    await flow.ready_for_bin_work(direction=direction)
     originals = []
     for bin_code, scanned_at, completed_at, result in (
         ("A000000001", 10, 50, first_result),

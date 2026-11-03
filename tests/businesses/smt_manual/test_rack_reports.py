@@ -304,3 +304,69 @@ async def test_missing_member_from_original_plan_keeps_handoff_unknown(manual_ho
         await session.execute(delete(members).where(members.c.rack_face == "B"))
     await flow.host.advance("MANUAL_RACK", job["id"])
     assert not await flow.rows("rack_departure")
+
+
+async def test_original_report_identity_survives_missing_row_and_result_review(
+    manual_host, monkeypatch
+):
+    from dataclasses import replace
+
+    from sqlalchemy import delete, select
+
+    from app.models import ReliableMessage
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    (report,) = await flow.rows("rack_report")
+    async with flow.factory.begin() as session:
+        r = flow.tables["request"]
+        await session.execute(
+            delete(r).where(
+                r.c.operation == report["operation"], r.c.operation_id == report["operation_id"]
+            )
+        )
+    transport = flow.host.capabilities.transport
+    original = transport.get_result
+
+    async def unavailable(*args, **kwargs):
+        return replace(await original(*args, **kwargs), availability="MISSING")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transport, "get_result", unavailable)
+        await flow.host.advance("MANUAL_RACK", job["id"])
+    assert (await flow.rows("rack_action"))[0]["phase"] == "REVIEW"
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory() as session:
+        assert list(
+            await session.scalars(
+                select(ReliableMessage.id).where(ReliableMessage.operation == report["operation"])
+            )
+        ) == [report["message_id"]]
+        assert await flow.host.manual_racks.has_report_obligations(session, task_id="T1")
+    assert not await flow.rows("rack_report")
+
+
+async def test_report_consumption_requires_its_original_saved_report_identity(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    await flow.host.advance("TASK", "T1")
+    (job,) = await flow.rows("rack")
+    await flow.rack_outcome(face="A")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    (report,) = await flow.rows("rack_report")
+    await flow.rack_response("rack_report", {}, code="RECORDED")
+    async with flow.factory.begin() as session:
+        members = flow.tables["member"]
+        await session.execute(
+            members.update()
+            .where(members.c.id == job["source_ref"])
+            .values(arrival_report_operation_id="other")
+        )
+    assert await flow.host.advance("RACK_REPORT", report["operation_id"]) == "OWNER_CONFLICT"
+    assert (await flow.rows("rack_report"))[0]["state"] == "REQUESTED"

@@ -53,3 +53,24 @@ async def test_report_pointer_keeps_original_rack(manual_racks):
         )
     assert await flow.consume_report() == "OWNER_CONFLICT"
     assert (await flow.rows("rack_report"))[0]["state"] == "REQUESTED"
+
+
+async def test_task_confirmation_requires_consumed_original_release_permission(
+    manual_bins, manual_completion_tools
+):
+    flow = manual_bins
+    await flow.ready()
+    await flow.bin_plan(cancel=True)
+    await flow.scan()
+    (work,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="NO_WORK"))
+    assert await flow.advance("bin", work["arrival_id"]) == "RELEASED"
+    async with flow.factory.begin() as session:
+        requests = flow.tables["request"]
+        await session.execute(
+            requests.update()
+            .where(requests.c.operation_id == work["admission_operation_id"])
+            .values(decision_code="WORK_REQUIRED")
+        )
+    await flow.confirm()
+    assert not await flow.confirmations()

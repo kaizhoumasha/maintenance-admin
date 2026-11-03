@@ -171,6 +171,121 @@ class TaskRepository:
         line_id = await session.scalar(select(WorkLine.id).where(WorkLine.line_code == code))
         return None if line_id is None else await self.lock_line(session, line_id)
 
+    async def bin_release_evidence(self, session, roller, work):
+        """Read the original permission and SCAN2 release intent without waiting for its result."""
+        from app.businesses._components.rack_dispatch.contracts import FactRef
+
+        from .contracts import ADMISSION_DECISION
+        from .models import BIN_COMPLETION_OPERATION
+        from .request.manual_bin_work_admission_decide_v1 import OPERATION
+
+        if (
+            work["state"] != "RELEASED"
+            or not work["admission_operation_id"]
+            or not work["command_code"]
+        ):
+            return None
+        requests = self.tables["request"]
+        original = (
+            (
+                await session.execute(
+                    select(requests).where(
+                        requests.c.operation == OPERATION,
+                        requests.c.operation_id == work["admission_operation_id"],
+                        requests.c.kind == "BIN_ADMISSION",
+                        requests.c.task_id == work["task_id"],
+                        requests.c.work_line_id == work["work_line_id"],
+                        requests.c.arrival_id == work["arrival_id"],
+                        requests.c.state == "CONSUMED",
+                    )
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if not original or original["request_snapshot"] != {
+            k: work[k] for k in ("task_id", "bin_code", "scanned_at")
+        }:
+            return None
+        response = original["response"] or {}
+        if (
+            response.get("code") != "DECIDED"
+            or type(response.get("timestamp")) is not int
+            or response["timestamp"] <= 0
+        ):
+            return None
+        try:
+            decision = ADMISSION_DECISION.validate_python(response.get("data"))
+        except ValueError:
+            return None
+        if decision.result != original["decision_code"]:
+            return None
+        notices = self.tables["input"]
+        applied = (
+            (
+                await session.execute(
+                    select(notices)
+                    .where(
+                        notices.c.operation == BIN_COMPLETION_OPERATION,
+                        notices.c.arrival_id == work["arrival_id"],
+                        notices.c.state == "APPLIED",
+                    )
+                    .limit(2)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if decision.result == "NO_WORK":
+            if applied or work["completed_operation_id"] or work["completed_result"]:
+                return None
+        elif decision.result == "WORK_REQUIRED":
+            if not work["completed_operation_id"] or decision.task_id != work["task_id"]:
+                return None
+            if len(applied) != 1:
+                return None
+            completion = applied[0]
+            if (
+                completion["operation_id"] != work["completed_operation_id"]
+                or any(
+                    completion[k] != work[k]
+                    for k in ("work_line_id", "task_id", "arrival_id", "bin_code")
+                )
+                or completion["completion_result"] != work["completed_result"]
+                or work["completed_result"] not in ("NORMAL", "NG")
+            ):
+                return None
+        else:
+            return None
+        try:
+            scan = await roller.original_arrival(session, work["arrival_id"])
+        except ValueError:
+            return None
+        if (
+            scan["point"] != "SCAN2"
+            or scan["release_command_code"] != work["command_code"]
+            or not scan["release_call_key"]
+            or not scan["release_record_id"]
+            or any(
+                scan[k] != work[k]
+                for k in ("work_line_id", "device_code", "bin_code", "scanned_at")
+            )
+        ):
+            return None
+        return FactRef(
+            "scan2_release",
+            (scan["id"], scan["release_record_id"]),
+            (
+                scan["release_call_key"],
+                work["command_code"],
+                original["operation_id"],
+                str(original["message_id"]),
+                decision.result,
+                str(work["completed_operation_id"]),
+                str(work["completed_result"]),
+            ),
+        )
+
     async def confirmation(self, session: AsyncSession, task: RowMapping) -> RowMapping | None:
         table = self.tables["request"]
         return (

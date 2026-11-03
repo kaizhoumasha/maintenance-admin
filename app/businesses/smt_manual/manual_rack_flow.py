@@ -105,7 +105,7 @@ class ManualRackFlow:
             .all()
         )
 
-    async def _target_plan(self, session, task):
+    async def original_target_plan(self, session, task):
         inputs = self.tables["input"]
         rows = await self._rows(
             session,
@@ -117,7 +117,12 @@ class ManualRackFlow:
             inputs.c.state == "APPLIED",
             inputs.c.plan_revision == 1,
         )
-        if len(rows) == 1 and rows[0]["payload"].get("target_rack") == task["target_rack"]:
+        if (
+            len(rows) == 1
+            and rows[0]["payload"].get("task_id") == task["task_id"]
+            and rows[0]["payload"].get("plan_revision") == 1
+            and rows[0]["payload"].get("target_rack") == task["target_rack"]
+        ):
             return rows[0]
         return None
 
@@ -145,9 +150,8 @@ class ManualRackFlow:
                 return False
         return True
 
-    async def target_permission(self, session, task):
+    async def target_permission(self, session, task, plan):
         """Read only the applied target plan's linked original preparation."""
-        plan = await self._target_plan(session, task)
         if (
             not plan
             or not plan["target_job_id"]
@@ -271,7 +275,7 @@ class ManualRackFlow:
             if role == "TRANSFER":
                 if not task["target_rack"]:
                     continue
-                plan = await self._target_plan(session, task)
+                plan = await self.original_target_plan(session, task)
                 if not plan:
                     continue
                 if job or plan["target_job_id"] or plan["target_action_id"]:
@@ -335,10 +339,11 @@ class ManualRackFlow:
             else:
                 job_id = job.id
                 position = next((a for a in job.actions if a.id == job.current_action_id), None)
+                face = position.target_face if position else None
                 action_id = (
                     position.id
                     if position
-                    and position.target_face == face
+                    and position.kind in ("ENTER", "ROTATE")
                     and (
                         position.phase == "REGISTERED"
                         or await self._current_preparation(session, job, position)
@@ -408,6 +413,24 @@ class ManualRackFlow:
             reports.c.task_id == task_id,
             reports.c.kind == "RACK_ARRIVAL_REPORT",
         )
+        members = self.tables["member"]
+        recorded = await self._rows(
+            session,
+            "member",
+            members.c.task_id == task_id,
+            members.c.arrival_report_operation_id.is_not(None),
+        )
+        identities = {
+            (r["operation_id"], r["rack_work_id"], r["action_id"])
+            for r in rows
+            if r["work_line_id"] == task["work_line_id"]
+        }
+        if any(
+            (m["arrival_report_operation_id"], m["rack_work_id"], m["preparation_action_id"])
+            not in identities
+            for m in recorded
+        ):
+            return True
         if any(r["state"] != "CONSUMED" for r in rows):
             return True
         jobs = await self.dispatch.jobs(
@@ -433,10 +456,23 @@ class ManualRackFlow:
                     return True
         return False
 
+    def _report_source(self, job, action):
+        member = self.tables["member"]
+        return (
+            (member.c.id == job.origin.source_ref)
+            & (member.c.task_id == job.origin.task_id)
+            & (member.c.rack_work_id == job.id)
+            & (member.c.preparation_action_id == action.id)
+        )
+
     async def _arrival_report(self, session, job, action):
         from .request.outbound_return_rack_arrival_report_v1 import ArrivalReport
 
-        reports = self.tables["request"]
+        reports, members = self.tables["request"], self.tables["member"]
+        owner = self._report_source(job, action)
+        source = (await session.execute(select(members).where(owner))).mappings().one_or_none()
+        if source is None or source["arrival_report_operation_id"] is not None:
+            return
         if await session.scalar(
             select(reports.c.operation_id).where(
                 reports.c.kind == "RACK_ARRIVAL_REPORT", reports.c.action_id == action.id
@@ -465,6 +501,10 @@ class ManualRackFlow:
                 action_id=action.id,
                 message_id=message.message_id,
             )
+        )
+
+        await session.execute(
+            members.update().where(owner).values(arrival_report_operation_id=operation_id)
         )
 
     async def advance_report(self, session: AsyncSession, *, operation_id: str) -> str:
@@ -511,6 +551,12 @@ class ManualRackFlow:
             == dict(type="RACK_POSITION", location_code=job.origin.point)
             and snap.get("arrival_face") == action.target_face
         ):
+            return "OWNER_CONFLICT"
+        member = self.tables["member"]
+        marker = await session.scalar(
+            select(member.c.arrival_report_operation_id).where(self._report_source(job, action))
+        )
+        if marker != original["operation_id"]:
             return "OWNER_CONFLICT"
         result = await self.capabilities.wms.get_result(
             session, message_id=original["message_id"], operation=REPORT, operation_id=operation_id
@@ -645,6 +691,69 @@ class ManualRackFlow:
             if transfer
             else ()
         )
+        if not transfer:
+            for member in members:
+                other_id = member["rack_work_id"]
+                if (
+                    member["task_id"] != task_id
+                    or member["kind"] != "DIRECT"
+                    or member["rack_id"] != origin.rack_id
+                    or member["status"] not in ("PENDING", "STARTED")
+                    or other_id in (None, job.id)
+                ):
+                    continue
+                other = await self.dispatch.progress(session, job_id=other_id)
+                if not (
+                    other
+                    and other.origin.source_kind == "MANUAL_RETURN"
+                    and other.origin.task_id == task_id
+                    and other.origin.work_line_id == origin.work_line_id
+                    and other.origin.rack_id == origin.rack_id
+                    and other.origin.point == origin.point
+                    and any(
+                        a.id == member["preparation_action_id"]
+                        and a.kind in ("ENTER", "ROTATE")
+                        and a.target_face == member["rack_face"]
+                        for a in other.actions
+                    )
+                    and any(
+                        m["id"] == other.origin.source_ref
+                        and m["rack_work_id"] == other.id
+                        and m["rack_id"] == origin.rack_id
+                        and m["task_id"] == task_id
+                        for m in members
+                    )
+                ):
+                    unknown = True
+                else:
+                    coverage.append(
+                        Coverage(
+                            "distinct_return",
+                            scope,
+                            status,
+                            (
+                                FactRef(
+                                    "member",
+                                    (member["id"],),
+                                    (
+                                        other.id,
+                                        member["preparation_action_id"],
+                                        member["status"],
+                                        str(member["plan_revision"]),
+                                    ),
+                                ),
+                                FactRef(
+                                    "original_job",
+                                    (other.id,),
+                                    (
+                                        other.origin.source_ref,
+                                        other.state,
+                                        str(other.facts_revision),
+                                    ),
+                                ),
+                            ),
+                        )
+                    )
         relevant = [
             m
             for m in members
@@ -862,6 +971,7 @@ class ManualRackFlow:
                 r["arrival_id"] not in arrival_ids or r["work_line_id"] != origin.work_line_id
                 for r in admissions
             )
+            releases = []
             for b in arrivals:
                 if b["state"] == "HOLD" and b["admission_operation_id"] is None:
                     continue
@@ -887,8 +997,15 @@ class ManualRackFlow:
                     )
                 ):
                     direct_unknown = unknown = True
+                if b["state"] == "RELEASED":
+                    release = await self.repository.bin_release_evidence(session, self.roller, b)
+                    if release is None:
+                        direct_unknown = unknown = True
+                    else:
+                        releases.append(release)
                 needed |= b["state"] != "RELEASED"
                 blocked |= b["state"] == "WORK_REQUIRED"
+            coverage.append(Coverage("bin_releases", scope, status, tuple(releases)))
         evidence = tuple(coverage)
         return (
             PointDemand(
