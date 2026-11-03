@@ -1,5 +1,11 @@
 name: ci
-on: [push, pull_request]
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -34,4 +40,4 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest -ra
+      - run: uv run pytest -ra --durations=30 --durations-min=1
