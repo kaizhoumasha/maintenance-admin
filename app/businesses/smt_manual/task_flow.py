@@ -726,9 +726,7 @@ class SmtManualTaskFlow:
             if m["kind"] == "BIN" and m["status"] != "CANCELLED"
         }
         progress = tuple(p for p in progress if p.source in active_sources)
-        if len(progress) != sum(
-            m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members
-        ):
+        if len(progress) != sum(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members):
             return False, {}
         for member in members:
             if member["status"] == "CANCELLED" and not member["cancelled_operation_id"]:
@@ -770,13 +768,12 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        if any(
-            m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members
-        ) and not bins:
+        if any(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members) and not bins:
             return False, {}
         faces = self.roller.repository(task["work_line_id"]).tables["face_work"]
         if await session.scalar(
-            select(faces.c.id).where(
+            select(faces.c.id)
+            .where(
                 faces.c.scope_id == task["task_id"],
                 faces.c.purpose == "SUPPLY",
                 faces.c.closed_at.is_(None),
@@ -784,7 +781,8 @@ class SmtManualTaskFlow:
                     faces.c.current_transport_task_id.is_not(None),
                     faces.c.phase.in_(("FEED_MOVE", "RETURN_MOVE")),
                 ),
-            ).limit(1)
+            )
+            .limit(1)
         ):
             return False, {}
         for work in bins:

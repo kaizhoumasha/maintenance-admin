@@ -118,12 +118,16 @@ class BinRoller:
         elif kind == "DRAIN":
             t = self.tables["workline_state"]
             returns = self.tables["bin_return"]
-            ready_return = select(returns.c.id).where(
-                returns.c.owner_domain == t.c.owner_domain,
-                returns.c.work_line_id == t.c.work_line_id,
-                returns.c.closed_at.is_(None),
-                returns.c.return_state == "READY",
-            ).exists()
+            ready_return = (
+                select(returns.c.id)
+                .where(
+                    returns.c.owner_domain == t.c.owner_domain,
+                    returns.c.work_line_id == t.c.work_line_id,
+                    returns.c.closed_at.is_(None),
+                    returns.c.return_state == "READY",
+                )
+                .exists()
+            )
             return select(t.c.line_run_id.label("id")).where(
                 t.c.owner_domain == self.context.domain,
                 t.c.line_run_id.is_not(None),

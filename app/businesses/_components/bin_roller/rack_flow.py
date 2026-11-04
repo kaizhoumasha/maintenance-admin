@@ -248,11 +248,7 @@ async def evaluate_roller_point(roller, session, job):
         return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
             point, "UNKNOWN", tuple(coverage)
         )
-    active = [
-        f
-        for f in faces
-        if f["closed_at"] is None and f.get("demand_state") != "WITHDRAWN"
-    ]
+    active = [f for f in faces if f["closed_at"] is None]
     if (
         ordinary
         and job.actions

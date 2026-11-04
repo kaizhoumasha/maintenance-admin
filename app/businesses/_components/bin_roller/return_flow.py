@@ -270,13 +270,13 @@ async def advance_return(roller, session, face_id):
         caller=job.origin.caller,
     )
     valid = valid_move(
-            result,
-            owner=repo.owner_domain,
-            task_id=face["current_transport_task_id"],
-            client_id=face["current_client_request_id"],
-            caller=job.origin.caller,
-            cycle_id=job.id,
-        )
+        result,
+        owner=repo.owner_domain,
+        task_id=face["current_transport_task_id"],
+        client_id=face["current_client_request_id"],
+        caller=job.origin.caller,
+        cycle_id=job.id,
+    )
     if not valid:
         logger.warning("bin return result identity pending")
         return "WAITING_FOR_RETURN_RESULT"

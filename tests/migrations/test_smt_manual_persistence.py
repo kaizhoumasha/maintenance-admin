@@ -7,8 +7,9 @@ import sqlalchemy as sa
 
 OLD = "0177313880f9"
 NEW = "smtmanualcompact"
+OPERATION_RENAME = "smtmanualoprename"
 BIN_NOTICE = "manual_bin.work_completed@v1"
-RACK_NOTICE = "manual_rack.direct_pick_completed@v1"
+RACK_NOTICE = "outbound.manual_rack.direct_pick_completed@v1"
 PLAN = "sorting.task.plan_delta@v1"
 
 
@@ -56,6 +57,77 @@ async def platform_snapshot(store, source):
             ]
             for name in ("reliable_message", "ecs_command", "transport_task")
         }
+
+
+@pytest.mark.parametrize(
+    "state_migration",
+    [
+        ("SMT_MANUAL_MIGRATION_DATABASE_URL", backend, "rollerfour")
+        for backend in ("sqlite", "postgres")
+    ],
+    indirect=True,
+)
+async def test_operation_rename_migrates_existing_inputs_and_supports_new_identity(state_migration):
+    store = state_migration
+    source = await tables(store)
+    inputs = source["smt_manual_input"]
+    legacy = {
+        "operation": "outbound.manual_rack.direct_pick_completed@v1",
+        "operation_id": "legacy-rack-completion",
+        "receipt_id": 1,
+        "task_id": "T1",
+        "work_line_id": 1,
+        "timestamp": 1,
+        "payload": {"task_id": "T1", "rack_id": "R1", "rack_face": "A"},
+        "state": "APPLIED",
+        "reason": None,
+        "is_plan_record": False,
+        "plan_revision": 1,
+        "rack_id": "R1",
+        "rack_face": "A",
+        "bin_code": None,
+        "arrival_id": None,
+        "completed_at": 1,
+        "completion_result": None,
+        "original_operation_id": None,
+    }
+    async with store.engine.begin() as connection:
+        await connection.execute(inputs.insert().values(**legacy))
+
+    await store.migrate("upgrade", OPERATION_RENAME)
+    current = await tables(store)
+    async with store.engine.connect() as connection:
+        row = (
+            (
+                await connection.execute(
+                    sa.select(current["smt_manual_input"]).where(
+                        current["smt_manual_input"].c.operation_id == legacy["operation_id"]
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+        assert row["operation"] == "manual_rack.direct_pick_completed@v1"
+
+        await connection.commit()
+
+    new_row = dict(legacy, operation="manual_rack.direct_pick_completed@v1", operation_id="new")
+    async with store.engine.begin() as connection:
+        await connection.execute(current["smt_manual_input"].insert().values(**new_row))
+
+    await store.migrate("downgrade", "rollerfour")
+    restored = await tables(store)
+    async with store.engine.connect() as connection:
+        operations = await connection.scalars(
+            sa.select(restored["smt_manual_input"].c.operation).order_by(
+                restored["smt_manual_input"].c.operation_id
+            )
+        )
+        assert list(operations) == [
+            "outbound.manual_rack.direct_pick_completed@v1",
+            "outbound.manual_rack.direct_pick_completed@v1",
+        ]
 
 
 async def cleanup_platform(store):

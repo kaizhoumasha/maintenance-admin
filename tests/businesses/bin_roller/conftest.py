@@ -113,7 +113,8 @@ async def roller_lifecycle(roller_return):
         return CurrentTask(flow.current_task, flow.current_task is not None)
 
     async def successor(session, *, work_line_id):
-        return SuccessorContext(flow.successor, {})
+        evidence = {"queued_task_ids": ["fixture-successor"]} if flow.successor == "UNKNOWN" else {}
+        return SuccessorContext(flow.successor, evidence)
 
     flow.production.read_current_task, flow.production.read_successor = current, successor
     async with factory.begin() as session:
@@ -599,7 +600,7 @@ async def roller_scans(roller_store, monkeypatch):
             return CurrentTask(self.current_task, self.current_valid)
 
         async def read_successor(self, session, *, work_line_id):
-            return SuccessorContext("UNKNOWN", {})
+            return SuccessorContext("UNKNOWN", {"queued_task_ids": ["fixture-successor"]})
 
         async def resolve_scan2_task(self, session, *, work_line_id):
             return await self.read_current_task(session, work_line_id=work_line_id)

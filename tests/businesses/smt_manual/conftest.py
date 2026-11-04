@@ -978,9 +978,9 @@ async def manual_supply(manual_racks, manual_completion_tools):
     module = "app.businesses._components.bin_roller.request.bin_inbound_batch_v1"
     if module in sys.modules:
         if "bin.inbound_batch@v1" not in operation._registry:
-            operation.request_operation(
-                "bin.inbound_batch@v1", operation.Endpoint.DECISIONS
-            )(sys.modules[module].InboundBatch)
+            operation.request_operation("bin.inbound_batch@v1", operation.Endpoint.DECISIONS)(
+                sys.modules[module].InboundBatch
+            )
     else:
         importlib.import_module(module)
     catalog.validate_business_contracts()

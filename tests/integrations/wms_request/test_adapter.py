@@ -116,11 +116,20 @@ def test_invalid_data_rejections_accept_a_valid_optional_field_path(path):
     [
         (FACTS_PROTOCOL, 200, "RECORDED"),
         (FACTS_PROTOCOL, 200, "DUPLICATE"),
-        (DECISIONS_PROTOCOL, 202, "PREPARE_ACCEPTED"),
     ],
 )
 def test_success_responses_without_business_fields_require_empty_data(protocol, status, code):
     assert classify(protocol, ack(status, code, unexpected=True)).kind == "UNKNOWN"
+
+
+def test_prepare_accepted_response_ignores_extra_data_fields():
+    assert (
+        classify(
+            DECISIONS_PROTOCOL,
+            ack(202, "PREPARE_ACCEPTED", task_id="PICK-001", workline_code="KT16"),
+        ).kind
+        == "DELIVERED"
+    )
 
 
 @pytest.mark.parametrize(
