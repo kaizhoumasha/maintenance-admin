@@ -34,7 +34,7 @@ from app.businesses.definitions import (
 )
 
 SCAN = DeviceRole(role_key="SCAN", display_name="扫码设备")
-INLET = PositionSlot(slot_key="INLET", display_name="入口")
+INLET = PositionSlot(slot_key="INLET", display_name="入口", position_type="HANDOFF_POSITION")
 # 此标记不能通过声明校验；确认实际事件合同后才替换。
 SCAN_EVENT = "<已确认事件名>"
 DEFINITION = BusinessDefinition(
@@ -260,3 +260,8 @@ SQLite 覆盖配置 API 和注册/路由接缝；显式独立 PostgreSQL 覆盖�
 配置保存成功只代表配置已持久化；可执行还需要业务许可、完整合同/资源和原发送门禁；物理完成要依据
 该真实业务的结果/完成合同。测试通过、工厂可构造、ACK、消息 DONE 都不能替代这三个边界。
 开发验收与供应商/现场验收分别记录；真实业务注册、供应商和现场验收仍须分别完成。
+
+
+### 位置类型与工作位额度
+
+`PositionSlot.position_type` 为必填标准库 Literal：RACK_POSITION/HANDOFF_POSITION。业务与组件合并使用完整声明比较，冲突不会被同名 slot 隐藏；业务清单接口只为位置项返回此类型。架位声明允许管理配置额度，不自动提供尚未实现的业务生产能力。宿主经原 production 端口提供当前任务及 `read_supply_order` 的 SourceFaceRef 原序列，共享组件不读取宿主私有表。
