@@ -2,10 +2,10 @@
 
 import asyncio
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app import business_wakeups
-from app.models import TransportTask, WorkLine
+from app.models import TransportTask
 from tests.helpers import manual_source_departure
 
 
@@ -135,13 +135,10 @@ async def test_each_line_refills_one_old_waiter_per_original_departure_acceptanc
     flow = formal_manual
     monkeypatch.setattr(business_wakeups, "enqueue_business", flow.notices.append)
     async with flow.factory.begin() as session:
-        await session.execute(
-            update(WorkLine)
-            .where(WorkLine.id.in_(flow.lines))
-            .values(
-                five_rack_request_limit=3,
-            )
-        )
+        from tests.helpers import set_position_capacity
+
+        for line_id in flow.lines:
+            await set_position_capacity(session, line_id, 3)
     for line in (0, 1):
         task = flow.prefix + f"-capacity-{line}"
         assert (await flow.issue(task, line=line)).status_code == 202

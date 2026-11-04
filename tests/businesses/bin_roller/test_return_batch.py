@@ -319,7 +319,7 @@ async def test_no_candidates_is_local_evidence_without_empty_request(roller_retu
         assert await flow.rows(session, "return_batch") == []
 
 
-async def test_batch_target_validation_has_no_cross_request_reservation(roller_return):
+async def test_independent_lines_keep_allocations_and_same_bin_identity_scoped(roller_return):
     flow = roller_return
     await flow.bins(1)
     async with flow.factory.begin() as session:
@@ -347,10 +347,9 @@ async def test_batch_target_validation_has_no_cross_request_reservation(roller_r
         assert {b["work_line_id"] for b in batches} == {1, 2}
         assert [b["members"][0]["bin_code"] for b in batches] == ["A000000001", "A000000001"]
         assert batches[0]["members"][0]["round_id"] != batches[1]["members"][0]["round_id"]
-        assert (
-            batches[0]["manifest"]["moves"][0]["target"]
-            == batches[1]["manifest"]["moves"][0]["target"]
-        )
+        targets = [b["manifest"]["moves"][0]["target"] for b in batches]
+        assert {t["rack_id"] for t in targets} == {"R1", "R2"}
+        assert {t["slot_id"] for t in targets} == {"S1"}
 
 
 async def test_original_batch_consumption_and_selected_next_intent_roll_back_together(

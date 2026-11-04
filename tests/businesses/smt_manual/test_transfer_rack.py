@@ -365,3 +365,55 @@ async def test_transfer_handoff_needs_original_bin_release(manual_host, fault):
             )
     await flow.host.advance("MANUAL_RACK", work["id"])
     assert bool(await flow.rows("rack_departure")) is (fault in ("no_work", "completed_work"))
+
+
+async def test_missing_original_target_action_is_not_rebound_by_task_wakeup(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    job = next(r for r in await flow.rows("rack") if r["role"] == "TRANSFER")
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.rack_outcome(entry, face="B")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory.begin() as session:
+        inputs = flow.tables["input"]
+        await session.execute(
+            inputs.update().where(inputs.c.is_plan_record).values(target_action_id=None)
+        )
+    await flow.host.advance("TASK", "T1")
+    plan = (await flow.rows("plan"))[0]
+    assert plan["target_job_id"] == job["id"]
+    assert plan["target_action_id"] is None
+
+
+async def test_old_return_at_another_point_does_not_block_original_target_permission(manual_host):
+    from app.businesses._components.rack_dispatch.models import RackJob
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan(target=dict(rack_id="TARGET", rack_face="B"))
+    await flow.host.advance("TASK", "T1")
+    job = next(r for r in await flow.rows("rack") if r["role"] == "TRANSFER")
+    entry = next(a for a in await flow.rows("rack_action") if a["rack_work_id"] == job["id"])
+    await flow.rack_outcome(entry, face="B")
+    await flow.host.advance("MANUAL_RACK", job["id"])
+    async with flow.factory.begin() as session:
+        session.add(
+            RackJob(
+                id="old-return",
+                owner_domain=flow.host.rack_dispatch.owner_domain,
+                work_line_id=flow.lines[0],
+                source_kind="MANUAL_RETURN",
+                source_ref="old-plan",
+                rack_id="OLD-RACK",
+                original_cycle_id="old-return",
+                task_id="OLD-TASK",
+                point="RETURN",
+                actual_position={"kind": "RACK_POSITION", "location_code": "RETURN"},
+            )
+        )
+    await flow.scan()
+    (arrival,) = await flow.rows("manual_bin")
+    await flow.decision(dict(result="WORK_REQUIRED", task_id="T1"))
+    assert await flow.host.advance("MANUAL_BIN", arrival["arrival_id"]) == "WORK_REQUIRED"

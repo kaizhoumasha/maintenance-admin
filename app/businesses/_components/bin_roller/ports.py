@@ -64,6 +64,10 @@ class Production(Protocol):
         self, session: AsyncSession, *, point: PointRef, task_id: str
     ) -> Coverage | None: ...
 
+    async def read_supply_order(
+        self, session: AsyncSession, *, work_line_id: int, task_id: str
+    ) -> tuple[SourceFaceRef, ...]: ...
+
     async def read_current_task(
         self, session: AsyncSession, *, work_line_id: int
     ) -> CurrentTask: ...

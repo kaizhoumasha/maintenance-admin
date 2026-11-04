@@ -64,7 +64,12 @@ async def test_coarse_line_saves_only_its_output_rack_position(
     options = await client.get("/api/v1/businesses", headers=admin)
     assert options.status_code == 200, options.text
     assert options.json()[0]["position_slots"] == [
-        {"key": "OUTPUT_RACK", "display_name": "出料单层货架位", "required": True}
+        {
+            "key": "OUTPUT_RACK",
+            "display_name": "出料单层货架位",
+            "required": True,
+            "position_type": "RACK_POSITION",
+        }
     ]
 
 
@@ -187,7 +192,14 @@ async def test_business_options_require_admin_and_workline_read(client, admin):
         "initial_entries",
     }
     assert first["device_roles"][0] == {"key": "SCAN1", "display_name": "扫码", "required": True}
-    assert first["position_slots"] == [{"key": "INLET", "display_name": "入口", "required": True}]
+    assert first["position_slots"] == [
+        {
+            "key": "INLET",
+            "display_name": "入口",
+            "required": True,
+            "position_type": "HANDOFF_POSITION",
+        }
+    ]
     assert first["initial_entries"] == [
         {"kind": "ecs_event", "name": "SCAN_COMPLETED", "device_role": "SCAN1"}
     ]
@@ -229,34 +241,50 @@ async def test_created_business_selection_is_in_transaction_audit(client, admin)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, "3", 2147483648])
-async def test_rack_request_limit_rejects_non_positive_or_non_sql_integer(client, admin, value):
+async def test_position_capacity_rejects_non_positive_or_non_sql_integer(
+    client, admin, value, monkeypatch
+):
+    from app.businesses import catalog
+    from app.businesses.smt_manual import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
     response = await client.post(
         "/api/v1/work-lines",
         headers=admin,
         json=dict(
             line_code="LIMIT",
             line_name="Line",
-            business_code="test_sorting",
-            five_rack_request_limit=value,
+            business_code="smt_manual",
+            position_bindings={"FIVE_RACK": "LIMITP"},
+            positions=[{"position_code": "LIMITP", "capacity": value}],
         ),
     )
     assert response.status_code == 400, response.text
 
 
-async def test_rack_request_limit_save_omit_clear_version_and_audit(client, admin):
+async def test_position_capacity_save_omit_clear_version_and_audit(client, admin, monkeypatch):
+    from app.businesses import catalog
+    from app.businesses.smt_manual import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
     response = await client.post(
         "/api/v1/work-lines",
         headers=admin,
-        json=dict(line_code="LIMIT", line_name="Line", business_code="test_sorting"),
+        json=dict(
+            line_code="LIMIT",
+            line_name="Line",
+            business_code="smt_manual",
+            position_bindings={"FIVE_RACK": "LIMITP"},
+        ),
     )
     assert response.status_code == 201, response.text
     line = response.json()
-    assert line.get("five_rack_request_limit", "missing") is None
+    assert line["positions"][0]["capacity"] == 1
     for version, fields, expected in (
-        (1, {"five_rack_request_limit": 3}, 3),
+        (1, {"positions": [{"position_code": "LIMITP", "capacity": 3}]}, 3),
         (2, {}, 3),
-        (3, {"five_rack_request_limit": None}, None),
-        (4, {"five_rack_request_limit": 2147483647}, 2147483647),
+        (3, {"positions": [{"position_code": "LIMITP", "capacity": None}]}, None),
+        (4, {"positions": [{"position_code": "LIMITP", "capacity": 2147483647}]}, 2147483647),
     ):
         response = await client.put(
             f"/api/v1/work-lines/{line['id']}",
@@ -264,16 +292,18 @@ async def test_rack_request_limit_save_omit_clear_version_and_audit(client, admi
             json=dict(line_name="Line", version=version, **fields),
         )
         assert response.status_code == 200, response.text
-        assert response.json()["five_rack_request_limit"] == expected
+        assert response.json()["positions"][0]["capacity"] == expected
         assert response.json()["version"] == version + 1
     stale = await client.put(
         f"/api/v1/work-lines/{line['id']}",
         headers=admin,
-        json=dict(line_name="Line", version=4, five_rack_request_limit=1),
+        json=dict(
+            line_name="Line", version=4, positions=[{"position_code": "LIMITP", "capacity": 1}]
+        ),
     )
     assert stale.status_code == 409
     read = await client.get(f"/api/v1/work-lines/{line['id']}", headers=admin)
-    assert read.json()["five_rack_request_limit"] == 2147483647
+    assert read.json()["positions"][0]["capacity"] == 2147483647
     async with app.state.audit_session_factory() as session:
         logs = list(
             await session.scalars(
@@ -282,8 +312,8 @@ async def test_rack_request_limit_save_omit_clear_version_and_audit(client, admi
                 .order_by(AuditLog.id)
             )
         )
-        assert [log.detail["after"]["five_rack_request_limit"] for log in logs] == [
-            None,
+        assert [log.detail["after"]["positions"][0]["capacity"] for log in logs] == [
+            1,
             3,
             3,
             None,

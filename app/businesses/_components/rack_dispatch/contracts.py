@@ -1,7 +1,9 @@
 """Original host facts and read-only dispatch projections."""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.wms_transport import TransportCaller
 
@@ -101,6 +103,7 @@ class ActionProgress:
 @dataclass(frozen=True, slots=True)
 class RackProgress:
     id: str
+    admission_order: int | None
     origin: JobOrigin
     state: str
     pending: bool
@@ -116,3 +119,9 @@ class RackProgress:
     completed_at_ms: int | None
     current_action_id: str | None
     actions: tuple[ActionProgress, ...]
+
+
+class TaskAdmission(Protocol):
+    async def allows_task_entry(
+        self, session: AsyncSession, *, work_line_id: int, task_id: str
+    ) -> bool: ...

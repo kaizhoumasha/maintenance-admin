@@ -29,6 +29,9 @@ async def start_feed(
     repo = roller.repository(demand["work_line_id"])
     if demand["feed_id"] is not None:
         return demand["feed_id"]
+    current = await roller.production.read_current_task(session, work_line_id=repo.work_line_id)
+    if not current.is_valid or current.task_id != demand["task_id"]:
+        return None
     if demand["demand_state"] == "WITHDRAWN" and not await repo.supply_started(session, demand):
         return None
     if not await can_use_face(roller, session, demand):

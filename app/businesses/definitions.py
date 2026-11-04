@@ -30,11 +30,14 @@ class DeviceRole:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PositionSlot:
+    position_type: Literal["RACK_POSITION", "HANDOFF_POSITION"]
     slot_key: str
     display_name: str
     required: bool = True
 
     def __post_init__(self):
+        if self.position_type not in ("RACK_POSITION", "HANDOFF_POSITION"):
+            raise ValueError("invalid position type")
         if not isinstance(self.slot_key, str) or not _KEY.fullmatch(self.slot_key):
             raise ValueError(f"invalid position slot key: {self.slot_key!r}")
         _text(self.display_name, "display_name")

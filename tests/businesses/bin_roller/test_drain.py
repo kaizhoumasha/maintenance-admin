@@ -359,7 +359,7 @@ async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_
     )
     await flow.advance("DRAIN", drain["id"])
     first = (await flow.all_rows("rack_cycle"))[0]
-    # An already selected original candidate keeps its independent arrival obligation.
+    # An unsubmitted second candidate has no independent arrival obligation.
     async with flow.factory.begin() as session:
         from app.businesses._components.bin_roller.rack_flow import register_job
 
@@ -376,15 +376,16 @@ async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_
         )
     await flow.advance("RACK_CYCLE", second_id)
     entries = await flow.all_rows("rack_action")
+    assert len(entries) == 1
     await flow.rack_result(entries[0])
     await flow.advance("RACK_CYCLE", first["id"])
     await flow.complete_return(count=1)
     assert [d["cycle_id"] for d in await flow.all_rows("departure")] == [first["id"]]
     await flow.finish_departure(first["id"])
-    assert (await flow.all_rows("drain"))[0]["status"] == "READY"
-    await flow.rack_result(entries[1])
-    await flow.advance("RACK_CYCLE", second_id)
-    await flow.finish_departure(second_id)
+    assert (
+        next(c for c in await flow.all_rows("rack_cycle") if c["id"] == second_id)["status"]
+        == "WITHDRAWN"
+    )
     assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
     assert [a["kind"] for a in await flow.all_rows("rack_action")].count("CTU02") == 0
 

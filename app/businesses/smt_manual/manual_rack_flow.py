@@ -200,13 +200,25 @@ class ManualRackFlow:
         )
         if any(
             j.id != job.id
-            and (j.origin.point == job.origin.point or j.origin.rack_id == job.origin.rack_id)
+            and self.dispatch.has_external_responsibility(j, j.actions)
+            and (
+                j.origin.rack_id == job.origin.rack_id
+                or (j.origin.point == job.origin.point and j.origin.task_id != task["task_id"])
+            )
             for j in jobs
         ):
             return None
         return job.id, action.id
 
-    async def reconcile_task(self, session, *, task_id):
+    async def reconcile_task(
+        self,
+        session,
+        *,
+        task_id,
+        register_only=False,
+        roles=("TRANSFER", "RETURN"),
+        through_revision=None,
+    ):
         task = await self.repository.task(session, task_id)
         if not task:
             return
@@ -222,21 +234,10 @@ class ManualRackFlow:
             and task["prepare_accepted"]
         ):
             return
-        jobs = await self.dispatch.jobs(
-            session, work_line_id=line.id, source_kinds=MANUAL_SOURCES, pending=True
-        )
+        if await self.repository.has_pending_plan(session, task_id):
+            return
         members = self.tables["member"]
-        unbound = sorted(
-            await self._rows(
-                session,
-                "member",
-                members.c.task_id == task_id,
-                members.c.kind == "DIRECT",
-                members.c.status == "PENDING",
-                members.c.rack_work_id.is_(None),
-            ),
-            key=lambda m: (m["plan_revision"], m["member_order"], m["id"]),
-        )
+        originals = await self._rows(session, "member", members.c.task_id == task_id)
         inputs = self.tables["input"]
         plans = {
             r["plan_revision"]: r
@@ -248,145 +249,196 @@ class ManualRackFlow:
                 inputs.c.is_plan_record,
             )
         }
-        if await self.repository.has_pending_plan(session, task_id):
-            return
         planned = _planned_members(plans)
-        unbound = [m for m in unbound if _member_key(m) in planned]
-        for role in ("TRANSFER", "RETURN"):
+        pending = sorted(
+            (
+                m
+                for m in originals
+                if m["kind"] == "DIRECT"
+                and m["status"] == "PENDING"
+                and _member_key(m) in planned
+                and (through_revision is None or m["plan_revision"] <= through_revision)
+            ),
+            key=lambda m: (m["plan_revision"], m["member_order"]),
+        )
+        jobs = list(
+            await self.dispatch.jobs(session, work_line_id=line.id, source_kinds=MANUAL_SOURCES)
+        )
+        active_ids = {j.id for j in jobs if j.pending and j.state == "ACTIVE"}
+        pending = [m for m in pending if not m["rack_work_id"] or m["rack_work_id"] in active_ids]
+        for role in roles:
             point = line.position_bindings.get(role + "_RACK")
             if not point or await self.dispatch.has_position_conflict(session, point=point):
                 continue
             kind = "MANUAL_" + role
-            occupied = [
-                j
-                for j in jobs
-                if j.pending and (j.origin.point == point or j.origin.source_kind == kind)
-            ]
-            if occupied and (
-                len(occupied) != 1
-                or occupied[0].origin.task_id != task_id
-                or occupied[0].origin.point != point
-                or occupied[0].origin.source_kind != kind
-                or occupied[0].state != "ACTIVE"
-            ):
-                continue
-            job = occupied[0] if occupied else None
-            selected = []
+            plan = await self.original_target_plan(session, task) if role == "TRANSFER" else None
             if role == "TRANSFER":
-                if not task["target_rack"]:
+                if not task["target_rack"] or not plan:
                     continue
-                plan = await self.original_target_plan(session, task)
-                if not plan:
-                    continue
-                if job or plan["target_job_id"] or plan["target_action_id"]:
-                    continue
-                rack_id, face = (task["target_rack"][k] for k in ("rack_id", "rack_face"))
-                source = task_id
+                candidates = [
+                    (task["target_rack"]["rack_id"], [], task["target_rack"]["rack_face"], task_id)
+                ]
             else:
-                if not unbound:
-                    continue
-                if job:
-                    entry = next((a for a in job.actions if a.kind == "ENTER"), None)
-                    triggers = await self._rows(
-                        session, "member", members.c.id == job.origin.source_ref
+                grouped = {}
+                for member in pending:
+                    grouped.setdefault(member["rack_id"], []).append(member)
+                candidates = [
+                    (rack, selected, selected[0]["rack_face"], selected[0]["id"])
+                    for rack, selected in grouped.items()
+                ]
+            for rack_id, selected, face, source in candidates:
+                bound = (
+                    plan["target_job_id"]
+                    if plan
+                    else next((m["rack_work_id"] for m in selected if m["rack_work_id"]), None)
+                )
+                job = (
+                    next((j for j in jobs if j.id == bound), None)
+                    if bound
+                    else next(
+                        (
+                            j
+                            for j in jobs
+                            if j.pending
+                            and j.state == "ACTIVE"
+                            and j.origin.task_id == task_id
+                            and j.origin.point == point
+                            and j.origin.rack_id == rack_id
+                            and j.origin.source_kind == kind
+                        ),
+                        None,
                     )
-                    if job.origin.source_ref == f"legacy/manual/{job.id}" or not any(
-                        m["rack_work_id"] == job.id
-                        and m["task_id"] == task_id
-                        and m["kind"] == "DIRECT"
-                        and m["rack_id"] == job.origin.rack_id
-                        and m["rack_face"] == job.origin.initial_face
-                        and _member_key(m) in planned
-                        and plans[m["plan_revision"]]["state"] == "APPLIED"
-                        and (entry is None or m["preparation_action_id"] == entry.id)
-                        for m in triggers
-                    ):
-                        continue
-                rack_id = job.origin.rack_id if job else unbound[0]["rack_id"]
-                selected = [m for m in unbound if m["rack_id"] == rack_id]
-                if not selected:
-                    continue
-                face, source = selected[0]["rack_face"], selected[0]["id"]
-            if any(
-                j.pending and j.origin.rack_id == rack_id and (job is None or j.id != job.id)
-                for j in jobs
-            ):
-                continue
-            if job is None:
-                if await self.dispatch.jobs(
-                    session,
-                    work_line_id=line.id,
-                    source_kinds=(kind,),
-                    task_id=task_id,
-                    source_ref=source,
+                )
+                if (
+                    role == "TRANSFER"
+                    and job
+                    and (not bound or (job.actions and not plan["target_action_id"]))
                 ):
                     continue
-                job_id = await self.dispatch.register(
-                    session,
-                    JobOrigin(
-                        kind,
-                        source,
-                        line.id,
-                        rack_id,
-                        task_id,
-                        line.line_code,
-                        point,
-                        face,
-                        TransportCaller(str(line.id), None),
-                        str(uuid7()),
-                        {
-                            role + "_RACK": point,
-                            **(
-                                {
-                                    "target_plan": [
-                                        plan["operation"],
-                                        plan["operation_id"],
-                                        plan["plan_revision"],
-                                    ]
-                                }
-                                if role == "TRANSFER"
-                                else {}
-                            ),
-                        },
-                    ),
-                )
-                action_id = await self.dispatch.prepare(
-                    session, job_id=job_id, kind="ENTER", source_ref=source, face=face
-                )
-            else:
-                job_id = job.id
+                if job and (
+                    not job.pending
+                    or job.state != "ACTIVE"
+                    or job.origin.task_id != task_id
+                    or job.origin.point != point
+                    or job.origin.rack_id != rack_id
+                    or job.origin.source_kind != kind
+                ):
+                    continue
+                entry = next((a for a in job.actions if a.kind == "ENTER"), None) if job else None
+                if (
+                    job
+                    and role == "RETURN"
+                    and not any(
+                        m["id"] == job.origin.source_ref
+                        and m["rack_work_id"] == job.id
+                        and _member_key(m) in planned
+                        and (entry is None or m["preparation_action_id"] == entry.id)
+                        for m in originals
+                    )
+                ):
+                    continue
+                if job is None:
+                    job_id = await self.dispatch.register(
+                        session,
+                        JobOrigin(
+                            kind,
+                            source,
+                            line.id,
+                            rack_id,
+                            task_id,
+                            line.line_code,
+                            point,
+                            face,
+                            TransportCaller(str(line.id), None),
+                            str(uuid7()),
+                            {
+                                role + "_RACK": point,
+                                **(
+                                    {
+                                        "target_plan": [
+                                            plan["operation"],
+                                            plan["operation_id"],
+                                            plan["plan_revision"],
+                                        ]
+                                    }
+                                    if plan
+                                    else {}
+                                ),
+                            },
+                        ),
+                    )
+                    job = await self.dispatch.progress(session, job_id=job_id)
+                    jobs.append(job)
+                    if job.state != "ACTIVE":
+                        continue
+                if register_only:
+                    if plan and plan["target_job_id"] is None:
+                        await session.execute(
+                            inputs.update()
+                            .where(
+                                inputs.c.operation == plan["operation"],
+                                inputs.c.operation_id == plan["operation_id"],
+                            )
+                            .values(target_job_id=job.id)
+                        )
+                    for member in selected:
+                        if member["rack_work_id"] is None:
+                            await session.execute(
+                                members.update()
+                                .where(members.c.id == member["id"])
+                                .values(rack_work_id=job.id)
+                            )
+                    continue
                 position = next((a for a in job.actions if a.id == job.current_action_id), None)
-                face = position.target_face if position else None
-                action_id = (
-                    position.id
-                    if position
-                    and position.kind in ("ENTER", "ROTATE")
-                    and (
-                        position.phase == "REGISTERED"
-                        or await self._current_preparation(session, job, position)
+                action_id = None
+                if position and position.kind in ("ENTER", "ROTATE"):
+                    face = position.target_face
+                    if position.phase == "REGISTERED" or await self._current_preparation(
+                        session, job, position
+                    ):
+                        action_id = position.id
+                elif not job.actions and not register_only:
+                    face = job.origin.initial_face
+                    action_id = await self.dispatch.prepare(
+                        session,
+                        job_id=job.id,
+                        kind="ENTER",
+                        source_ref=job.origin.source_ref,
+                        face=face,
                     )
-                    else None
-                )
-            if job is None:
-                jobs = (*jobs, await self.dispatch.progress(session, job_id=job_id))
-            if role == "TRANSFER" and action_id:
-                await session.execute(
-                    inputs.update()
-                    .where(
-                        inputs.c.operation == plan["operation"],
-                        inputs.c.operation_id == plan["operation_id"],
+                if plan and (plan["target_job_id"], plan["target_action_id"]) != (
+                    job.id,
+                    action_id,
+                ):
+                    await session.execute(
+                        inputs.update()
+                        .where(
+                            inputs.c.operation == plan["operation"],
+                            inputs.c.operation_id == plan["operation_id"],
+                        )
+                        .values(target_job_id=job.id, target_action_id=action_id)
                     )
-                    .values(target_job_id=job_id, target_action_id=action_id)
-                )
-            for member in selected:
-                await session.execute(
-                    members.update()
-                    .where(members.c.id == member["id"])
-                    .values(
-                        rack_work_id=job_id,
-                        preparation_action_id=action_id if member["rack_face"] == face else None,
+                for member in selected:
+                    preparation = (
+                        action_id
+                        if member["rack_face"] == face
+                        else member["preparation_action_id"]
                     )
-                )
+                    if (member["rack_work_id"], member["preparation_action_id"]) == (
+                        job.id,
+                        preparation,
+                    ):
+                        continue
+                    await session.execute(
+                        members.update()
+                        .where(members.c.id == member["id"])
+                        .values(
+                            rack_work_id=job.id,
+                            preparation_action_id=action_id
+                            if member["rack_face"] == face
+                            else member["preparation_action_id"],
+                        )
+                    )
 
     async def get_pending_upper_id(self, session, *, kind="MANUAL_RACK"):
         if kind == "MANUAL_RACK":
@@ -457,6 +509,8 @@ class ManualRackFlow:
             task_id=task_id,
         )
         for job in jobs:
+            if job.state in {"NOT_ARRIVED", "WITHDRAWN"}:
+                continue
             for a in job.actions:
                 if a.kind != "ENTER" or (
                     a.phase == "APPLIED"
@@ -685,7 +739,15 @@ class ManualRackFlow:
             if j.id != job.id
             and (j.origin.point == origin.point or j.origin.rack_id == origin.rack_id)
         ]
-        direct_unknown |= bool(others)
+        direct_unknown |= any(
+            self.dispatch.has_external_responsibility(j, j.actions)
+            and (
+                j.origin.rack_id == origin.rack_id
+                or j.origin.task_id != task_id
+                or j.origin.point != origin.point
+            )
+            for j in others
+        )
         coverage.append(
             Coverage(
                 "point_claims",
@@ -1047,6 +1109,25 @@ class ManualRackFlow:
         await self.apply_completions(session, task=task)
         first_arrival = not any(a.kind == "ENTER" and _arrived(job, a) for a in job.actions)
         demand, handoff = await self.evaluate_manual_point(session, job)
+        if task["status"] in {
+            "COMPLETED",
+            "CANCELLED",
+        } and not self.dispatch.has_external_responsibility(job, job.actions):
+            members = self.tables["member"]
+            bins = self.tables["manual_bin"]
+            started = await session.scalar(
+                select(members.c.id)
+                .where(members.c.rack_work_id == job.id, members.c.status == "STARTED")
+                .limit(1)
+            )
+            allocated = await session.scalar(
+                select(bins.c.arrival_id)
+                .where(bins.c.target_job_id == job.id, bins.c.state == "WORK_REQUIRED")
+                .limit(1)
+            )
+            if demand.coverage and not started and not allocated:
+                demand = PointDemand(demand.point, "NONE", demand.coverage)
+                handoff = DirectHandoff(handoff.point, "CLEAR", handoff.coverage)
         job = await self.dispatch.advance(
             session,
             job_id=job.id,

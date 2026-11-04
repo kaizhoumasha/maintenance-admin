@@ -106,7 +106,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
 
     from app.businesses import catalog
     from app.integrations.wms_request import operation
-    from app.models import Device, DeviceRoute, WorkLine
+    from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
 
     flow = roller_return
     modules = {
@@ -149,7 +149,7 @@ async def roller_lifecycle(roller_return, monkeypatch):
             importlib.import_module(module)
     catalog.validate_business_contracts()
     metadata = MetaData(schema=WorkLine.__table__.schema)
-    for model in (WorkLine, DeviceRoute, Device):
+    for model in (WorkLine, WorkLinePosition, DeviceRoute, Device):
         model.__table__.to_metadata(metadata)
     from app.businesses.smt_manual.repository import TaskRepository
 
@@ -160,15 +160,19 @@ async def roller_lifecycle(roller_return, monkeypatch):
     async with engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
     async with flow.factory.begin() as session:
-        await session.execute(
-            WorkLine.__table__.insert().values(
-                id=1,
-                line_code="LINE-1",
-                line_name="Test",
-                business_code="first",
-                position_bindings=dict(FIVE_RACK="RACK-WORK", INLET="INLET", OUTLET="OUTLET"),
-            )
+        from tests.helpers import rack_task_admission
+
+        line = await session.get(WorkLine, 1)
+        if line is None:
+            line = WorkLine(id=1, line_code="LINE-1", line_name="Test", business_code="first")
+            session.add(line)
+        line.line_code = "LINE-1"
+        line.position_bindings = dict(
+            FIVE_RACK="RACK-WORK", INLET="INLET", OUTLET="OUTLET", RETURN_RACK="CTU01"
         )
+        await session.flush()
+        session.add(WorkLinePosition(work_line_id=1, position_code="RACK-WORK", capacity=None))
+    flow.roller.rack_dispatch.task_admission = rack_task_admission(flow.production)
     import json
 
     from sqlalchemy import select
@@ -455,6 +459,9 @@ async def roller_lifecycle(roller_return, monkeypatch):
             await session.execute(
                 delete(CallbackReceipt).where(CallbackReceipt.operation_id.in_(receipts))
             )
+            await session.execute(
+                delete(WorkLinePosition).where(WorkLinePosition.work_line_id == 1)
+            )
             await session.execute(delete(WorkLine).where(WorkLine.id == 1))
 
 
@@ -520,11 +527,41 @@ async def roller_feed(roller_transport, monkeypatch):
         contract_consumers=catalog.contract_consumers,
     )
     capabilities = Capabilities(None, wms, roller_transport.service, store.factory)
+    from app.businesses._components.bin_roller.ports import CurrentTask
+    from app.models import WorkLine, WorkLinePosition
+    from tests.helpers import configure_rack_positions, fixture_supply_order, rack_task_admission
+
+    metadata = MetaData(schema=WorkLine.__table__.schema)
+    for model in (WorkLine, WorkLinePosition):
+        model.__table__.to_metadata(metadata)
+    async with store.factory.kw["bind"].begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with store.factory.begin() as session:
+        line = WorkLine(
+            id=1,
+            line_code="LINE-ORIGINAL",
+            line_name="Feed",
+            business_code="first",
+            position_bindings={"FIVE_RACK": "CTU01"},
+        )
+        session.add(line)
+        await session.flush()
+        await configure_rack_positions(session, line)
+
+    async def current(session, *, work_line_id):
+        return CurrentTask("T1", work_line_id == 1)
+
+    production = SimpleNamespace(
+        read_current_task=current,
+        read_supply_order=fixture_supply_order(store.tables, owner="first"),
+    )
     roller = BinRoller(
         CommandOwner("first"),
         capabilities,
-        SimpleNamespace(),
-        rack_dispatch=RackDispatch("first", capabilities),
+        production,
+        rack_dispatch=RackDispatch(
+            "first", capabilities, task_admission=rack_task_admission(production)
+        ),
         tables=store.tables,
     )
     receipts = set()
@@ -902,6 +939,9 @@ async def roller_scans(roller_store, monkeypatch):
                 await flow.roller.release_scan2(ctx.session, arrival_id=arrival.arrival_id)
 
     production = Production()
+    from tests.helpers import fixture_supply_order
+
+    production.read_supply_order = fixture_supply_order(store.tables, owner="first")
     flow = SimpleNamespace(
         store=store,
         factory=store.factory,
@@ -1122,7 +1162,10 @@ async def roller_return(roller_scans, monkeypatch):
     flow, store = roller_scans, roller_scans.store
     engine = store.factory.kw["bind"]
     metadata = MetaData()
-    TransportTask.__table__.to_metadata(metadata)
+    from app.models import WorkLine, WorkLinePosition
+
+    for model in (TransportTask, WorkLine, WorkLinePosition):
+        model.__table__.to_metadata(metadata)
     async with engine.begin() as connection:
         await connection.run_sync(metadata.create_all)
     transport_target = TargetConfig(
@@ -1156,59 +1199,107 @@ async def roller_return(roller_scans, monkeypatch):
     )
     flow.roller.capabilities = Capabilities(flow.ecs, wms, transport, store.factory)
     flow.roller.rack_dispatch = RackDispatch("first", flow.roller.capabilities)
+    from tests.helpers import configure_rack_positions, rack_task_admission
+
+    flow.roller.rack_dispatch.task_admission = rack_task_admission(flow.production)
+    async with flow.factory.begin() as session:
+        for number in (1, 2):
+            line = WorkLine(
+                id=number,
+                line_code="RETURN-LINE" + ("-2" if number == 2 else ""),
+                line_name="Return",
+                business_code="first",
+                position_bindings={"RETURN_RACK": "CTU01" + ("-2" if number == 2 else "")},
+            )
+            session.add(line)
+            await session.flush()
+            await configure_rack_positions(session, line)
     from app.businesses._components.bin_roller.return_flow import advance_return_batch
 
     flow.consume_return = partial(advance_return_batch, flow.roller)
     receipts = set()
 
     async def selected(session, *, kind="FACE_END", face="A", line=1):
+        rack = f"R{line}"
         repo = flow.roller.repository(line)
+        current = await flow.production.read_current_task(session, work_line_id=line)
+        config = await session.get(WorkLine, line)
+        point = config.position_bindings["RETURN_RACK"]
         demand_id, service_id, opportunity_id = str(uuid7()), str(uuid7()), str(uuid7())
         faces = store.tables["face_work"]
         revision = 1 + (
             await session.scalar(select(func.max(faces.c.plan_revision)).where(*repo.scoped(faces)))
             or 0
         )
-        cycle_id = await flow.roller.rack_dispatch.register(
+        jobs = await flow.roller.rack_dispatch.jobs(
             session,
-            JobOrigin(
-                "ROLLER_ORDINARY",
-                demand_id,
-                line,
-                "R1",
-                "T1",
-                "RETURN-LINE",
-                "CTU01",
-                face,
-                TransportCaller(str(line)),
-                str(uuid7()),
-                {},
-            ),
+            work_line_id=line,
+            source_kinds=("ROLLER_ORDINARY",),
+            task_id=current.task_id,
+            pending=True,
         )
-        await session.execute(
-            faces.insert().values(
-                id=demand_id,
-                demand_id=demand_id,
-                service_id=service_id,
-                purpose="SUPPLY",
-                task_id="T1",
-                change_id=opportunity_id,
-                plan_revision=revision,
-                rack_id="R1",
-                **repo.scope,
-                cycle_id=cycle_id,
-                source_ref=demand_id,
-                rack_face=face,
-                demand_state="ACTIVE",
-                service_state="READY",
+        job = next((j for j in jobs if j.origin.rack_id == rack and j.origin.point == point), None)
+        cycle_id = (
+            job.id
+            if job
+            else await flow.roller.rack_dispatch.register(
+                session,
+                JobOrigin(
+                    "ROLLER_ORDINARY",
+                    demand_id,
+                    line,
+                    rack,
+                    current.task_id,
+                    config.line_code,
+                    point,
+                    face,
+                    TransportCaller(str(line)),
+                    str(uuid7()),
+                    {},
+                ),
             )
         )
-        action_id = await arrived_face(flow.roller, session, cycle_id, service_id, receipts)
-        await session.execute(
-            faces.update()
-            .where(faces.c.service_id == service_id)
-            .values(preparation_action_id=action_id)
+        existing = (
+            (
+                await session.execute(
+                    select(faces).where(
+                        *repo.scoped(faces),
+                        faces.c.cycle_id == cycle_id,
+                        faces.c.rack_face == face,
+                        faces.c.service_state == "READY",
+                    )
+                )
+            )
+            .mappings()
+            .first()
         )
+        if existing:
+            service_id = existing["service_id"]
+        else:
+            await session.execute(
+                faces.insert().values(
+                    id=demand_id,
+                    demand_id=demand_id,
+                    service_id=service_id,
+                    purpose="SUPPLY",
+                    task_id=current.task_id,
+                    change_id=opportunity_id,
+                    plan_revision=revision,
+                    rack_id=rack,
+                    **repo.scope,
+                    cycle_id=cycle_id,
+                    source_ref=demand_id,
+                    rack_face=face,
+                    demand_state="ACTIVE",
+                    service_state="READY",
+                )
+            )
+            action_id = await arrived_face(flow.roller, session, cycle_id, service_id, receipts)
+            await session.execute(
+                faces.update()
+                .where(faces.c.service_id == service_id)
+                .values(preparation_action_id=action_id)
+            )
         await session.execute(
             store.tables["return_opportunity"]
             .insert()
@@ -1216,7 +1307,7 @@ async def roller_return(roller_scans, monkeypatch):
                 id=opportunity_id,
                 **repo.scope,
                 service_id=service_id,
-                source_ref=service_id,
+                source_ref=opportunity_id,
                 kind=kind,
             )
         )
@@ -1246,11 +1337,20 @@ async def roller_return(roller_scans, monkeypatch):
 
     async def decide(session, batch_id, *, count=None, data=None):
         batch = await flow.roller.original_record(session, "return_batch", batch_id)
+        opportunity = await flow.roller.original_record(
+            session, "return_opportunity", batch["opportunity_id"]
+        )
+        face = await flow.roller.original_record(session, "face_service", opportunity["service_id"])
         moves = [
             dict(
                 sequence_no=i,
                 bin_code=m["bin_code"],
-                target=dict(type="RACK_BIN_SLOT", rack_id="R1", rack_face="A", slot_id=f"S{i}"),
+                target=dict(
+                    type="RACK_BIN_SLOT",
+                    rack_id=face["rack_id"],
+                    rack_face=face["rack_face"],
+                    slot_id=f"S{i}",
+                ),
             )
             for i, m in enumerate(batch["members"][:count], 1)
         ]
@@ -1474,7 +1574,14 @@ async def roller_application(roller_scans, request):
         def __init__(self, owner, capabilities):
             self.capabilities = capabilities
             self.production = Production(owner)
-            dispatch = RackDispatch(owner, capabilities)
+            from tests.helpers import fixture_supply_order
+
+            self.production.read_supply_order = fixture_supply_order(flow.store.tables, owner=owner)
+            from tests.helpers import rack_task_admission
+
+            dispatch = RackDispatch(
+                owner, capabilities, task_admission=rack_task_admission(self.production)
+            )
             self.components = {
                 "rack_dispatch": dispatch,
                 "bin_roller": BinRoller(

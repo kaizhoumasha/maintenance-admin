@@ -49,13 +49,14 @@ async def rack_result(flow, action):
     await flow.host.advance("RACK_CYCLE", action["cycle_id"])
 
 
-async def cycle_departure(flow, action):
+async def cycle_departure(flow, action, *, arrived=False):
     """Actual CTU01 Result, empty face decision and departure decision create CTU03."""
     flow.inbound_decision = {"result": "RACK_FACE_DONE"}
     flow.departure_decision = dict(
         result="READY", rack_destination=dict(type="ZONE", location_code="AT1-LOCAL-RETURN")
     )
-    await rack_result(flow, action)
+    if not arrived:
+        await rack_result(flow, action)
     for _ in range(6):
         await flow.dispatch()
         await flow.host.scan_pending()
@@ -201,7 +202,18 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
             )
 
     try:
-        await configure(five_rack_request_limit=1)
+        await configure(
+            positions=[
+                {
+                    "position_code": p["code"],
+                    "capacity": 1 if p["role"] == "FIVE_RACK" else p["capacity"],
+                }
+                for p in __import__(
+                    "tests.businesses.smt_manual.factory_profile", fromlist=["PROFILE"]
+                ).PROFILE["lines"][0]["positions"]
+                if p["role"] in ("FIVE_RACK", "RETURN_RACK", "TRANSFER_RACK")
+            ]
+        )
         tasks = [await ready(flow, line=i) for i in (0, 1)]
         await plan(flow, tasks[0], ["FIRST", "WAITER"])
         await flow.host.scan_pending()
@@ -212,9 +224,14 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
             if r["cycle_id"] != entry["cycle_id"]
         )
         assert waiting["service_id"] and waiting["cycle_id"]
+        # Freeze the original feed authorization while enabled; disable cannot grant new work.
+        flow.inbound_decision = {"result": "RACK_FACE_DONE"}
+        await rack_result(flow, entry)
+        await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
+        assert len([f for f in await flow.rows("face_work", roller=True) if f["feed_id"]]) == 1
         await configure(is_enabled=False)
         await plan(flow, tasks[1], ["OTHER-LINE"])
-        await cycle_departure(flow, entry)
+        await cycle_departure(flow, entry, arrived=True)
         await flow.host.scan_pending()
         cycles = await flow.rows("rack_cycle", roller=True)
         assert next(c for c in cycles if c["id"] == entry["cycle_id"])["status"] == "RELEASED"
@@ -273,7 +290,17 @@ async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
         assert len(list(await session.scalars(select(Device)))) == 12
         assert len(list(await session.scalars(select(DeviceRoute)))) == 12
         for line, source in zip(lines, PROFILE["lines"], strict=True):
-            assert line.five_rack_request_limit == 3
+            from app.models import WorkLinePosition
+
+            assert (
+                await session.scalar(
+                    select(WorkLinePosition.capacity).where(
+                        WorkLinePosition.work_line_id == line.id,
+                        WorkLinePosition.position_code == line.position_bindings["FIVE_RACK"],
+                    )
+                )
+                == 3
+            )
             assert len(source["devices"]) == 6
             assert sum(d["has_contract"] for d in source["devices"]) == 4
             assert all(d["upstream_device_id"] is None for d in source["devices"])
@@ -417,7 +444,7 @@ async def test_scan3_independent_scan4_own_success_fifo_outlet(profile_flow, lin
                 bin_code=f"A{i:09d}",
                 target=dict(
                     type="RACK_BIN_SLOT",
-                    rack_id=flow.prefix + "-return",
+                    rack_id=flow.prefix + f"-return-{line}",
                     rack_face="A",
                     slot_id=f"S{i}",
                 ),

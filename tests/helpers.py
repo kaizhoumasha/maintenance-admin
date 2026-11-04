@@ -595,7 +595,9 @@ def workline_business_definition(code="test_sorting"):
             DeviceRole(role_key="SCAN1", display_name="扫码"),
             DeviceRole(role_key="SCAN2", display_name="可选扫码", required=False),
         ),
-        position_slots=(PositionSlot(slot_key="INLET", display_name="入口"),),
+        position_slots=(
+            PositionSlot(position_type="HANDOFF_POSITION", slot_key="INLET", display_name="入口"),
+        ),
         initial_entries=(
             InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="SCAN1"),
         ),
@@ -1043,7 +1045,11 @@ async def business_flow_fixture(factory, monkeypatch):
                 code=code,
                 display_name=code,
                 device_roles=(DeviceRole(role_key=role, display_name=role),),
-                position_slots=(PositionSlot(slot_key="INLET", display_name="入口"),),
+                position_slots=(
+                    PositionSlot(
+                        position_type="HANDOFF_POSITION", slot_key="INLET", display_name="入口"
+                    ),
+                ),
                 initial_entries=(
                     InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role=role),
                     InitialEntry(kind="wms_callback", name=f"{code}.accept@v1"),
@@ -1520,15 +1526,22 @@ async def formal_manual_fixture(
                         line_name=profile["code"],
                         business_code="smt_manual",
                         is_enabled=profile["enabled"],
-                        five_rack_request_limit=next(
-                            p["capacity"] for p in profile["positions"] if p["role"] == "FIVE_RACK"
-                        ),
                         version=profile["version"],
                         device_bindings=devices,
                         position_bindings=positions,
                     )
                 session.add(line)
                 await session.flush()
+                await configure_rack_positions(
+                    session,
+                    line,
+                    five_capacity=next(
+                        (p["capacity"] for p in profile["positions"] if p["role"] == "FIVE_RACK"),
+                        None,
+                    )
+                    if profile
+                    else None,
+                )
                 state.lines.append(line.id)
                 state.devices.append(devices)
                 state.positions.append(positions)
@@ -1802,6 +1815,11 @@ async def formal_manual_fixture(
                 await session.execute(
                     delete(DeviceRoute).where(owned_device(DeviceRoute.device_code))
                 )
+                from app.models import WorkLinePosition
+
+                await session.execute(
+                    delete(WorkLinePosition).where(WorkLinePosition.work_line_id.in_(state.lines))
+                )
                 await session.execute(delete(WorkLine).where(WorkLine.id.in_(state.lines)))
 
             if source_profile is not None:
@@ -1819,6 +1837,9 @@ async def formal_manual_fixture(
                             )
                             for model in (
                                 WorkLine,
+                                __import__(
+                                    "app.models", fromlist=["WorkLinePosition"]
+                                ).WorkLinePosition,
                                 Device,
                                 DeviceRoute,
                                 EcsCommand,
@@ -2020,9 +2041,55 @@ async def manual_return_opportunity(flow, *, line=0):
     """A controlled original drain selection enters and serves its face through real Transport."""
     from app.core.identifiers import uuid7
 
+    line_id = flow.lines[line]
+    async with flow.factory() as session:
+        jobs = await flow.host.rack_dispatch.jobs(
+            session, work_line_id=line_id, source_kinds=("ROLLER_ORDINARY",), pending=True
+        )
+    original = next(
+        (j for j in jobs if any(a.kind == "ENTER" and a.transport_task_id for a in j.actions)), None
+    )
+    if original is not None:
+        entry = next(a for a in original.actions if a.kind == "ENTER")
+        response = await flow.callback(
+            "transport.task.resulted@v1",
+            dict(
+                transport_task_id=entry.transport_task_id,
+                kind="RACK_MOVE",
+                rack_id=original.origin.rack_id,
+                outcome_revision=1,
+                status="SUCCEEDED",
+                final_position=entry.target,
+                arrival_face=entry.target_face,
+            ),
+        )
+        assert response.status_code == 202
+        flow.inbound_decision = {"result": "RACK_FACE_DONE"}
+        flow.departure_decision = dict(
+            result="READY", rack_destination=dict(type="ZONE", location_code="LOCAL-RETURN")
+        )
+        for _ in range(4):
+            await flow.host.advance("RACK_CYCLE", original.id)
+            batches = [
+                b
+                for b in await flow.rows("return_batch", roller=True)
+                if b["work_line_id"] == line_id and b["pending"]
+            ]
+            if batches:
+                return batches[0]["id"]
+            await flow.dispatch()
+            await flow.host.advance("FEED", original.origin.source_ref)
+            async with flow.factory() as session:
+                progress = await flow.host.rack_dispatch.progress(session, job_id=original.id)
+            if not progress.pending:
+                break
+        else:
+            raise AssertionError(
+                "original task rack neither served returns nor completed departure"
+            )
     decision_id = str(uuid7())
     line_id = flow.lines[line]
-    rack = flow.prefix + "-return"
+    rack = flow.prefix + f"-return-{line}"
     async with flow.factory.begin() as session:
         repo = flow.roller.repository(line_id)
         candidates = await flow.roller.get_return_candidates(session, work_line_id=line_id)
@@ -2200,3 +2267,70 @@ def bin_roller_query(tables, key):
         )
     table = tables[key]
     return select(table).order_by(*table.primary_key.columns)
+
+
+async def configure_rack_positions(session, line, *, five_capacity=None, capacity=1):
+    from app.models import WorkLinePosition
+
+    seen = set()
+    for role in ("FIVE_RACK", "RETURN_RACK", "TRANSFER_RACK", "OUTPUT_RACK"):
+        code = line.position_bindings.get(role)
+        if code and code not in seen:
+            session.add(
+                WorkLinePosition(
+                    work_line_id=line.id,
+                    position_code=code,
+                    capacity=five_capacity if role == "FIVE_RACK" else capacity,
+                )
+            )
+            seen.add(code)
+    await session.flush()
+
+
+async def set_position_capacity(session, line_id, value, *, role="FIVE_RACK"):
+    from sqlalchemy import select
+
+    from app.models import WorkLine, WorkLinePosition
+
+    line = await session.get(WorkLine, line_id)
+    row = await session.scalar(
+        select(WorkLinePosition).where(
+            WorkLinePosition.work_line_id == line_id,
+            WorkLinePosition.position_code == line.position_bindings[role],
+        )
+    )
+    row.capacity = value
+
+
+def rack_task_admission(production):
+    from types import SimpleNamespace
+
+    async def allows_task_entry(session, *, work_line_id, task_id):
+        current = await production.read_current_task(session, work_line_id=work_line_id)
+        return current.is_valid and current.task_id == task_id
+
+    return SimpleNamespace(allows_task_entry=allows_task_entry)
+
+
+def fixture_supply_order(tables, *, owner):
+    async def read(session, *, work_line_id, task_id):
+        from sqlalchemy import select
+
+        from app.businesses._components.bin_roller.ports import SourceFaceRef
+
+        face = tables["face_work"]
+        rows = (
+            await session.execute(
+                select(face)
+                .where(
+                    face.c.owner_domain == owner,
+                    face.c.work_line_id == work_line_id,
+                    face.c.task_id == task_id,
+                    face.c.purpose == "SUPPLY",
+                )
+                .order_by(face.c.plan_revision, face.c.id)
+            )
+        ).mappings()
+        return tuple(SourceFaceRef(r["plan_revision"], r["rack_id"], r["rack_face"]) for r in rows)
+
+    return read

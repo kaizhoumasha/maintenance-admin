@@ -109,13 +109,16 @@ async def test_unstarted_cancelled_members_and_failed_entry_do_not_invent_report
     )
     assert (await flow.deliver(flow.message("cancel", cancel))).status_code == 202
     await flow.reconcile()
-    assert await flow.rows("rack") == []
+    assert not await flow.rows("rack_action")
+    await flow.rack_advance()
+    assert all(r["state"] == "WITHDRAWN" for r in await flow.rows("rack"))
     async with flow.factory() as session:
         assert not await flow.racks.has_report_obligations(session, task_id="T1")
     await flow.plan(revision=2)
     await flow.reconcile()
-    await flow.rack_outcome(status="FAILED", location="ELSEWHERE")
-    await flow.rack_advance()
+    failed_entry = (await flow.rows("rack_action"))[-1]
+    await flow.rack_outcome(failed_entry, status="FAILED", location="ELSEWHERE")
+    await flow.rack_advance(failed_entry["job_id"])
     assert await flow.rows("rack_report") == []
     async with flow.factory() as session:
         assert not await flow.racks.has_report_obligations(session, task_id="T1")
@@ -231,6 +234,11 @@ async def test_independent_report_survives_deleted_line(manual_host):
     async with flow.factory.begin() as session:
         await session.execute(update(flow.tables["task"]).values(status="COMPLETED"))
         await session.execute(delete(Device).where(Device.work_line_id == flow.lines[0]))
+        from app.models import WorkLinePosition
+
+        await session.execute(
+            delete(WorkLinePosition).where(WorkLinePosition.work_line_id == flow.lines[0])
+        )
         await session.execute(delete(WorkLine).where(WorkLine.id == flow.lines[0]))
     assert await flow.host.advance("RACK_REPORT", report["operation_id"]) == "CONSUMED"
 
@@ -370,3 +378,89 @@ async def test_report_consumption_requires_its_original_saved_report_identity(ma
         )
     assert await flow.host.advance("RACK_REPORT", report["operation_id"]) == "OWNER_CONFLICT"
     assert (await flow.rows("rack_report"))[0]["state"] == "REQUESTED"
+
+
+async def test_proven_unsubmitted_entry_rejection_does_not_invent_arrival_report(manual_racks):
+    import json
+
+    from sqlalchemy import select
+
+    from app.models import ReliableMessage
+
+    flow = manual_racks
+    await flow.ready()
+    await flow.plan()
+    await flow.reconcile()
+    (entry,) = await flow.rows("rack_action")
+    async with flow.factory.begin() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(
+                ReliableMessage.business_key == entry["transport_task_id"]
+            )
+        )
+        message.status = "FAILED"
+        message.last_http_status = 409
+        message.last_verdict = "PEER_TERMINAL"
+        message.fail_reason = "CONFLICT"
+        message.response_raw = json.dumps(
+            dict(
+                operation_id=message.operation_id,
+                code="CONFLICT",
+                timestamp=100,
+                data=dict(
+                    reason_code="REFERENCE_CONFLICT", transport_task_id=entry["transport_task_id"]
+                ),
+            )
+        ).encode()
+    assert await flow.rack_advance(entry["job_id"]) == "NOT_ARRIVED"
+    assert not await flow.rows("rack_report")
+    async with flow.factory() as session:
+        assert not await flow.racks.has_report_obligations(session, task_id="T1")
+
+
+async def test_withdrawn_local_only_candidate_does_not_invent_arrival_report(manual_racks):
+    from app.businesses._components.rack_dispatch.models import RackAction
+
+    flow = manual_racks
+    await flow.ready()
+    await flow.plan()
+    (job,) = await flow.rows("rack")
+    async with flow.factory.begin() as session:
+        session.add(
+            RackAction(
+                id="original-local",
+                job_id=job["id"],
+                owner_domain="smt_manual",
+                work_line_id=flow.lines[0],
+                ordinal=1,
+                kind="ENTER",
+                source_ref=job["source_ref"],
+                completion_rule="APPLIED_RESULT",
+                client_request_id="original-local-client",
+                target={"kind": "RACK_POSITION", "location_code": job["location_code"]},
+                target_face="A",
+                basis={"registration_at_cutover": "LOCAL_ONLY"},
+            )
+        )
+        members = flow.tables["member"]
+        await session.execute(
+            members.update()
+            .where(members.c.rack_work_id == job["id"])
+            .values(preparation_action_id="original-local")
+        )
+    assert (
+        await flow.deliver(
+            flow.message(
+                "cancel",
+                dict(
+                    task_id="T1",
+                    cancel_scope="PLAN_MEMBERS",
+                    direct_pick_sources=[dict(plan_revision=1, rack_id="DIRECT", rack_face="A")],
+                ),
+            )
+        )
+    ).status_code == 202
+    assert await flow.rack_advance(job["id"]) == "WITHDRAWN"
+    assert not await flow.rows("rack_report")
+    async with flow.factory() as session:
+        assert not await flow.racks.has_report_obligations(session, task_id="T1")
