@@ -132,14 +132,14 @@ async def stored(factory, state):
 
 @pytest.mark.parametrize("kind", ["ecs", "wms"])
 async def test_acceptance_never_starts_result_advancement(
-    kind, entry_setup, callback_store, client
+    kind, entry_setup, callback_store, callback_client
 ):
     state = entry_setup
     for index, code in enumerate(state["codes"]):
         path, body = request(kind, code, timestamp=index + 1)
-        response = await client.post(path, json=body)
+        response = await callback_client.post(path, json=body)
         assert response.status_code == (200 if kind == "ecs" else 202), response.text
-        assert (await client.post(path, json=body)).status_code == 200
+        assert (await callback_client.post(path, json=body)).status_code == 200
     receipts, lines = await stored(callback_store, state)
     assert len(receipts) == len(state["calls"]) == 2
     assert [call[1].work_line_id for call in state["calls"]] == state["ids"]
@@ -152,13 +152,15 @@ async def test_acceptance_never_starts_result_advancement(
     }
 
 
-async def test_ecs_business_diagnostic_acks_without_execution(entry_setup, callback_store, client):
+async def test_ecs_business_diagnostic_acks_without_execution(
+    entry_setup, callback_store, callback_client
+):
     state = entry_setup
     async with callback_store.begin() as session:
         line = await session.get(WorkLine, state["ids"][0])
         line.business_code = None
     path, body = request("ecs", state["codes"][0])
-    response = await client.post(path, json=body)
+    response = await callback_client.post(path, json=body)
     assert response.status_code == 200 and response.json() == {"code": 200, "message": "ACK"}
     receipts, lines = await stored(callback_store, state)
     assert receipts[0].diagnostic == [{"reason_code": "WORKLINE_BUSINESS_MISMATCH"}]
@@ -168,31 +170,33 @@ async def test_ecs_business_diagnostic_acks_without_execution(entry_setup, callb
 
 @pytest.mark.parametrize("kind", ["ecs", "wms"])
 async def test_transient_failure_rolls_back_receipt_and_business(
-    kind, entry_setup, callback_store, client
+    kind, entry_setup, callback_store, callback_client
 ):
     state = entry_setup
     state["mode"] = "transient"
     path, body = request(kind, state["codes"][0])
-    assert (await client.post(path, json=body)).status_code == 503
+    assert (await callback_client.post(path, json=body)).status_code == 503
     receipts, lines = await stored(callback_store, state)
     assert receipts == []
     assert all(line.description is line.zone_name is None for line in lines)
     state["mode"] = "accept"
-    assert (await client.post(path, json=body)).status_code == (200 if kind == "ecs" else 202)
+    assert (await callback_client.post(path, json=body)).status_code == (
+        200 if kind == "ecs" else 202
+    )
 
 
 @pytest.mark.parametrize("mode,status,persisted", [("reject", 422, False), ("conflict", 409, True)])
 async def test_wms_business_keeps_rejected_conflict_contract(
-    mode, status, persisted, entry_setup, callback_store, client
+    mode, status, persisted, entry_setup, callback_store, callback_client
 ):
     state = entry_setup
     state["mode"] = mode
     path, body = request("wms", state["codes"][0])
-    response = await client.post(path, json=body)
+    response = await callback_client.post(path, json=body)
     assert response.status_code == status, response.text
     receipts, lines = await stored(callback_store, state)
     assert len(receipts) == 1
     assert bool(lines[0].description) is persisted
     assert bool(lines[0].zone_name) is persisted
-    assert (await client.post(path, json=body)).status_code == status
+    assert (await callback_client.post(path, json=body)).status_code == status
     assert len(state["calls"]) == 1

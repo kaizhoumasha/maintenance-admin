@@ -9,7 +9,6 @@ from sqlalchemy.pool import StaticPool
 from app.database import create_database_engine
 from app.integrations.ecs_command import PROTOCOL_RETRY_WINDOW
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
-from app.models import Base
 from tests.helpers import EcsMove, EcsOther
 
 
@@ -29,7 +28,7 @@ class Routes:
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
-async def ecs(request):
+async def ecs(request, sqlite_tables):
     from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
@@ -41,8 +40,7 @@ async def ecs(request):
         factory = async_sessionmaker(engine, expire_on_commit=False)
     else:
         engine = create_database_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-        async with engine.begin() as c:
-            await c.run_sync(Base.metadata.create_all)
+        await sqlite_tables(engine)
         factory = async_sessionmaker(engine, expire_on_commit=False)
     if request.param == "postgres":
         from sqlalchemy import delete

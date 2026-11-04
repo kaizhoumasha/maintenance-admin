@@ -393,7 +393,7 @@ async def test_recheck_success_never_regresses_after_preloaded_failure(
 
 
 async def test_recheck_lock_timeout_preserves_original_receipt(
-    extension, wait_for_lock, client, monkeypatch
+    extension, wait_for_lock, callback_client, monkeypatch
 ):
     ext = extension
     if ext.factory.kw["bind"].dialect.name != "postgresql":
@@ -408,7 +408,7 @@ async def test_recheck_lock_timeout_preserves_original_receipt(
             .where(CallbackReceipt.operation_id == ext.body["operation_id"])
             .with_for_update()
         )
-        pending = asyncio.create_task(client.post("/api/v1/wms/events", json=ext.body))
+        pending = asyncio.create_task(callback_client.post("/api/v1/wms/events", json=ext.body))
         await wait_for_lock(pending)
         response = await pending
         assert response.status_code == 503

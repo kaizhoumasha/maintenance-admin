@@ -35,19 +35,19 @@ async def rows(factory, model):
         return list(await session.scalars(select(model).order_by(model.id)))
 
 
-async def test_valid_event_is_acked(client, callback_store):
+async def test_valid_event_is_acked(callback_client, callback_store):
     calls = []
 
     @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
     async def handler(ctx, data):
         calls.append(ctx.device_code)
 
-    response = await client.post(PATH, json=body())
+    response = await callback_client.post(PATH, json=body())
     assert response.status_code == 200 and response.json() == ACK
     assert calls == ["D1"]
 
 
-async def test_validated_event_is_applied_once_on_replay(client, callback_store):
+async def test_validated_event_is_applied_once_on_replay(callback_client, callback_store):
     class ScanData(CallbackPayload):
         barcode: str
 
@@ -59,7 +59,7 @@ async def test_validated_event_is_applied_once_on_replay(client, callback_store)
         ctx.note("SCAN_APPLIED", barcode=data.barcode)
 
     for _ in range(2):
-        response = await client.post(PATH, json=body(data={"barcode": "BIN_104"}))
+        response = await callback_client.post(PATH, json=body(data={"barcode": "BIN_104"}))
         assert response.status_code == 200 and response.json() == ACK
 
     [data] = applied
@@ -68,14 +68,14 @@ async def test_validated_event_is_applied_once_on_replay(client, callback_store)
     assert receipt.diagnostic == [{"reason_code": "SCAN_APPLIED", "barcode": "BIN_104"}]
 
 
-async def test_bad_envelope_returns_issues_without_echoing_values(client, callback_store):
-    response = await client.post(PATH, json=body(device_code="SECRET-DEV", timestamp="x"))
+async def test_bad_envelope_returns_issues_without_echoing_values(callback_client, callback_store):
+    response = await callback_client.post(PATH, json=body(device_code="SECRET-DEV", timestamp="x"))
     assert response.status_code == 400
     assert response.json()["error_detail"]["issues"]
     assert "SECRET-DEV" not in response.text
 
 
-async def test_data_errors_keep_each_array_position_in_order(client, callback_store):
+async def test_data_errors_keep_each_array_position_in_order(callback_client, callback_store):
     class ScanData(CallbackPayload):
         samples: list[float]
 
@@ -83,7 +83,7 @@ async def test_data_errors_keep_each_array_position_in_order(client, callback_st
     async def handler(ctx, data):
         pytest.fail("invalid event data must not reach the handler")
 
-    response = await client.post(PATH, json=body(data={"samples": ["SECRET", 1.0, None]}))
+    response = await callback_client.post(PATH, json=body(data={"samples": ["SECRET", 1.0, None]}))
 
     assert response.status_code == 400
     assert response.json()["error_detail"]["issues"] == [
@@ -94,7 +94,7 @@ async def test_data_errors_keep_each_array_position_in_order(client, callback_st
     assert await rows(callback_store, CallbackReceipt) == []
 
 
-async def test_masked_data_errors_merge_only_identical_issues(client, callback_store):
+async def test_masked_data_errors_merge_only_identical_issues(callback_client, callback_store):
     class ScanData(CallbackPayload):
         readings: dict[str, int | float]
         barcode: str
@@ -103,7 +103,7 @@ async def test_masked_data_errors_merge_only_identical_issues(client, callback_s
     async def handler(ctx, data):
         pytest.fail("invalid event data must not reach the handler")
 
-    response = await client.post(
+    response = await callback_client.post(
         PATH, json=body(data={"readings": {"SECRET_A": [], "SECRET_B": []}})
     )
 
@@ -117,14 +117,16 @@ async def test_masked_data_errors_merge_only_identical_issues(client, callback_s
     assert await rows(callback_store, CallbackReceipt) == []
 
 
-async def test_oversize_is_413_with_json_body(client, callback_store):
-    response = await client.post(PATH, content=b" " * (MAX_BODY_BYTES + 1))
+async def test_oversize_is_413_with_json_body(callback_client, callback_store):
+    response = await callback_client.post(PATH, content=b" " * (MAX_BODY_BYTES + 1))
     assert response.status_code == 413
     assert response.json() == {"code": 413, "message": "PAYLOAD_TOO_LARGE"}
     assert await rows(callback_store, CallbackReceipt) == []
 
 
-async def test_commit_failure_returns_503_and_logs_error_outcome(client, callback_store, caplog):
+async def test_commit_failure_returns_503_and_logs_error_outcome(
+    callback_client, callback_store, caplog
+):
     engine = callback_store.kw["bind"]
 
     def fail_once(connection):
@@ -133,7 +135,7 @@ async def test_commit_failure_returns_503_and_logs_error_outcome(client, callbac
 
     event.listen(engine.sync_engine, "commit", fail_once)
     caplog.set_level(logging.INFO)
-    response = await client.post(PATH, json=body())
+    response = await callback_client.post(PATH, json=body())
     assert response.status_code == 503
     assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
     assert await rows(callback_store, CallbackReceipt) == []
@@ -145,14 +147,18 @@ async def test_commit_failure_returns_503_and_logs_error_outcome(client, callbac
 
 @pytest.mark.parametrize("raw", [None, b"\xff"])
 async def test_receive_failure_log_identity_is_best_effort(
-    client, callback_store, caplog, monkeypatch, raw
+    callback_client, callback_store, caplog, monkeypatch, raw
 ):
     async def broken(session, data):
         raise RuntimeError("secret-commit-detail")
 
     monkeypatch.setattr(ecs_controller, "receive_ecs_event", broken)
     caplog.set_level(logging.INFO)
-    response = await client.post(PATH, content=raw) if raw else await client.post(PATH, json=body())
+    response = (
+        await callback_client.post(PATH, content=raw)
+        if raw
+        else await callback_client.post(PATH, json=body())
+    )
     assert response.status_code == 503
     [final] = [r for r in caplog.records if hasattr(r, "outcome")]
     assert final.outcome == "error"
@@ -164,9 +170,9 @@ async def test_receive_failure_log_identity_is_best_effort(
     assert all(r.exc_info is None for r in caplog.records)
 
 
-async def test_final_log_has_rendered_fields(client, callback_store, caplog):
+async def test_final_log_has_rendered_fields(callback_client, callback_store, caplog):
     caplog.set_level(logging.INFO)
-    await client.post(PATH, json=body())
+    await callback_client.post(PATH, json=body())
     [record] = [r for r in caplog.records if hasattr(r, "outcome")]
     assert record.outcome == "unregistered" and record.event_type == "'SCAN_COMPLETED'"
     assert record.device_code == "'D1'" and len(record.digest) == 8
@@ -174,18 +180,18 @@ async def test_final_log_has_rendered_fields(client, callback_store, caplog):
 
 
 async def test_snapshot_is_recorded_with_ecs_source_and_wms_quota_unaffected(
-    client, callback_store, monkeypatch
+    callback_client, callback_store, monkeypatch
 ):
     monkeypatch.setattr(snapshots, "SNAPSHOTS_PER_MINUTE", 2)
     for n in range(3):
-        assert (await client.post(PATH, json=body(timestamp=n))).status_code == 200
+        assert (await callback_client.post(PATH, json=body(timestamp=n))).status_code == 200
     wms = dict(operation_id=str(uuid7()), operation="x@v1", timestamp=1, data={})
-    await client.post(WMS_PATH, json=wms)
+    await callback_client.post(WMS_PATH, json=wms)
     sources = [s.source for s in await rows(callback_store, CallbackSnapshot)]
     assert sources.count("ecs") == 2 and sources.count(None) == 1
 
 
-async def test_wms_events_endpoint_cannot_reach_ecs_handlers(client, callback_store):
+async def test_wms_events_endpoint_cannot_reach_ecs_handlers(callback_client, callback_store):
     calls = []
 
     @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
@@ -193,18 +199,20 @@ async def test_wms_events_endpoint_cannot_reach_ecs_handlers(client, callback_st
         calls.append(1)
 
     wms = dict(operation_id=str(uuid7()), operation="ecs.event", timestamp=1, data={})
-    response = await client.post(WMS_PATH, json=wms)
+    response = await callback_client.post(WMS_PATH, json=wms)
     assert response.status_code == 422
     assert response.json()["data"] == {"reason_code": "UNSUPPORTED_OPERATION"}
     assert calls == []
 
 
-async def test_local_scan_example_validates_data_and_persists_one_note(client, callback_store):
+async def test_local_scan_example_validates_data_and_persists_one_note(
+    callback_client, callback_store
+):
     from app.integrations.ecs_callback.dev_ecs_event import ExampleScan, example_scan
 
     if registry.lookup("EXAMPLE_SCAN", "EXAMPLE_SCAN") is None:
         ecs_event("EXAMPLE_SCAN", data=ExampleScan, device_role="EXAMPLE_SCAN")(example_scan)
-    invalid = await client.post(
+    invalid = await callback_client.post(
         PATH,
         json=body(
             device_code="LOCAL_EXAMPLE_SCAN", event_type="EXAMPLE_SCAN", data={"barcode": ""}
@@ -214,7 +222,7 @@ async def test_local_scan_example_validates_data_and_persists_one_note(client, c
     assert await rows(callback_store, CallbackReceipt) == []
 
     for _ in range(2):
-        response = await client.post(
+        response = await callback_client.post(
             PATH,
             json=body(
                 device_code="LOCAL_EXAMPLE_SCAN",
@@ -229,7 +237,7 @@ async def test_local_scan_example_validates_data_and_persists_one_note(client, c
 
 @pytest.mark.parametrize("original_extra", [{}, {"is_debug": False}, {"is_debug": True}])
 async def test_legacy_unregistered_event_is_not_applied_after_upgrade(
-    client, callback_store, original_extra
+    callback_client, callback_store, original_extra
 ):
     await legacy_ecs_receipt(callback_store, body(**original_extra))
     [before] = await rows(callback_store, CallbackReceipt)
@@ -243,14 +251,14 @@ async def test_legacy_unregistered_event_is_not_applied_after_upgrade(
         pytest.fail("historical unregistered receipt must never replay into a new handler")
 
     for extra in ({}, {"is_debug": True}, {"is_debug": False}, {"is_debug": "extra"}):
-        response = await client.post(PATH, json=body(**extra))
+        response = await callback_client.post(PATH, json=body(**extra))
         assert response.status_code == 200 and response.json() == ACK
     [after] = await rows(callback_store, CallbackReceipt)
     assert {c.name: getattr(after, c.name) for c in CallbackReceipt.__table__.columns} == saved
 
 
 async def test_handler_failure_returns_503_without_receipt_or_business_write(
-    client, callback_store
+    callback_client, callback_store
 ):
     @ecs_event("SCAN_COMPLETED", data=CallbackPayload, device_role="SCAN1")
     async def handler(ctx, data):
@@ -267,7 +275,7 @@ async def test_handler_failure_returns_503_without_receipt_or_business_write(
         await ctx.session.flush()
         raise RuntimeError("temporary failure")
 
-    response = await client.post(PATH, json=body(is_debug=True))
+    response = await callback_client.post(PATH, json=body(is_debug=True))
     assert response.status_code == 503
     assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
     assert await rows(callback_store, CallbackReceipt) == []

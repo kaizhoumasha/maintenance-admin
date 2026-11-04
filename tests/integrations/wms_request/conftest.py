@@ -16,7 +16,6 @@ from app.integrations.wms_request import (
     request_operation,
 )
 from app.integrations.wms_request import operation as registry
-from app.models import Base
 from app.reliable import Outbox
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
@@ -49,10 +48,9 @@ def isolated_registry(monkeypatch):
 
 
 @pytest.fixture
-async def sessions():
+async def sessions(sqlite_tables):
     engine = create_database_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    await sqlite_tables(engine)
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:

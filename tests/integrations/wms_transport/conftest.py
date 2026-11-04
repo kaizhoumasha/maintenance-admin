@@ -18,7 +18,7 @@ from app.integrations.wms_transport import (
     TransportService,
     TransportSubmitAdapter,
 )
-from app.models import Base, CallbackReceipt, Menu, ReliableMessage, TransportTask
+from app.models import CallbackReceipt, Menu, ReliableMessage, TransportTask
 from app.reliable import Outbox
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
@@ -47,7 +47,7 @@ def make_transport_rig(factory, engine):
 
 
 @pytest.fixture
-async def transport_rig():
+async def transport_rig(sqlite_tables):
     engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
 
     # SQLAlchemy 文档的 pysqlite 事务配方:由 SQLAlchemy 显式发 BEGIN,保存点才可靠。
@@ -59,8 +59,7 @@ async def transport_rig():
     def begin_explicitly(connection):
         connection.exec_driver_sql("BEGIN")
 
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    await sqlite_tables(engine)
     try:
         yield make_transport_rig(async_sessionmaker(engine, expire_on_commit=False), engine)
     finally:
