@@ -139,10 +139,13 @@ class TransportService:
         target_face: str | None = None,
         rcs_template_id: str = DEFAULT_MOVE_TEMPLATE,
         cycle_id: str | None = None,
+        scope=None,
     ) -> TransportHandle:
         """登记义务,不提交调用方事务;返回值不证明接纳或物理完成。"""
         data = move_rack_data(rack_id, source, target, target_face, rcs_template_id)
-        return await self._register(session, "move_rack", client_request_id, caller, data, cycle_id)
+        return await self._register(
+            session, "move_rack", client_request_id, caller, data, cycle_id, scope
+        )
 
     async def rotate_rack(
         self,
@@ -155,11 +158,12 @@ class TransportService:
         target_face: str,
         rcs_template_id: str,
         cycle_id: str | None = None,
+        scope=None,
     ) -> TransportHandle:
         """原地换面;精确位置 `position` 原样写入 source 与 target,位置与当前面由 WMS 校验。"""
         data = rotate_rack_data(rack_id, position, target_face, rcs_template_id)
         return await self._register(
-            session, "rotate_rack", client_request_id, caller, data, cycle_id
+            session, "rotate_rack", client_request_id, caller, data, cycle_id, scope
         )
 
     async def move_bins(
@@ -170,9 +174,12 @@ class TransportService:
         caller: TransportCaller,
         moves: list[BinMove],
         cycle_id: str | None = None,
+        scope=None,
     ) -> TransportHandle:
         data = bin_move_data(moves)
-        return await self._register(session, "move_bins", client_request_id, caller, data, cycle_id)
+        return await self._register(
+            session, "move_bins", client_request_id, caller, data, cycle_id, scope
+        )
 
     async def exchange_bins(
         self,
@@ -182,10 +189,11 @@ class TransportService:
         caller: TransportCaller,
         exchange_pairs: list[BinExchangePair],
         cycle_id: str | None = None,
+        scope=None,
     ) -> TransportHandle:
         data = exchange_bins_data(exchange_pairs)
         return await self._register(
-            session, "exchange_bins", client_request_id, caller, data, cycle_id
+            session, "exchange_bins", client_request_id, caller, data, cycle_id, scope
         )
 
     async def _register(
@@ -196,8 +204,11 @@ class TransportService:
         caller: TransportCaller,
         data: dict,
         cycle_id: str | None = None,
+        scope=None,
     ) -> TransportHandle:
         """四个方法共用的登记流程:同号重放返回原任务,新请求冻结字节后同事务入队。"""
+        if scope is not None and scope.owner_domain != self.owner_domain:
+            raise InvalidTransportRequest("transport scope owner mismatch")
         outbox, target = self.outbox, self.target  # 未配置时先于任何校验和写入失败
         require_uuid7(client_request_id)
         if not isinstance(caller, TransportCaller):
@@ -212,7 +223,7 @@ class TransportService:
         )
         existing = await session.scalar(query)
         if existing is not None:
-            return self._existing(existing, digest)
+            return await self._existing_scoped(session, existing, digest, scope)
         now = self.clock()
         timestamp = timestamp_ms(now)
         new_id = self.uuid7 or (lambda: uuid7(now))
@@ -244,14 +255,31 @@ class TransportService:
                 winner = await session.scalar(query)
                 if winner is None:
                     raise RuntimeError("client_request_id conflict without a visible task")
-                return self._existing(winner, digest)
+                return await self._existing_scoped(session, winner, digest, scope)
             await outbox.enqueue(
                 session,
                 MessageDraft(
-                    target, OPERATION, operation_id, raw, business_key=task_id, ttl=SUBMIT_TTL
+                    target,
+                    OPERATION,
+                    operation_id,
+                    raw,
+                    business_key=task_id,
+                    ttl=SUBMIT_TTL,
+                    scope=scope,
                 ),
             )
         return TransportHandle(task_id, client_request_id)
+
+    async def _existing_scoped(self, session, task, digest, scope):
+        handle = self._existing(task, digest)
+        await self.outbox.check_scope(
+            session,
+            target=self.target,
+            operation=OPERATION,
+            operation_id=task.operation_id,
+            scope=scope,
+        )
+        return handle
 
     def _existing(self, task: TransportTask, digest: str) -> TransportHandle:
         if task.input_digest != digest:

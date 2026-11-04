@@ -25,14 +25,24 @@ class ReliableMessage(Base):
             "target", "operation", "operation_id", name="reliable_message_identity_key"
         ),
         CheckConstraint(
-            "status IN ('PENDING','SENDING','STALLED','HELD','DONE','FAILED','EXPIRED')",
+            (
+                "status IN "
+                "('PENDING','SENDING','STALLED','HELD','DONE','FAILED','EXPIRED','ABANDONED')"
+            ),
             name="status",
         ),
         CheckConstraint(
-            "(status IN ('STALLED','HELD') AND next_attempt_at IS NULL) OR "
-            "(status NOT IN ('STALLED','HELD') AND next_attempt_at IS NOT NULL)",
+            "(status IN ('STALLED','HELD','ABANDONED') AND next_attempt_at IS NULL) OR "
+            "(status NOT IN ('STALLED','HELD','ABANDONED') AND next_attempt_at IS NOT NULL)",
             name="next_attempt",
         ),
+        CheckConstraint(
+            "(scope_owner IS NULL AND scope_kind IS NULL AND scope_id IS NULL) OR "
+            "(scope_owner IS NOT NULL AND scope_owner != '' AND scope_kind IS NOT NULL AND "
+            "scope_kind IN ('TASK','LINE') AND scope_id IS NOT NULL AND scope_id != '')",
+            name="scope",
+        ),
+        Index("reliable_message_scope_idx", "scope_owner", "scope_kind", "scope_id"),
         Index("reliable_message_due_idx", "status", "next_attempt_at"),
         Index("reliable_message_expiry_idx", "status", "expires_at"),
         Index("reliable_message_lease_idx", "status", "lease_until"),
@@ -62,6 +72,10 @@ class ReliableMessage(Base):
     last_response_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
     lease_id: Mapped[str | None] = mapped_column(String(64))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scope_owner: Mapped[str | None] = mapped_column(Text)
+    scope_kind: Mapped[str | None] = mapped_column(String(4))
+    scope_id: Mapped[str | None] = mapped_column(Text)
+    dispatch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     business_key: Mapped[str | None] = mapped_column(Text)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trace_id: Mapped[str | None] = mapped_column(Text)

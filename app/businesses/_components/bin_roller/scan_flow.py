@@ -1,26 +1,23 @@
-"""Original arrivals and local point actions; production alone permits SCAN2 release."""
+"""Horizontal point checkpoints linked to original public EVENT and command evidence."""
 
 import re
-from dataclasses import asdict
-from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.engine import RowMapping
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest
-from app.integrations.ecs_callback import EcsEventContext
+from app.integrations.ecs_callback import (
+    EcsEventContext,
+    EventApplicationRef,
+    get_event,
+    list_point_events,
+)
 from app.integrations.ecs_command.contracts import CommandView, ResultEnvelope
+from app.reliable import ScopeRef
 
 from .contracts import ScanCompletedData
 from .ecs_command import MoveForward, MoveLeft, MoveRight
-from .ports import RollerWorkRef, Scan2Arrival
-from .repository import RollerRepository
-
-if TYPE_CHECKING:
-    from .service import BinRoller
+from .ports import Scan2Arrival
 
 _BIN = re.compile(r"A[0-9]{9}\Z")
 
@@ -32,9 +29,7 @@ def bin_identity(raw: str) -> str | None:
     return code if _BIN.fullmatch(code) else None
 
 
-async def get_scan_result(
-    roller: "BinRoller", session: AsyncSession, code: str | None
-) -> CommandView | None:
+async def get_scan_result(roller, session, code: str | None) -> CommandView | None:
     if code is None:
         return None
     return await roller.capabilities.ecs.get_command(
@@ -64,220 +59,410 @@ def applied_result(
     return result
 
 
-async def accept_scan(
-    roller: "BinRoller", ctx: EcsEventContext, payload: ScanCompletedData
-) -> None:
-    facts = roller.tables["scan_fact"]
-    original = (
-        (await ctx.session.execute(select(facts).where(facts.c.digest == ctx.digest)))
-        .mappings()
-        .one_or_none()
-    )
-    # Technical identity survives receipt retention and subsequent workline/business rebindings.
-    if original is not None:
-        return
+async def point_event(session, row, point):
+    result = await get_event(session, event_id=row[point.lower() + "_event_id"])
+    return result.record if result.availability == "FOUND" else None
+
+
+async def point_view(roller, session, row, point):
+    event = await point_event(session, row, point)
+    code_key = "release_command_code" if point == "SCAN2" else point.lower() + "_command_code"
+    view = await get_scan_result(roller, session, row[code_key])
+    return event, view
+
+
+async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
     if ctx.business_code != roller.context.domain:
-        raise ValueError("scan business does not match the component owner")
-    repository = roller.repository(ctx.work_line_id)
-    jobs = ()
-    fifo = ()
-    bin_code = bin_identity(payload.bin_code)
-    affects_return = ctx.device_role == "SCAN4" or (
-        ctx.device_role == "SCAN3" and bin_code is not None and payload.bin_code.endswith("-B")
-    )
-    if affects_return:
-        jobs = await roller.lock_jobs_on_line(ctx.session, ctx.work_line_id)
-        await roller.lock_production_subjects(ctx.session, ctx.work_line_id, jobs)
-        fifo = await repository.return_queue(ctx.session)
-    if ctx.device_role == "SCAN2":
-        await roller.production.lock_scan2_task(ctx.session, work_line_id=ctx.work_line_id)
-    previous = await repository.latest_scan(ctx.session, ctx.device_role)
-    separator = None
-    if previous is not None and previous["command_code"] is not None:
-        view = await get_scan_result(roller, ctx.session, previous["command_code"])
-        if applied_result(view, previous["command_code"], previous["device_code"]) is not None:
-            separator = previous["command_code"]
-    arrival = await repository.accept_scan_fact(
+        raise ValueError("scan business does not match component owner")
+    repo = roller.repository(ctx.work_line_id)
+    # The receiver owns WorkLine/source Device; acquire original jobs before host/checkpoints.
+    jobs = await roller.lock_jobs_on_line(ctx.session, ctx.work_line_id)
+    current = await roller.production.resolve_scan2_task(ctx.session, work_line_id=ctx.work_line_id)
+    await roller.lock_production_subjects(ctx.session, ctx.work_line_id, jobs)
+    await repo.line_state(ctx.session)
+    # Version the point collection so a waiting Repeatable Read receiver retries its old snapshot.
+    await repo.update(ctx.session, "workline_state")
+    await roller.rack_dispatch.lock_actions(ctx.session, job_ids=tuple(job.id for job in jobs))
+    point = ctx.device_role
+    key = "bin_passage" if point in ("SCAN1", "SCAN2") else "bin_return"
+    table = repo.tables[key]
+    prefix = point.lower()
+    previous_events = await list_point_events(
         ctx.session,
-        digest=ctx.digest,
-        receipt_id=ctx.receipt_id,
-        point=ctx.device_role,
-        device_code=ctx.device_code,
-        raw_bin_code=payload.bin_code,
-        bin_code=bin_code,
-        scanned_at=ctx.timestamp,
-        separator_command_code=separator,
-        binding_snapshot=asdict(ctx.binding),
-        previous_arrival=previous,
+        owner_domain=repo.owner_domain,
+        work_line_id=repo.work_line_id,
+        point=point,
+        before_event_id=ctx.receipt_id,
+        limit=1,
     )
-    if affects_return and arrival["first_digest"] == ctx.digest:
-        identity = {
-            "arrival_id": arrival["id"],
-            "digest": ctx.digest,
-            "receipt_id": ctx.receipt_id,
-            "point": ctx.device_role,
-        }
-        decisions = roller.tables["decision"]
-        active = (
+    previous_event = previous_events[0] if previous_events else None
+    previous = None
+    separator = None
+    if previous_event and previous_event.application_ref:
+        previous = await repo._one(
+            ctx.session, table, table.c.id == previous_event.application_ref.subject_id
+        )
+    same = (
+        previous_event is not None
+        and previous_event.envelope["device_code"] == ctx.device_code
+        and previous_event.envelope["data"].get("bin_code") == payload.bin_code
+    )
+    if (
+        same
+        and previous is not None
+        and key == "bin_passage"
+        and previous["closed_at"] is not None
+        and previous["scope_kind"] == "TASK"
+        and current.is_valid
+        and current.task_id is not None
+        and current.task_id != previous["scope_id"]
+    ):
+        # A confirmed new WMS task starts independently; the closed task is never reparented.
+        same = False
+    if same and previous is not None:
+        code = previous["release_command_code" if point == "SCAN2" else prefix + "_command_code"]
+        view = await get_scan_result(roller, ctx.session, code)
+        applied = applied_result(view, code, ctx.device_code)
+        if applied is not None:
+            separator = code
+        old_separator = previous_event.application_ref.separator_command_code
+        if separator is None or separator == old_separator:
+            ctx.bind_application(
+                EventApplicationRef(
+                    key.upper(),
+                    previous["id"],
+                    previous_event.event_id,
+                    previous_event.application_ref.predecessor_event_id,
+                    old_separator,
+                )
+            )
+            return
+    else:
+        separator = None
+    predecessor_event_id = previous_event.event_id if previous_event else None
+    visit_key = canonical_digest(
+        dict(
+            point=point,
+            predecessor_event_id=predecessor_event_id,
+            separator_command_code=separator,
+            device_code=ctx.device_code,
+            raw_bin_code=payload.bin_code,
+        )
+    )
+    existing = await repo._one(ctx.session, table, table.c[prefix + "_visit_key"] == visit_key)
+    if existing:
+        ctx.bind_application(
+            EventApplicationRef(
+                key.upper(),
+                existing["id"],
+                existing[prefix + "_event_id"],
+                predecessor_event_id,
+                separator,
+            )
+        )
+        return
+    bin_code = bin_identity(payload.bin_code)
+    task_scope = point in ("SCAN1", "SCAN2") and current.is_valid and current.task_id is not None
+    if task_scope:
+        scope = ScopeRef(repo.owner_domain, "TASK", current.task_id)
+    else:
+        line = await repo.line_state(ctx.session, start=True)
+        scope = ScopeRef(repo.owner_domain, "LINE", line["line_run_id"])
+    row = None
+    if point == "SCAN2" and task_scope and bin_code is not None:
+        candidates = (
+            await ctx.session.execute(
+                select(table)
+                .where(
+                    *repo.scoped(table),
+                    table.c.scope_kind == "TASK",
+                    table.c.scope_id == current.task_id,
+                    table.c.bin_code == bin_code,
+                    table.c.closed_at.is_(None),
+                    table.c.scan1_event_id.is_not(None),
+                    table.c.scan2_event_id.is_(None),
+                    table.c.scan1_command_code.is_not(None),
+                )
+                .order_by(table.c.id)
+                .with_for_update()
+            )
+        ).mappings()
+        eligible = []
+        for candidate in candidates:
+            original = await get_event(ctx.session, event_id=candidate["scan1_event_id"])
+            command = await get_scan_result(roller, ctx.session, candidate["scan1_command_code"])
+            if (
+                original.availability == "FOUND"
+                and command
+                and command.task_type == "MOVE_FORWARD"
+                and command.device_code == original.record.envelope["device_code"]
+            ):
+                eligible.append(candidate)
+        if len(eligible) == 1:
+            row = eligible[0]
+    valid_return = bin_code is not None and payload.bin_code.endswith("-B")
+    if point == "SCAN4" and valid_return:
+        roots = (
             (
                 await ctx.session.execute(
-                    select(decisions).where(*repository.scoped(decisions), decisions.c.pending)
+                    select(table)
+                    .where(
+                        *repo.scoped(table),
+                        table.c.bin_code == bin_code,
+                        table.c.scan3_event_id.is_not(None),
+                        table.c.is_current.is_(True),
+                        table.c.closed_at.is_(None),
+                        table.c.return_state != "OBSERVED",
+                    )
+                    .with_for_update()
                 )
             )
             .mappings()
             .all()
         )
-        for decision in active:
-            await ctx.session.execute(
-                decisions.update()
-                .where(
-                    *repository.scoped(decisions),
-                    decisions.c.kind == "DRAIN",
-                    decisions.c.id == decision["id"],
+        if len(roots) == 1:
+            root = roots[0]
+            if root["scan4_event_id"] is None:
+                row = root
+            elif (
+                root["selected_face_work_id"] is None
+                and root["transport_task_id"] is None
+                and root["return_state"] in ("WAITING", "READY")
+            ):
+                event, view = await point_view(roller, ctx.session, root, point)
+                applied = (
+                    applied_result(view, root["scan4_command_code"], event.envelope["device_code"])
+                    if event
+                    else None
                 )
-                .values(received_work=[*(decision["received_work"] or ()), identity])
+                if applied and applied.result == "FAILED":
+                    row = root
+                else:
+                    ctx.bind_application(
+                        EventApplicationRef(
+                            key.upper(),
+                            root["id"],
+                            root["scan4_event_id"],
+                            predecessor_event_id,
+                            separator,
+                        )
+                    )
+                    return
+            else:
+                ctx.bind_application(
+                    EventApplicationRef(
+                        key.upper(),
+                        root["id"],
+                        root["scan4_event_id"],
+                        predecessor_event_id,
+                        separator,
+                    )
+                )
+                return
+    if point == "SCAN3" and valid_return:
+        previous_rounds = (
+            (
+                await ctx.session.execute(
+                    select(table)
+                    .where(
+                        *repo.scoped(table),
+                        table.c.bin_code == bin_code,
+                        table.c.is_current.is_(True),
+                        table.c.closed_at.is_(None),
+                    )
+                    .order_by(table.c.id)
+                )
             )
-        if not active and not jobs and fifo and fifo[0]["id"] and fifo[0]["status"] == "PENDING":
-            head = fifo[0]
-            await repository.update_scan(
-                ctx.session,
-                head["fifo_arrival_id"],
-                received_work=[*(head["received_work"] or ()), identity],
+            .mappings()
+            .all()
+        )
+        for previous_round in previous_rounds:
+            await repo.update(ctx.session, key, previous_round["id"], is_current=False)
+            pending_direction = False
+            for original_point in ("scan3", "scan4"):
+                code = previous_round[original_point + "_command_code"]
+                if code and previous_round[original_point + "_consumed_result_id"] is None:
+                    original_view = await get_scan_result(roller, ctx.session, code)
+                    pending_direction |= (
+                        original_view is None or original_view.delivery_status != "ABANDONED"
+                    )
+            if (
+                previous_round["selected_face_work_id"] is None
+                and previous_round["transport_task_id"] is None
+                and not pending_direction
+            ):
+                await repo.close(ctx.session, key, previous_round["id"], "SUPERSEDED")
+    values = {prefix + "_event_id": ctx.receipt_id, prefix + "_visit_key": visit_key}
+    if key == "bin_return" and point == "SCAN4":
+        values.update(scan4_command_code=None, scan4_consumed_result_id=None)
+        if row is None or row["first_scan4_event_id"] is None:
+            receipt = await get_event(ctx.session, event_id=ctx.receipt_id)
+            if receipt.availability != "FOUND":
+                raise ValueError("original event unavailable during acceptance")
+            values.update(
+                first_scan4_event_id=ctx.receipt_id,
+                first_scan4_received_at=receipt.record.received_at,
+                fifo_visit_key=visit_key,
             )
-        if jobs:
-            await roller.rack_dispatch.note_facts_changed(
-                ctx.session, job_ids=tuple(j.id for j in jobs)
+    if row is None:
+        values.update(id=str(uuid7()), **repo.scope, scope_id=scope.scope_id, bin_code=bin_code)
+        if key == "bin_passage":
+            values["scope_kind"] = scope.kind
+        else:
+            values.update(
+                is_current=True,
+                return_state="WAITING" if point == "SCAN3" and valid_return else "OBSERVED",
             )
-    if arrival["point"] == "SCAN2":
-        if arrival["delegation_state"] != "ACCEPTED":
-            await roller.production.accept_scan2(
-                ctx,
-                Scan2Arrival(
-                    arrival_id=arrival["id"],
-                    work_line_id=arrival["work_line_id"],
-                    device_code=arrival["device_code"],
-                    raw_bin_code=arrival["raw_bin_code"],
-                    bin_code=arrival["bin_code"],
-                    scanned_at=arrival["scanned_at"],
-                ),
-            )
-            await repository.update_scan(
-                ctx.session, arrival["id"], delegation_state="ACCEPTED", pending=False
-            )
-        return
-    if arrival["first_digest"] == ctx.digest:
-        await accept_point(roller, ctx.session, repository, arrival)
+        await ctx.session.execute(table.insert().values(**values))
+        row_id = values["id"]
+    else:
+        row_id = row["id"]
+        await repo.update(ctx.session, key, row_id, **values)
+    row = await repo._one(ctx.session, table, table.c.id == row_id)
+    ctx.bind_application(
+        EventApplicationRef(key.upper(), row_id, ctx.receipt_id, predecessor_event_id, separator)
+    )
+    if point == "SCAN2":
+        production_id = await roller.production.accept_scan2(
+            ctx,
+            Scan2Arrival(
+                row_id, ctx.work_line_id, ctx.device_code, payload.bin_code, bin_code, ctx.timestamp
+            ),
+        )
+        if not production_id:
+            raise ValueError("production acceptance must return its original record")
+        await repo.update(ctx.session, key, row_id, production_record_id=production_id)
+    elif point == "SCAN1":
+        command = MoveForward() if valid_return and task_scope else MoveRight()
+        await create_direction(roller, ctx.session, repo, row, point, ctx.device_code, command)
+    elif point == "SCAN3":
+        await create_direction(
+            roller,
+            ctx.session,
+            repo,
+            row,
+            point,
+            ctx.device_code,
+            MoveForward() if valid_return else MoveLeft(),
+        )
+    elif row["scan3_event_id"] is not None and valid_return:
+        await create_direction(
+            roller, ctx.session, repo, row, point, ctx.device_code, MoveForward()
+        )
+    jobs = await roller.rack_dispatch.jobs(
+        ctx.session,
+        work_line_id=ctx.work_line_id,
+        source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+        pending=True,
+    )
+    await roller.rack_dispatch.note_facts_changed(ctx.session, job_ids=tuple(j.id for j in jobs))
 
 
-async def create_direction(
-    roller: "BinRoller",
-    session: AsyncSession,
-    repository: RollerRepository,
-    arrival: RowMapping,
-    command: BaseModel,
-) -> str:
-    if arrival["command_code"] is not None:
-        return arrival["command_code"]
+async def create_direction(roller, session, repo, row, point, device_code, command):
+    key = "bin_passage" if point in ("SCAN1", "SCAN2") else "bin_return"
+    column = "release_command_code" if point == "SCAN2" else point.lower() + "_command_code"
+    if row[column] is not None:
+        return row[column]
+    if row["closed_at"] is not None:
+        raise ValueError("closed scope cannot create a direction")
+    scope = ScopeRef(
+        repo.owner_domain, row["scope_kind"] if key == "bin_passage" else "LINE", row["scope_id"]
+    )
     view = await roller.capabilities.ecs.create(
         session,
         owner=roller.context,
-        call_key=f"bin_roller:scan:{arrival['id']}",
-        device_code=arrival["device_code"],
+        call_key=f"bin_roller:{point.lower()}:{row['id']}:{row[point.lower() + '_event_id']}",
+        device_code=device_code,
         timeout_ms=30000,
         command=command,
+        scope=scope,
     )
-    await repository.update_scan(session, arrival["id"], command_code=view.command_code)
+    await repo.update(session, key, row["id"], **{column: view.command_code})
     return view.command_code
 
 
-async def accept_point(
-    roller: "BinRoller", session: AsyncSession, repository: RollerRepository, arrival: RowMapping
-) -> None:
-    if arrival["command_code"] is not None or not arrival["pending"]:
-        return
-    point = arrival["point"]
-    valid = arrival["bin_code"] is not None and arrival["raw_bin_code"].endswith("-B")
-    if point == "SCAN1":
-        task = await roller.production.read_current_task(
-            session, work_line_id=repository.work_line_id
-        )
-        command = (
-            MoveForward() if valid and task.is_valid and task.task_id is not None else MoveRight()
-        )
-    else:
-        round_ = await repository.bind_scan_round(session, arrival, valid=valid)
-        if round_ is None and (point == "SCAN4" or valid):
-            return
-        if round_ is not None:
-            attempts = await repository.point_attempts(session, round_["round_id"], point)
-            if attempts:
-                previous = attempts[-1]
-                view = await get_scan_result(roller, session, previous["command_code"])
-                result = applied_result(view, previous["command_code"], previous["device_code"])
-                if (
-                    result is None
-                    or result.result != "FAILED"
-                    or not valid
-                    or round_["return_state"] != "PENDING"
-                ):
-                    await repository.update_scan(session, arrival["id"], pending=False)
-                    return
-        command = MoveForward() if valid else MoveLeft()
-    await create_direction(roller, session, repository, arrival, command)
-
-
-async def release_scan2(roller: "BinRoller", session: AsyncSession, *, arrival_id: str) -> str:
-    arrival = await roller.original_record(session, "scan_arrival", arrival_id, for_update=True)
-    if arrival["point"] != "SCAN2":
-        raise ValueError("original SCAN2 arrival required")
-    repository = roller.repository(arrival["work_line_id"])
-    if arrival["release_command_code"] is not None:
-        return arrival["release_command_code"]
-    call_key = arrival["release_call_key"] or f"bin_roller:scan2_release:{arrival_id}"
+async def release_scan2(roller, session, *, arrival_id):
+    row = await roller.original_record(session, "bin_passage", arrival_id, for_update=True)
+    if row["closed_at"] is not None:
+        raise ValueError("closed passage cannot release")
+    event = await point_event(session, row, "SCAN2")
+    if not event or not row["production_record_id"]:
+        raise ValueError("original SCAN2 production acceptance required")
+    if row["release_command_code"]:
+        return row["release_command_code"]
     view = await roller.capabilities.ecs.create(
         session,
         owner=roller.context,
-        call_key=call_key,
-        device_code=arrival["device_code"],
+        call_key=f"bin_roller:scan2_release:{arrival_id}",
+        device_code=event.envelope["device_code"],
         timeout_ms=30000,
         command=MoveForward(),
+        scope=ScopeRef(roller.context.domain, row["scope_kind"], row["scope_id"]),
     )
-    await repository.update_scan(
-        session,
-        arrival_id,
-        release_record_id=arrival["release_record_id"] or str(uuid7()),
-        release_call_key=call_key,
-        release_state="PENDING",
-        release_command_code=view.command_code,
-        command_code=view.command_code,
+    await roller.repository(row["work_line_id"]).update(
+        session, "bin_passage", row["id"], release_command_code=view.command_code
     )
     return view.command_code
 
 
-async def consume_scan_result(
-    roller: "BinRoller", session: AsyncSession, work: RollerWorkRef
-) -> str:
-    if work.kind == "SCAN2_RELEASE":
-        arrival = await roller.original_record(session, "scan2_release", work.record_id)
-    elif work.kind == "SCAN":
-        arrival = await roller.original_arrival(session, work.record_id)
-        if arrival["point"] == "SCAN2":
-            return "DELEGATED" if arrival["delegation_state"] == "ACCEPTED" else "WAITING"
-    else:
-        raise ValueError("unsupported scan work kind")
-    code = (
-        arrival["release_command_code"] if work.kind == "SCAN2_RELEASE" else arrival["command_code"]
-    )
-    result = applied_result(
-        await get_scan_result(roller, session, code), code, arrival["device_code"]
-    )
-    if result is None:
-        return "WAITING"
-    digest = canonical_digest(result.model_dump())
-    values = (
-        dict(release_consumed_result_id=digest, release_state="CONSUMED")
+async def consume_scan_result(roller, session, work):
+    key = "bin_passage" if work.kind in ("PASSAGE", "SCAN2_RELEASE") else "bin_return"
+    row = await roller.original_record(session, key, work.record_id)
+    if row["closed_at"] is not None:
+        return "CLOSED"
+    repo = roller.repository(row["work_line_id"])
+    points = (
+        ("SCAN2",)
         if work.kind == "SCAN2_RELEASE"
-        else dict(consumed_result_id=digest, pending=arrival["point"] == "SCAN4")
+        else ("SCAN1",)
+        if key == "bin_passage"
+        else ("SCAN3", "SCAN4")
     )
-    await roller.repository(arrival["work_line_id"]).update_scan(session, arrival["id"], **values)
-    return result.result
+    status = "WAITING"
+    for point in points:
+        code_column = (
+            "release_command_code" if point == "SCAN2" else point.lower() + "_command_code"
+        )
+        consumed_column = (
+            "release_consumed_result_id"
+            if point == "SCAN2"
+            else point.lower() + "_consumed_result_id"
+        )
+        if row[code_column] is None or row[consumed_column] is not None:
+            continue
+        event, view = await point_view(roller, session, row, point)
+        result = (
+            applied_result(view, row[code_column], event.envelope["device_code"]) if event else None
+        )
+        if result is None:
+            continue
+        values = {consumed_column: canonical_digest(result.model_dump())}
+        if (
+            key == "bin_return"
+            and point == "SCAN4"
+            and row["return_state"] == "WAITING"
+            and result.result == "SUCCESS"
+        ):
+            values["return_state"] = "READY"
+        await repo.update(session, key, row["id"], **values)
+        status = result.result
+    updated = await repo._one(session, repo.tables[key], repo.tables[key].c.id == row["id"])
+    if (
+        key == "bin_passage"
+        and updated["scope_kind"] == "LINE"
+        and updated["scan2_event_id"] is None
+        and updated["scan1_consumed_result_id"]
+    ):
+        await repo.close(session, key, row["id"], "FINISHED")
+    elif (
+        key == "bin_return"
+        and updated["return_state"] == "OBSERVED"
+        and updated["scan3_event_id"]
+        and updated["scan3_consumed_result_id"]
+        and updated["first_scan4_event_id"] is None
+    ):
+        await repo.close(session, key, row["id"], "FINISHED")
+    if key == "bin_return":
+        await repo.close_retired_return(session, row["id"])
+    await repo.finish_line_if_idle(session)
+    return status

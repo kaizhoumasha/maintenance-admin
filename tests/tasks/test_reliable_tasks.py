@@ -1,3 +1,14 @@
+import pytest
+
+
+@pytest.mark.parametrize("days", [0, -1])
+async def test_cleanup_rejects_invalid_retention_before_opening_storage(days):
+    from app.tasks.reliable_tasks import run_cleanup
+
+    with pytest.raises(ValueError, match="retention_days"):
+        await run_cleanup(None, days)
+
+
 def test_terminal_cleanup_registered_without_sender_task():
     from app.tasks import reliable_tasks
     from app.tasks.celery_app import celery_app

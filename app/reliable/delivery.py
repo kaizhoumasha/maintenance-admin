@@ -54,6 +54,10 @@ async def send_one(
         if claim.message.expires_at is not None and claim.message.expires_at <= now:
             outcome = AttemptOutcome(MessageStatus.EXPIRED)
         else:
+            phase = "before_send"
+            until = await store.before_send(claim, target)
+            if until is None:
+                return
             phase = "send"
             result = await client.send(request)
             if not isinstance(result, HttpResult):

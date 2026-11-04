@@ -44,12 +44,14 @@ class TransportTaskResult:
     submission_target: str | None = None
     submission_delivery_status: str | None = None
     submission_delivery_uncertain: bool | None = None
+    submission_dispatch_started: bool | None = None
     submission_fail_reason: str | None = None
     submission_response_state: str = "UNAVAILABLE"
     submission_http_status: int | None = None
     submission_response_code: str | None = None
     submission_response_timestamp: int | None = None
     submission_response_data: dict | None = None
+    frozen: dict | None = None
     outcome: dict | None = None
     outcome_revision: int | None = None
     position_observation: dict | None = None
@@ -69,7 +71,9 @@ async def read_rows(
         return {}
     task, message = TransportTask.__table__, ReliableMessage.__table__
     match_identity = or_ if check_conflicts else and_
-    columns = (*RESPONSE_COLUMNS, "delivery_snapshot") if check_conflicts else RESPONSE_COLUMNS
+    columns = (*RESPONSE_COLUMNS, "dispatch_started_at", "scope_owner")
+    if check_conflicts:
+        columns += ("delivery_snapshot",)
     task_columns = [c for c in task.c if c.name != "submission_acceptance"]
     if check_conflicts:
         task_columns.extend(
@@ -345,6 +349,7 @@ def project(
         )
     result = replace(
         result,
+        frozen=deepcopy(task["frozen"]),
         outcome=deepcopy(outcome),
         position_observation=deepcopy(observation),
         outcome_revision=task["applied_outcome_revision"],
@@ -374,6 +379,9 @@ def project(
             submission_target=row["target"],
             submission_delivery_status=row["status"],
             submission_delivery_uncertain=row["delivery_uncertain"],
+            submission_dispatch_started=(row["dispatch_started_at"] is not None)
+            if row["scope_owner"] is not None
+            else None,
             submission_fail_reason=row["fail_reason"],
             **{"submission_" + k: v for k, v in response.items()},
         )
@@ -417,6 +425,7 @@ def project(
         "HELD",
         "FAILED",
         "EXPIRED",
+        "ABANDONED",
     }:
         reason = "DELIVERY_OR_RESULT_UNCERTAIN"
     if reason:

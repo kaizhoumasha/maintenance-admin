@@ -23,6 +23,8 @@ from .types import (
     MessageStatus,
     OutgoingMessage,
     ProtocolAdapter,
+    ScopeRef,
+    ScopeStopItem,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,8 @@ class Outbox:
             not isinstance(draft.business_key, str) or "\x00" in draft.business_key
         ):
             raise InvalidMessage("invalid business key")
+        if draft.scope is not None and not isinstance(draft.scope, ScopeRef):
+            raise InvalidMessage("invalid scope")
         query = select(ReliableMessage).where(
             ReliableMessage.target == draft.target,
             ReliableMessage.operation == draft.operation,
@@ -96,6 +100,7 @@ class Outbox:
                 now,
                 expires_at,
                 draft.delivery_snapshot,
+                draft.scope,
             )
             target = self.targets[draft.target].effective(draft.delivery_snapshot)
             request = self.adapters[target.protocol].build_request(message, target)
@@ -108,6 +113,9 @@ class Outbox:
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
         values = dict(
             delivery_snapshot=asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None,
+            scope_owner=draft.scope.owner_domain if draft.scope else None,
+            scope_kind=draft.scope.kind if draft.scope else None,
+            scope_id=draft.scope.scope_id if draft.scope else None,
             target=message.target,
             operation=message.operation,
             operation_id=message.operation_id,
@@ -135,6 +143,13 @@ class Outbox:
                 return self._existing(existing, draft)
 
     def _existing(self, existing, draft) -> EnqueueResult:
+        scope = (
+            (draft.scope.owner_domain, draft.scope.kind, draft.scope.scope_id)
+            if draft.scope
+            else (None, None, None)
+        )
+        if (existing.scope_owner, existing.scope_kind, existing.scope_id) != scope:
+            raise DuplicateMessage("identity already has different scope")
         snapshot = asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None
         if existing.delivery_snapshot != snapshot:
             raise DuplicateMessage("identity already has different delivery snapshot")
@@ -151,6 +166,99 @@ class Outbox:
         return isinstance(adapter, ComparableRequests) and adapter.same_request(
             existing.request_raw, draft.request_raw
         )
+
+    async def check_scope(self, session, *, target, operation, operation_id, scope):
+        row = await session.scalar(
+            select(ReliableMessage).where(
+                ReliableMessage.target == target,
+                ReliableMessage.operation == operation,
+                ReliableMessage.operation_id == operation_id,
+            )
+        )
+        expected = (scope.owner_domain, scope.kind, scope.scope_id) if scope else (None, None, None)
+        if row is None:
+            if scope is not None:
+                raise DuplicateMessage("original scope evidence is unavailable")
+            return
+        if (row.scope_owner, row.scope_kind, row.scope_id) != expected:
+            raise DuplicateMessage("identity already has different scope")
+
+    async def stop_scope(
+        self, session: AsyncSession, scope: ScopeRef, *, reason: str
+    ) -> tuple[ScopeStopItem, ...]:
+        from .lifecycle import transaction_limits
+        from .store import TERMINAL, AttemptOutcome, MessageStore
+        from .types import DeliverySnapshot
+
+        if not isinstance(scope, ScopeRef) or not isinstance(reason, str) or not reason:
+            raise ValueError("scope and stop reason required")
+        identities = list(
+            await session.execute(
+                select(
+                    ReliableMessage.id,
+                    ReliableMessage.operation_id,
+                    ReliableMessage.delivery_snapshot,
+                )
+                .where(
+                    ReliableMessage.scope_owner == scope.owner_domain,
+                    ReliableMessage.scope_kind == scope.kind,
+                    ReliableMessage.scope_id == scope.scope_id,
+                )
+                .order_by(ReliableMessage.id)
+            )
+        )
+        stopped = []
+        for identity in identities:
+            port = context = None
+            if identity.delivery_snapshot is not None:
+                snapshot = DeliverySnapshot(**identity.delivery_snapshot)
+                port = self.lifecycles.get(snapshot.protocol)
+                if port is None:
+                    raise InvalidMessage("snapshot mutation requires its transaction lifecycle")
+                await transaction_limits(session)
+                context = await port.lock_context(session, identity.operation_id)
+            row = await session.scalar(
+                select(ReliableMessage)
+                .where(
+                    ReliableMessage.id == identity.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                continue
+            previous = MessageStatus(row.status)
+            if previous in TERMINAL:
+                stopped.append(ScopeStopItem(row.id, previous, "TERMINAL"))
+                continue
+            # Claim/recovery counts are not dispatch evidence; only the committed gate is.
+            dispatch = (
+                "MAY_HAVE_DISPATCHED"
+                if row.dispatch_started_at is not None or row.delivery_uncertain
+                else "NEVER_DISPATCHED"
+            )
+            if port is not None:
+                claim = MessageStore._claim(self, session, row)
+                await port.apply_transition(
+                    session,
+                    context,
+                    claim,
+                    AttemptOutcome(
+                        MessageStatus.ABANDONED,
+                        pause_reason=reason,
+                    ),
+                )
+            row.status = MessageStatus.ABANDONED
+            row.pause_reason = reason
+            row.lease_id = row.lease_until = row.next_attempt_at = None
+            row.updated_at = utc_datetime(self.clock())
+            stopped.append(ScopeStopItem(row.id, previous, dispatch))
+        await session.flush()
+        return tuple(stopped)
+
+    @staticmethod
+    def _time(session, value):
+        return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
     async def resume(
         self, session: AsyncSession, target: str, operation: str, operation_id: str
@@ -326,7 +434,7 @@ class Outbox:
             row.status = status
             row.pause_reason = reason
             row.lease_id = row.lease_until = None
-            row.next_attempt_at = None if status == "HELD" else now
+            row.next_attempt_at = None if status in ("HELD", "ABANDONED") else now
             row.updated_at = now
             await port.apply_transition(
                 session, context, claim, AttemptOutcome(MessageStatus(status), pause_reason=reason)

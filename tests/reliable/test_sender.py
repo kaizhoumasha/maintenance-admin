@@ -362,13 +362,19 @@ async def test_busy_sender_expires_messages_when_maintenance_interval_elapses(
     runner = asyncio.create_task(sender.run())
     try:
         async with asyncio.timeout(3):
-            assert await started.get() == "0"
+            first_started = await started.get()
             if max_concurrency == 1:
+                assert first_started == "0"
                 await parked.wait()
                 release.set()
-            assert {await started.get(), await started.get()} == {"1", "2"}
-        async with rig.factory() as session:
-            row = await session.get(ReliableMessage, expired.message_id)
+            assert {first_started, await started.get(), await started.get()} == {"0", "1", "2"}
+            release.set()
+            for _ in range(100):
+                async with rig.factory() as session:
+                    row = await session.get(ReliableMessage, expired.message_id)
+                    if row.status == "EXPIRED":
+                        break
+                await asyncio.sleep(0.01)
             assert row.status == "EXPIRED" and row.attempts == 0
     finally:
         release.set()

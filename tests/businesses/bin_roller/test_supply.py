@@ -122,16 +122,16 @@ async def test_pending_feed_discovers_original_demand_before_cycle_and_retains_i
                 1, "T1", "C1", (), (SourceFaceRef(2, "R1", "A"), SourceFaceRef(3, "R1", "A"))
             ),
         )
-        upper = await env.roller.get_pending_upper_id(session, kind="FEED")
+        upper = await env.roller.get_pending_upper_id(session, kind="FACE")
         later = await env.demand(session, revision=4, change="M4")
         page = await env.roller.list_pending(
-            session, kind="FEED", after_id=None, upper_id=upper, limit=1
+            session, kind="FACE", after_id=None, upper_id=upper, limit=1
         )
-        assert page == (RollerWorkRef("FEED", first["id"]),)
+        assert page == (RollerWorkRef("FACE", first["id"]),)
         page = await env.roller.list_pending(
-            session, kind="FEED", after_id=first["id"], upper_id=upper, limit=10
+            session, kind="FACE", after_id=first["id"], upper_id=upper, limit=10
         )
-        assert page == (RollerWorkRef("FEED", started["id"]),)
+        assert page == (RollerWorkRef("FACE", started["id"]),)
         assert stopped["id"] not in {r.record_id for r in page}
         assert later["id"] > upper
-        assert await env.consume_feed(session, first["id"]) == "WAITING_FOR_SELECTED_FACE"
+        assert await env.consume_feed(session, first["id"]) == "WAITING_FOR_RACK"

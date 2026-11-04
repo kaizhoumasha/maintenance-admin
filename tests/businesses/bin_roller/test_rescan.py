@@ -14,12 +14,16 @@ async def test_failed_rescan_keeps_first_fifo_order(roller_scans):
     await flow.scan("SCAN4", "A000000001-B", timestamp=30)
     async with flow.factory() as session:
         attempts = [a for a in await flow.rows(session, "scan_arrival") if a["point"] == "SCAN4"]
-    for a in attempts[1:]:
+    for a in attempts:
         await flow.result(a["command_code"], "SCAN4")
-    async with flow.factory() as session:
+    async with flow.factory.begin() as session:
+        from app.businesses._components.bin_roller.ports import RollerWorkRef
+
+        for row in await flow.rows(session, "bin_return"):
+            await flow.roller.advance(session, RollerWorkRef("RETURN", row["id"]))
         candidates = await flow.roller.get_return_candidates(session, work_line_id=1)
         assert [r["bin_code"] for r in candidates] == ["A000000001", "A000000002"]
         current = next(
             r for r in await flow.rows(session, "return_round") if r["id"] == first["id"]
         )
-        assert current["scan4_arrival_id"] == first["scan4_arrival_id"]
+        assert current["first_scan4_event_id"] == first["first_scan4_event_id"]

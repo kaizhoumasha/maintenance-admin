@@ -263,7 +263,7 @@ async def test_rolled_back_arrival_does_not_invalidate_original_confirmation(
     assert await flow.confirm() == "COMPLETED"
 
 
-async def test_completed_task_keeps_original_release_pending_after_successor_starts(
+async def test_completed_task_closes_original_release_before_successor_starts(
     manual_bins, manual_completion_tools
 ):
     from app.businesses._components.bin_roller.ports import RollerWorkRef
@@ -280,7 +280,7 @@ async def test_completed_task_keeps_original_release_pending_after_successor_sta
     assert await flow.confirm() == "COMPLETED"
     await flow.ready(task_id="T2")
     original_release = (await flow.rows("scan2_release", component=True))[0]
-    await flow.result((await flow.rows("manual_bin"))[0]["command_code"])
+    assert original_release["pending"] is False
     async with flow.factory.begin() as session:
         await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
         await flow.roller.advance(session, RollerWorkRef("SCAN2_RELEASE", original_release["id"]))

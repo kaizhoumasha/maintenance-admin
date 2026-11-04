@@ -7,6 +7,8 @@ from .types import (
     MessageStatus,
     OutgoingMessage,
     ProtocolAdapter,
+    ScopeRef,
+    ScopeStopItem,
     Verdict,
     VerdictKind,
 )
@@ -21,6 +23,8 @@ __all__ = [
     "MessageStatus",
     "OutgoingMessage",
     "ProtocolAdapter",
+    "ScopeRef",
+    "ScopeStopItem",
     "Verdict",
     "VerdictKind",
 ]

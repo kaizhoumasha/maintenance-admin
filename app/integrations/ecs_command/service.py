@@ -57,7 +57,10 @@ class EcsCommands:
         device_code,
         timeout_ms,
         command,
+        scope=None,
     ):
+        if scope is not None and scope.owner_domain != owner.domain:
+            raise ValueError("command scope owner mismatch")
         declaration = command_declaration(type(command))
         binding = declaration.bindings[0]
         params = validated_model_payload(command)
@@ -86,6 +89,7 @@ class EcsCommands:
             timeout_ms=timeout_ms,
             params=params,
             resolve_route=resolve_route,
+            scope=scope,
         )
 
     async def _enqueue(
@@ -99,6 +103,7 @@ class EcsCommands:
         timeout_ms,
         params,
         resolve_route,
+        scope=None,
     ):
         if (
             not isinstance(owner, CommandOwner)
@@ -125,6 +130,13 @@ class EcsCommands:
         row = await session.scalar(query)
         if row is not None:
             compare(row)
+            await self.outbox.check_scope(
+                session,
+                target=row.target,
+                operation=OPERATION,
+                operation_id=row.command_code,
+                scope=scope,
+            )
             return await self._view(session, row)
         route = await resolve_route()
         if route.device_code != device_code or task_type not in route.commands:
@@ -204,11 +216,30 @@ class EcsCommands:
                         business_key=code,
                         delivery_snapshot=snapshot,
                         expires_at=values["expires_at"],
+                        scope=scope,
                     ),
+                )
+            else:
+                await self.outbox.check_scope(
+                    session,
+                    target=row.target,
+                    operation=OPERATION,
+                    operation_id=row.command_code,
+                    scope=scope,
                 )
         return await self._view(session, row)
 
-    async def _view(self, session: AsyncSession, row: EcsCommand) -> CommandView:
+    @staticmethod
+    async def _view(session: AsyncSession, row: EcsCommand) -> CommandView:
+        from app.models import ReliableMessage
+
+        message_id = await session.scalar(
+            select(ReliableMessage.id).where(
+                ReliableMessage.target == row.target,
+                ReliableMessage.operation == OPERATION,
+                ReliableMessage.operation_id == row.command_code,
+            )
+        )
         result = None
         if row.applied_result_id:
             evidence = await session.scalar(
@@ -226,6 +257,9 @@ class EcsCommands:
             result,
             row.hold_reason,
             row.needs_reconciliation,
+            message_id=message_id,
+            task_type=row.task_type,
+            device_code=row.device_code,
         )
 
     async def get_command(

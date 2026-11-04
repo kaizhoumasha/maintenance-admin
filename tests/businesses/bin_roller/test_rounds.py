@@ -7,9 +7,11 @@ async def test_removed_round_does_not_block_new_round(roller_scans):
     await flow.scan("SCAN4", "A000000001-B", timestamp=11)
     async with flow.factory.begin() as session:
         original = (await flow.rows(session, "return_round"))[0]
-        table = flow.store.tables["scan_arrival"]
+        table = flow.store.tables["bin_return"]
         await session.execute(
-            table.update().where(table.c.id == original["scan3_arrival_id"]).values(removed=True)
+            table.update()
+            .where(table.c.id == original["scan3_arrival_id"])
+            .values(is_current=False)
         )
     await flow.scan("SCAN3", "A000000002-B", timestamp=20)
     await flow.scan("SCAN3", "A000000001-B", timestamp=30)
@@ -21,7 +23,7 @@ async def test_removed_round_does_not_block_new_round(roller_scans):
             r for r in await flow.rows(session, "return_round") if r["bin_code"] == "A000000001"
         ]
         assert len(rounds) == 2
-        assert next(r for r in rounds if r["id"] != original["id"])["status"] == "PENDING"
+        assert next(r for r in rounds if r["id"] != original["id"])["status"] == "WAITING"
 
 
 async def test_old_result_cannot_reopen_new_round(roller_return):
@@ -34,9 +36,9 @@ async def test_old_result_cannot_reopen_new_round(roller_return):
         await flow.decide(session, batch_id)
         await flow.consume_return(session, batch_id)
         old = (await flow.rows(session, "return_round"))[0]
-        table = flow.store.tables["scan_arrival"]
+        table = flow.store.tables["bin_return"]
         await session.execute(
-            table.update().where(table.c.id == old["scan3_arrival_id"]).values(removed=True)
+            table.update().where(table.c.id == old["scan3_arrival_id"]).values(is_current=False)
         )
     await flow.scan("SCAN3", "A000000002-B", timestamp=20)
     await flow.scan("SCAN3", "A000000001-B", timestamp=30)
@@ -44,14 +46,14 @@ async def test_old_result_cannot_reopen_new_round(roller_return):
     await flow.scan("SCAN4", "A000000001-B", timestamp=40)
     await flow.success(batch_id)
     async with flow.factory.begin() as session:
-        assert await flow.consume_return(session, batch_id) == "SUCCEEDED"
+        assert await flow.consume_return(session, batch_id) == "RETURN_SUCCEEDED"
         rounds = [
             r for r in await flow.rows(session, "return_round") if r["bin_code"] == "A000000001"
         ]
         original = next(r for r in rounds if r["id"] == old["id"])
         newer = next(r for r in rounds if r["id"] != old["id"])
-        assert original["removed"] and original["status"] == old["status"]
-        assert newer["status"] == "PENDING" and not newer["removed"]
+        assert original["removed"] and original["closed_at"]
+        assert newer["status"] == "WAITING" and not newer["removed"]
         assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()
         assert not await flow.roller.return_channel_empty(session, work_line_id=1)
 
@@ -72,12 +74,12 @@ async def test_completed_round_late_result_cannot_finish_next_round(roller_retur
     await flow.scan("SCAN3", "A000000001-B", timestamp=30)
     await flow.scan("SCAN4", "A000000001-B", timestamp=40)
     async with flow.factory.begin() as session:
-        assert await flow.consume_return(session, batch_id) == "SUCCEEDED"
+        await flow.consume_return(session, batch_id)
         rounds = [
             r for r in await flow.rows(session, "return_round") if r["bin_code"] == "A000000001"
         ]
         assert len(rounds) == 2
         newer = next(r for r in rounds if r["id"] != old["id"])
-        assert newer["status"] == "PENDING"
+        assert newer["status"] == "WAITING"
         assert newer["scan4_arrival_id"] != old["scan4_arrival_id"]
         assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()

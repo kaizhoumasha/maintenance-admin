@@ -41,15 +41,37 @@ async def run_cleanup(factory, days, *, now=None, batch=500) -> int:
 async def run_receipt_cleanup(factory, days, *, now=None, batch=500) -> int:
     """收据保留期与可靠层终态消息一致(`RELIABLE_RETENTION_DAYS`);超期重放的旧身份按新消息处理,
     业务幂等由任务行上的版本与摘要承担。"""
-    return await _purge(
-        factory,
-        CallbackReceipt,
-        CallbackReceipt.created_at,
-        days,
-        "RELIABLE_RETENTION_DAYS",
-        now,
-        batch,
-    )
+    from app.businesses._components.bin_roller.retention import protected_event_ids
+
+    positive(days, "RELIABLE_RETENTION_DAYS")
+    positive(batch, "batch")
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=days)
+    total, cursor = 0, 0
+    while True:
+        async with factory() as session, session.begin():
+            if session.get_bind().dialect.name == "postgresql":
+                await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+            ids = tuple(
+                await session.scalars(
+                    select(CallbackReceipt.id)
+                    .where(
+                        CallbackReceipt.id > cursor,
+                        CallbackReceipt.created_at < cutoff,
+                    )
+                    .order_by(CallbackReceipt.id)
+                    .limit(batch)
+                )
+            )
+            if not ids:
+                return total
+            protected = await protected_event_ids(session, candidate_ids=ids)
+            removed = await session.execute(
+                delete(CallbackReceipt).where(
+                    CallbackReceipt.id.in_(ids), CallbackReceipt.id.not_in(protected)
+                )
+            )
+            total += removed.rowcount
+            cursor = ids[-1]
 
 
 def _run(cleanup, days_setting: str) -> int:

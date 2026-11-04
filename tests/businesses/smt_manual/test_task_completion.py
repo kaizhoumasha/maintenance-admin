@@ -72,7 +72,7 @@ async def test_manual_completion_does_not_wait_for_scan2_result(
     assert len(await flow.confirmations()) == 1
     await flow.confirmation_response(dict(result="COMPLETED"))
     assert await flow.confirm() == "COMPLETED"
-    assert (await flow.rows("scan2_release", component=True))[0]["pending"]
+    assert not (await flow.rows("scan2_release", component=True))[0]["pending"]
 
 
 async def test_target_only_outbound_requires_reliable_transfer_arrival(

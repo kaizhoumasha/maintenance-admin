@@ -43,7 +43,7 @@ async def test_two_lines_keep_tasks_arrivals_and_returns_separate(formal_manual,
         (flow.lines[1], tasks[1], "SOURCE-1"),
     }
     for demand in demands:
-        await flow.host.advance("FEED", demand["id"])
+        await flow.host.advance("FACE", demand["id"])
     actions = await flow.rows("rack_action", roller=True)
     assert {(r["work_line_id"], r["target"]["location_code"]) for r in actions} == {
         (flow.lines[0], flow.positions[0]["FIVE_RACK"]),
@@ -98,17 +98,17 @@ async def test_two_lines_keep_tasks_arrivals_and_returns_separate(formal_manual,
     first = next(row for row in scans4 if row["work_line_id"] == flow.lines[0])
     second = next(row for row in scans4 if row["work_line_id"] == flow.lines[1])
     await flow.result(first["command_code"])
-    await flow.host.advance("SCAN", first["id"])
+    await flow.host.advance("RETURN", first["id"])
     async with flow.factory() as session:
         ready = await flow.roller.get_return_candidates(session, work_line_id=flow.lines[0])
-        assert [row["scan4_arrival_id"] for row in ready] == [first["id"]]
+        assert [row["id"] for row in ready] == [first["id"]]
         assert await flow.roller.get_return_candidates(session, work_line_id=flow.lines[1]) == ()
     await flow.result(second["command_code"])
-    await flow.host.advance("SCAN", second["id"])
+    await flow.host.advance("RETURN", second["id"])
     await flow.result(first["command_code"])
     async with flow.factory() as session:
         ready = await flow.roller.get_return_candidates(session, work_line_id=flow.lines[1])
-        assert [row["scan4_arrival_id"] for row in ready] == [second["id"]]
+        assert [row["id"] for row in ready] == [second["id"]]
     from tests.helpers import manual_return_opportunity
 
     for line in (0, 1):

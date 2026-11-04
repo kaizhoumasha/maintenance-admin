@@ -61,7 +61,7 @@ async def get_result(
         availability="FOUND",
         target=row["target"],
         delivery_status=row["status"],
-        delivery_terminal=row["status"] in {"DONE", "FAILED", "EXPIRED"},
+        delivery_terminal=row["status"] in {"DONE", "FAILED", "EXPIRED", "ABANDONED"},
         delivery_uncertain=row["delivery_uncertain"],
         fail_reason=row["fail_reason"],
         **stored_response(outgoing_message(row), row, adapter),

@@ -26,7 +26,7 @@ from .roller_ports import RollerPorts
 from .task_flow import SmtManualTaskFlow
 
 logger = logging.getLogger(__name__)
-ROLLER_KINDS = ("SCAN", "SCAN2_RELEASE", "FEED", "RETURN_BATCH", "RACK_CYCLE", "DRAIN")
+ROLLER_KINDS = ("PASSAGE", "SCAN2_RELEASE", "RETURN", "FACE", "RACK_CYCLE", "DRAIN")
 KINDS = ("TASK", "MANUAL_BIN", "MANUAL_COMPLETION", "MANUAL_RACK", "RACK_REPORT", *ROLLER_KINDS)
 
 
@@ -56,7 +56,7 @@ class SmtManualService(SmtManualTaskFlow):
         return await self.ports.read_successor(session, work_line_id=work_line_id)
 
     async def accept_scan2(self, ctx, arrival):
-        await self.manual_bins.accept_scan2(ctx, arrival)
+        return await self.manual_bins.accept_scan2(ctx, arrival)
 
     async def accept_manual_completed(self, ctx, payload):
         return await self.manual_bins.accept_manual_completed(ctx, payload)
@@ -74,16 +74,6 @@ class SmtManualService(SmtManualTaskFlow):
         return select(task.c.task_id).where(
             or_(
                 task.c.status.in_(("QUEUED", "PREPARING", "EXECUTING")),
-                task.c.prepare_message_id.is_not(None) & task.c.prepare_accepted.is_(False),
-                select(confirmation.c.operation_id)
-                .where(
-                    confirmation.c.operation_id == task.c.confirmation_operation_id,
-                    confirmation.c.kind == "COMPLETION_CONFIRM",
-                    confirmation.c.task_id == task.c.task_id,
-                    confirmation.c.work_line_id == task.c.work_line_id,
-                    confirmation.c.state == "REQUESTED",
-                )
-                .exists(),
                 select(notice.c.operation_id)
                 .where(
                     notice.c.task_id == task.c.task_id,
@@ -167,9 +157,9 @@ class SmtManualService(SmtManualTaskFlow):
                                 if kind
                                 in {
                                     "TASK",
-                                    "SCAN",
-                                    "FEED",
-                                    "RETURN_BATCH",
+                                    "PASSAGE",
+                                    "FACE",
+                                    "RETURN",
                                     "RACK_CYCLE",
                                     "DRAIN",
                                     "MANUAL_RACK",
@@ -205,11 +195,20 @@ class SmtManualService(SmtManualTaskFlow):
                 column = table.c.arrival_id if kind == "MANUAL_BIN" else table.c.operation_id
                 located = await self.manual_bins._one(session, key, column == record_id)
             else:
-                key = {"SCAN": "scan_arrival", "FEED": "supply_demand"}.get(kind, kind.lower())
+                key = {
+                    "PASSAGE": "bin_passage",
+                    "RETURN": "bin_return",
+                    "FACE": "face_work",
+                    "DRAIN": "workline_state",
+                }.get(kind, kind.lower())
                 located = await self.roller.original_record(session, key, record_id)
             if not located:
                 return "NOT_FOUND"
             task_id = located.get("task_id")
+            if kind == "FACE" and located["purpose"] == "SUPPLY":
+                task_id = located["scope_id"]
+            elif kind == "PASSAGE" and located["scope_kind"] == "TASK":
+                task_id = located["scope_id"]
             await self.repository.lock_dispatch_line(
                 session, self.roller, located["work_line_id"], task_id=task_id
             )
@@ -242,7 +241,7 @@ class SmtManualService(SmtManualTaskFlow):
         if kind == "MANUAL_RACK":
             return await self.manual_racks.advance_rack(session, rack_work_id=record_id)
         if kind == "SCAN2_RELEASE":
-            located = await self.roller.original_record(session, "scan2_release", record_id)
+            located = await self.roller.original_record(session, "bin_passage", record_id)
             await self.repository.lock_line(session, located["work_line_id"])
-            await self.roller.original_record(session, "scan2_release", record_id, for_update=True)
+            await self.roller.original_record(session, "bin_passage", record_id, for_update=True)
         return await self.roller.advance(session, RollerWorkRef(kind, record_id))

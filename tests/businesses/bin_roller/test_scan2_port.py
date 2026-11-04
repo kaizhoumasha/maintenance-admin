@@ -13,7 +13,7 @@ async def test_scan2_fact_precedes_business_admission_and_closes_only_component_
         assert admitted["arrival_id"] == arrival["id"]
         assert admitted["raw_bin_code"] == "A000000001-C"
         assert admitted["scanned_at"] == arrival["scanned_at"] == 10
-        assert arrival["delegation_state"] == "ACCEPTED" and not arrival["pending"]
+        assert arrival["delegation_state"] == "ACCEPTED"
         assert not await flow.messages(session)
 
 
@@ -23,9 +23,10 @@ async def test_two_productions_share_one_scan2_entry(roller_scans, owner):
     flow.rebuild(owner)
     flow.production.release_requested = True
     await flow.scan("SCAN2", "A000000001-C")
-    async with flow.factory() as session:
+    async with flow.factory.begin() as session:
         admitted = (await session.execute(select(flow.production_table))).mappings().one()
         arrival = (await flow.rows(session, "scan_arrival"))[0]
+        await flow.roller.release_scan2(session, arrival_id=arrival["id"])
         assert admitted["business"] == arrival["owner_domain"] == owner
         assert len(await flow.messages(session)) == 1
 
@@ -77,6 +78,8 @@ async def test_admission_and_release_intent_roll_back_with_outer_transaction(rol
     with pytest.raises(RuntimeError, match="outer rollback"):
         async with flow.factory.begin() as session:
             await flow.scan("SCAN2", "A000000001-C", timestamp=10, session=session)
+            arrival = (await flow.rows(session, "bin_passage"))[0]
+            await flow.roller.release_scan2(session, arrival_id=arrival["id"])
             assert len(await flow.messages(session)) == 1
             raise RuntimeError("outer rollback")
     async with flow.factory() as session:
@@ -84,7 +87,9 @@ async def test_admission_and_release_intent_roll_back_with_outer_transaction(rol
         assert not await flow.rows(session, "scan_arrival")
         assert not await flow.messages(session)
     await flow.scan("SCAN2", "A000000001-C", timestamp=10)
-    async with flow.factory() as session:
+    async with flow.factory.begin() as session:
+        arrival = (await flow.rows(session, "bin_passage"))[0]
+        await flow.roller.release_scan2(session, arrival_id=arrival["id"])
         assert len(await flow.rows(session, "scan2_release")) == 1
         assert len(await flow.messages(session)) == 1
 

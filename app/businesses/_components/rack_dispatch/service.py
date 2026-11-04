@@ -25,6 +25,7 @@ from app.integrations.wms_transport import (
     Zone,
 )
 from app.models import WorkLine
+from app.reliable import ScopeRef
 
 from .contracts import (
     ActionProgress,
@@ -176,7 +177,9 @@ class RackDispatch:
             query = query.order_by(RackAction.id).with_for_update()
         return sorted(await session.scalars(query), key=lambda row: row.ordinal)
 
-    async def register(self, session: AsyncSession, origin: JobOrigin) -> str:
+    async def register(
+        self, session: AsyncSession, origin: JobOrigin, *, scope: ScopeRef | None = None
+    ) -> str:
         identity = dict(
             owner_domain=self.owner_domain,
             work_line_id=origin.work_line_id,
@@ -186,13 +189,21 @@ class RackDispatch:
         )
         if not all(identity.values()) or not origin.cycle_id:
             raise ValueError("incomplete rack origin")
+        if scope is not None and scope.owner_domain != self.owner_domain:
+            raise ValueError("rack scope owner mismatch")
         values = asdict(origin)
+        tags = dict(
+            scope_owner=scope.owner_domain if scope else None,
+            scope_kind=scope.kind if scope else None,
+            scope_id=scope.scope_id if scope else None,
+        )
         del values["cycle_id"]
         insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
         await session.execute(
             insert(RackJob)
             .values(
                 **values,
+                **tags,
                 id=origin.cycle_id,
                 original_cycle_id=origin.cycle_id,
                 owner_domain=self.owner_domain,
@@ -206,6 +217,8 @@ class RackDispatch:
                 .execution_options(populate_existing=True)
             )
         ).one()
+        if any(getattr(job, key) != value for key, value in tags.items()):
+            raise ValueError("original rack scope cannot change")
         # A drain candidate can acquire its original approved resources exactly once.
         if (
             job.state == "ACTIVE"
@@ -223,6 +236,80 @@ class RackDispatch:
             for k in ("resources", "caller", "workline_code", "point", "initial_face"):
                 setattr(job, k, values[k])
         return job.id
+
+    async def close_scope(self, session, scope: ScopeRef, *, reason: str):
+        if scope.owner_domain != self.owner_domain:
+            raise ValueError("rack scope owner mismatch")
+        jobs = list(
+            await session.scalars(
+                self._jobs.where(
+                    RackJob.scope_owner == scope.owner_domain,
+                    RackJob.scope_kind == scope.kind,
+                    RackJob.scope_id == scope.scope_id,
+                    RackJob.pending.is_(True),
+                )
+                .order_by(RackJob.id)
+                .with_for_update()
+            )
+        )
+        for job in jobs:
+            job.state = "CLOSED_BY_SCOPE"
+            job.pending = False
+            job.closure_reason = "CLOSED_BY_SCOPE"
+            job.closure_basis = dict(reason=reason, scope_kind=scope.kind, scope_id=scope.scope_id)
+        await session.flush()
+
+    async def get_point_preparations(self, session, *, work_line_id: int, point: str):
+        jobs = await self.jobs(
+            session,
+            work_line_id=work_line_id,
+            source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+            pending=True,
+        )
+        eligible = []
+        if await self.has_position_conflict(session, point=point):
+            return ()
+        for job in jobs:
+            if (
+                job.state != "ACTIVE"
+                or job.review_reason
+                or job.origin.point != point
+                or not job.actions
+            ):
+                continue
+            action = job.actions[-1]
+            if (
+                action.id != job.current_action_id
+                or action.id != job.position_action_id
+                or action.kind not in ("ENTER", "ROTATE")
+                or action.phase != "APPLIED"
+                or not action.outcome
+                or action.outcome.get("status") != "SUCCEEDED"
+                or action.target_face != job.actual_face
+                or action.actual_face != job.actual_face
+                or action.target != _point(point)
+                or job.actual_position != action.target
+                or action.actual_position != action.target
+                or action.position_revision != action.outcome_revision
+            ):
+                continue
+            valid = True
+            for original in job.actions:
+                result = await self.final_result(session, job_id=job.id, action_id=original.id)
+                if (
+                    original.phase != "APPLIED"
+                    or not result
+                    or result.closure != "CLOSED"
+                    or result.has_pending_outcome
+                    or result.outcome_revision != original.outcome_revision
+                    or result.outcome != original.outcome
+                    or result.position_observation != original.position_observation
+                ):
+                    valid = False
+                    break
+            if valid:
+                eligible.append(job)
+        return tuple(eligible)
 
     async def progress(self, session: AsyncSession, *, job_id: str) -> RackProgress | None:
         job = await self._job(session, job_id)
@@ -318,7 +405,18 @@ class RackDispatch:
         )
         if exclude_job_id is not None:
             query = query.where(RackJob.id != exclude_job_id)
-        return bool(await session.scalar(query.limit(1)))
+        if await session.scalar(query.limit(1)):
+            return True
+        claims = await session.scalar(
+            select(func.count())
+            .select_from(RackJob)
+            .where(
+                RackJob.pending,
+                RackJob.position_action_id.is_not(None),
+                RackJob.actual_position["location_code"].as_string() == point,
+            )
+        )
+        return claims > 1
 
     async def withdraw_unused(
         self, session: AsyncSession, *, job_id: str, source: Coverage
@@ -456,6 +554,9 @@ class RackDispatch:
             cycle_id=job.original_cycle_id,
             rcs_template_id=action.template,
             target_face=action.target_face,
+            scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
+            if job.scope_owner
+            else None,
         )
         transport = self.capabilities.transport
         if action.kind == "ROTATE":
@@ -955,7 +1056,14 @@ class RackDispatch:
             current_face=job.actual_face,
         )
         op_id = _id()
-        message = await self.capabilities.wms.send(session, payload, operation_id=op_id)
+        message = await self.capabilities.wms.send(
+            session,
+            payload,
+            operation_id=op_id,
+            scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
+            if job.scope_owner
+            else None,
+        )
         row = RackAction(
             id=_id(),
             job_id=job.id,
@@ -1053,3 +1161,40 @@ class RackDispatch:
             now_ms,
         )
         await session.flush()
+
+
+async def pending_message_references(session, *, candidate_ids):
+    """Original active rack references for one cleanup batch, including their line owners."""
+    if not candidate_ids:
+        return ()
+    rows = await session.execute(
+        select(RackJob.work_line_id, RackAction.message_id, RackAction.submit_message_id)
+        .join(RackAction, RackAction.job_id == RackJob.id)
+        .where(
+            RackJob.pending.is_(True),
+            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN")),
+            (RackAction.message_id.in_(candidate_ids))
+            | (RackAction.submit_message_id.in_(candidate_ids)),
+        )
+    )
+    return tuple(
+        (line, identity)
+        for line, message, submission in rows
+        for identity in (message, submission)
+        if identity in candidate_ids
+    )
+
+
+async def get_job(session, *, owner_domain, job_id):
+    """Pure original job projection for reference retention."""
+    job = await session.scalar(
+        select(RackJob).where(RackJob.owner_domain == owner_domain, RackJob.id == job_id)
+    )
+    if job is None:
+        return None
+    actions = list(
+        await session.scalars(
+            select(RackAction).where(RackAction.job_id == job.id).order_by(RackAction.ordinal)
+        )
+    )
+    return _snapshot(job, actions)

@@ -23,7 +23,7 @@ class RollerPorts:
         self.repository = repository
         self.manual_bins = manual_bins
 
-    async def lock_scan2_task(self, session: AsyncSession, *, work_line_id: int) -> None:
+    async def resolve_scan2_task(self, session: AsyncSession, *, work_line_id: int) -> CurrentTask:
         # The event resolver owns the line and source device before any scan row is written.
         table = self.repository.tables["task"]
         await session.execute(
@@ -35,10 +35,12 @@ class RollerPorts:
             .with_for_update()
         )
 
-    async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> None:
+        return await self.read_current_task(session, work_line_id=work_line_id)
+
+    async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> str:
         if self.manual_bins is None:
             raise RuntimeError("manual bin production must be assembled")
-        await self.manual_bins.accept_scan2(ctx, arrival)
+        return await self.manual_bins.accept_scan2(ctx, arrival)
 
     async def read_task_coverage(
         self, session: AsyncSession, *, point: PointRef, task_id: str

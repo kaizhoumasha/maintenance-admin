@@ -65,7 +65,10 @@ class WmsRequests:
         payload: BaseModel,
         *,
         operation_id: str,
+        scope=None,
     ) -> EnqueueResult:
+        if scope is not None and scope.owner_domain != self.owner_domain:
+            raise InvalidRequestPayload("request scope owner mismatch")
         matches = [item for item in operations().values() if item.data_model is type(payload)]
         if len(matches) > 1:
             raise InvalidRequestPayload("payload model has multiple registered operations")
@@ -108,6 +111,7 @@ class WmsRequests:
             raw,
             ttl=registered.ttl,
             business_key=business_key,
+            scope=scope,
         )
         reference = await self.outbox.enqueue(session, draft)
         if reference.business_key != business_key:

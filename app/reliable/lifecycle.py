@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from datetime import timedelta
 from typing import Protocol
 
@@ -99,6 +100,8 @@ class SnapshotTransactions:
                     until = now + timedelta(
                         seconds=target.timeout_ms / 1000 + self.store.lease_margin_s
                     )
+                    if row.scope_owner is not None:
+                        row.dispatch_started_at = row.dispatch_started_at or now
                     row.lease_until = until
                     return until
                 outcome = AttemptOutcome(
@@ -138,13 +141,27 @@ class SnapshotTransactions:
             raise ValueError("FAILED requires matching rejection evidence")
         async with self.store.session_factory() as session, session.begin():
             port, context, row, _ = await self.locked(session, claim)
+            outcome = self._interruption(row, outcome)
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
                 await port.observe_late(session, context, claim, outcome)
                 return False
             await self.apply(session, port, context, row, claim, outcome)
             return True
 
+    @staticmethod
+    def _interruption(row, outcome):
+        if (
+            row is not None
+            and outcome.pause_reason == "LEASE_INTERRUPTED"
+            and row.scope_owner is not None
+            and row.dispatch_started_at is None
+            and not row.delivery_uncertain
+        ):
+            return replace(outcome, delivery_uncertain=False)
+        return outcome
+
     async def apply(self, session, port, context, row, claim, outcome):
+        outcome = self._interruption(row, outcome)
         now = self.store.clock()
         row.status = outcome.status
         row.pause_reason = outcome.pause_reason

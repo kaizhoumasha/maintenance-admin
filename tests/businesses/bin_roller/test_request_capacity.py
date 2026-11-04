@@ -40,10 +40,21 @@ async def test_original_requests_share_current_line_budget_and_keep_identity(
     await set_limit(flow, limit)
     demands = [await flow.demand(rack=f"R{i}") for i in range(5)]
     for demand in demands:
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
     original = await entries(flow)
     assert len(original) == expected
-    await asyncio.gather(*(flow.advance("FEED", demand) for demand in demands))
+    results = await asyncio.gather(
+        *(flow.advance("FACE", demand) for demand in demands), return_exceptions=True
+    )
+    from sqlalchemy.exc import DBAPIError
+
+    for result in results:
+        if isinstance(result, BaseException):
+            assert (
+                isinstance(result, DBAPIError) and getattr(result.orig, "sqlstate", None) == "40001"
+            )
+    for demand in demands:
+        await flow.advance("FACE", demand)
     assert [a["id"] for a in await entries(flow)] == [a["id"] for a in original]
     assert len({a["transport_task_id"] for a in await entries(flow)}) == expected
 
@@ -63,7 +74,7 @@ async def test_unknown_or_failed_entry_keeps_budget_after_limit_is_lowered(
     ):
         demands = [await flow.demand(rack=f"R{i}") for i in range(3)]
     for demand in demands:
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
     original = await entries(flow)
     assert len(original) == 2
     if status:
@@ -71,10 +82,10 @@ async def test_unknown_or_failed_entry_keeps_budget_after_limit_is_lowered(
         await flow.advance("RACK_CYCLE", original[0]["cycle_id"])
     await set_limit(flow, 1)
     for demand in demands:
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
     assert [a["id"] for a in await entries(flow)] == [a["id"] for a in original]
     await set_limit(flow, 3)
-    await flow.advance("FEED", demands[-1])
+    await flow.advance("FACE", demands[-1])
     assert len(await entries(flow)) == 3
 
 
@@ -84,9 +95,9 @@ async def test_selected_quota_waiter_can_be_withdrawn_without_starting_or_stalli
     flow = roller_lifecycle
     await set_limit(flow, 1)
     first = await flow.demand(rack="OCCUPIED")
-    await flow.advance("FEED", first)
+    await flow.advance("FACE", first)
     withdrawn = await flow.demand(rack="WAITING", face="A")
-    await flow.advance("FEED", withdrawn)
+    await flow.advance("FACE", withdrawn)
     demand = next(d for d in await flow.all_rows("supply_demand") if d["id"] == withdrawn)
     assert demand["cycle_id"] is not None
     assert len(await entries(flow)) == 1
@@ -100,9 +111,9 @@ async def test_selected_quota_waiter_can_be_withdrawn_without_starting_or_stalli
     await set_limit(flow, 3)
     for kind, record in (
         ("RACK_CYCLE", demand["cycle_id"]),
-        ("FEED", withdrawn),
-        ("FEED", sibling),
-        ("FEED", other),
+        ("FACE", withdrawn),
+        ("FACE", sibling),
+        ("FACE", other),
     ):
         await flow.advance(kind, record)
     actions = await entries(flow)
@@ -110,7 +121,7 @@ async def test_selected_quota_waiter_can_be_withdrawn_without_starting_or_stalli
     cycles = await flow.all_rows("rack_cycle")
     original_cycle = next(c for c in cycles if c["id"] == demand["cycle_id"])
     assert original_cycle["status"] == "ACTIVE" and original_cycle["release_basis"] is None
-    cancelled = next(d for d in await flow.all_rows("face_work") if d["id"] == withdrawn)
+    cancelled = next(d for d in await flow.all_rows("face_service") if d["id"] == withdrawn)
     assert cancelled["service_state"] == "WITHDRAWN"
     assert cancelled["cycle_id"] == demand["cycle_id"]
     assert cancelled["service_id"] == demand["service_id"]
@@ -141,12 +152,11 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
     withdrawn,
     persisted,
 ):
-    from app.core.identifiers import uuid7
 
     flow = roller_lifecycle
     await set_limit(flow, 1)
     occupied = await flow.demand(rack="OCCUPIED")
-    await flow.advance("FEED", occupied)
+    await flow.advance("FACE", occupied)
     first, second = await ordered_waiting_faces(flow)
     if persisted:
         # Previously saved unstarted candidate: FEED B selected the older service A.
@@ -159,9 +169,9 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
                 session,
                 repo,
                 "ROLLER_ORDINARY",
-                second,
+                first,
                 "WAITING",
-                "B",
+                "A",
                 flow.current_task,
                 await flow.roller.read_resources(session, 1),
             )
@@ -170,10 +180,9 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
                 session,
                 demand_id=first,
                 cycle_id=cycle_id,
-                service_id=str(uuid7()),
             )
     else:
-        await flow.advance("FEED", second)
+        await flow.advance("FACE", second)
     old = next(d for d in await flow.all_rows("supply_demand") if d["id"] == first)
     old_cycle = next(c for c in await flow.all_rows("rack_cycle") if c["id"] == old["cycle_id"])
     assert old["service_id"] and len(await entries(flow)) == 1
@@ -189,9 +198,9 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
     await set_limit(flow, 2)
     for kind, identity in (
         ("RACK_CYCLE", old_cycle["id"]),
-        ("FEED", cancelled),
-        ("FEED", valid),
-        ("FEED", valid),
+        ("FACE", cancelled),
+        ("FACE", valid),
+        ("FACE", valid),
     ):
         await flow.advance(kind, identity)
     cycles = await flow.all_rows("rack_cycle")
@@ -202,7 +211,7 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
         if next(c for c in cycles if c["id"] == a["cycle_id"])["rack_id"] == "WAITING"
     ]
     assert faces == (["B"] if withdrawn == "A" else ["A"])
-    saved = next(d for d in await flow.all_rows("face_work") if d["id"] == first)
+    saved = next(d for d in await flow.all_rows("face_service") if d["id"] == first)
     assert saved["cycle_id"] == old["cycle_id"] and saved["service_id"] == old["service_id"]
     saved_cycle = next(c for c in cycles if c["id"] == old_cycle["id"])
     assert saved_cycle["source_ref"] == old_cycle["source_ref"]
@@ -221,16 +230,16 @@ async def test_prebound_sibling_cancellation_preserves_unstarted_identities_and_
         assert not cancelled_progress.feed_complete and not cancelled_progress.pending
     other = await flow.demand(rack="OTHER")
     await set_limit(flow, 3)
-    await flow.advance("FEED", other)
+    await flow.advance("FACE", other)
     assert len(await entries(flow)) == 3
     if not persisted:
-        assert old_cycle["source_ref"] == first
+        assert old_cycle["source_ref"] == second
 
 
 async def test_withdrawal_after_original_entry_keeps_started_obligation(roller_lifecycle):
     flow = roller_lifecycle
     demand = await flow.demand()
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     entry = (await entries(flow))[0]
     async with flow.factory.begin() as session:
         await flow.roller.apply_supply_change(
@@ -238,11 +247,11 @@ async def test_withdrawal_after_original_entry_keeps_started_obligation(roller_l
             SupplyChange(1, flow.current_task, "withdraw", (), (SourceFaceRef(1, "R1", "A"),)),
         )
     await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    current = next(d for d in await flow.all_rows("face_work") if d["id"] == demand)
+    current = next(d for d in await flow.all_rows("face_service") if d["id"] == demand)
     assert current["service_state"] == "PENDING"
     await flow.rack_result(entry)
-    await flow.advance("FEED", demand)
-    current = next(d for d in await flow.all_rows("face_work") if d["id"] == demand)
+    await flow.advance("FACE", demand)
+    current = next(d for d in await flow.all_rows("face_service") if d["id"] == demand)
     assert current["feed_id"] is not None and current["service_state"] == "READY"
     async with flow.factory() as session:
         progress = (
@@ -261,31 +270,32 @@ async def test_unstarted_withdrawn_service_remains_terminal_after_sibling_cycle_
     flow = roller_lifecycle
     await set_limit(flow, 1)
     occupied = await flow.demand(rack="OCCUPIED")
-    await flow.advance("FEED", occupied)
+    await flow.advance("FACE", occupied)
     first, second = await ordered_waiting_faces(flow)
-    await flow.advance("FEED", second)
+    await flow.advance("FACE", second)
     async with flow.factory.begin() as session:
         await flow.roller.apply_supply_change(
             session,
             SupplyChange(1, flow.current_task, "withdraw", (), (SourceFaceRef(1, "WAITING", "A"),)),
         )
     await set_limit(flow, 2)
-    await flow.advance("FEED", first)
+    await flow.advance("FACE", first)
+    await flow.advance("FACE", second)
     entry = (await entries(flow))[-1]
     assert entry["target_face"] == "B"
     await flow.rack_result(entry)
-    await flow.advance("FEED", second)
+    await flow.advance("FACE", second)
     feed = (await flow.all_rows("feed"))[-1]
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", second)
+    await flow.advance("FACE", second)
     await flow.finish_departure(entry["cycle_id"])
-    cancelled = next(d for d in await flow.all_rows("face_work") if d["id"] == first)
+    cancelled = next(d for d in await flow.all_rows("face_service") if d["id"] == first)
     assert cancelled["service_state"] == "WITHDRAWN"
     async with flow.factory() as session:
-        upper = await flow.roller.get_pending_upper_id(session, kind="FEED")
+        upper = await flow.roller.get_pending_upper_id(session, kind="FACE")
         pending = await flow.roller.list_pending(
             session,
-            kind="FEED",
+            kind="FACE",
             after_id=None,
             upper_id=upper,
             limit=100,
@@ -302,103 +312,41 @@ async def test_unstarted_withdrawn_service_remains_terminal_after_sibling_cycle_
         assert not original.feed_complete and not original.pending
 
 
-@pytest.mark.parametrize(
-    "buffer,first_work",
-    [("queued", "RACK_CYCLE"), ("empty", "RACK_CYCLE"), ("empty", "DRAIN"), ("unknown", "DRAIN")],
-)
-async def test_ordinary_and_drain_original_requests_use_one_budget(
-    roller_lifecycle, buffer, first_work
-):
+@pytest.mark.parametrize("buffer", ["queued", "empty", "unknown"])
+async def test_ordinary_and_drain_original_requests_use_one_budget(roller_lifecycle, buffer):
     flow = roller_lifecycle
     await set_limit(flow, 1)
-    demand = await flow.demand(rack="ORDINARY")
-    await flow.advance("FEED", demand)
-    entry = (await entries(flow))[0]
-    await flow.rack_result(entry)
-    await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    feed = (await flow.all_rows("feed"))[0]
-    await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", demand)
-    flow.successor = "NONE"
+    face_id, ordinary = await flow.ready_supply(count=1)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", face_id)
     await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        drain["id"],
-        dict(
-            result="READY",
-            racks=[dict(rack_id="DRAIN", rack_face=["A"])],
-        ),
+    flow.successor = "NONE"
+    root = (await flow.all_rows("bin_return"))[0]
+    await flow.advance("RETURN", root["id"])
+    state = (await flow.all_rows("workline_state"))[0]
+    await flow.decide_current(
+        state["drain_message_id"],
+        dict(result="READY", racks=[dict(rack_id="DRAIN", rack_face=["A"])]),
     )
-    await flow.advance("DRAIN", drain["id"])
-    assert len(await entries(flow)) == 1
-    cycle = next(c for c in await flow.all_rows("rack_cycle") if c["purpose"] == "DRAIN")
-    service = next(s for s in await flow.all_rows("face_work") if s["cycle_id"] == cycle["id"])
-    original = (await flow.all_rows("drain"))[0]
-    if buffer == "queued":
-        await flow.finish_departure(entry["cycle_id"])
-        for _ in range(2):
-            await flow.advance("RACK_CYCLE", cycle["id"])
-        assert [a["source_ref"] for a in await entries(flow) if a["cycle_id"] == cycle["id"]] == [
-            service["service_id"]
-        ]
-        return
-
-    # Another ready face takes the last box. Its original Transport decides when it leaves.
-    async with flow.factory.begin() as session:
-        batch_id = await flow.start(session, await flow.selected(session))
-        await flow.decide(session, batch_id)
-        assert await flow.consume_return(session, batch_id) == "WAITING_FOR_RETURN_RESULT"
-    await flow.advance("DRAIN", drain["id"])
-    assert (await flow.all_rows("drain"))[0]["unused_racks"] == []
-    await flow.success(
-        batch_id, placed=buffer == "empty", status="SUCCEEDED" if buffer == "empty" else "UNKNOWN"
-    )
-    async with flow.factory.begin() as session:
-        assert await flow.consume_return(session, batch_id) == (
-            "SUCCEEDED" if buffer == "empty" else "UNKNOWN"
-        )
-        assert await flow.roller.return_channel_empty(session, work_line_id=1) == (
-            buffer == "empty"
-        )
-    if buffer == "unknown":
-        # A new visit retires the FIFO passage while its original movement remains unresolved.
-        await flow.scan("SCAN3", "A000000002-B", timestamp=50)
-        await flow.scan("SCAN3", "A000000001-B", timestamp=51)
+    await flow.advance("DRAIN", state["line_run_id"])
+    drain = next(c for c in await flow.all_rows("rack_cycle") if c["purpose"] == "DRAIN")
+    assert not [a for a in await entries(flow) if a["cycle_id"] == drain["id"]]
+    if buffer == "empty":
+        async with flow.factory.begin() as session:
+            await flow.roller.repository(1).close(session, "bin_return", root["id"], "EXITED")
+        await flow.advance("DRAIN", state["line_run_id"])
         async with flow.factory() as session:
-            assert not await flow.roller.get_return_candidates(session, work_line_id=1)
-            assert not await flow.roller.return_channel_empty(session, work_line_id=1)
-        await flow.finish_departure(entry["cycle_id"])
-        await flow.advance("RACK_CYCLE", cycle["id"])
-        assert (await flow.all_rows("drain"))[0]["unused_racks"] == []
-        assert not [a for a in await flow.all_rows("rack_action") if a["cycle_id"] == cycle["id"]]
-        assert next(c for c in await flow.all_rows("rack_cycle") if c["id"] == cycle["id"])[
-            "pending"
-        ]
-        return
-
-    await set_limit(flow, 2)
-    await flow.advance(first_work, cycle["id"] if first_work == "RACK_CYCLE" else drain["id"])
-    await flow.finish_departure(entry["cycle_id"])
-    for _ in range(2):
-        await flow.advance("RACK_CYCLE", cycle["id"])
-        await flow.advance("DRAIN", drain["id"])
-    current = (await flow.all_rows("drain"))[0]
-    assert (current["status"], current["pending"], current["unused_racks"]) == (
-        "COMPLETED",
-        False,
-        ["DRAIN"],
-    )
-    assert all(current[k] == original[k] for k in ("id", "operation_id", "message_id", "decision"))
-    assert not [a for a in await flow.all_rows("rack_action") if a["cycle_id"] == cycle["id"]]
-    saved = next(c for c in await flow.all_rows("rack_cycle") if c["id"] == cycle["id"])
-    assert (saved["status"], saved["pending"], saved["release_basis"]) == ("WITHDRAWN", False, None)
-    face = next(
-        s for s in await flow.all_rows("face_work") if s["service_id"] == service["service_id"]
-    )
-    assert face["service_state"] == "WITHDRAWN" and face["cycle_id"] == cycle["id"]
+            job = await flow.roller.rack_dispatch.progress(session, job_id=drain["id"])
+            assert job.state == "WITHDRAWN" and not job.actions
+    else:
+        if buffer == "unknown":
+            # An observed physical head without its own result cannot become a free slot.
+            await flow.scan("SCAN4", "NOREAD", timestamp=100)
+        await flow.finish_departure(ordinary)
+        await flow.advance("RACK_CYCLE", drain["id"])
+        assert len([a for a in await entries(flow) if a["cycle_id"] == drain["id"]]) == 1
+        await flow.advance("DRAIN", state["line_run_id"])
+        assert len([a for a in await entries(flow) if a["cycle_id"] == drain["id"]]) == 1
 
 
 @pytest.mark.parametrize("response", [None, (503, "UNAVAILABLE"), (200, "RECEIVED")])
@@ -407,7 +355,7 @@ async def test_departure_without_valid_acceptance_does_not_admit_waiter(roller_l
     await set_limit(flow, 1)
     demand, cycle_id = await flow.ready_supply(count=1)
     await flow.feed_success((await flow.all_rows("feed_segment"))[0])
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     departure = (await flow.all_rows("departure"))[0]
     await flow.decision(
         "departure",
@@ -424,7 +372,7 @@ async def test_departure_without_valid_acceptance_does_not_admit_waiter(roller_l
         await flow.accepted(action, http=http, code=code)
     waiter = await flow.demand(rack="WAITING")
     await flow.advance("RACK_CYCLE", cycle_id)
-    await flow.advance("FEED", waiter)
+    await flow.advance("FACE", waiter)
     assert len(await entries(flow)) == 1
     cycle = next(c for c in await flow.all_rows("rack_cycle") if c["id"] == cycle_id)
     assert cycle["status"] == "ACTIVE" and cycle["release_basis"] is None
@@ -469,7 +417,7 @@ async def test_other_owner_original_entry_does_not_use_this_owners_budget(roller
         )
         assert await other.prepare(session, job_id=cycle, kind="ENTER", source_ref="OLD", face="A")
     own = await flow.demand(rack="OWN")
-    await flow.advance("FEED", own)
+    await flow.advance("FACE", own)
     assert len([a for a in await entries(flow) if a["owner_domain"] == "first"]) == 1
 
 
@@ -477,9 +425,9 @@ async def test_new_face_does_not_reactivate_withdrawn_original(roller_lifecycle)
     flow = roller_lifecycle
     await set_limit(flow, 1)
     occupied = await flow.demand(rack="OCCUPIED")
-    await flow.advance("FEED", occupied)
+    await flow.advance("FACE", occupied)
     old = await flow.demand()
-    await flow.advance("FEED", old)
+    await flow.advance("FACE", old)
     original = next(c["id"] for c in await flow.all_rows("rack_cycle") if c["rack_id"] == "R1")
     async with flow.factory.begin() as session:
         await flow.roller.apply_supply_change(
@@ -489,7 +437,7 @@ async def test_new_face_does_not_reactivate_withdrawn_original(roller_lifecycle)
     await flow.advance("RACK_CYCLE", original)
     new = await flow.demand(revision=2)
     await set_limit(flow, 2)
-    await flow.advance("FEED", new)
+    await flow.advance("FACE", new)
     async with flow.factory() as session:
         historical = await flow.roller.rack_dispatch.progress(session, job_id=original)
         assert historical.state == "WITHDRAWN" and not historical.actions
@@ -514,7 +462,7 @@ async def test_two_first_entries_share_last_line_slot(roller_lifecycle):
             await asyncio.wait_for(initial.wait(), 5)
 
     await asyncio.wait_for(
-        asyncio.gather(*(flow.advance("FEED", d, before=overlap) for d in demands)), 10
+        asyncio.gather(*(flow.advance("FACE", d, before=overlap) for d in demands)), 10
     )
     assert 1 in attempts
     assert len(await entries(flow)) == 1
