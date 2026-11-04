@@ -17,7 +17,11 @@
 
 这些是计划验收证据缺口，尚无证据证明相应生产实现有缺陷。T1/T5/T6/T7 的组合验收状态为 PARTIAL；不以全部既有用例通过替代完整计划验收。
 
-本次以 `caca3c0bef16d6a9eff31ff7628fea0e378a05d3` 为基线，在独立工作树 `feature/workline-position-capacity` 实施；改动尚未提交、推送或部署。原工作区 14 个既有改动/未跟踪文件、HEAD、develop 分支和 index 已逐项校验未变。本节只对应这次工作位容量增量，下方历史通过数保留各自快照含义。
+本次以 `caca3c0bef16d6a9eff31ff7628fea0e378a05d3` 为基线，在独立工作树 `feature/workline-position-capacity` 实施；实现 `ca33056` 与合同/验收文档 `048a04f` 已提交并推送，尚未合并或部署。实施验收时，原工作区 14 个既有改动/未跟踪文件、HEAD、develop 分支和 index 已逐项校验未变。本节只对应这次工作位容量增量，下方历史通过数保留各自快照含义。
+
+**2026-11-04 SHIP 复验。** 在上述已推送源码上，独立迁移组 **272 passed / 0 skipped（675.75 秒）**，其余全组 **5,286 passed / 47 skipped（738.07 秒）**，均 exit 0；不重叠并集为 **5,558 passed / 47 SQLite 条件 skipped / 0 failed**。Ruff check、682 文件 format check、diff check 与唯一 head `positioncapacity` 均通过。原始执行日志保存在本机外部目录 `/tmp/maintenance-ship-audits/` 的 `workline-migrations.log`、`workline-tests.log` 和 `workline-lint.log`；该目录不随仓库分发。复验没有补齐上表五组直接验收，PARTIAL 状态保留；下文 5,557 快照不改写为本次结果。
+
+**并行分支边界。** 本迁移读取四表改造前的 BIN_Roller 原面服务关系，因此容量须先于后续四表迁移。两分支尚未完成共同集成；后续分支须接续实际 head，并协调任务终态与原货架外部责任的收口后重新验证，不能以各分支单独通过证明可直接组合。管理调用端改用 `positions`、API/worker/schema 同版切换及供应商/现场验收仍是独立上线前提。
 
 工作位 `positions` 统一配置三类架额度，省略 capacity 默认 1、显式 null 不限额，角色绑定仍为字符串。运行额度与顺序严格限定在本线/本任务/本点；同线仅一个 PREPARING/EXECUTING，后续任务不提前 prepare。五层架和取料架可以真实登记多条原进场 Transport，转运架仍只用首版唯一目标；额度不是同时物理到位架数。只有精确原 ENTER/ROTATE 的点和面可以生产，两个未交出的真实到位持有者会阻止生产。
 

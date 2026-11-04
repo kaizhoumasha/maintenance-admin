@@ -1,8 +1,8 @@
 # 工作位进场请求额度 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户已授权本地实施及软件验收；提交、推送与部署仍未授权。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户最初授权本地实施及软件验收，后续已授权 SHIP 提交、推送和创建 PR；合并与部署未执行。
 
-**Execution:** T1～T7 的本地实现已完成；已有软件验收快照的全仓用例并集为 5,557 passed / 47 SQLite 条件 skipped / 0 遗留失败，272 个迁移用例全部取得通过证据。复核发现 T1/T5/T6/T7 的部分组合验收仍缺直接覆盖，不能据此宣称下列验收矩阵全部完成；具体缺口和后续 review 修复见 [验收记录](../../testing/smt-manual.md#position-capacity)。以下复选项保留原实施检查步骤；结果以对应快照和日志为准。未提交、推送、部署或操作运行库。
+**Execution:** T1～T7 的本地实现已完成；历史软件验收快照为 5,557 passed / 47 SQLite 条件 skipped，2026-11-04 SHIP 复验为 5,558 passed / 47 SQLite 条件 skipped / 0 失败，其中 272 个迁移用例全部通过。复核发现 T1/T5/T6/T7 的五组直接验收仍缺覆盖，不能据此宣称下列验收矩阵全部完成；具体缺口和后续 review 修复见 [验收记录](../../testing/smt-manual.md#position-capacity)。以下复选项保留原实施检查步骤；结果以对应快照和日志为准。实现 `ca33056` 与文档 `048a04f` 已提交并推送，尚未合并、部署或操作运行库。
 
 **Goal:** 将进场请求额度统一配置到工作位，让当前单个任务的五层架、取料架在额度内真实提前下发、由对端就近排队；转运架统一支持额度配置，保留每任务唯一目标架。
 

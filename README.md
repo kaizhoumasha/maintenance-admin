@@ -2,6 +2,8 @@
 
 手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。自动线与粗分后续生产阶段的接入仍在规划中。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
 
+工作位进场额度现由 `positions[].capacity` 配置，运行计数限定本线当前任务；管理字段与切换要求见[人工 API](docs/integrations/manual-picking-api.md#manual-request-limit)，设计和验收范围见[容量设计](docs/superpowers/specs/2026-11-03-workline-position-capacity-design.md)、[实施计划](docs/superpowers/plans/2026-11-03-workline-position-capacity-implementation.md)及[软件验收记录](docs/testing/smt-manual.md#position-capacity)。
+
 面向生产企业的通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，提供通用、易用的第三方与内部 API 对接基础能力。
 
 平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接已实现独立异步 HTTP 客户端和协议无关的出站可靠交互首版（事务发件箱、持久化重试、租约与恢复），并提供 WMS/ECS 回调接收入口；接收与投递不代表业务或物理完成。
