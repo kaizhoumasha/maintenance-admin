@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine
-from app.models import CallbackReceipt, Device, DeviceRoute, ReliableMessage, WorkLine
+from app.models import (
+    CallbackReceipt,
+    Device,
+    DeviceRoute,
+    ReliableMessage,
+    WorkLine,
+    WorkLinePosition,
+)
 
 
 @pytest.fixture
@@ -45,6 +52,7 @@ async def manual_sessions(request, tmp_path, postgres_tables):
         RackJob,
         RackAction,
         WorkLine,
+        WorkLinePosition,
         DeviceRoute,
         Device,
         CallbackReceipt,
@@ -111,8 +119,18 @@ async def manual_flow(manual_sessions, monkeypatch):
         code="smt_manual",
         display_name="SMT manual",
         position_slots=(
-            PositionSlot(slot_key="RETURN_RACK", display_name="Direct", required=False),
-            PositionSlot(slot_key="TRANSFER_RACK", display_name="Transfer", required=False),
+            PositionSlot(
+                position_type="RACK_POSITION",
+                slot_key="RETURN_RACK",
+                display_name="Direct",
+                required=False,
+            ),
+            PositionSlot(
+                position_type="RACK_POSITION",
+                slot_key="TRANSFER_RACK",
+                display_name="Transfer",
+                required=False,
+            ),
         ),
     )
     from app.businesses._components.rack_dispatch.composition import COMPONENT as DISPATCH
@@ -162,7 +180,7 @@ async def manual_flow(manual_sessions, monkeypatch):
         CommandOwner("smt_manual"),
         capabilities,
         ports,
-        rack_dispatch=RackDispatch("smt_manual", capabilities),
+        rack_dispatch=RackDispatch("smt_manual", capabilities, task_admission=ports),
         tables=roller_tables,
     )
     task = SmtManualTaskFlow(capabilities, roller, repository=repository)
@@ -198,6 +216,13 @@ async def manual_flow(manual_sessions, monkeypatch):
                 )
                 session.add(line)
                 await session.flush()
+                if number == 2:
+                    line.position_bindings = {
+                        k: v + "-2" for k, v in line.position_bindings.items()
+                    }
+                from tests.helpers import configure_rack_positions
+
+                await configure_rack_positions(session, line)
                 lines.append(line.id)
 
         def message(name, data, *, operation_id=None, timestamp=100):
@@ -334,6 +359,9 @@ async def manual_flow(manual_sessions, monkeypatch):
             )
             await session.execute(
                 delete(ReliableMessage).where(ReliableMessage.business_key == "business:smt_manual")
+            )
+            await session.execute(
+                delete(WorkLinePosition).where(WorkLinePosition.work_line_id.in_(lines))
             )
             await session.execute(delete(WorkLine).where(WorkLine.id.in_(lines)))
         for name in modules:

@@ -5,7 +5,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.businesses._components.bin_roller.ports import CurrentTask, Scan2Arrival, SuccessorContext
+from app.businesses._components.bin_roller.ports import (
+    CurrentTask,
+    Scan2Arrival,
+    SourceFaceRef,
+    SuccessorContext,
+)
 from app.businesses._components.rack_dispatch.contracts import Coverage, FactRef, PointRef
 from app.integrations.ecs_callback import EcsEventContext
 from app.models import WorkLine
@@ -199,3 +204,27 @@ class RollerPorts:
         return SuccessorContext(
             "CHECKING" if eligible else "UNKNOWN", dict(queued_task_ids=eligible)
         )
+
+    async def allows_task_entry(
+        self, session: AsyncSession, *, work_line_id: int, task_id: str
+    ) -> bool:
+        current = await self.read_current_task(session, work_line_id=work_line_id)
+        if not current.is_valid or current.task_id != task_id:
+            return False
+        return not await self.repository.has_pending_plan(session, task_id)
+
+    async def read_supply_order(
+        self, session: AsyncSession, *, work_line_id: int, task_id: str
+    ) -> tuple[SourceFaceRef, ...]:
+        task = await self.repository.task(session, task_id)
+        if not task or task["work_line_id"] != work_line_id:
+            return ()
+        members = self.repository.tables["member"]
+        rows = (
+            await session.execute(
+                select(members)
+                .where(members.c.task_id == task_id, members.c.kind == "BIN")
+                .order_by(members.c.plan_revision, members.c.member_order)
+            )
+        ).mappings()
+        return tuple(SourceFaceRef(r["plan_revision"], r["rack_id"], r["rack_face"]) for r in rows)

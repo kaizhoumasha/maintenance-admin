@@ -3970,7 +3970,7 @@ WES 按该新命令的完整 barcode/scanned_at、原来源和最新 source_rack
 
 smt_auto只装配一份bin_roller，两个方向共用下面这些方法/事实。组件独立履约四点、五层供箱/回流/FIFO/drain/CTU生命周期，不取得业务码、owner或独立调度入口。业务不另注册SCAN2、不另发MOVE_FORWARD、不复制组件状态表，也不直接读组件/平台内部表替代公开进度。
 
-当前公共实现已由手工首宿主消费并收敛为10表，宿主继续使用原ports和具名ID，不依赖合表布局。每线`WorkLine.five_rack_request_limit`及原CTU01/RELEASED计算直接复用；不新增自动额度字段，不以额度证明在位或物理完成。手工准入/完工与私有状态不进入自动生产；拟议Transport更正不改原协议终态；新的公共调度决定已统一CTU03/F01的DEPART有效接纳完成，含库区及不同工作位去向，直接架也适用，原始FAILED仍保留为失败备查。
+当前公共实现已由手工首宿主消费并收敛为10表，宿主继续使用原ports和具名ID，不依赖合表布局。工作位`positions[].capacity`及原进场/交出事实由公共调度复用，运行额度限定单个任务，同线保持单一进行中任务；无任务drain独立串行；不新增自动额度字段，不以额度证明在位或物理完成。手工准入/完工与私有状态不进入自动生产；拟议Transport更正不改原协议终态；新的公共调度决定已统一CTU03/F01的DEPART有效接纳完成，含库区及不同工作位去向，直接架也适用，原始FAILED仍保留为失败备查。
 
 公共执行与事务唯一引用[BIN_Roller设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)、[公共回流](workline-bin-return-api.md)与[固定接口](../superpowers/plans/2026-10-30-bin-roller-implementation.md#文件责任与固定接口)，本章只定义宿主提供什么、消费什么。
 

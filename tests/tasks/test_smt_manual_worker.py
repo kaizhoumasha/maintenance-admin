@@ -430,13 +430,9 @@ async def test_original_submit_owner_wakeup_and_beat_refill_capacity(manual_work
     with monkeypatch.context() as setup:
         setup.setattr(business_wakeups, "enqueue_business", flow.notices.append)
         async with flow.factory.begin() as session:
-            await session.execute(
-                update(WorkLine)
-                .where(WorkLine.id == flow.lines[0])
-                .values(
-                    five_rack_request_limit=3,
-                )
-            )
+            from tests.helpers import set_position_capacity
+
+            await set_position_capacity(session, flow.lines[0], 3)
         task = flow.prefix + "-capacity"
         assert (await flow.issue(task)).status_code == 202
         await flow.host.advance("TASK", task)
@@ -497,3 +493,135 @@ async def test_original_submit_owner_wakeup_and_beat_refill_capacity(manual_work
             )
             assert transport.applied_outcome is None
     print("worker capacity CTU01: 3 -> owner wake 4 -> missed wake / Beat 5; no CTU03 final Result")
+
+
+@pytest.mark.parametrize("role", ["RETURN", "TRANSFER"])
+async def test_bound_manual_candidate_recovers_from_original_tail_in_worker(
+    manual_worker, monkeypatch, role
+):
+    run, flow = manual_worker, manual_worker.flow
+    with monkeypatch.context() as setup:
+        setup.setattr(business_wakeups, "enqueue_business", flow.notices.append)
+        if role == "TRANSFER":
+            async with flow.factory.begin() as session:
+                line = await session.get(WorkLine, flow.lines[0])
+                line.position_bindings = {
+                    **line.position_bindings,
+                    "TRANSFER_RACK": line.position_bindings["RETURN_RACK"],
+                }
+                line.version += 1
+        old, current = flow.prefix + "-old", flow.prefix + "-current"
+
+        async def prepared(task):
+            assert (await flow.issue(task, direction="outbound")).status_code == 202
+            await flow.host.advance("TASK", task)
+            await flow.dispatch()
+            await flow.host.advance("TASK", task)
+
+        def direct(rack):
+            return [
+                dict(
+                    source_locator=dict(type="RACK_SLOT", rack_id=rack, rack_face="A", slot_id="1")
+                )
+            ]
+
+        await prepared(old)
+        assert (
+            await flow.callback(
+                "sorting.task.plan_delta@v1",
+                dict(task_id=old, plan_revision=1, added_direct_picks=direct("OLD-MANUAL")),
+            )
+        ).status_code == 202
+        await flow.host.advance("TASK", old)
+        old_job = next(j for j in await flow.rows("rack") if j["task_id"] == old)
+        entry = next(
+            a for a in await flow.rows("rack_action") if a["rack_work_id"] == old_job["id"]
+        )
+        await flow.dispatch()
+        flow.departure_decision = dict(
+            result="READY", rack_destination=dict(type="ZONE", location_code="RETURNED")
+        )
+        assert (
+            await flow.callback(
+                "transport.task.resulted@v1",
+                dict(
+                    transport_task_id=entry["transport_task_id"],
+                    kind="RACK_MOVE",
+                    rack_id="OLD-MANUAL",
+                    outcome_revision=1,
+                    status="SUCCEEDED",
+                    final_position=entry["target"],
+                    arrival_face="A",
+                ),
+            )
+        ).status_code == 202
+        await flow.host.advance("MANUAL_RACK", old_job["id"])
+        await flow.dispatch()
+        report = next(r for r in await flow.rows("rack_report") if r["task_id"] == old)
+        await flow.host.advance("RACK_REPORT", report["operation_id"])
+        assert (
+            await flow.callback(
+                "outbound.manual_rack.direct_pick_completed@v1",
+                dict(
+                    task_id=old,
+                    plan_revision=1,
+                    rack_id="OLD-MANUAL",
+                    rack_face="A",
+                    completed_at=10,
+                ),
+            )
+        ).status_code == 202
+        await flow.host.advance("MANUAL_RACK", old_job["id"])
+        flow.confirmation = {"result": "COMPLETED"}
+        await flow.host.advance("TASK", old)
+        await flow.dispatch()
+        assert await flow.host.advance("TASK", old) == "COMPLETED"
+        await prepared(current)
+        plan = dict(task_id=current, plan_revision=1)
+        if role == "RETURN":
+            plan["added_direct_picks"] = direct("NEW-MANUAL")
+        else:
+            plan["target_rack"] = dict(rack_id="NEW-MANUAL", rack_face="A")
+        assert (await flow.callback("sorting.task.plan_delta@v1", plan)).status_code == 202
+        await flow.host.advance("TASK", current)
+        waiting = next(j for j in await flow.rows("rack") if j["task_id"] == current)
+        assert waiting["role"] == role and waiting["pending"]
+        assert not [a for a in await flow.rows("rack_action") if a["rack_work_id"] == waiting["id"]]
+        flow.departure_decision = dict(
+            result="READY", rack_destination=dict(type="ZONE", location_code="RETURNED")
+        )
+        await flow.host.advance("MANUAL_RACK", old_job["id"])
+        departure = next(a for a in await flow.rows("rack_action") if a["kind"] == "DEPART")
+
+    async def new_entries():
+        return [a for a in await flow.rows("rack_action") if a["rack_work_id"] == waiting["id"]]
+
+    if role == "RETURN":
+        await run.start("worker")
+        await flow.dispatch()
+    else:
+
+        def unavailable(_):
+            raise ConnectionError("owned test drops post-commit notification")
+
+        with monkeypatch.context() as missed:
+            missed.setattr(business_wakeups, "enqueue_business", unavailable)
+            await flow.dispatch()
+        assert not await new_entries()
+        await run.start("worker")
+        await run.start("beat")
+        await run.beat_tick()
+    entries = await eventually(new_entries, lambda rows: len(rows) == 1, deadline_seconds=25)
+    await run.wait_idle()
+    if role == "TRANSFER":
+        await run.stop("beat")
+    await run.stop("worker")
+    assert entries[0]["kind"] == "ENTER"
+    assert entries[0]["rack_work_id"] == waiting["id"]
+    async with flow.factory() as session:
+        original = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == departure["transport_task_id"]
+            )
+        )
+        assert original.applied_outcome is None

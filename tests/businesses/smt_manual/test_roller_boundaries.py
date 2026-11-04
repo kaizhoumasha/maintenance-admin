@@ -72,7 +72,7 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
                 bin_code="A000000001",
                 target=dict(
                     type="RACK_BIN_SLOT",
-                    rack_id=flow.prefix + "-return",
+                    rack_id=flow.prefix + "-return-0",
                     rack_face="A",
                     slot_id="S1",
                 ),

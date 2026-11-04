@@ -96,7 +96,7 @@ async def test_unassigned_scan4_reaches_drain_through_original_scan_pending(
     )
     await flow.result(scan["command_code"], point="SCAN4")
     assert not await flow.rows("drain", component=True)
-    assert not await flow.rows("rack_cycle", component=True)
+    assert not await flow.rows("rack_action", component=True)
     assert await flow.host.scan_pending(limit=1) >= 1
     drains = await flow.rows("drain", component=True)
     assert len(drains) == 1

@@ -2,6 +2,56 @@
 
 **2026-11-03 实施状态。** 手工 MANUAL_RACK、MANUAL_BIN、MANUAL_COMPLETION 与组件相关推进在首条 SQL 前采用 SERIALIZABLE。独立 RACK_REPORT 与 SCAN2_RELEASE 保留 REPEATABLE READ。
 
+<a id="position-capacity"></a>
+## 2026-11-03 工作位容量实施与软件验收
+
+**Review 补充：** 下列全仓数字对应 review 前的验收快照。复核已修复已绑定供箱候选每次推进仍逐面查询的问题，新增 20 个供箱面、容量 3 的回归，验证重复推进保留原 job/order 和 3 条 ENTER。计划中的以下组合仍为部分覆盖，已有分层测试不能替代这些直接验收：
+
+| 计划项 | 已有证据与尚缺的组合 |
+| --- | --- |
+| T1/M02 | 已测搬迁及若干 DDL 前拒绝；同码异类、跨线同点、同任务同点顺序歧义三类预检拒绝未各有永久迁移用例 |
+| T5/S10 | 已测公共单架约束、两 drain 并发及 READY FIFO；两个真实 READY 决定交错 DRAIN/RACK_CYCLE/LOCAL_ONLY 的宿主闭环未直接覆盖 |
+| T6/X03 | 已测真实 PG 配置写与接纳竞争；写侧直接更新表，未通过 update_workline 同时验证 version、完整替换和审计原子性 |
+| T6/X04 | 已测其他 owner 同点责任的串行阻断；其登记/闭合与当前任务接纳并发、锁集合变动重试未直接覆盖 |
+| T7/U02/R01 | 已测真实 worker/Beat 的离场补位、丢通知、手工两类架恢复；运行中上调容量后无新计划补位，以及 worker 重建后多候选 admission_order 保真未直接覆盖 |
+
+这些是计划验收证据缺口，尚无证据证明相应生产实现有缺陷。T1/T5/T6/T7 的组合验收状态为 PARTIAL；不以全部既有用例通过替代完整计划验收。
+
+本次以 `caca3c0bef16d6a9eff31ff7628fea0e378a05d3` 为基线，在独立工作树 `feature/workline-position-capacity` 实施；实现 `ca33056` 与合同/验收文档 `048a04f` 已提交并推送，尚未合并或部署。实施验收时，原工作区 14 个既有改动/未跟踪文件、HEAD、develop 分支和 index 已逐项校验未变。本节只对应这次工作位容量增量，下方历史通过数保留各自快照含义。
+
+**2026-11-04 SHIP 复验。** 在上述已推送源码上，独立迁移组 **272 passed / 0 skipped（675.75 秒）**，其余全组 **5,286 passed / 47 skipped（738.07 秒）**，均 exit 0；不重叠并集为 **5,558 passed / 47 SQLite 条件 skipped / 0 failed**。Ruff check、682 文件 format check、diff check 与唯一 head `positioncapacity` 均通过。原始执行日志保存在本机外部目录 `/tmp/maintenance-ship-audits/` 的 `workline-migrations.log`、`workline-tests.log` 和 `workline-lint.log`；该目录不随仓库分发。复验没有补齐上表五组直接验收，PARTIAL 状态保留；下文 5,557 快照不改写为本次结果。
+
+**并行分支边界。** 本迁移读取四表改造前的 BIN_Roller 原面服务关系，因此容量须先于后续四表迁移。两分支尚未完成共同集成；后续分支须接续实际 head，并协调任务终态与原货架外部责任的收口后重新验证，不能以各分支单独通过证明可直接组合。管理调用端改用 `positions`、API/worker/schema 同版切换及供应商/现场验收仍是独立上线前提。
+
+工作位 `positions` 统一配置三类架额度，省略 capacity 默认 1、显式 null 不限额，角色绑定仍为字符串。运行额度与顺序严格限定在本线/本任务/本点；同线仅一个 PREPARING/EXECUTING，后续任务不提前 prepare。五层架和取料架可以真实登记多条原进场 Transport，转运架仍只用首版唯一目标；额度不是同时物理到位架数。只有精确原 ENTER/ROTATE 的点和面可以生产，两个未交出的真实到位持有者会阻止生产。
+
+满额候选保持原 job/order，原 DEPART 有效提交接纳释放后由既有 pending 补位；候选未下发不占额，已提交 outbox 即占额，不因 Sender 尚未发送或父任务终态而撤销。旧任务同点外部责任隔离新任务，旧结果可以收尾，不能新增生产授权。无任务 drain 仍单架串行，原已冻结回箱分配及 FIFO 责任保持。
+
+迁移唯一 head 为 `positioncapacity`（前序 `sharedrackdispatch`）：搬迁旧 FIVE 限额、同点别名只一行、其他架位初始 1；历史 Transport 注册顺序决定原进场先后，不排序 UUID；无法归属/排序时在 DDL 前拒绝。有 admission_order 或其他架位非 1 容量时拒绝有损 downgrade。
+
+| 验收范围 | 永久测试入口 |
+| --- | --- |
+| 配置/API、严格值、别名、版本、在途改绑/删除 | `tests/controllers/test_workline_position_capacity.py`、workline_business controller/service 回归 |
+| 原 ENTER 统一占额、当前任务、旧任务、无任务及严格拒绝 | `tests/businesses/rack_dispatch/test_capacity.py`、同目录 lifecycle/safety 回归 |
+| 五层架、取料架多架补位、唯一转运目标、原计划顺序、队尾不挡队头、双真到位 | `tests/businesses/smt_manual/test_position_capacity.py`、BIN_Roller request_capacity/rack_lifecycle |
+| PostgreSQL 最后名额、task/drain、drain/drain、配置降额竞争 | `tests/businesses/rack_dispatch/test_capacity_concurrency.py` |
+| Transport 登记后 commit 40001、三次耗尽后 pending 恢复 | `tests/businesses/smt_manual/test_transactions.py` |
+| 正式 receiver/outbox/Sender/loopback、工厂双线与现场旧样本模拟 | `tests/businesses/smt_manual/test_factory_profile.py`、test_two_worklines、BIN_Roller recorded_wes_cases |
+| 真实 Redis worker/Beat，原通知/丢通知，已绑定无 action 的手工两类架补位 | `tests/tasks/test_smt_manual_worker.py`，包括五层架 3→4→5、RETURN 原 owner 唤醒、TRANSFER 漏通知 Beat 恢复 |
+| SQLite/PG 数据搬迁、DDL 前拒绝、有损降级、高水位、原身份/字节/接纳/待处理结果保全 | `tests/migrations/test_workline_position_capacity.py`、shared_rack_dispatch/project_schema 回归 |
+
+本轮最终按不重叠用例并集统计：**5,557 passed / 47 conditional skipped / 0 outstanding failed / 0 errors**，共 5,604 个唯一用例。迁移 272 个唯一用例全部取得通过证据；其余全组为 **5,285 passed / 47 skipped / 1 warning，680.01 秒，exit 0**。47 项均为 SQLite 不具备 PostgreSQL 锁、并发或独立连接语义的条件变体，没有因为缺 PostgreSQL/Redis 配置而跳过关键门禁。Ruff check、682 文件 format check、唯一 head `positioncapacity` 和 diff check 通过。
+
+证据目录为 `.superpowers/sdd/2026-11-03-workline-position-capacity-implementation/`（本地忽略目录）。`final-summary.json`、`collection-coverage.json`、`remaining-final.xml/.log`、`migration-runtime-final.xml/.log`、`tested-source-final-before.json` 与 `source-preservation.json` 记录最终范围、结果和保全。579 个实现/测试/迁移/配置路径在最终验证期间无漂移；原工作区 14 个既有文件、HEAD、develop 分支及 index 均一致。关键专项 `final-targeted.log` 为 133 passed，追加原到位报告义务专项 19 passed；这些是全仓子集，不另加进总数。
+
+验收过程中的失败保留为诊断：首轮测试强制要求有序候选发生 40001，修正了可合法只读拒绝时的测试断言；同一迁移库/主测试库被历史用例降级导致环境串扰，随后拆分独立库并复验。迁移统计由 `all-migrations-isolated.log` 中 268 项通过，加独立库 11 项复验覆盖的全部 4 项受影响用例组成，按唯一用例统计 272；没有把有失败或中止的进程标为最终全仓通过。两组最终验证的主测试库、迁移库及 Redis 均隔离。
+
+独立只读审查修复了“不同工作位的旧任务尾部错误阻断当前目标架许可”；收尾反例另修复了可靠未执行拒绝/LOCAL_ONLY 撤销后仍虚构到位上报义务。两项均保留失败后通过的永久回归，既有报告义务继续独立结清。
+
+验收结束时，本轮业务库 22 张相关表均为零行；两个本轮专属测试容器已停止并自动移除，工作树与本地日志保留。
+
+本机测试只使用独占可丢弃 PostgreSQL/Redis 与 loopback；没有向 WMS/ECS/RCS 或 SSH 运行环境发送业务请求。WMS/RCS 对同点多请求的实际就近排队、唯一物理点互锁，以及真实运行库升级尚未现场验收。
+
 <a id="current-delivery"></a>
 ## 2026-11-02 提交交付与最终全仓验证
 

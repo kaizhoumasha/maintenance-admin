@@ -39,7 +39,7 @@ async def test_empty_cutover_round_trip(schema_database):
 
 
 # Use the actual previous revision and reflect it, independently of current business metadata.
-async def old_store(schema_database, *, multi_rotation=True):
+async def old_store(schema_database, *, multi_rotation=True, runtime_subject=None):
     from sqlalchemy import MetaData
 
     url, engine = schema_database
@@ -53,13 +53,20 @@ async def old_store(schema_database, *, multi_rotation=True):
             for c in t.c:
                 if isinstance(c.type, sa.JSON):
                     c.type.none_as_null = True
-        await seed(conn, tables, multi_rotation)
+        await seed(conn, tables, multi_rotation, runtime_subject)
     return url, engine, tables
 
 
-async def seed(conn, t, multi_rotation):
+async def seed(conn, t, multi_rotation, runtime_subject):
     async def insert(table, **values):
         await conn.execute(t[table].insert().values(**values))
+
+    def location_for(job):
+        code = "P" if runtime_subject in (None, job) else "P-" + job
+        return {"type": "RACK_POSITION", "location_code": code}
+
+    def rack_for(job):
+        return "R" if runtime_subject in (None, job) else "R-" + job
 
     scope = dict(owner_domain="smt_manual", work_line_id=7)
     loc = {"type": "RACK_POSITION", "location_code": "P"}
@@ -132,14 +139,18 @@ async def seed(conn, t, multi_rotation):
         client_id = str(uuid7()) if job == "active" else "client-" + i
         operation_id = str(uuid7()) if job not in ("manual", "roller") else "op-" + i
         k = "RACK_ROTATE" if kind == "ROTATE" else "RACK_MOVE"
-        target = dest if kind == "DEPART" else loc
+        original_point = location_for(job)
+        rack = rack_for(job)
+        target = dest if kind == "DEPART" else original_point
         face = None if kind == "DEPART" else facing
         template = (
             {"ENTER": "CTU01", "ROTATE": "CTU02", "DEPART": "CTU03"}[kind] if roller else "F01"
         )
-        source = point(loc) if kind != "ENTER" else {"kind": "RACK", "location_code": "R"}
+        source = (
+            point(original_point) if kind != "ENTER" else {"kind": "RACK", "location_code": rack}
+        )
         frozen = dict(
-            kind=k, rack_id="R", rcs_template_id=template, source=source, target=point(target)
+            kind=k, rack_id=rack, rcs_template_id=template, source=source, target=point(target)
         )
         if face:
             frozen["target_face"] = face
@@ -149,7 +160,7 @@ async def seed(conn, t, multi_rotation):
             dict(
                 transport_task_id=transport_id,
                 kind=k,
-                rack_id="R",
+                rack_id=rack,
                 status=status,
                 outcome_revision=1,
                 final_position=actual,
@@ -236,8 +247,8 @@ async def seed(conn, t, multi_rotation):
                     **scope,
                     id="pos-" + i,
                     object_kind="RACK",
-                    object_code="R",
-                    location_code="P",
+                    object_code=rack,
+                    location_code=original_point["location_code"],
                     rack_face=face,
                     source_kind="RACK",
                     source_id=i,
@@ -264,8 +275,9 @@ async def seed(conn, t, multi_rotation):
             ("active", "ACTIVE", "TRANSFER"),
         )
     ):
+        loc, rack = location_for(job), rack_for(job)
         task = "task-" + job
-        target = None if role == "RETURN" else dict(rack_id="R", rack_face="A")
+        target = None if role == "RETURN" else dict(rack_id=rack, rack_face="A")
         await insert(
             "smt_manual_task",
             task_id=task,
@@ -292,7 +304,7 @@ async def seed(conn, t, multi_rotation):
                 {
                     "source_locator": {
                         "type": "RACK_SLOT",
-                        "rack_id": "R",
+                        "rack_id": rack,
                         "rack_face": "A",
                         "slot_id": "S",
                     }
@@ -317,7 +329,7 @@ async def seed(conn, t, multi_rotation):
                 task_id=task,
                 plan_revision=1,
                 kind="DIRECT",
-                rack_id="R",
+                rack_id=rack,
                 rack_face="A",
                 slot_id="S",
                 member_order=0,
@@ -330,9 +342,9 @@ async def seed(conn, t, multi_rotation):
             task_id=task,
             work_line_id=7,
             workline_code="L",
-            rack_id="R",
+            rack_id=rack,
             role=role,
-            location_code="P",
+            location_code=loc["location_code"],
             initial_face="A",
             caller_workline_id="caller",
             state=state,
@@ -350,10 +362,12 @@ async def seed(conn, t, multi_rotation):
             if job == "active"
             else "SUCCEEDED",
         )
+    loc, rack = location_for("manual"), rack_for("manual")
+    request = dict(workline_code="L", rack_id=rack, current_location=loc, current_face="A")
     report = dict(
         task_id="task-manual",
         transport_task_id="tt-manual-ENTER",
-        rack_id="R",
+        rack_id=rack,
         arrival_face="A",
         final_position=loc,
         outcome_revision=1,
@@ -438,6 +452,9 @@ async def seed(conn, t, multi_rotation):
         ("unused", "WITHDRAWN"),
         (UNBOUND_CYCLE, "ACTIVE"),
     ):
+        loc, rack = location_for(job), rack_for(job)
+        request = dict(workline_code="L", rack_id=rack, current_location=loc, current_face="A")
+        resources = {**resources, "positions": {"FIVE_RACK": loc["location_code"]}}
         drain = "drain-" + job
         await insert(
             "bin_roller_decision",
@@ -446,7 +463,7 @@ async def seed(conn, t, multi_rotation):
             id=drain,
             input_ref=drain,
             input_kind="FIFO_OBSERVATION",
-            unused_racks=["R"] if job == "unused" else [],
+            unused_racks=[rack] if job == "unused" else [],
             operation_id="drain-op-" + job,
             status="READY",
             pending=False,
@@ -454,7 +471,7 @@ async def seed(conn, t, multi_rotation):
                 "result": "READY",
                 "racks": [
                     {
-                        "rack_id": "R",
+                        "rack_id": rack,
                         "rack_face": (
                             ["A", "Z", "B"] if job == "roller" and multi_rotation else ["A"]
                         ),
@@ -477,7 +494,7 @@ async def seed(conn, t, multi_rotation):
                         cycle_id=cycles.get(job, job),
                         source_ref=drain + ":" + face,
                         service_state="COMPLETED",
-                        rack_id="R",
+                        rack_id=rack,
                         rack_face=face,
                     )
                     await move(job, "ROTATE", sid, 81, roller=True, facing=face)
@@ -527,13 +544,14 @@ async def seed(conn, t, multi_rotation):
             **scope,
             id=cycles.get(job, job),
             source_ref=drain,
-            rack_id="R",
+            rack_id=rack,
             purpose="DRAIN",
             status=state,
             pending=state == "ACTIVE",
             resources=resources if job != "unused" else None,
             release_basis=basis,
         )
+    loc, rack = location_for("roller"), rack_for("roller")
     await insert(
         "bin_roller_face_work",
         **scope,
@@ -543,7 +561,7 @@ async def seed(conn, t, multi_rotation):
         cycle_id="roller",
         source_ref="drain-roller:A",
         service_state="COMPLETED",
-        rack_id="R",
+        rack_id=rack,
         rack_face="A",
     )
     await insert(
@@ -572,12 +590,15 @@ async def seed(conn, t, multi_rotation):
         status="COMPLETED",
         pending=False,
     )
+    loc, rack = location_for("ordinary"), rack_for("ordinary")
+    resources = {**resources, "positions": {"FIVE_RACK": loc["location_code"]}}
+
     await insert(
         "bin_roller_rack_cycle",
         **scope,
         id=ORDINARY,
         source_ref="demand",
-        rack_id="R",
+        rack_id=rack,
         task_id="task-active",
         purpose="ORDINARY",
         resources=resources,
@@ -598,7 +619,7 @@ async def seed(conn, t, multi_rotation):
         plan_revision=1,
         service_state="READY",
         demand_state="ACTIVE",
-        rack_id="R",
+        rack_id=rack,
         rack_face="A",
         feed_id="feed",
         feed_state="ALLOCATED",
@@ -617,7 +638,7 @@ async def seed(conn, t, multi_rotation):
         members=[
             {
                 "bin_code": "box",
-                "source_locator": {"rack_id": "R", "rack_face": "A", "slot_id": "S"},
+                "source_locator": {"rack_id": rack, "rack_face": "A", "slot_id": "S"},
             }
         ],
         client_request_id="feed-client",
@@ -645,7 +666,7 @@ async def seed(conn, t, multi_rotation):
                     "container_id": "box",
                     "source": {
                         "kind": "RACK_BIN_SLOT",
-                        "rack_id": "R",
+                        "rack_id": rack,
                         "rack_face": "A",
                         "slot_id": "S",
                     },
@@ -698,6 +719,7 @@ async def test_original_history_survives_without_dispatch(schema_database):
         before = await snapshot(conn, untouched)
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stdout + result.stderr
+    await current_runtime_schema(engine)
     async with async_sessionmaker(engine)() as db:
         outbox = Outbox({}, {})
         host = build_runtime(
@@ -1036,7 +1058,50 @@ async def test_pruned_consumed_report_requires_complete_native_proof(schema_data
             )
 
 
-def runtime(engine):
+async def current_runtime_schema(engine):
+    """Keep historical revision assertions separate from current model requirements."""
+    from app.businesses import catalog
+    from app.models import WorkLinePosition
+
+    async with engine.begin() as conn:
+        # This only supplies nullable runtime shape; capacity migration is tested separately.
+        await conn.execute(
+            text(
+                "ALTER TABLE enterprise_backend.rack_dispatch_job "
+                "ADD COLUMN IF NOT EXISTS admission_order BIGINT"
+            )
+        )
+        await conn.run_sync(lambda bind: WorkLinePosition.__table__.create(bind, checkfirst=True))
+        rows = (await conn.execute(text("SELECT * FROM enterprise_backend.work_lines"))).mappings()
+        for line in rows:
+            if not line["business_code"]:
+                continue
+            definition = catalog.get_definition(line["business_code"])
+            declared = {
+                p.slot_key for p in definition.position_slots if p.position_type == "RACK_POSITION"
+            }
+            points = {code for role, code in line["position_bindings"].items() if role in declared}
+            for point in points:
+                await conn.execute(
+                    text(
+                        "INSERT INTO enterprise_backend.workline_positions "
+                        "(work_line_id,position_code,capacity) VALUES (:line,:point,:capacity) "
+                        "ON CONFLICT DO NOTHING"
+                    ),
+                    {
+                        "line": line["id"],
+                        "point": point,
+                        "capacity": line["five_rack_request_limit"]
+                        if point == line["position_bindings"].get("FIVE_RACK")
+                        else 1,
+                    },
+                )
+    await engine.dispose()
+
+
+async def runtime(engine):
+    await current_runtime_schema(engine)
+
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.businesses.runtime import build_runtime
@@ -1065,7 +1130,7 @@ def runtime(engine):
     ["active", "missing", "empty_drain", "cancelled", "disabled", "conflict", "elsewhere"],
 )
 async def test_first_migrated_entry_requires_original_host_permission(schema_database, permission):
-    url, engine, t = await old_store(schema_database)
+    url, engine, t = await old_store(schema_database, runtime_subject=UNBOUND_CYCLE)
     async with engine.begin() as conn:
         await conn.execute(
             t["work_lines"]
@@ -1114,9 +1179,16 @@ async def test_first_migrated_entry_requires_original_host_permission(schema_dat
             )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     faces = host.roller.tables["face_work"]
     async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE enterprise_backend.rack_dispatch_job SET admission_order=1 "
+                "WHERE id=:job AND task_id IS NOT NULL"
+            ),
+            {"job": UNBOUND_CYCLE},
+        )
         if permission == "missing":
             grant = dict(
                 (await conn.execute(sa.select(faces).where(faces.c.id == "original-demand")))
@@ -1284,7 +1356,7 @@ async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_
             and job["closure_reason"] is None
         )
 
-    host = runtime(engine)
+    host = await runtime(engine)
     assert await host.advance("MANUAL_RACK", CANCELLED) == "POSITION_CONFLICT"
     if evidence == "configured":
         async with engine.begin() as conn:
@@ -1320,7 +1392,7 @@ async def test_unconsumed_bound_transfer_result_advances_original_manual_job(sch
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     async with host.capabilities.session_factory() as db:
         before = await host.rack_dispatch.progress(db, job_id=ACTIVE)
         assert before.actions[0].outcome_revision is None
@@ -1373,7 +1445,7 @@ async def test_roller_position_uses_kind_from_matching_original_outcome(schema_d
         before = await snapshot(conn, ("bin_roller_position_fact", "transport_task"))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     async with host.capabilities.session_factory() as db:
         job = await host.rack_dispatch.progress(db, job_id=ACK)
         assert (
@@ -1418,7 +1490,7 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     async with engine.begin() as conn:
         await conn.execute(
             t["smt_manual_input"]
@@ -1502,7 +1574,9 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
     ],
 )
 async def test_first_followup_move_waits_for_current_host_authority(schema_database, kind, case):
-    url, engine, t = await old_store(schema_database)
+    url, engine, t = await old_store(
+        schema_database, runtime_subject="ordinary" if kind == "ROTATE" else "ack"
+    )
     cycle = ORDINARY if kind == "ROTATE" else ACK
     client = "019a1111-2222-7333-8444-555555555589"
     async with engine.begin() as conn:
@@ -1618,7 +1692,7 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
         await conn.execute(position.update().where(position.c.id == prior).values(is_current=True))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
 
     async def original():
         async with host.capabilities.session_factory() as db:
@@ -1733,6 +1807,9 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
 
 async def retained_observation(conn, t, point):
     task = t["transport_task"]
+    original = await conn.scalar(
+        sa.select(task.c.frozen).where(task.c.transport_task_id == ACTIVE_TRANSPORT)
+    )
     await conn.execute(
         task.update()
         .where(task.c.transport_task_id == ACTIVE_TRANSPORT)
@@ -1740,7 +1817,7 @@ async def retained_observation(conn, t, point):
             position_observation=dict(
                 transport_task_id=ACTIVE_TRANSPORT,
                 kind="RACK_MOVE",
-                rack_id="R",
+                rack_id=original["rack_id"],
                 status="SUCCEEDED",
                 outcome_revision=2,
                 final_position={"kind": "RACK_POSITION", "location_code": point},
@@ -1757,7 +1834,7 @@ async def retained_observation(conn, t, point):
 async def test_ready_feed_honors_location_before_observation_owner_sweep(
     schema_database, contested
 ):
-    url, engine, t = await old_store(schema_database)
+    url, engine, t = await old_store(schema_database, runtime_subject="ordinary")
     async with engine.begin() as conn:
         await retained_observation(conn, t, "P" if contested else "elsewhere")
         cycles = t["bin_roller_rack_cycle"]
@@ -1804,7 +1881,7 @@ async def test_ready_feed_honors_location_before_observation_owner_sweep(
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     for _ in range(2):
         await host.advance("FEED", "demand")
     async with engine.connect() as conn:
@@ -1846,7 +1923,7 @@ async def test_bound_departure_retains_opaque_consumed_preparation(schema_databa
         before = await snapshot(conn, ("transport_task", "reliable_message"))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = runtime(engine)
+    host = await runtime(engine)
     for _ in range(2):
         await host.advance("RACK_CYCLE", ACK)
     async with host.capabilities.session_factory() as db:

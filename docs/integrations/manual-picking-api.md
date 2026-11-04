@@ -657,30 +657,31 @@ field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信
 受理使用接收器原事务保存收据、业务事实和持久待办，不在事务内访问 WMS/ECS。独立推进使用公开结果读口与调用方 Repeatable Read 事务，消费身份/版本、进度及下一 Outbox 意图原子提交。唤醒、Beat 和序列化重试沿[平台规则](workline-business-api.md#5-结果读取和事务规则)，不另建 Sender、Celery 任务或轮询器。
 
 <a id="manual-request-limit"></a>
-### 4.2 每线 FIVE_RACK 请求额度
+### 4.2 工作位进场请求额度
 
-管理 API 的 `POST /api/v1/work-lines`、`PUT /api/v1/work-lines/{id}` 及读取响应新增 `five_rack_request_limit: int | null`。值为严格整数 1～2147483647；布尔、小数、字符串、零、负值或越界值返回 422。创建省略即 null；更新省略保留原值，显式 null 清除配置并恢复未配置线的既有行为。更新仍提交当前 `version`，成功后加 1，旧版本返回 409，不改数据或冻结意图。
-
-例如为已有 KT16 配置 3（只展示相关响应字段，id/其他配置沿原管理 API）：
-
-```http
-PUT /api/v1/work-lines/{id}
-Content-Type: application/json
-
-{"line_name":"KT16","version":31,"five_rack_request_limit":3}
-```
+管理 API 的 `POST /api/v1/work-lines`、`PUT /api/v1/work-lines/{id}` 及读取响应使用 `positions` 集合。`position_bindings` 继续是角色到编码的字符串映射；同点别名只配置一行。业务资源位置声明增加 `position_type`，只有 `RACK_POSITION` 可以配置额度，交接口不配置货架额度。其他工作线不能重复配置同一现场货架点。
 
 ```json
-{"line_code":"KT16","line_name":"KT16","version":32,"five_rack_request_limit":3}
+{
+  "line_name": "KT16",
+  "version": 31,
+  "positions": [
+    {"position_code": "KT16", "capacity": 3},
+    {"position_code": "OUT55", "capacity": 3},
+    {"position_code": "OUT65", "capacity": 1}
+  ]
+}
 ```
 
-下一次仅改名称可发 `{"line_name":"KT16","version":32}` 保留 3；显式清除可发 `{"line_name":"KT16","version":33,"five_rack_request_limit":null}`。原设备/位置绑定省略时也保留，`position_bindings` 始终是角色到编码的字符串映射。额度表示本线原请求预算，非物理实时占位或缓存容量：新 CTU01 原动作登记即占用，原周期 RELEASED 才退出；CTU01 未知/失败不释放，原 CTU03 有效 submit 接纳或原成功结果只释放一次，不等最终位置/Result，不因重复通知多补位。
+示例编码必须对应本线实际绑定，并非出厂值。每项 capacity 省略默认为 1，显式 null 表示请求数不限额，合法整数范围 1～2147483647；非法类型/数值返回既有 400 INVALID_REQUEST。更新省略 positions 保持原值，提供则完整替换；仍有绑定或原未结束责任的点不能删除。版本冲突、在途改码/解绑/删除返回 409，成功更新 version 加 1。读取的每个位置项另有管理 id，不作为 WMS 业务身份。
 
-KT16/KT18 专用验收 fixture 在首次外部意图前创建两条 enabled/MANUAL 工作线并显式保存额度 3，保留源 version31/7；这是测试配置构造，不能把正常管理更新后版本仍为31/7当成 API 语义。源 AUTO 是运行元数据，任务仍为 MANUAL/outbound。开始前撤销服务的 WITHDRAWN 只在全周期无 CTU/feed 等原义务时记录，后续兄弟开始或 RELEASED 不把它改为 COMPLETED；公开进度保持 false/false。
+配置按工作位保存，计数与顺序只属于 `(work_line_id, task_id, position_code)`。同一分拣工作线仍至多一个 PREPARING/EXECUTING 任务，不因空余名额 prepare 或预叫后继任务。当前合同每任务只有一个转运目标架，转运架 capacity=3 也只下发这一个目标架。无任务 drain 保持独立单架串行，不借任务额度。
 
-迁移为 `0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit`，保留原数据和旧 revision。停写后迁移并切换对应代码；降级在任何 DDL 前拒绝非空额度或 WITHDRAWN 服务，保留数据/schema/revision，不清历史以强行回退，详见[迁移边界](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md#7-有数据迁移)。
+额度内登记原 ENTER 与原 Transport/outbox 后才会实际发送，登记成功即占 1；排队、到位、换面一直占额。满额候选保留原 job 和关联但不创建 Transport，释放或上调后由原 pending/Beat 补位，无须新计划。降低上限不撤销已登记请求，未知、超时及未证明的失败不释放。原 DEPART 严格取得 202 RECEIVED 或 200 DUPLICATE 接纳，或可靠证明未到场并收口，才释放一次；离场接纳不等于物理离场成功。
 
-已选架在额度等待期间遇到停线，首次 CTU01 等线重新启用后按原 cycle/service 登记。停线期间继续消费旧架的原 CTU03 接纳。未启动的 drain 候选若已真实排空，则按[公共回流 R01](workline-bin-return-api.md#return-drain-empty)记入未使用清单，其 WITHDRAWN 面服务同样受降级保护。
+任务终态只停止尚未提交的候选；已提交 outbox 尚未网络发送也属于原责任。后继任务即使计数为零，同点旧任务/drain 未交出责任仍阻止进场；原结果继续归原任务，不能改绑。生产只认精确原架/点/面到位事实，不能凭 ACK 或排队记录生产，正常队尾不阻止队头按原条件离场。
+
+迁移 `sharedrackdispatch → positioncapacity` 搬迁本项目原五层架限额（含 null），其他架位初值 1，保存原身份、冻结载荷与证据；不导入旧 wes_backend 历史。停写预检拒绝重复物理点、无归属额度与无法证明顺序的数据。有损降级在 DDL 前拒绝。API/worker 与管理客户端须同步切换，旧 `five_rack_request_limit` 不再是可写接口。
 
 <a id="manual-config"></a>
 ### 4.3 KT16 / KT18 现场配置参考

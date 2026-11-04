@@ -26,6 +26,27 @@ class RackJob(Base):
         UniqueConstraint("owner_domain", "work_line_id", "source_kind", "source_ref", "rack_id"),
         UniqueConstraint("id", "owner_domain", "work_line_id", name="rack_dispatch_job_scope"),
         Index("rack_dispatch_job_work", "owner_domain", "work_line_id", "pending", "id"),
+        _unique(
+            "rack_dispatch_job_admission_order",
+            "work_line_id",
+            "task_id",
+            "point",
+            "admission_order",
+            where="task_id IS NOT NULL AND admission_order IS NOT NULL",
+        ),
+        Index(
+            "rack_dispatch_job_admission_scan",
+            "work_line_id",
+            "task_id",
+            "point",
+            "pending",
+            "admission_order",
+        ),
+        CheckConstraint(
+            "(admission_order IS NULL OR admission_order > 0) AND (task_id IS "
+            "NOT NULL OR admission_order IS NULL)",
+            name="admission_order",
+        ),
         Index(
             "rack_dispatch_job_source_work",
             "owner_domain",
@@ -57,6 +78,7 @@ class RackJob(Base):
     rack_id: Mapped[str]
     original_cycle_id: Mapped[str]
     task_id: Mapped[str | None]
+    admission_order: Mapped[int | None] = mapped_column(BigInteger)
     workline_code: Mapped[str | None]
     point: Mapped[str | None]
     initial_face: Mapped[str | None]

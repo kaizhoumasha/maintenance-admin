@@ -243,7 +243,75 @@ class SmtManualTaskFlow:
             .where(plans.c.operation == ctx.operation, plans.c.operation_id == ctx.operation_id)
             .values(is_plan_record=True)
         )
+        await self._register_task_rack_candidates(ctx.session, task_id=payload.task_id)
         return Accepted()
+
+    async def _register_task_rack_candidates(self, session: AsyncSession, *, task_id: str) -> None:
+        from app.businesses._components.bin_roller.rack_flow import select_supply_cycle
+
+        task = await self.repository.task(session, task_id)
+        if not task or task["status"] != "EXECUTING" or not task["prepare_accepted"]:
+            return
+        current = await self.roller.production.read_current_task(
+            session, work_line_id=task["work_line_id"]
+        )
+        if (
+            not current.is_valid
+            or current.task_id != task_id
+            or await self.repository.has_pending_plan(session, task_id)
+        ):
+            return
+        await self.manual_racks.reconcile_task(
+            session, task_id=task_id, register_only=True, roles=("TRANSFER",)
+        )
+        repo = self.roller.repository(task["work_line_id"])
+        faces = repo.tables["face_work"]
+        members = self.repository.tables["member"]
+        ordered = (
+            (
+                await session.execute(
+                    select(members)
+                    .where(members.c.task_id == task_id, members.c.status == "PENDING")
+                    .order_by(members.c.plan_revision, members.c.member_order)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        supply_faces = (
+            (
+                await session.execute(
+                    select(faces).where(
+                        *repo.scoped(faces),
+                        faces.c.purpose == "SUPPLY",
+                        faces.c.task_id == task_id,
+                        faces.c.demand_state == "ACTIVE",
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        by_source = {
+            (face["plan_revision"], face["rack_id"], face["rack_face"]): face
+            for face in supply_faces
+        }
+        for revision in sorted({m["plan_revision"] for m in ordered}):
+            for member in ordered:
+                if member["plan_revision"] != revision or member["kind"] != "BIN":
+                    continue
+                face = by_source.get((revision, member["rack_id"], member["rack_face"]))
+                if face and face["cycle_id"] is None:
+                    cycle = await select_supply_cycle(self.roller, session, face["demand_id"])
+                    if cycle:
+                        await repo.bind_supply(session, demand_id=face["demand_id"], cycle_id=cycle)
+            await self.manual_racks.reconcile_task(
+                session,
+                task_id=task_id,
+                register_only=True,
+                roles=("RETURN",),
+                through_revision=revision,
+            )
 
     async def recheck_task_plan(
         self, ctx: CallbackContext, payload: PlanDelta, original_response: Mapping
