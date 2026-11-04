@@ -121,7 +121,7 @@ catalog 将同键且完整相同的资源合并，资源冲突、输入双重认
 已有调用同参重入保留原身份、字节、路由、附录和期限，不重跑新动作授权；Result 继续按原命令处理。
 阶段二的 WMS 出站结果与 Transport 实际应用结果已沿同一原业务通知，具体本地归属和兼容边界见下文。
 
-本方后续业务统一采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：公共箱流部分只声明 bin_roller.COMPONENT，任务合同另组合同源 sorting_task；四点只有组件一个输入目标，SCAN2 同原事务委托本业务生产接缝；业务决定释放、组件登记原命令。普通/drain 都由 RACK_CYCLE 待办推进同一 CTU 生命周期，DRAIN 只管理供架批次/周期引用，不再声明旧两个组件或外置架面模型；生产业务提供任务/供箱/接续上下文，原 progression 不变。物理扫码/原 Transport 结果更新当前事实，旧记录不阻挡新到位；组件不增加手工锁或占位控制。B1～B5 组件本地实现与分项验证、B6 边界核对及 B7 共享声明/隔离测试装配已完成；手工正式宿主/catalog、组件状态迁移已本地交付，供应商/现场整体验收仍未执行，前文框架/下文其他业务事务要求不因此被重写。
+本方后续业务统一采用[BIN_Roller 设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)：当前状态保存按 [四表设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md) 实施，公共箱流部分只声明 bin_roller.COMPONENT，任务合同另组合同源 sorting_task；四点只有组件一个输入目标，SCAN2 同原事务委托本业务生产接缝；业务决定释放、组件登记原命令。普通/drain 都由 RACK_CYCLE 待办推进同一 CTU 生命周期，DRAIN 只管理供架批次/周期引用，不再声明旧两个组件或外置架面模型；生产业务提供任务/供箱/接续上下文，原 progression 不变。物理扫码/原 Transport 结果更新当前事实，旧记录不阻挡新到位；组件不增加手工锁或占位控制。B1～B5 组件本地实现与分项验证、B6 边界核对及 B7 共享声明/隔离测试装配已完成；手工正式宿主/catalog、组件状态迁移已本地交付，供应商/现场整体验收仍未执行，前文框架/下文其他业务事务要求不因此被重写。
 
 BIN_Roller 的 `get_supply_progress` 必须与宿主自己保存的原成员有效/撤销事实一起使用：有效需求要求 feed_complete=true 且 pending=false；未开始撤销可返回 false/false，不要求补造成功。已开始/原 pending 不因撤销跳过，缺预期关联不视为结清；DTO 不提供 withdrawn，宿主不查组件内部表。该进度不等于全局回流或全部架离场，人工完成映射见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)。
 

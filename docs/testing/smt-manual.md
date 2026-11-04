@@ -1,5 +1,8 @@
 # SMT 手工正式组合软件验收
 
+2026-11-03 四表重构后的实体、TASK 终态停发、独立 LINE/WAIT_FACT 与清理边界见[本轮软件验收](2026-11-03-bin-roller-four-table-acceptance.md)及[新设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。下列旧轮次的表数量、service/segment/opportunity/decision 历史结构及终态继续旧调度的叙述仅为历史验收证据，不作为新 runtime 的恢复合同。
+
+
 **2026-11-03 实施状态。** 手工 MANUAL_RACK、MANUAL_BIN、MANUAL_COMPLETION 与组件相关推进在首条 SQL 前采用 SERIALIZABLE。独立 RACK_REPORT 与 SCAN2_RELEASE 保留 REPEATABLE READ。
 
 <a id="current-delivery"></a>

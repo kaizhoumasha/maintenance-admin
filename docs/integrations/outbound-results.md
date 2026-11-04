@@ -121,3 +121,10 @@ async def wake_execution(session_factory, execution_id, advance_owned_business):
 运行时绑定业务实例负责新请求消费者核对和原关联重放冲突；默认未绑定实例不能创建正式共享 WMS 请求。
 旧 None 不回填；公开 Transport owner_domain 只是原关联，不授权新动作。该列迁移有非空证据时阻止降级删除。
 测试与部署边界见[阶段二验收](../testing/business-components-phase2.md)，BIN_Roller 阶段三已完成本地组件及隔离测试装配，手工正式宿主/catalog、组件状态迁移与本地运行恢复已交付，见[手工验收](../testing/smt-manual.md)；尚未部署或进行供应商/现场验收。
+
+
+### 可终止调度范围
+
+新登记可显式传入 `ScopeRef(owner_domain, "TASK" | "LINE", scope_id)`；身份和范围一起冻结。终态业务事务调用 `Outbox.stop_scope` 只停止精确匹配的未结束投递，标记 ABANDONED、清除租约和排期。ABANDONED 不表示物理成功/失败或对端取消；已观察响应和原结果继续按各公开读口读取。FACTS/独立报告可保持无范围，不因某 TASK 完成而批量停止。
+
+Sender 以原消息状态/租约为发送门禁；带范围标签的消息提交首个 dispatch_started_at 后才允许 HTTP，未标签消息不写入该新增证据并保持原保守判断；stop 先提交则旧 claim 不能发送，gate 先提交则该原次可能已发送。attempts/last_attempt_at 不是派发证明。两类发送均不回查业务，finish/recovery/settle/resume 不复活 ABANDONED。Transport 公开结果的 submission_dispatch_started 对新范围消息为布尔值，旧未标签消息为 None；不能从消息缺失/投递终态推断从未下发。

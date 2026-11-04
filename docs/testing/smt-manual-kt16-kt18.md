@@ -1,5 +1,8 @@
 # KT16 / KT18 用户配置专项验收
 
+2026-11-03 更新：BIN_Roller 当前检查点采用[四表设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。原 TASK 完成/取消即停止其后续调度，独立 LINE 回流只按自身责任继续；WAIT_FACT 不重发旧动作。旧八表历史不迁移。本文既往表数量/中间实体和运行快照保留为历史证据，当前软件验证见[本轮验收](2026-11-03-bin-roller-four-table-acceptance.md)；WMS/ECS wire 与现场验收边界不因此改变。
+
+
 <a id="current-factory-profile"></a>
 <a id="rack-cancellation-fixes"></a>
 ## 2026-11-02 取消与离场修复：新专项通过
