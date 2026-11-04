@@ -15,7 +15,7 @@
 
 ## 迁移与切换
 
-唯一新 head 为 rollerfour：sharedrackdispatch → rollerfoundation（公共增量 A）→ rollerfour（私表替换 B）。历史 revision 不修改。
+唯一新 head 为 rollerfour：sharedrackdispatch → positioncapacity（工作位容量）→ rollerfoundation（公共增量 A）→ rollerfour（私表替换 B）。历史 revision 不修改。
 
 A 不回填旧公共行。B 在任何旧私表删除前检查旧待办、可能发送/原搬运、活跃架作业和宿主引用；发现责任则拒绝。允许丢弃无在制责任的旧私表历史，公共及其他业务原字节/身份保留。B 新表非空拒绝降级；A 有新范围/ABANDONED/派发/事件语义时拒绝降级，均在破坏性 DDL 前预检。
 
@@ -67,9 +67,16 @@ A 不回填旧公共行。B 在任何旧私表删除前检查旧待办、可能�
 
 ## 与工作线容量分支的集成前提
 
-本分支当前独立迁移链保持不变。与 `feature/workline-position-capacity` 集成时须先合入容量变更：容量迁移读取 B 将删除的旧 demand_id/task 等列，拟议组合链为 `sharedrackdispatch → positioncapacity → rollerfoundation → rollerfour`，仍须正式调整与复验。不得先执行 B 再运行容量迁移。
+2026-11-04 已在本分支合并容量来源 `48e6a180` 的代码并完成冲突移植，组合链为 `sharedrackdispatch → positioncapacity → rollerfoundation → rollerfour`。容量预检先读取旧 BIN 关联，B 之后不再运行容量迁移。原容量用例已移植至 SUPPLY 的 scope_id/id/rack_job_id；不能恢复旧列或兼容私表。
 
-源码也需协调：本分支 `close_scope` 将架作业设为 `pending=False`，容量准入仍按 pending 查询原架责任，机械组合会遗漏旧架物理责任保护。第二次合入前须明确终态责任合同、将候选排序移植到四表，并处理已识别的 12 处文本冲突/31 条共享修改路径后执行组合验证。此项是跨分支集成前提，不作为本分支新增独立运行时缺陷；尚未证明组合正确，PR 保持 Draft。
+用户已明确选择“停投递，保留未决原架责任”。CLOSED_BY_SCOPE 禁止一切新动作，但未决原架继续 pending，保护同点/同架及引用。纯候选、严格从未派发或原严格交出接纳才解除；ABANDONED 不证明未发送。停止原因保留，解除事实嵌套保存为 responsibility_release。
+
+组合专项：停止责任 SQLite/PostgreSQL **56 passed**（含关闭/新入位真实锁等待、提交/回滚），宿主容量与生命周期 **153 passed**，清理 **21 passed**（未决原架保留、严格交出后可清理）。这些专项结果有重叠，不相加；整合后的完整测试和最终评审将在同节补记。此前两分支独立全绿不能代替组合结论。
+
+整合后全仓初验：迁移 309 passed、9 failed、0 skipped；其余 5406 passed、1 failed、44 skipped。失败均为两处测试样例适配：旧迁移用例重复插入已存在工作线；双线用例在旧供架未交出时要求第二架进同点。产品/迁移/helper 源码未再修改；更新既有配置，并以原 Transport/严格接纳先交出旧架后，完整受影响文件复验关闭失败（迁移文件 56 passed，双线文件 2 passed）。不将初验命令冒称 exit 0；最终按每项最新结果去重覆盖，迁移 318、其余 5407 passed/44 skipped，合计 5725 passed/44 skipped。完整提交树另由 PR CI 重验。
+
+独立整体审查无 Critical/Minor，发现 1 项 Important：停止后的真实宿主传 UNKNOWN，阻止严格原 ENTER 拒绝事实收口。公共入口回归先失败再通过，保留原冻结身份、无接纳/结果/位置/前驱冲突等全部证据检查；受影响停止组 84 passed。历史恢复还以先失败后通过的回归修复重复核对清空原 preparation_action_id，容量/恢复 23 passed。Ruff、702 文件格式、差异检查和唯一 rollerfour head 通过。所有检查使用独占可丢弃 PG/Redis/loopback，未操作运行库。
+
 
 ## 未验证边界
 

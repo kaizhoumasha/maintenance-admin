@@ -134,3 +134,49 @@ async def test_component_result_waits_for_original_workline_lock(manual_host):
     assert (await flow.rows("scan2_release", component=True))[0]["pending"]
     assert await flow.host.advance("SCAN2_RELEASE", release["id"]) == "SUCCESS"
     assert not (await flow.rows("scan2_release", component=True))[0]["pending"]
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+async def test_original_capacity_slot_rolls_back_with_transport_before_commit(
+    manual_host, failures
+):
+    from sqlalchemy import select
+
+    from app.businesses._components.rack_dispatch.models import RackAction
+
+    flow = manual_host
+    await flow.ready()
+    await flow.plan()
+    (job,) = await flow.rows("rack")
+    assert not await flow.rows("rack_action")
+    attempts = []
+
+    def fail_after_registration(session):
+        action = session.scalar(select(RackAction).where(RackAction.job_id == job["id"]))
+        if action is None:
+            return
+        attempts.append((session, action.transport_task_id))
+        if len(attempts) <= failures:
+            session.execute(
+                text("DO $$ BEGIN RAISE EXCEPTION 'retry' USING ERRCODE='40001'; END $$")
+            )
+
+    event.listen(Session, "before_commit", fail_after_registration)
+    try:
+        if failures == 3:
+            with pytest.raises(DBAPIError):
+                await flow.host.advance("MANUAL_RACK", job["id"])
+        else:
+            await flow.host.advance("MANUAL_RACK", job["id"])
+    finally:
+        event.remove(Session, "before_commit", fail_after_registration)
+    assert len(attempts) == (3 if failures == 3 else 2)
+    assert len({id(session) for session, _ in attempts}) == len(attempts)
+    assert all(transport for _, transport in attempts)
+    assert len(await flow.rows("rack_action")) == (0 if failures == 3 else 1)
+    assert (await flow.rows("rack"))[0]["id"] == job["id"]
+    if failures == 3:
+        await flow.host.advance("MANUAL_RACK", job["id"])
+    actions = await flow.rows("rack_action")
+    assert len(actions) == 1
+    assert actions[0]["rack_work_id"] == job["id"]

@@ -26,7 +26,12 @@ async def list_businesses():
                 for role in definition.device_roles
             ],
             "position_slots": [
-                {"key": slot.slot_key, "display_name": slot.display_name, "required": slot.required}
+                {
+                    "key": slot.slot_key,
+                    "display_name": slot.display_name,
+                    "required": slot.required,
+                    "position_type": slot.position_type,
+                }
                 for slot in definition.position_slots
             ],
             "initial_entries": [

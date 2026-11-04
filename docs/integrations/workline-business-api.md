@@ -279,3 +279,8 @@ Python 集中声明描述“这个业务需要什么”；静态 catalog 与简�
 每个业务至少给出：流程及结束条件、完整 API 字段及联合分支、原身份/业务经过身份、角色附录、工作线资源表、异常等待/核对路径、受理与推进边界、孤立环境测试清单。接口草案必须由 WMS/ECS 责任方确认后，才转为正式注册。
 
 人工的旧系统流程参考见其专页；人工、粗分和自动线的业务未决项各自在文末列出，公共回流语义冲突只在[公共文档](workline-bin-return-api.md#return-pending)维护。统一任务命名和共用离场调整以本文草案说明为准。公共协议细节以[注册](registration.md)、[ECS](ecs-command.md)、[Transport](wms-transport.md)及[出站结果](outbound-results.md)为准。
+
+
+## 工作位配置与单任务接纳
+
+资源 PositionSlot 显式声明 RACK_POSITION 或 HANDOFF_POSITION，业务清单对位置返回 position_type。工作线 `positions` 集合保存位置码与 capacity，替代专用五层架限额；同任务同点跨角色共用上限，运行计数、候选顺序和授权不跨任务。同线 PREPARING/EXECUTING 唯一约束和原 prepare 时机保持。旧任务/无任务流程的同点外部责任单独隔离，纯本地候选不冒充外部责任，原事实收口不依赖当前任务门禁。详见[管理合同](manual-picking-api.md#manual-request-limit)。

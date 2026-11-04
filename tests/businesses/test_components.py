@@ -19,7 +19,11 @@ def shared_component(monkeypatch):
     component = ComponentDefinition(
         key="shared_scan",
         device_roles=(DeviceRole(role_key="SHARED_SCAN", display_name="Shared scan"),),
-        position_slots=(PositionSlot(slot_key="OUTLET", display_name="Outlet"),),
+        position_slots=(
+            PositionSlot(
+                position_type="HANDOFF_POSITION", slot_key="OUTLET", display_name="Outlet"
+            ),
+        ),
         initial_entries=(
             InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="SHARED_SCAN"),
         ),
@@ -66,7 +70,11 @@ def test_invalid_component_composition_fails_before_runtime(shared_component, pr
     elif problem == "resource":
         state.first.DEFINITION = replace(
             state.first.DEFINITION,
-            position_slots=(PositionSlot(slot_key="OUTLET", display_name="Conflicting"),),
+            position_slots=(
+                PositionSlot(
+                    position_type="HANDOFF_POSITION", slot_key="OUTLET", display_name="Conflicting"
+                ),
+            ),
         )
     elif problem == "input":
         state.first.DEFINITION = replace(

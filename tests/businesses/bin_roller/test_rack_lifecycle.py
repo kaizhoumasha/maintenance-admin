@@ -130,6 +130,11 @@ async def test_original_release_commits_when_queued_supply_configuration_is_unav
     async with flow.factory.begin() as session:
         line = WorkLine.__table__
         if unavailable == "missing_line":
+            from app.models import WorkLinePosition
+
+            await session.execute(
+                WorkLinePosition.__table__.delete().where(WorkLinePosition.work_line_id == 1)
+            )
             await session.execute(line.delete().where(line.c.id == 1))
         else:
             values = (
@@ -172,6 +177,9 @@ async def test_original_release_commits_when_queued_supply_configuration_is_unav
         )
         if unavailable == "missing_line":
             await session.execute(line.insert().values(id=1, **values))
+            from tests.helpers import configure_rack_positions
+
+            await configure_rack_positions(session, await session.get(WorkLine, 1))
         else:
             await session.execute(line.update().where(line.c.id == 1).values(**values))
     await flow.advance("FACE", queued)
@@ -232,7 +240,8 @@ async def test_new_task_does_not_adopt_original_cycle(roller_lifecycle):
     cycles = await flow.all_rows("rack_cycle")
     assert len(cycles) == 2
     assert {c["task_id"] for c in cycles} == {"task-original", "T2"}
-    assert len(await flow.all_rows("rack_action")) == 2
+    assert len(await flow.all_rows("rack_action")) == 1
+    assert next(c for c in cycles if c["task_id"] == "T2")["id"] != cycle
 
 
 @pytest.mark.parametrize(
@@ -321,19 +330,20 @@ async def test_task_switch_does_not_start_queued_old_supply(roller_lifecycle):
     assert len(await flow.all_rows("departure")) == 1
 
 
-async def test_old_cycle_does_not_use_new_tasks_arrival_for_departure(roller_lifecycle):
+async def test_old_task_settlement_does_not_admit_or_borrow_new_task_entry(roller_lifecycle):
     flow = roller_lifecycle
     original, cycle = await flow.ready_supply(count=1)
     old_segment = (await flow.all_rows("feed_segment"))[0]
+    old_entries = await flow.all_rows("rack_action")
     flow.current_task = "T2"
     new = await flow.demand(task="T2")
     await flow.advance("FACE", new)
-    new_entry = (await flow.all_rows("rack_action"))[-1]
-    await flow.rack_result(new_entry)
-    await flow.advance("RACK_CYCLE", new_entry["cycle_id"])
+    assert [a["id"] for a in await flow.all_rows("rack_action")] == [a["id"] for a in old_entries]
     await flow.feed_success(old_segment)
     await flow.advance("FACE", original)
-    assert not [d for d in await flow.all_rows("departure") if d["cycle_id"] == cycle]
+    assert [d["cycle_id"] for d in await flow.all_rows("departure")] == [cycle]
+    assert len(await flow.all_rows("feed")) == 1
+    assert not [a for a in await flow.all_rows("rack_action") if a["cycle_id"] != cycle]
 
 
 async def test_departure_wait_keeps_due_point_then_registers_one_recheck(

@@ -40,6 +40,7 @@ class TransportTaskResult:
     cycle_id: str | None = None
     kind: str | None = None
     submission_state: str = "UNAVAILABLE"
+    has_submission_acceptance: bool | None = None
     submission_message_id: int | None = None
     submission_target: str | None = None
     submission_delivery_status: str | None = None
@@ -75,13 +76,9 @@ async def read_rows(
     if check_conflicts:
         columns += ("delivery_snapshot",)
     task_columns = [c for c in task.c if c.name != "submission_acceptance"]
+    task_columns.append(task.c.submission_acceptance.is_not(None).label("has_acceptance"))
     if check_conflicts:
-        task_columns.extend(
-            (
-                task.c.submission_acceptance,
-                task.c.submission_acceptance.is_not(None).label("has_acceptance"),
-            )
-        )
+        task_columns.append(task.c.submission_acceptance)
     query = (
         select(
             *[c.label("task_" + c.name) for c in task_columns],
@@ -349,6 +346,7 @@ def project(
         )
     result = replace(
         result,
+        has_submission_acceptance=task["has_acceptance"],
         frozen=deepcopy(task["frozen"]),
         outcome=deepcopy(outcome),
         position_observation=deepcopy(observation),

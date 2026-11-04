@@ -1,6 +1,9 @@
 # 公共货架调度实体与推进服务设计
 
-**2026-11-03 实施状态。** 手工与 BIN_Roller 已在本地实施公共调度、原提交接纳及两类宿主接入，唯一迁移 head 为 sharedrackdispatch。验证范围为软件与可丢弃数据库，供应商验收、真实生产数据迁移和现场执行仍待验证。
+**2026-11-03 实施状态。** 手工与 BIN_Roller 已在本地实施公共调度、原提交接纳及两类宿主接入，原公共调度迁移为 sharedrackdispatch；后续工作位容量迁移追加 positioncapacity head。验证范围为软件与可丢弃数据库，供应商验收、真实生产数据迁移和现场执行仍待验证。
+
+
+**工作位容量实施增量（2026-11-03，基线 caca3c0）。** 配置归 `WorkLinePosition`；原 `RackJob.admission_order` 仅在本线、本任务、本点决定候选接纳顺序，公共调度在 ENTER 登记 Transport 前统一校验当前任务授权、同点额度及同物理架责任。已登记 ENTER 持续占额，普通排队候选不成为队头的直接交出障碍；只有原 DEPART 有效接纳或可靠 NOT_ARRIVED 依据释放。不同任务、其他 owner 的同点外部责任仍隔离，未提交候选不伪造现场责任。无任务 ROLLER_DRAIN 保留同点单架串行与原 FIFO，不随 capacity 扩成排队池。原任务的结果/离场可继续收尾，失去当前任务授权后不得新增供箱授权或转到新服务面。参见[容量设计](2026-11-03-workline-position-capacity-design.md)和[软件验收](../../testing/smt-manual.md#position-capacity)。
 
 历史状态：2026-11-02，**用户已选择架构与离场接纳完成语义；本文为设计草案，尚未实施、迁移或部署**。本轮仅更新文档，不修改应用代码、不操作数据库、不提交。当前 develop/HEAD 为 064b5c8，现有实现行为仍以源码为准。
 
@@ -315,7 +318,7 @@ RACK_REPORT参与同一个宿主scan_pending的只读RR上界/游标和公平轮
 
 作业原出处按 (owner_domain,work_line_id,source_kind,source_ref,rack_id) 唯一，五项非空；source_ref 编入原轮次。来源类型是 MANUAL_RETURN、MANUAL_TRANSFER、ROLLER_ORDINARY、ROLLER_DRAIN。普通手工 RETURN 使用触发该轮的首个成员 id，TRANSFER 使用原目标计划出处（首轮任务标识），普通 roller 使用 demand_id，drain 使用原决定 id，同一 drain 中按原架区别。重复已闭合出处只返回历史；新增真实授权使用新出处。保存独立 original_cycle_id 和不可变 caller，允许无 task 的 drain。早期无资源候选保留未知，派发前以原宿主批准的完整资源一次冻结。使用字符串 job/action 本地主键；不以 rack_id 或当前配置作历史身份。
 
-Job.state = ACTIVE / RELEASING / COMPLETED / WITHDRAWN / NOT_ARRIVED。ACTIVE 可含 release_requested、review_reason；首次合法 decide 根使状态 RELEASING，禁止再接生产，直至终结。终态 pending=false。正常 COMPLETED 仅限 closure_reason=DEPARTURE_ACK，并保存严格 ACK 和消费时间；迁移独占例外 closure_reason=LEGACY_CLOSED，completion_rule=LEGACY_RECORDED_CLOSURE，保存原表、原 id、原状态、原 release_basis、原 outcome_revision/时间等实际存在的依据。该历史分支既适用于手工 DEPARTED 也适用于 roller RELEASED，包括仅以 SUCCEEDED 闭合、缺原 ACK 的情况。移植已闭合行不重新计算或要求 ACK；无原时间保留 NULL，独立记录迁移出处，绝不将迁移时间当原完成时间。新建动作和历史未决动作禁止选择旧规则。历史歧义或缺少关联拒绝迁移；历史已确认结论与无 ACK 分开保留。
+Job.state = ACTIVE / RELEASING / COMPLETED / WITHDRAWN / NOT_ARRIVED。ACTIVE 可含 release_requested、review_reason；首次合法 decide 根使状态 RELEASING，禁止再接生产，直至终结。正常终态 pending=false；2026-11-04 容量/四表整合增加 CLOSED_BY_SCOPE：停止动作后，未决原架可 pending=true，仅消费原事实并保护门禁/清理；严格解除在原 closure_basis.responsibility_release 保存，停止原因不改。正常 COMPLETED 仅限 closure_reason=DEPARTURE_ACK，并保存严格 ACK 和消费时间；迁移独占例外 closure_reason=LEGACY_CLOSED，completion_rule=LEGACY_RECORDED_CLOSURE，保存原表、原 id、原状态、原 release_basis、原 outcome_revision/时间等实际存在的依据。该历史分支既适用于手工 DEPARTED 也适用于 roller RELEASED，包括仅以 SUCCEEDED 闭合、缺原 ACK 的情况。移植已闭合行不重新计算或要求 ACK；无原时间保留 NULL，独立记录迁移出处，绝不将迁移时间当原完成时间。新建动作和历史未决动作禁止选择旧规则。历史歧义或缺少关联拒绝迁移；历史已确认结论与无 ACK 分开保留。
 
 Action.kind = ENTER / ROTATE / DEPARTURE_DECIDE / DEPART。phase = REGISTERED / WAIT / READY / APPLIED / ACCEPTED / REVIEW / LEGACY_CLOSED，原 FAILED/CANCELLED 等 outcome 及 revision 独立于 phase。decide 的 completion_rule 为空，ENTER/ROTATE=APPLIED_RESULT，DEPART=ACCEPTED_DEPARTURE（上述历史特例除外）。WAIT 仅 decide 且 due_at_ms 非空；READY 仅 decide 且保存严格决定；ACCEPTED 仅 DEPART 且原证据非空；APPLIED 仅 ENTER/ROTATE 且有结果版本，不据此单独授予生产。动作到 job 的 FK RESTRICT，前驱为同一 job 的动作（组合 FK）；唯一 (job_id,kind,source_ref)。ENTER/DEPART 分别按 job 单例；以 WHERE kind='DEPARTURE_DECIDE' AND previous_action_id IS NULL 对 job_id 建唯一索引，非空 WAIT 前驱上以 (job_id,previous_action_id) 部分唯一，补齐 SQL NULL 不去重的漏洞。后继仅在前驱是已消费 WAIT 后登记。DEPART 引用原 READY。对非空 transport_task_id/client_request_id/submit_operation_id 及非空 (operation,decision_operation_id) 各设唯一。pending 查询索引 (owner_domain,work_line_id,pending,id)；另按 (owner_domain,work_line_id,source_kind,pending,id) 扫宿主类别。SQLite/PostgreSQL 同一谓词。任务没有级联删除权。
 

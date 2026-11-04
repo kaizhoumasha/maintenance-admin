@@ -1,12 +1,12 @@
 from collections.abc import Callable
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.businesses.definitions import BusinessDefinition
 from app.core.errors import AppError, ErrorCode
 from app.integrations.ecs_callback.binding import DeviceBinding
-from app.models import Device, WorkLine
-from app.schemas.workline import WorkLineRead
+from app.models import Device, WorkLine, WorkLinePosition
+from app.schemas.workline import WorkLinePositionRead, WorkLineRead
 from app.services.asset_audit import mutation, record_change
 from app.services.pagination import paginate
 
@@ -26,24 +26,40 @@ async def lock_worklines(session, ids):
     return rows
 
 
-def snapshot(row):
+def snapshot(row, positions=()):
     return {
-        key: getattr(row, key)
-        for key in (
-            "id",
-            "line_code",
-            "line_name",
-            "business_code",
-            "is_enabled",
-            "five_rack_request_limit",
-            "zone_name",
-            "description",
-            "sort_order",
-            "version",
-            "device_bindings",
-            "position_bindings",
-        )
+        "positions": [
+            WorkLinePositionRead.model_validate(p).model_dump(mode="json") for p in positions
+        ],
+        **{
+            key: getattr(row, key)
+            for key in (
+                "id",
+                "line_code",
+                "line_name",
+                "business_code",
+                "is_enabled",
+                "zone_name",
+                "description",
+                "sort_order",
+                "version",
+                "device_bindings",
+                "position_bindings",
+            )
+        },
     }
+
+
+async def position_rows(session, line_ids):
+    rows = await session.scalars(
+        select(WorkLinePosition)
+        .where(WorkLinePosition.work_line_id.in_(line_ids))
+        .order_by(WorkLinePosition.position_code)
+    )
+    result = {key: [] for key in line_ids}
+    for row in rows:
+        result[row.work_line_id].append(row)
+    return result
 
 
 async def read_workline(session, workline_id):
@@ -53,7 +69,13 @@ async def read_workline(session, workline_id):
     count = await session.scalar(
         select(func.count()).select_from(Device).where(Device.work_line_id == row.id)
     )
-    return WorkLineRead.model_validate(row).model_copy(update={"device_count": count})
+    positions = (await position_rows(session, [row.id]))[row.id]
+    return WorkLineRead.model_validate(row).model_copy(
+        update={
+            "device_count": count,
+            "positions": [WorkLinePositionRead.model_validate(p) for p in positions],
+        }
+    )
 
 
 async def list_worklines(session, params, filters=None):
@@ -87,8 +109,14 @@ async def list_worklines(session, params, filters=None):
             )
         ).all()
     )
+    positions = await position_rows(session, [row.id for row in page["items"]])
     page["items"] = [
-        WorkLineRead.model_validate(row).model_copy(update={"device_count": counts.get(row.id, 0)})
+        WorkLineRead.model_validate(row).model_copy(
+            update={
+                "device_count": counts.get(row.id, 0),
+                "positions": [WorkLinePositionRead.model_validate(p) for p in positions[row.id]],
+            }
+        )
         for row in page["items"]
     ]
     return page
@@ -98,10 +126,17 @@ async def create_workline(session, data, *, actor, definition_lookup):
     async with mutation(session):
         definition = _definition(data.business_code, definition_lookup)
         _validate_positions(data.position_bindings, definition)
-        row = WorkLine(**data.model_dump())
+        row = WorkLine(**data.model_dump(exclude={"positions"}))
         session.add(row)
         await session.flush()
         await validate_bindings(session, row.id, row.device_bindings, definition=definition)
+        positions = await _save_positions(
+            session,
+            row,
+            definition,
+            data.positions if "positions" in data.model_fields_set else None,
+            creating=True,
+        )
         await record_change(
             session,
             actor=actor,
@@ -109,7 +144,7 @@ async def create_workline(session, data, *, actor, definition_lookup):
             resource="work-lines",
             resource_id=row.id,
             before={},
-            after=snapshot(row),
+            after=snapshot(row, positions),
         )
         row_id = row.id
     return await read_workline(session, row_id)
@@ -120,12 +155,12 @@ async def update_workline(session, workline_id, data, *, actor, definition_looku
         row = (await lock_worklines(session, [workline_id]))[0]
         if row.version != data.version:
             raise AppError(ErrorCode.CONFLICT, "工作线版本已变化")
-        before = snapshot(row)
-        updates = data.model_dump(exclude={"version"})
+        original_positions = (await position_rows(session, [row.id]))[row.id]
+        before = snapshot(row, original_positions)
+        updates = data.model_dump(exclude={"version", "positions"})
         for key in (
             "business_code",
             "is_enabled",
-            "five_rack_request_limit",
             "device_bindings",
             "position_bindings",
         ):
@@ -142,8 +177,19 @@ async def update_workline(session, workline_id, data, *, actor, definition_looku
             updates.get("device_bindings", row.device_bindings),
             definition=definition,
         )
+        next_bindings = updates.get("position_bindings", row.position_bindings)
+        changed = {
+            code for role, code in row.position_bindings.items() if next_bindings.get(role) != code
+        }
+        await _protect_positions(session, row.id, changed)
         for key, value in updates.items():
             setattr(row, key, value)
+        positions = await _save_positions(
+            session,
+            row,
+            definition,
+            data.positions if "positions" in data.model_fields_set else None,
+        )
         row.version += 1
         await record_change(
             session,
@@ -152,7 +198,7 @@ async def update_workline(session, workline_id, data, *, actor, definition_looku
             resource="work-lines",
             resource_id=row.id,
             before=before,
-            after=snapshot(row),
+            after=snapshot(row, positions),
         )
     return await read_workline(session, workline_id)
 
@@ -200,8 +246,17 @@ async def delete_workline(session, workline_id, *, version, actor):
             action="asset:workline:delete",
             resource="work-lines",
             resource_id=row.id,
-            before=snapshot(row),
+            before=snapshot(row, (await position_rows(session, [row.id]))[row.id]),
             after={},
+        )
+        from app.businesses._components.rack_dispatch.models import RackJob
+
+        if await session.scalar(
+            select(RackJob.id).where(RackJob.work_line_id == row.id, RackJob.pending).limit(1)
+        ):
+            raise AppError(ErrorCode.CONFLICT, "工作线仍有未结束货架责任")
+        await session.execute(
+            delete(WorkLinePosition).where(WorkLinePosition.work_line_id == row.id)
         )
         await session.delete(row)
 
@@ -255,3 +310,65 @@ async def business_configuration_issue(
     ):
         return "WORKLINE_CONFIGURATION_INCOMPLETE"
     return None
+
+
+async def _protect_positions(session, line_id, codes):
+    if not codes:
+        return
+    from app.businesses._components.rack_dispatch.models import RackJob
+
+    if await session.scalar(
+        select(RackJob.id)
+        .where(RackJob.work_line_id == line_id, RackJob.point.in_(codes), RackJob.pending)
+        .limit(1)
+    ):
+        raise AppError(ErrorCode.CONFLICT, "工作位仍有未结束货架责任")
+
+
+async def _save_positions(session, line, definition, supplied, *, creating=False):
+    declared = (
+        {p.slot_key: p.position_type for p in definition.position_slots} if definition else {}
+    )
+    rack_codes = {
+        v for k, v in line.position_bindings.items() if declared.get(k) == "RACK_POSITION"
+    }
+    handoffs = {
+        v for k, v in line.position_bindings.items() if declared.get(k) == "HANDOFF_POSITION"
+    }
+    if rack_codes & handoffs:
+        raise AppError(ErrorCode.INVALID_REQUEST, "货架工作位不能同时是交接口")
+    existing = (await position_rows(session, [line.id]))[line.id]
+    old = {p.position_code: p for p in existing}
+    if supplied is None:
+        if not creating:
+            if rack_codes - old.keys():
+                raise AppError(ErrorCode.CONFLICT, "货架工作位配置不完整")
+            return existing
+        values = {code: 1 for code in rack_codes}
+    else:
+        values = {p.position_code: p.capacity for p in supplied}
+        if len(values) != len(supplied) or values.keys() - (rack_codes | old.keys()):
+            raise AppError(ErrorCode.INVALID_REQUEST, "工作位配置重复或不属于货架工作位")
+        if rack_codes - values.keys():
+            raise AppError(ErrorCode.CONFLICT, "仍绑定的货架工作位不能删除")
+    await _protect_positions(session, line.id, old.keys() - values.keys())
+    if values and await session.scalar(
+        select(WorkLinePosition.id)
+        .where(WorkLinePosition.position_code.in_(values), WorkLinePosition.work_line_id != line.id)
+        .limit(1)
+    ):
+        raise AppError(ErrorCode.CONFLICT, "货架工作位已属于其他工作线")
+    for code, row in old.items():
+        if code not in values:
+            await session.delete(row)
+    result = []
+    for code, capacity in sorted(values.items()):
+        row = old.get(code)
+        if row is None:
+            row = WorkLinePosition(work_line_id=line.id, position_code=code, capacity=capacity)
+            session.add(row)
+        else:
+            row.capacity = capacity
+        result.append(row)
+    await session.flush()
+    return result

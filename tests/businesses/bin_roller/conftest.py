@@ -119,6 +119,13 @@ async def roller_lifecycle(roller_return):
     async with factory.begin() as session:
         line = await session.get(WorkLine, 1)
         line.position_bindings = dict(FIVE_RACK="RACK-WORK", INLET="INLET", OUTLET="OUTLET")
+        from sqlalchemy import delete
+
+        from app.models import WorkLinePosition
+        from tests.helpers import configure_rack_positions
+
+        await session.execute(delete(WorkLinePosition).where(WorkLinePosition.work_line_id == 1))
+        await configure_rack_positions(session, line)
 
     async def advance(kind, record_id, *, before=None):
         from sqlalchemy.exc import DBAPIError
@@ -614,6 +621,9 @@ async def roller_scans(roller_store, monkeypatch):
             return arrival.arrival_id
 
     production = Production()
+    from tests.helpers import fixture_supply_order, rack_task_admission
+
+    production.read_supply_order = fixture_supply_order(store.tables, owner="first")
     flow = SimpleNamespace(
         store=store,
         factory=store.factory,
@@ -630,7 +640,9 @@ async def roller_scans(roller_store, monkeypatch):
             CommandOwner(owner),
             capabilities,
             production,
-            rack_dispatch=RackDispatch(owner, capabilities),
+            rack_dispatch=RackDispatch(
+                owner, capabilities, task_admission=rack_task_admission(production)
+            ),
             tables=store.tables,
         )
         flow.runtime = BusinessRuntime(
@@ -1031,7 +1043,14 @@ async def roller_application(roller_scans, request):
         def __init__(self, owner, capabilities):
             self.capabilities = capabilities
             self.production = Production(owner)
-            dispatch = RackDispatch(owner, capabilities)
+            from tests.helpers import fixture_supply_order
+
+            self.production.read_supply_order = fixture_supply_order(flow.store.tables, owner=owner)
+            from tests.helpers import rack_task_admission
+
+            dispatch = RackDispatch(
+                owner, capabilities, task_admission=rack_task_admission(self.production)
+            )
             self.components = {
                 "rack_dispatch": dispatch,
                 "bin_roller": BinRoller(
@@ -1236,11 +1255,17 @@ async def roller_current(roller_scans, roller_declaration):
     wms = WmsRequests(outbox, owner_domain="first", contract_consumers=catalog.contract_consumers)
     transport = TransportService(outbox, target="wms-transport", owner_domain="first")
     capabilities = replace(flow.roller.capabilities, wms=wms, transport=transport)
-    dispatch = RackDispatch("first", capabilities)
+    from tests.helpers import configure_rack_positions, rack_task_admission
+
+    dispatch = RackDispatch(
+        "first", capabilities, task_admission=rack_task_admission(flow.production)
+    )
     flow.roller.capabilities = capabilities
     flow.roller.rack_dispatch = dispatch
     metadata = MetaData(schema=SCHEMA)
-    for model in (WorkLine, Device, DeviceRoute, TransportTask):
+    from app.models import WorkLinePosition
+
+    for model in (WorkLine, WorkLinePosition, Device, DeviceRoute, TransportTask):
         model.__table__.to_metadata(metadata)
     engine = flow.factory.kw["bind"]
     async with engine.begin() as connection:
@@ -1256,6 +1281,8 @@ async def roller_current(roller_scans, roller_declaration):
                 device_bindings=flow.devices,
             )
         )
+        line = await session.get(WorkLine, 1)
+        await configure_rack_positions(session, line)
 
     async def lock_line(session, line):
         await session.execute(select(WorkLine.id).where(WorkLine.id == line).with_for_update())
@@ -1413,4 +1440,7 @@ async def roller_current(roller_scans, roller_declaration):
         yield flow
     finally:
         async with flow.factory.begin() as session:
+            await session.execute(
+                WorkLinePosition.__table__.delete().where(WorkLinePosition.work_line_id == 1)
+            )
             await session.execute(WorkLine.__table__.delete().where(WorkLine.id == 1))

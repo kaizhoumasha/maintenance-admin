@@ -2,10 +2,10 @@
 
 import asyncio
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app import business_wakeups
-from app.models import TransportTask, WorkLine
+from app.models import TransportTask
 from tests.helpers import manual_source_departure
 
 
@@ -89,6 +89,11 @@ async def test_two_lines_keep_tasks_arrivals_and_returns_separate(formal_manual,
         await flow.host.advance("MANUAL_BIN", row["arrival_id"])
     released = await flow.rows("manual_bin")
     assert len({row["command_code"] for row in released}) == 2
+    for original in actions:
+        await manual_source_departure(flow, original)
+    await flow.dispatch()
+    for original in actions:
+        await flow.host.advance("RACK_CYCLE", original["cycle_id"])
     for line in (0, 1):
         await flow.scan("SCAN3", "A000000001-B", line=line, timestamp=20)
         await flow.scan("SCAN4", "A000000001-B", line=line, timestamp=21)
@@ -135,13 +140,10 @@ async def test_each_line_refills_one_old_waiter_per_original_departure_acceptanc
     flow = formal_manual
     monkeypatch.setattr(business_wakeups, "enqueue_business", flow.notices.append)
     async with flow.factory.begin() as session:
-        await session.execute(
-            update(WorkLine)
-            .where(WorkLine.id.in_(flow.lines))
-            .values(
-                five_rack_request_limit=3,
-            )
-        )
+        from tests.helpers import set_position_capacity
+
+        for line_id in flow.lines:
+            await set_position_capacity(session, line_id, 3)
     for line in (0, 1):
         task = flow.prefix + f"-capacity-{line}"
         assert (await flow.issue(task, line=line)).status_code == 202

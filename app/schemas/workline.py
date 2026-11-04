@@ -23,12 +23,34 @@ BindingCode = Annotated[
 ]
 
 
+Capacity = Annotated[int, Field(strict=True, ge=1, le=2147483647)]
+
+
+class WorkLinePositionWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    position_code: BindingCode
+    capacity: Capacity | None = 1
+
+    @field_validator("position_code")
+    @classmethod
+    def check_code(cls, value):
+        if value != value.strip() or "\x00" in value:
+            raise ValueError("位置编码不能含NUL或首尾空白")
+        return value
+
+
+class WorkLinePositionRead(WorkLinePositionWrite):
+    model_config = ConfigDict(from_attributes=True)
+    id: DatabaseId
+
+
 class WorkLineEditable(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     line_name: str = Field(min_length=1, max_length=100)
     is_enabled: Annotated[bool, Field(strict=True)] = True
-    five_rack_request_limit: Annotated[int, Field(strict=True, ge=1, le=2147483647)] | None = None
+    positions: list[WorkLinePositionWrite] = Field(default_factory=list, strict=True)
     zone_name: str | None = Field(None, max_length=100)
     description: str | None = Field(None, max_length=500)
     sort_order: int = 0
@@ -63,4 +85,5 @@ class WorkLineRead(WorkLineCreate):
     version: int
     created_at: datetime
     updated_at: datetime
+    positions: list[WorkLinePositionRead] = Field(default_factory=list)
     device_count: int = 0

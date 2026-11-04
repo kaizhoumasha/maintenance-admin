@@ -531,3 +531,33 @@ async def test_historical_zone_failure_requires_canonical_original(transport_rig
     assert result.availability == expected
     if expected == "FOUND":
         assert result.outcome == raw and result.closure == "CLOSED"
+
+
+async def test_result_preserves_acceptance_presence_without_claiming_valid_acceptance(
+    transport_rig,
+):
+    task = await result_task(transport_rig.factory)
+    assert (await read(transport_rig.factory, task)).has_submission_acceptance is False
+    async with transport_rig.factory.begin() as session:
+        await session.execute(
+            update(TransportTask)
+            .where(TransportTask.transport_task_id == task.handle.transport_task_id)
+            .values(submission_acceptance={"invalid": True})
+        )
+    result = await read(transport_rig.factory, task)
+    assert result.has_submission_acceptance is True
+    async with transport_rig.factory() as session:
+        acceptance = await task.service.get_submission_acceptance(
+            session,
+            transport_task_id=task.handle.transport_task_id,
+            client_request_id=task.handle.client_request_id,
+            caller=task.caller,
+        )
+        assert acceptance.state == "INVALID"
+    async with transport_rig.factory.begin() as session:
+        await session.execute(
+            delete(TransportTask).where(
+                TransportTask.transport_task_id == task.handle.transport_task_id
+            )
+        )
+    assert (await read(transport_rig.factory, task)).has_submission_acceptance is None

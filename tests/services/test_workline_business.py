@@ -55,27 +55,37 @@ async def test_workline_can_be_created_disabled(db):
     assert (await service.read_workline(db, created.id)).is_enabled is False
 
 
-async def test_workline_can_be_created_with_limit_and_legacy_update_preserves_it(db):
+async def test_workline_position_capacity_survives_omitted_update(db):
+    from app.businesses.definitions import BusinessDefinition, PositionSlot
+
+    definition = BusinessDefinition(
+        code="test_sorting",
+        display_name="Test",
+        position_slots=(
+            PositionSlot(slot_key="FIVE_RACK", display_name="Rack", position_type="RACK_POSITION"),
+        ),
+    )
     created = await service.create_workline(
         db,
         WorkLineCreate(
             line_code="LIMIT",
             line_name="Line",
             business_code="test_sorting",
-            five_rack_request_limit=3,
+            position_bindings={"FIVE_RACK": "P"},
+            positions=[{"position_code": "P", "capacity": 3}],
         ),
         actor=ACTOR,
-        definition_lookup=workline_definition_lookup,
+        definition_lookup=lambda code: definition,
     )
-    assert (await service.read_workline(db, created.id)).five_rack_request_limit == 3
+    assert (await service.read_workline(db, created.id)).positions[0].capacity == 3
     changed = await service.update_workline(
         db,
         created.id,
         WorkLineUpdate(line_name="Renamed", version=1),
         actor=ACTOR,
-        definition_lookup=workline_definition_lookup,
+        definition_lookup=lambda code: definition,
     )
-    assert changed.five_rack_request_limit == 3 and changed.version == 2
+    assert changed.positions[0].capacity == 3 and changed.version == 2
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", "false", None])
@@ -297,7 +307,11 @@ async def test_operation_resource_subset_preserves_business_and_binding_guards(d
             DeviceRole(role_key="SCAN1", display_name="Input"),
             DeviceRole(role_key="SCAN3", display_name="Return"),
         ),
-        position_slots=(PositionSlot(slot_key="OUTLET", display_name="Outlet"),),
+        position_slots=(
+            PositionSlot(
+                position_type="HANDOFF_POSITION", slot_key="OUTLET", display_name="Outlet"
+            ),
+        ),
     )
     binding = await resolve_binding(db, "D3")
 

@@ -101,3 +101,10 @@ local 通过 `configure_local_ecs(routes=DeviceRoutes(...))` 装配，集成层 
 业务包开发与两线接缝验收见[业务包开发指南](business-packages.md)。配置保存、当前可执行许可和物理完成
 分别判断；Status/ACK/工厂构造成功不表示业务闭环。受理先提交原收据和本业务持久待办，结果消费由
 本业务独立 REPEATABLE READ 事务推进；重复/丢失通知通过原执行身份和待办恢复，不自动重发物理动作。
+
+
+## 工作位进场额度
+
+工作线聚合配置使用 `positions: [{position_code, capacity}]`，读取项含管理 id。省略集合的更新保留原值，提交集合为完整替换；cap 省略=1、显式 null=不限额、其余须严格正整数且不超过 2147483647。类型由 `/businesses` 的位置 `position_type` 声明，禁止给 HANDOFF_POSITION 配货架额度，禁止跨线重复配置同一现场货架点。版本与 admin/asset:workline 权限沿用原合同，修改额度保留原在途请求，在途解绑/改码/删除返回409。
+
+额度只控制本线当前单个任务的进场请求数量，不增加物理工作位，也不允许跨任务预叫。完整例子与迁移见[人工分拣额度](manual-picking-api.md#manual-request-limit)。

@@ -42,6 +42,8 @@ from app.businesses.definitions import BusinessDefinition, DeviceRole, InitialEn
     ],
 )
 def test_definition_rejects_invalid_fields(constructor, fields):
+    if constructor is PositionSlot:
+        fields = {"position_type": "HANDOFF_POSITION", **fields}
     with pytest.raises(ValueError):
         constructor(**fields)
 
@@ -55,7 +57,7 @@ def test_definition_rejects_mutable_or_wrong_type_collections(field, value):
 
 def test_definition_rejects_invalid_or_duplicate_keys():
     role = DeviceRole(role_key="SCAN", display_name="设备")
-    position = PositionSlot(slot_key="INLET", display_name="位置")
+    position = PositionSlot(position_type="HANDOFF_POSITION", slot_key="INLET", display_name="位置")
     entry = InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="SCAN")
     for fields in (
         {"device_roles": (role, role)},
@@ -80,7 +82,9 @@ def test_definition_keeps_distinct_role_event_keys_and_immutable_values():
         code="test_2",
         display_name="名" * 100,
         device_roles=roles,
-        position_slots=(PositionSlot(slot_key="INLET", display_name="位置"),),
+        position_slots=(
+            PositionSlot(position_type="HANDOFF_POSITION", slot_key="INLET", display_name="位置"),
+        ),
         initial_entries=entries,
     )
     assert len(definition.initial_entries) == 3

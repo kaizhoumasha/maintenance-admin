@@ -5,7 +5,7 @@
 
 > 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
 
-2026-11-02 本地增量：BIN_Roller 持久化已收敛为 10 张表，SMT 宿主 7 张，`sorting_task` 仍只有合同/分派。原 SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN、公开 ports、operation 及 owner 保持。可空的每线 `five_rack_request_limit` 只限制新原 CTU01 登记，CTU03 有效接纳只释放原周期一次；未知/失败不伪造释放，最终物理结果仍归原 Transport。开始前撤销的 WITHDRAWN 服务保留原身份，可由有效兄弟面继续原周期，兄弟开始和周期 RELEASED 后该撤销服务仍是 WITHDRAWN、公开进度 false/false，不列 pending FEED。详见[实现及迁移兼容边界](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)和[12 项永久配置专项](../testing/smt-manual-kt16-kt18.md#current-factory-profile)；全仓/整体复核待控制器，未提交、未部署。
+2026-11-02 本地增量：BIN_Roller 持久化已收敛为 10 张表，SMT 宿主 7 张，`sorting_task` 仍只有合同/分派。原 SCAN/SCAN2_RELEASE/FEED/RETURN_BATCH/RACK_CYCLE/DRAIN、公开 ports、operation 及 owner 保持。工作位 `positions[].capacity` 在当前单任务内限制新原进场登记；无任务 drain 不使用任务数值额度，保持同点单架串行，CTU03 有效接纳只释放原周期一次；未知/失败不伪造释放，最终物理结果仍归原 Transport。开始前撤销的 WITHDRAWN 服务保留原身份，可由有效兄弟面继续原周期，兄弟开始和周期 RELEASED 后该撤销服务仍是 WITHDRAWN、公开进度 false/false，不列 pending FEED。详见[实现及迁移兼容边界](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)和[12 项永久配置专项](../testing/smt-manual-kt16-kt18.md#current-factory-profile)；全仓/整体复核待控制器，未提交、未部署。
 
 状态：**B1～B5组件实现、B6文档边界、B7共享声明及隔离测试装配已交付；后续手工 M5/M6 已本地交付首个完整正式宿主、组件状态迁移及软件组合/真实 worker 验证，见[SMT 手工验收](../testing/smt-manual.md)。手工增量未提交、未部署，供应商/现场验收未执行。** 本文描述 BIN_Roller 内部 SCAN3→SCAN4→FIFO→Return_Batch 回流段，供手工和自动宿主复用；不因此新增业务码或调度器。
 
@@ -83,7 +83,7 @@ SCAN2 每经过只成功委托一次，成功后组件受理项即可结束；�
 
 公共回流从实际 SCAN3 到位事实独立开始，不要求先取得人工/自动工作段的交接授权，不回查 SCAN1、SCAN2、WMS 作业决定、原任务/计划或上游命令 Result。原工作段继续保存自己的业务和命令事实，但这些记录不成为 SCAN3 的准入、等待或分流条件，见[已确认 C02](#return-scan3)。
 
-SCAN3 按本点事实建立/识别当前回流，不查询“当前最新任务”挂接料箱，也不为补齐上游关系新增请求字段。SCAN4 仍须关联本次公共回流，但实际到位证明本点事实，不需要 SCAN3 原 MOVE_FORWARD 的 Result 才登记 SCAN4 放行。关联缺失/歧义先保存待关联，不按最新轮次强挂；本点已有同一未决动作不重复创建。TASK 完成或取消会停止本 TASK 后续调度；独立 LINE 事实不随之删除，已选回流依原 Transport 派发/终位证据解除选择或进入 WAIT_FACT。迟到事实不重开已关闭 TASK，也不改变 SCAN3 原方向。
+SCAN3 按本点事实建立/识别当前回流，不查询“当前最新任务”挂接料箱，也不为补齐上游关系新增请求字段。SCAN4 仍须关联本次公共回流，但实际到位证明本点事实，不需要 SCAN3 原 MOVE_FORWARD 的 Result 才登记 SCAN4 放行。关联缺失/歧义先保存待关联，不按最新轮次强挂；本点已有同一未决动作不重复创建。TASK 完成或取消会停止本 TASK 后续调度；原架以 CLOSED_BY_SCOPE 停止动作，未决责任保留 pending 供原事实消费及清理保护，不能创建任何后继；严格证明未派发或原交出接纳后才解除新任务门禁。独立 LINE 事实不随之删除，已选回流依原 Transport 派发/终位证据解除选择或进入 WAIT_FACT。迟到事实不重开已关闭 TASK，也不改变 SCAN3 原方向。
 
 NG 结果仅属于本次经过，不成为箱码永久属性。已闭合历史不阻挡合法新轮次，当前未知动作及直接物理依赖仍保留。NG 出口后的人工作业不在本文范围，不虚构 NG 出口完成报告。
 

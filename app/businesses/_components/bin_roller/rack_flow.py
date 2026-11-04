@@ -15,7 +15,6 @@ from app.businesses._components.rack_dispatch.contracts import (
 )
 from app.core.identifiers import uuid7
 from app.integrations.wms_transport import TransportCaller
-from app.models import WorkLine
 from app.reliable import ScopeRef
 
 
@@ -80,15 +79,37 @@ async def select_supply_cycle(roller, session, demand_id):
         resources = await roller.read_resources(session, repo.work_line_id)
         if not resources:
             return None
+        table = repo.tables["face_work"]
+        candidates = (
+            (
+                await session.execute(
+                    select(table).where(
+                        *repo.scoped(table),
+                        table.c.purpose == "SUPPLY",
+                        table.c.scope_id == face["scope_id"],
+                        table.c.rack_id == face["rack_id"],
+                        table.c.rack_job_id.is_(None),
+                        table.c.closed_at.is_(None),
+                        table.c.demand_state == "ACTIVE",
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        ordered = await ordered_supply_faces(roller, session, repo, face["scope_id"], candidates)
+        if not ordered:
+            return None
+        first = ordered[0]
         job_id = await register_job(
             roller,
             session,
             repo,
             "ROLLER_ORDINARY",
-            face["id"],
-            face["rack_id"],
-            face["rack_face"],
-            face["scope_id"],
+            first["id"],
+            first["rack_id"],
+            first["rack_face"],
+            first["scope_id"],
             resources,
         )
     if job_id:
@@ -109,6 +130,16 @@ async def select_supply_cycle(roller, session, demand_id):
         for sibling_id in siblings:
             await repo.bind_supply(session, demand_id=sibling_id, cycle_id=job_id)
     return job_id
+
+
+async def ordered_supply_faces(roller, session, repo, task_id, rows):
+    order = await roller.production.read_supply_order(
+        session, work_line_id=repo.work_line_id, task_id=task_id
+    )
+    indices = {(f.plan_revision, f.rack_id, f.rack_face): n for n, f in enumerate(order)}
+    if any((r["plan_revision"], r["rack_id"], r["rack_face"]) not in indices for r in rows):
+        return []
+    return sorted(rows, key=lambda r: indices[r["plan_revision"], r["rack_id"], r["rack_face"]])
 
 
 def row_fact(name, table, row):
@@ -274,26 +305,6 @@ async def evaluate_roller_point(roller, session, job):
     )
 
 
-async def entry_available(roller, session, job, line):
-    from .service import ROLLER_SOURCES
-
-    if not line or not line.is_enabled or line.business_code != roller.context.domain:
-        return False
-    if line.five_rack_request_limit is None:
-        return True
-    active = await roller.rack_dispatch.jobs(
-        session, work_line_id=line.id, source_kinds=ROLLER_SOURCES, pending=True
-    )
-    return (
-        sum(
-            any(a.template == "CTU01" and a.transport_task_id for a in other.actions)
-            for other in active
-            if other.id != job.id
-        )
-        < line.five_rack_request_limit
-    )
-
-
 def cycle_progress(job):
     if job.closure_reason == "DEPARTURE_ACK":
         return "RELEASED"
@@ -321,9 +332,36 @@ async def advance_cycle(roller, session, cycle_id):
         raise ValueError("original roller rack job missing")
     if not job.pending:
         return cycle_progress(job)
+    if job.state == "CLOSED_BY_SCOPE":
+        point = PointRef(
+            roller.context.domain,
+            job.origin.work_line_id,
+            job.id,
+            job.origin.rack_id,
+            job.origin.point,
+        )
+        stopped = await roller.rack_dispatch.advance(
+            session,
+            job_id=job.id,
+            demand=PointDemand(point, "UNKNOWN", ()),
+            handoff=DirectHandoff(point, "UNKNOWN", ()),
+            now_ms=int(time() * 1000),
+        )
+        return cycle_progress(stopped)
     repo = roller.repository(job.origin.work_line_id)
     table = repo.tables["face_work"]
     ordinary = job.origin.source_kind == "ROLLER_ORDINARY"
+    if (
+        not ordinary
+        and not job.actions
+        and await roller.return_channel_empty(session, work_line_id=repo.work_line_id)
+    ):
+        state = await repo.line_state(session)
+        if state["drain_phase"] == "USING" and state["drain_operation_id"] == job.origin.source_ref:
+            from .return_flow import advance_drain
+
+            await advance_drain(roller, session, repo.work_line_id)
+            return cycle_progress(await roller.rack_dispatch.progress(session, job_id=job.id))
     demand, handoff = await evaluate_roller_point(roller, session, job)
     if demand.state == "UNKNOWN":
         return "WAITING_FOR_ORIGINAL_FACTS"
@@ -367,11 +405,10 @@ async def advance_cycle(roller, session, cycle_id):
             current = await roller.production.read_current_task(
                 session, work_line_id=repo.work_line_id
             )
-            candidate = (
+            candidates = (
                 (
                     await session.execute(
-                        select(table)
-                        .where(
+                        select(table).where(
                             *repo.scoped(table),
                             table.c.purpose == "SUPPLY",
                             table.c.scope_id == job.origin.task_id,
@@ -380,13 +417,15 @@ async def advance_cycle(roller, session, cycle_id):
                             table.c.closed_at.is_(None),
                             table.c.demand_state == "ACTIVE",
                         )
-                        .order_by(table.c.id)
-                        .limit(1)
                     )
                 )
                 .mappings()
-                .one_or_none()
+                .all()
             )
+            ordered = await ordered_supply_faces(
+                roller, session, repo, job.origin.task_id, candidates
+            )
+            candidate = ordered[0] if ordered else None
             if candidate and current.is_valid and current.task_id == job.origin.task_id:
                 await repo.bind_supply(session, demand_id=candidate["id"], cycle_id=job.id)
                 active = [await repo.demand(session, candidate["id"])]
@@ -468,11 +507,14 @@ async def advance_cycle(roller, session, cycle_id):
             return await advance_cycle(roller, session, cycle_id)
         return progress
     if not job.actions:
-        line = await session.get(WorkLine, repo.work_line_id, populate_existing=True)
-        if not await entry_available(roller, session, job, line):
-            return "WAITING_FOR_RACK"
         kind = "ENTER"
     elif move:
+        if ordinary:
+            current = await roller.production.read_current_task(
+                session, work_line_id=repo.work_line_id
+            )
+            if not current.is_valid or current.task_id != job.origin.task_id:
+                return "WAITING_FOR_CURRENT_TASK"
         kind = "ROTATE"
     else:
         return "WAITING_FOR_ORIGINAL_RESULT"

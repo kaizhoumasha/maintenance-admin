@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "rollerfoundation"
-down_revision = "sharedrackdispatch"
+down_revision = "positioncapacity"
 branch_labels = None
 depends_on = None
 
@@ -32,8 +32,9 @@ OLD_CLOSURE = (
     "(closure_reason='DEPARTURE_ACK' AND completed_at_ms IS NOT NULL))) OR (state IN "
     "('WITHDRAWN','NOT_ARRIVED') AND closure_reason=state)))"
 )
-NEW_CLOSURE = OLD_CLOSURE.replace(
-    "'WITHDRAWN','NOT_ARRIVED'", "'WITHDRAWN','NOT_ARRIVED','CLOSED_BY_SCOPE'"
+NEW_CLOSURE = (
+    OLD_CLOSURE + " OR (state='CLOSED_BY_SCOPE' AND closure_reason IS NOT NULL AND "
+    "closure_reason=state AND closure_basis IS NOT NULL)"
 )
 
 

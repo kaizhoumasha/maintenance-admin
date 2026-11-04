@@ -34,7 +34,7 @@ class SmtManualService(SmtManualTaskFlow):
     def __init__(self, capabilities: Capabilities, *, first_plan_wait_ms: int | None = None):
         repository = TaskRepository()
         self.ports = RollerPorts(repository)
-        self.rack_dispatch = RackDispatch("smt_manual", capabilities)
+        self.rack_dispatch = RackDispatch("smt_manual", capabilities, task_admission=self.ports)
         roller = BinRoller(
             CommandOwner("smt_manual"), capabilities, self.ports, rack_dispatch=self.rack_dispatch
         )
@@ -212,6 +212,8 @@ class SmtManualService(SmtManualTaskFlow):
             await self.repository.lock_dispatch_line(
                 session, self.roller, located["work_line_id"], task_id=task_id
             )
+        if kind not in {"SCAN2_RELEASE", "RACK_REPORT"} and task_id:
+            await self._register_task_rack_candidates(session, task_id=task_id)
         if kind == "TASK":
             original = await self.repository.task(session, record_id)
             if original is None:
@@ -239,6 +241,7 @@ class SmtManualService(SmtManualTaskFlow):
                 session, operation_id=record_id, locked=True
             )
         if kind == "MANUAL_RACK":
+            await self.manual_racks.reconcile_task(session, task_id=task_id)
             return await self.manual_racks.advance_rack(session, rack_work_id=record_id)
         if kind == "SCAN2_RELEASE":
             located = await self.roller.original_record(session, "bin_passage", record_id)

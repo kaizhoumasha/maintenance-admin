@@ -31,3 +31,5 @@ __all__ = [
     "role_permission",
     "user_role",
 ]
+
+from .workline_position import WorkLinePosition as WorkLinePosition

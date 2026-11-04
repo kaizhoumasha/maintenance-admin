@@ -17,7 +17,16 @@ BAD = CASES["bad"]
 
 async def configure(flow, task_id):
     flow.current_task = task_id
+    from app.models import WorkLinePosition
+
     async with flow.factory.begin() as session:
+        await session.execute(
+            WorkLinePosition.__table__.update()
+            .where(
+                WorkLinePosition.work_line_id == 1, WorkLinePosition.position_code == "RACK-WORK"
+            )
+            .values(position_code="KT16")
+        )
         await session.execute(
             WorkLine.__table__.update()
             .where(WorkLine.id == 1)

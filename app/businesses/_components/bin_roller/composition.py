@@ -12,9 +12,13 @@ COMPONENT = ComponentDefinition(
         for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")
     ),
     position_slots=(
-        PositionSlot(slot_key="FIVE_RACK", display_name="料架工作位"),
-        PositionSlot(slot_key="INLET", display_name="投箱交接位"),
-        PositionSlot(slot_key="OUTLET", display_name="回流交接位"),
+        PositionSlot(
+            position_type="RACK_POSITION", slot_key="FIVE_RACK", display_name="料架工作位"
+        ),
+        PositionSlot(position_type="HANDOFF_POSITION", slot_key="INLET", display_name="投箱交接位"),
+        PositionSlot(
+            position_type="HANDOFF_POSITION", slot_key="OUTLET", display_name="回流交接位"
+        ),
     ),
     initial_entries=tuple(
         InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role=point)

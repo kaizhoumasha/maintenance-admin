@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from sqlalchemy import func, select
 
@@ -286,3 +288,112 @@ async def test_line_stop_closes_pending_drain_even_without_open_return_rows(roll
     assert after["drain_phase"] == "IDLE" and after["drain_message_id"] is None
     assert after["drain_review_reason"] == "LINE_STOPPED" and after["line_run_id"] is None
     assert not await flow.all_rows("rack_action")
+
+
+async def test_stopped_rack_consumes_original_departure_ack_without_host_demand(roller_lifecycle):
+    from dataclasses import asdict
+
+    from app.core.strict_json import canonical_digest
+    from app.models import TransportTask
+
+    flow = roller_lifecycle
+    demand, cycle = await flow.ready_supply(count=1)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", demand)
+    decision = (await flow.all_rows("departure"))[0]
+    await flow.decision(
+        "departure",
+        decision["id"],
+        dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORAGE")),
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    departure = next(a for a in await flow.all_rows("rack_action") if a["kind"] == "CTU03")
+    await flow.accepted(departure)
+    async with flow.factory.begin() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        action = job.actions[-1]
+        acceptance = await flow.roller.capabilities.transport.get_submission_acceptance(
+            session,
+            transport_task_id=action.transport_task_id,
+            client_request_id=action.client_request_id,
+            caller=job.origin.caller,
+        )
+        assert acceptance.state == "ACCEPTED"
+        saved = {
+            **asdict(acceptance.basis),
+            "attempt_no": 1,
+            "lease_id": "original-departure",
+            "saved_at": 100,
+        }
+        saved["evidence_sha256"] = canonical_digest(saved)
+        await flow.roller.close_scope(
+            session, ScopeRef("first", "TASK", flow.current_task), reason="TASK_COMPLETED"
+        )
+        task = await session.scalar(
+            select(TransportTask).where(TransportTask.transport_task_id == action.transport_task_id)
+        )
+        task.submission_acceptance = saved
+        before = await session.scalar(select(func.count()).select_from(ReliableMessage))
+    flow.current_task = "NEXT-TASK"
+
+    async def unavailable_task_coverage(session, *, point, task_id):
+        return None
+
+    flow.production.read_task_coverage = unavailable_task_coverage
+    async with flow.factory() as session:
+        assert (await flow.roller.rack_dispatch.progress(session, job_id=cycle)).pending
+    await flow.advance("RACK_CYCLE", cycle)
+    async with flow.factory() as session:
+        stopped = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        assert stopped.state == "CLOSED_BY_SCOPE"
+        assert not stopped.pending
+        assert stopped.closure_basis["reason"] == "TASK_COMPLETED"
+        assert stopped.closure_basis["responsibility_release"]["kind"] == "DEPARTURE_ACK"
+        assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == before
+
+
+async def test_stopped_rack_consumes_original_submit_rejection_without_host_demand(
+    roller_lifecycle,
+):
+    flow = roller_lifecycle
+    face_id = await flow.demand()
+    await flow.advance("FACE", face_id)
+    entry = (await flow.all_rows("rack_action"))[0]
+    async with flow.factory.begin() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == entry["operation_id"])
+        )
+        message.status, message.last_http_status, message.last_verdict = (
+            "FAILED",
+            409,
+            "PEER_TERMINAL",
+        )
+        message.fail_reason = "CONFLICT"
+        message.response_raw = json.dumps(
+            dict(
+                operation_id=message.operation_id,
+                code="CONFLICT",
+                timestamp=2,
+                data=dict(
+                    reason_code="REFERENCE_CONFLICT", transport_task_id=entry["transport_task_id"]
+                ),
+            )
+        ).encode()
+        await session.flush()
+        await flow.roller.close_scope(
+            session, ScopeRef("first", "TASK", flow.current_task), reason="TASK_COMPLETED"
+        )
+        before = await session.scalar(select(func.count()).select_from(ReliableMessage))
+    flow.current_task = "NEXT-TASK"
+
+    async def unavailable_task_coverage(session, *, point, task_id):
+        return None
+
+    flow.production.read_task_coverage = unavailable_task_coverage
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        stopped = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert stopped.state == "CLOSED_BY_SCOPE" and not stopped.pending
+        assert stopped.closure_basis["reason"] == "TASK_COMPLETED"
+        assert stopped.closure_basis["responsibility_release"]["kind"] == "SUBMIT_REJECTION"
+        assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == before

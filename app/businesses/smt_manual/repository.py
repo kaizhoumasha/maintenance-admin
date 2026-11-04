@@ -62,10 +62,13 @@ class TaskRepository:
         from .manual_rack_flow import MANUAL_SOURCES
 
         kinds = (*ROLLER_SOURCES, *MANUAL_SOURCES)
+        admission = await roller.rack_dispatch.admission_jobs(session, work_line_id=work_line_id)
+        await roller.rack_dispatch.lock_admission_jobs(
+            session, job_ids=tuple(j.id for j in admission)
+        )
         jobs = await roller.rack_dispatch.jobs(
             session, work_line_id=work_line_id, source_kinds=kinds, pending=True
         )
-        await roller.rack_dispatch.lock_jobs(session, job_ids=tuple(j.id for j in jobs))
         task_ids = {job.origin.task_id for job in jobs if job.origin.task_id}
         if task_id is not None:
             task_ids.add(task_id)
@@ -74,10 +77,17 @@ class TaskRepository:
         confirmed = await roller.rack_dispatch.jobs(
             session, work_line_id=work_line_id, source_kinds=kinds, pending=True
         )
-        if tuple(j.id for j in jobs) != tuple(j.id for j in confirmed):
+        confirmed_admission = await roller.rack_dispatch.admission_jobs(
+            session, work_line_id=work_line_id
+        )
+        if tuple(j.id for j in admission) != tuple(j.id for j in confirmed_admission) or tuple(
+            j.id for j in jobs
+        ) != tuple(j.id for j in confirmed):
             raise RackLockSetChanged("original dispatch jobs changed during lock acquisition")
         if lock_actions:
-            await roller.rack_dispatch.lock_actions(session, job_ids=tuple(job.id for job in jobs))
+            await roller.rack_dispatch.lock_admission_actions(
+                session, job_ids=tuple(job.id for job in admission)
+            )
         return line, jobs
 
     async def lock_dispatch_subjects(self, session, work_line_id, task_ids):

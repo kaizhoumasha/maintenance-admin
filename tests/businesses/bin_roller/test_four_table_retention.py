@@ -68,17 +68,24 @@ async def test_protected_first_page_does_not_starve_later_expired_rows(roller_cu
         assert list(await session.scalars(select(CallbackReceipt.id))) == [anchor["scan1_event_id"]]
 
 
-async def test_task_close_releases_finished_task_references(roller_current, monkeypatch):
+@pytest.mark.parametrize("handed_off", [False, True])
+async def test_task_close_releases_host_references_but_preserves_original_rack_responsibility(
+    roller_lifecycle, monkeypatch, handed_off
+):
     from app.businesses._components.bin_roller import retention
 
-    flow = roller_current
+    flow = roller_lifecycle
     monkeypatch.setattr(retention, "TABLES", flow.roller.tables)
-    face_id = await flow.ready_supply_current(count=5)
-    feed = (await flow.current_rows("face_work"))[0]
+    face_id, cycle_id = await flow.ready_supply(count=1)
+    if handed_off:
+        await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+        await flow.advance("FACE", face_id)
+        await flow.finish_departure(cycle_id)
+    feed = (await flow.all_rows("face_work"))[0]
     async with flow.factory() as session:
         all_ids = tuple(await session.scalars(select(ReliableMessage.id)))
         protected = await retention.protected_message_ids(session, candidate_ids=all_ids)
-        assert feed["feed_message_id"] in protected
+        assert (feed["feed_message_id"] in protected) is (not handed_off)
     async with flow.factory.begin() as session:
         await flow.roller.close_scope(
             session, ScopeRef("first", "TASK", "task-original"), reason="TASK_COMPLETED"
@@ -94,10 +101,9 @@ async def test_task_close_releases_finished_task_references(roller_current, monk
             .where(table.c.id == face_id)
             .values(closed_at=datetime.now(UTC) - timedelta(days=100))
         )
-        assert (
-            await flow.roller.cleanup_closed(session, cutoff=datetime.now(UTC) - timedelta(days=90))
-            == 1
-        )
+        assert await flow.roller.cleanup_closed(
+            session, cutoff=datetime.now(UTC) - timedelta(days=90)
+        ) == int(handed_off)
 
 
 async def test_finished_line_run_does_not_pin_the_last_point_forever(roller_current, monkeypatch):

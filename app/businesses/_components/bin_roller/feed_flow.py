@@ -60,6 +60,9 @@ async def start_feed(roller, session, *, demand_id):
         return None
     if face["feed_operation_id"]:
         return face["id"]
+    current = await roller.production.read_current_task(session, work_line_id=face["work_line_id"])
+    if not current.is_valid or current.task_id != face["scope_id"]:
+        return None
     if not await can_use_face(roller, session, face):
         return None
     operation_id = str(uuid7())

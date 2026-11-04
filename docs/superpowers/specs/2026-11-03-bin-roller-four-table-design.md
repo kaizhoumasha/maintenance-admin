@@ -431,6 +431,8 @@ TASK 终态只取原宿主已持久化的 COMPLETED/CANCELLED；成员撤回、�
 
 同一原事务：持有原 WorkLine/任务及业务锁 → 写任务终态 → stop_scope → 关闭原 FaceWork/Passage/RackJob 后继 → 处理选中 BinReturn → 提交。RackJob 用 CLOSED_BY_SCOPE 和原关闭依据退出调度，不能伪造 DEPARTURE_ACK。
 
+2026-11-04 容量整合后的终态合同：CLOSED_BY_SCOPE 不再具有执行权；原架责任未决时保留 pending=True，仅消费原事实并保护同点/同架及原消息。纯候选或严格原未派发证据可结束责任；已过 gate、接纳或到位不能由任务终态解除。严格原 DEPART 接纳在原 closure_basis 下保存 responsibility_release 后设 pending=False，保留停止原因，不能恢复旧 TASK 或新增决定/搬运。详见[整合设计](2026-11-04-capacity-four-table-integration-design.md)。
+
 独立 LINE BinReturn 可能被 TASK 面服务选中，但它不因此取得旧 TASK 的执行权：
 
 | 原 TASK 步骤状态 | BinReturn 的处理 |
