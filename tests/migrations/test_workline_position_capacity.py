@@ -30,7 +30,7 @@ async def test_position_upgrade_preserves_limit_aliases_and_other_defaults(state
                     "limit": limit,
                 },
             )
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
         async with store.engine.connect() as conn:
             names = await conn.run_sync(
                 lambda c: inspect(c).get_table_names(
@@ -72,7 +72,7 @@ async def test_position_upgrade_preserves_limit_aliases_and_other_defaults(state
             ):
                 await conn.execute(text("DELETE FROM workline_positions"))
             await conn.execute(text("DELETE FROM work_lines WHERE line_code='POS_OLD'"))
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
 
 
 @pytest.mark.parametrize("state_migration", STORES, indirect=True)
@@ -89,7 +89,7 @@ async def test_position_preflight_refuses_unattributed_limit_before_ddl(state_mi
             )
         before = await store.schema_snapshot("work")
         result = await run_alembic(
-            store.engine.url.render_as_string(hide_password=False), "upgrade", "head"
+            store.engine.url.render_as_string(hide_password=False), "upgrade", "positioncapacity"
         )
         assert result.returncode != 0
         assert "capacity preflight" in result.stdout + result.stderr
@@ -97,7 +97,7 @@ async def test_position_preflight_refuses_unattributed_limit_before_ddl(state_mi
     finally:
         async with store.engine.begin() as conn:
             await conn.execute(text("DELETE FROM work_lines WHERE line_code='POS_BAD'"))
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
 
 
 @pytest.mark.parametrize("state_migration", STORES, indirect=True)
@@ -114,7 +114,7 @@ async def test_downgrade_refuses_unrepresentable_capacity_before_ddl(state_migra
                 ),
                 {"bindings": json.dumps({"RETURN_RACK": "POS_LOSS_RETURN"})},
             )
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
         async with store.engine.begin() as conn:
             await conn.execute(
                 text("UPDATE workline_positions SET capacity=:value"), {"value": capacity}
@@ -148,7 +148,7 @@ async def test_upgrade_preserves_deleted_workline_identity_highwater(state_migra
                 )
             )
             await conn.execute(text("DELETE FROM work_lines WHERE line_code='POS_HIGH'"))
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
         if store.backend == "sqlite":
             async with store.engine.begin() as conn:
                 identity = await conn.scalar(
@@ -163,7 +163,7 @@ async def test_upgrade_preserves_deleted_workline_identity_highwater(state_migra
             await conn.execute(
                 text("DELETE FROM work_lines WHERE line_code IN ('POS_HIGH','POS_NEXT')")
             )
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
 
 
 @pytest.mark.parametrize("state_migration", STORES, indirect=True)
@@ -289,7 +289,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
                     )
                 )
             before = await snapshot(conn)
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
         await store.engine.dispose()
         async with store.engine.connect() as conn:
             after = await snapshot(conn)
@@ -325,7 +325,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
             if "workline_positions" in names:
                 await conn.execute(text("DELETE FROM workline_positions"))
             await conn.execute(text("DELETE FROM work_lines WHERE line_code='POS_ORIG'"))
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")
 
 
 @pytest.mark.parametrize("state_migration", STORES, indirect=True)
@@ -360,7 +360,7 @@ async def test_unproved_original_task_is_rejected_without_touching_job_or_schema
             ).one()
         before = await store.schema_snapshot("rack_dispatch")
         result = await run_alembic(
-            store.engine.url.render_as_string(hide_password=False), "upgrade", "head"
+            store.engine.url.render_as_string(hide_password=False), "upgrade", "positioncapacity"
         )
         assert result.returncode != 0
         assert "unproved original task" in result.stdout + result.stderr
@@ -373,4 +373,4 @@ async def test_unproved_original_task_is_rejected_without_touching_job_or_schema
         async with store.engine.begin() as conn:
             await conn.execute(text("DELETE FROM rack_dispatch_job WHERE id='unproved'"))
             await conn.execute(text("DELETE FROM work_lines WHERE line_code='POS_UNPROVED'"))
-        await store.migrate("upgrade", "head")
+        await store.migrate("upgrade", "positioncapacity")

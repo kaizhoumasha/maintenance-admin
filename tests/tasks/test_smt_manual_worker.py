@@ -363,7 +363,7 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
     assert original_work["command_code"] == release["command_code"]
     assert len(original_releases) == 1
     assert original_releases[0]["command_code"] == release["command_code"]
-    assert original_releases[0]["pending"]
+    assert not original_releases[0]["pending"]
     cycles = await eventually(
         lambda: flow.rows("rack_cycle", roller=True),
         lambda rows: next(r for r in rows if r["id"] == cycle["id"])["status"] == "RELEASED",

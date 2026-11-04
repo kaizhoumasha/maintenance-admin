@@ -7,6 +7,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -56,6 +57,13 @@ class RackJob(Base):
             "id",
         ),
         CheckConstraint(
+            "(scope_owner IS NULL AND scope_kind IS NULL AND scope_id IS NULL) OR "
+            "(scope_owner IS NOT NULL AND scope_owner != '' AND scope_kind IS NOT NULL AND "
+            "scope_kind IN ('TASK','LINE') AND scope_id IS NOT NULL AND scope_id != '')",
+            name="execution_scope",
+        ),
+        Index("rack_dispatch_job_execution_scope", "scope_owner", "scope_kind", "scope_id"),
+        CheckConstraint(
             "source_kind IN ('MANUAL_RETURN','MANUAL_TRANSFER','ROLLER_ORDINARY','ROLLER_DRAIN')",
             name="source_kind",
         ),
@@ -65,7 +73,9 @@ class RackJob(Base):
             "(NOT pending AND closure_reason IS NOT NULL AND closure_basis IS NOT NULL AND "
             "((state='COMPLETED' AND (closure_reason='LEGACY_CLOSED' OR "
             "(closure_reason='DEPARTURE_ACK' AND completed_at_ms IS NOT NULL))) OR "
-            "(state IN ('WITHDRAWN','NOT_ARRIVED') AND closure_reason=state)))",
+            "(state IN ('WITHDRAWN','NOT_ARRIVED') AND closure_reason=state))) OR "
+            "(state='CLOSED_BY_SCOPE' AND closure_reason IS NOT NULL AND closure_reason=state "
+            "AND closure_basis IS NOT NULL)",
             name="closure",
         ),
     )
@@ -73,6 +83,9 @@ class RackJob(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     owner_domain: Mapped[str]
     work_line_id: Mapped[int]
+    scope_owner: Mapped[str | None] = mapped_column(Text)
+    scope_kind: Mapped[str | None] = mapped_column(String(4))
+    scope_id: Mapped[str | None] = mapped_column(Text)
     source_kind: Mapped[str]
     source_ref: Mapped[str]
     rack_id: Mapped[str]

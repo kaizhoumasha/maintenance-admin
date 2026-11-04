@@ -21,12 +21,18 @@ from .types import (
     FailReason,
     MessageStatus,
     OutgoingMessage,
+    ScopeRef,
     Verdict,
     VerdictKind,
 )
 
 logger = logging.getLogger(__name__)
-TERMINAL = (MessageStatus.DONE, MessageStatus.FAILED, MessageStatus.EXPIRED)
+TERMINAL = (
+    MessageStatus.DONE,
+    MessageStatus.FAILED,
+    MessageStatus.EXPIRED,
+    MessageStatus.ABANDONED,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,7 @@ class Claim:
     attempt_no: int
     not_received_count: int = 0
     delivery_uncertain: bool = False
+    dispatch_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +114,9 @@ class MessageStore:
             DeliverySnapshot(**row.delivery_snapshot)
             if row.delivery_snapshot is not None and include_snapshot
             else None,
+            ScopeRef(row.scope_owner, row.scope_kind, row.scope_id)
+            if row.scope_owner is not None
+            else None,
         )
         return Claim(
             row.id,
@@ -116,6 +126,7 @@ class MessageStore:
             row.attempts + 1,
             row.not_received_count,
             bool(row.delivery_uncertain),
+            self._time(session, row.dispatch_started_at),
         )
 
     async def claim(self, limit: int, targets: Mapping[str, TargetConfig]) -> tuple[Claim, ...]:
@@ -189,7 +200,29 @@ class MessageStore:
         return tuple(claims)
 
     async def before_send(self, claim, target):
-        return await self.snapshots.gate(claim, target)
+        if claim.message.delivery_snapshot is not None:
+            return await self.snapshots.gate(claim, target)
+        async with self.session_factory() as session, session.begin():
+            row = await session.scalar(
+                select(ReliableMessage)
+                .where(
+                    ReliableMessage.id == claim.message_id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            now = utc_datetime(self.clock())
+            if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
+                return None
+            if self._time(session, row.lease_until) <= now or (
+                claim.message.expires_at is not None and claim.message.expires_at <= now
+            ):
+                return None
+            if row.scope_owner is not None:
+                row.dispatch_started_at = row.dispatch_started_at or now
+            until = now + timedelta(seconds=target.timeout_ms / 1000 + self.lease_margin_s)
+            row.lease_until = until
+            return until
 
     async def maintain_snapshots(self, limit, targets, deadline):
         return await self.snapshots.maintain(limit, targets, deadline)
@@ -197,7 +230,13 @@ class MessageStore:
     async def finish(self, claim: Claim, outcome: AttemptOutcome) -> bool:
         if claim.message.delivery_snapshot is not None:
             return await self.snapshots.finish(claim, outcome)
-        if outcome.status not in (*TERMINAL, MessageStatus.PENDING, MessageStatus.STALLED):
+        if outcome.status not in (
+            MessageStatus.DONE,
+            MessageStatus.FAILED,
+            MessageStatus.EXPIRED,
+            MessageStatus.PENDING,
+            MessageStatus.STALLED,
+        ):
             raise ValueError("invalid attempt transition")
         if outcome.status == MessageStatus.FAILED and outcome.fail_reason is None:
             raise ValueError("failed outcome requires reason")
@@ -394,13 +433,20 @@ class MessageStore:
             last_verdict=None,
             last_response_raw=None,
             # 租约中断后请求可能已送达:一旦未知,预算不再适用(合同 §4.3)。
-            delivery_uncertain=True,
+            delivery_uncertain=claim.delivery_uncertain
+            or claim.dispatch_started_at is not None
+            or claim.message.scope is None,
             next_attempt_at=now
             + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, self.uniform)),
         )
 
     async def _recover(self, session, claim, now, targets):
         values = self._recovery_values(claim, now, targets)
+        values["delivery_uncertain"] = or_(
+            ReliableMessage.delivery_uncertain,
+            ReliableMessage.dispatch_started_at.is_not(None),
+            ReliableMessage.scope_owner.is_(None),
+        )
         changed = await session.scalar(
             update(ReliableMessage)
             .where(
@@ -492,7 +538,13 @@ CLEANUP_BATCH_SIZE = 1000
 
 
 async def cleanup_terminal(
-    session: AsyncSession, *, now: datetime, retention_days: int, limit: int | None = None
+    session: AsyncSession,
+    *,
+    now: datetime,
+    retention_days: int,
+    limit: int | None = None,
+    protected_ids: frozenset[int] = frozenset(),
+    candidate_ids: tuple[int, ...] | None = None,
 ) -> int:
     positive(retention_days, "retention_days")
     cutoff = utc_datetime(now) - timedelta(days=retention_days)
@@ -500,6 +552,9 @@ async def cleanup_terminal(
         ReliableMessage.status.in_(TERMINAL),
         ReliableMessage.updated_at < cutoff,
     )
+    if candidate_ids is not None:
+        expired = expired.where(ReliableMessage.id.in_(candidate_ids))
+    expired = expired.where(ReliableMessage.id.not_in(protected_ids))
     if limit is not None:
         expired = expired.order_by(ReliableMessage.id).limit(limit)
     result = await session.execute(delete(ReliableMessage).where(ReliableMessage.id.in_(expired)))

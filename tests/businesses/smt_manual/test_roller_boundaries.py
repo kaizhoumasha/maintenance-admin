@@ -62,7 +62,7 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
     old3, old4 = await flow.rows("scan_arrival", roller=True)
     for row in (old3, old4):
         await flow.result(row["command_code"])
-        await flow.host.advance("SCAN", row["id"])
+        await flow.host.advance("RETURN", row["id"])
     batch_id = await manual_return_opportunity(flow)
     flow.return_decision = dict(
         result="READY",
@@ -80,7 +80,7 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
         ],
     )
     await flow.dispatch()
-    await flow.host.advance("RETURN_BATCH", batch_id)
+    await flow.host.advance("FACE", batch_id)
     batch = (await flow.rows("return_batch", roller=True))[0]
     assert batch["transport_task_id"]
     async with flow.factory() as session:
@@ -104,12 +104,12 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
     new4 = (await flow.rows("scan_arrival", roller=True))[-1]
     assert new4["round_id"] == new3["round_id"]
     await flow.result(old4["command_code"])
-    await flow.host.advance("SCAN", old4["id"])
+    await flow.host.advance("RETURN", old4["id"])
     async with flow.factory() as session:
         assert await flow.roller.get_return_candidates(session, work_line_id=flow.lines[0]) == ()
     await flow.dispatch()
     await flow.result(new4["command_code"])
-    await flow.host.advance("SCAN", new4["id"])
+    await flow.host.advance("RETURN", new4["id"])
     async with flow.factory() as session:
         assert [
             r["id"]
@@ -152,19 +152,19 @@ async def test_scan4_retry_keeps_original_fifo_under_manual_host(formal_manual, 
     first = (await flow.rows("return_round", roller=True))[0]
     old4 = (await flow.rows("scan_arrival", roller=True))[-1]
     await flow.result(old4["command_code"], status="FAILED")
-    await flow.host.advance("SCAN", old4["id"])
+    await flow.host.advance("RETURN", old4["id"])
     await flow.scan("SCAN3", "A000000002-B", timestamp=20)
     await flow.scan("SCAN4", "A000000002-B", timestamp=21)
     await flow.scan("SCAN4", "A000000001-B", timestamp=30)
     await flow.dispatch()
-    retry = [r for r in await flow.rows("scan_arrival", roller=True) if r["point"] == "SCAN4"][1:]
+    retry = [r for r in await flow.rows("scan_arrival", roller=True) if r["point"] == "SCAN4"]
     for row in retry:
         await flow.result(row["command_code"])
-        await flow.host.advance("SCAN", row["id"])
+        await flow.host.advance("RETURN", row["id"])
     async with flow.factory() as session:
         candidates = await flow.roller.get_return_candidates(session, work_line_id=flow.lines[0])
         assert [r["bin_code"] for r in candidates] == ["A000000001", "A000000002"]
     current = next(
         r for r in await flow.rows("return_round", roller=True) if r["id"] == first["id"]
     )
-    assert current["scan4_arrival_id"] == first["scan4_arrival_id"]
+    assert current["first_scan4_event_id"] == first["first_scan4_event_id"]

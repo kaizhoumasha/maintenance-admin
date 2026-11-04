@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from math import isfinite
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from app.http_client import HttpRequest, HttpResult
 
@@ -18,6 +18,7 @@ class MessageStatus(StrEnum):
     DONE = "DONE"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
+    ABANDONED = "ABANDONED"
 
 
 class FailReason(StrEnum):
@@ -63,6 +64,27 @@ class DeliverySnapshot:
 
 
 @dataclass(frozen=True)
+class ScopeRef:
+    owner_domain: str
+    kind: Literal["TASK", "LINE"]
+    scope_id: str
+
+    def __post_init__(self):
+        if self.kind not in ("TASK", "LINE") or any(
+            not isinstance(value, str) or not value or "\x00" in value
+            for value in (self.owner_domain, self.scope_id)
+        ):
+            raise ValueError("scope requires an owner, TASK/LINE kind and identity")
+
+
+@dataclass(frozen=True)
+class ScopeStopItem:
+    message_id: int
+    previous_status: MessageStatus
+    dispatch: Literal["NEVER_DISPATCHED", "MAY_HAVE_DISPATCHED", "TERMINAL"]
+
+
+@dataclass(frozen=True)
 class MessageDraft:
     target: str
     operation: str
@@ -72,6 +94,7 @@ class MessageDraft:
     business_key: str | None = None
     delivery_snapshot: DeliverySnapshot | None = None
     expires_at: datetime | None = None
+    scope: ScopeRef | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +108,7 @@ class OutgoingMessage:
     created_at: datetime
     expires_at: datetime | None
     delivery_snapshot: DeliverySnapshot | None = None
+    scope: ScopeRef | None = None
 
 
 @dataclass(frozen=True)

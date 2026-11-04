@@ -28,6 +28,7 @@ from app.integrations.wms_callback import (
     Unavailable,
 )
 from app.models import WorkLine
+from app.reliable import ScopeRef
 
 from .contracts import (
     Cancel,
@@ -284,7 +285,7 @@ class SmtManualTaskFlow:
                     select(faces).where(
                         *repo.scoped(faces),
                         faces.c.purpose == "SUPPLY",
-                        faces.c.task_id == task_id,
+                        faces.c.scope_id == task_id,
                         faces.c.demand_state == "ACTIVE",
                     )
                 )
@@ -301,10 +302,10 @@ class SmtManualTaskFlow:
                 if member["plan_revision"] != revision or member["kind"] != "BIN":
                     continue
                 face = by_source.get((revision, member["rack_id"], member["rack_face"]))
-                if face and face["cycle_id"] is None:
-                    cycle = await select_supply_cycle(self.roller, session, face["demand_id"])
+                if face and face["rack_job_id"] is None:
+                    cycle = await select_supply_cycle(self.roller, session, face["id"])
                     if cycle:
-                        await repo.bind_supply(session, demand_id=face["demand_id"], cycle_id=cycle)
+                        await repo.bind_supply(session, demand_id=face["id"], cycle_id=cycle)
             await self.manual_racks.reconcile_task(
                 session,
                 task_id=task_id,
@@ -342,6 +343,12 @@ class SmtManualTaskFlow:
             if task["status"] not in {"QUEUED", "PREPARING"} or task["plan_revision"] != 0:
                 return Conflict({"reason_code": "STATE_CONFLICT"})
             await self.repository.save_task(ctx.session, payload.task_id, status="CANCELLED")
+            await self.repository.stop_bin_scheduling(ctx.session, payload.task_id)
+            await self.roller.close_scope(
+                ctx.session,
+                ScopeRef(self.roller.context.domain, "TASK", payload.task_id),
+                reason="TASK_CANCELLED",
+            )
         else:
             table = self.repository.tables["member"]
             rows = (
@@ -451,6 +458,7 @@ class SmtManualTaskFlow:
             session,
             Prepare(task_id=row["task_id"], workline_code=row["workline_code"]),
             operation_id=operation_id,
+            scope=ScopeRef(self.roller.context.domain, "TASK", row["task_id"]),
         )
         await session.execute(
             self.repository.tables["request"]
@@ -483,8 +491,7 @@ class SmtManualTaskFlow:
         task = await self.repository.task(session, task_id)
         if task is None:
             return "NOT_FOUND"
-        terminal = task["status"] in {"CANCELLED", "COMPLETED"}
-        if task["status"] not in {"PREPARING", "EXECUTING"} and not terminal:
+        if task["status"] not in {"PREPARING", "EXECUTING"}:
             return task["status"]
         now_ms = unix_ms(self.capabilities.wms.clock())
         if not task["prepare_accepted"]:
@@ -553,9 +560,7 @@ class SmtManualTaskFlow:
         confirmation = await self.repository.confirmation(session, task)
         if task["confirmation_operation_id"] is not None and confirmation is None:
             return task["status"]
-        ready, basis = (
-            (False, {}) if terminal else await self._completion_basis(session, task, now_ms)
-        )
+        ready, basis = await self._completion_basis(session, task, now_ms)
         table = self.repository.tables["request"]
         if confirmation is not None and confirmation["state"] == "REQUESTED":
             response = confirmation["response"]
@@ -590,18 +595,14 @@ class SmtManualTaskFlow:
                 return task["status"]
             state = decision.result
             notices = self.repository.tables["input"]
-            if (
-                state == "COMPLETED"
-                and not terminal
-                and await session.scalar(
-                    select(notices.c.operation_id)
-                    .where(
-                        notices.c.task_id == task_id,
-                        notices.c.operation == BIN_COMPLETION_OPERATION,
-                        notices.c.state == "PENDING",
-                    )
-                    .limit(1)
+            if state == "COMPLETED" and await session.scalar(
+                select(notices.c.operation_id)
+                .where(
+                    notices.c.task_id == task_id,
+                    notices.c.operation == BIN_COMPLETION_OPERATION,
+                    notices.c.state == "PENDING",
                 )
+                .limit(1)
             ):
                 if confirmation["response"] is None:
                     await session.execute(
@@ -639,6 +640,12 @@ class SmtManualTaskFlow:
             )
             if state == "COMPLETED":
                 await self.repository.save_task(session, task_id, status="COMPLETED")
+                await self.repository.stop_bin_scheduling(session, task_id)
+                await self.roller.close_scope(
+                    session,
+                    ScopeRef(self.roller.context.domain, "TASK", task_id),
+                    reason="TASK_COMPLETED",
+                )
                 return "COMPLETED"
             confirmation = await self.repository.confirmation(session, task)
         if not ready:
@@ -666,6 +673,7 @@ class SmtManualTaskFlow:
             session,
             CompletionConfirm(task_id=task_id, last_applied_plan_revision=task["plan_revision"]),
             operation_id=operation_id,
+            scope=ScopeRef(self.roller.context.domain, "TASK", task_id),
         )
         await session.execute(
             table.insert().values(

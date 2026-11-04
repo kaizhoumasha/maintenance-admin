@@ -16,6 +16,59 @@ UNBOUND_CYCLE = "019a1111-2222-7333-8444-555555555551"
 UNBOUND_CLIENT = "019a1111-2222-7333-8444-555555555552"
 
 
+async def assert_four_table_cutover_refused(url, engine):
+    """Historical migration identity remains valid; the new runtime refuses old active work."""
+    result = await migrate(url, "upgrade", "rollerfoundation")
+    assert result.returncode == 0, result.stderr
+    await engine.dispose()
+    async with engine.connect() as connection:
+        before = await snapshot(
+            connection,
+            ("transport_task", "reliable_message", "rack_dispatch_job", "rack_dispatch_action"),
+        )
+    result = await migrate(url, "upgrade", "rollerfour")
+    assert result.returncode != 0 and "BIN four-table cutover refused" in result.stderr
+    async with engine.connect() as connection:
+        assert await snapshot(connection, tuple(before)) == before
+        assert await connection.scalar(
+            text("select to_regclass('enterprise_backend.bin_roller_scan_arrival')")
+        )
+        assert not await connection.scalar(
+            text("select to_regclass('enterprise_backend.bin_roller_bin_passage')")
+        )
+
+
+async def isolate_retained_manual_runtime(url, engine):
+    """This disposable fixture has mixed sample data; only the MANUAL history is under test."""
+    async with engine.begin() as connection:
+        metadata = sa.MetaData(schema="enterprise_backend")
+        await connection.run_sync(metadata.reflect)
+        tables = {t.name: t for t in metadata.tables.values()}
+        # No application migration performs this fixture setup or rewrites shared native evidence.
+        for name, table in tables.items():
+            if name.startswith("bin_roller_"):
+                await connection.execute(table.delete())
+        jobs, actions = tables["rack_dispatch_job"], tables["rack_dispatch_action"]
+        roller_jobs = sa.select(jobs.c.id).where(
+            jobs.c.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN"))
+        )
+        action_ids = list(
+            await connection.scalars(
+                sa.select(actions.c.id)
+                .where(actions.c.job_id.in_(roller_jobs))
+                .order_by(actions.c.ordinal.desc())
+            )
+        )
+        for identity in action_ids:
+            await connection.execute(actions.delete().where(actions.c.id == identity))
+        await connection.execute(jobs.delete().where(jobs.c.id.in_(roller_jobs)))
+        members = tables["smt_manual_task_member"]
+        await connection.execute(members.delete().where(members.c.kind == "BIN"))
+    result = await migrate(url, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    await engine.dispose()
+
+
 async def test_empty_cutover_round_trip(schema_database):
     url, engine = schema_database
     for direction, revision in (
@@ -68,6 +121,14 @@ async def seed(conn, t, multi_rotation, runtime_subject):
     def rack_for(job):
         return "R" if runtime_subject in (None, job) else "R-" + job
 
+    await insert(
+        "work_lines",
+        id=7,
+        line_code="L",
+        line_name="Original line",
+        business_code="smt_manual",
+        position_bindings={"FIVE_RACK": "P", "RETURN_RACK": "P", "TRANSFER_RACK": "P"},
+    )
     scope = dict(owner_domain="smt_manual", work_line_id=7)
     loc = {"type": "RACK_POSITION", "location_code": "P"}
     dest = {"type": "ZONE", "location_code": "Z"}
@@ -690,7 +751,19 @@ async def snapshot(conn, names):
     rows = {}
     for name in names:
         result = (await conn.execute(text(f"select * from enterprise_backend.{name}"))).mappings()
-        rows[name] = sorted((dict(r) for r in result), key=lambda r: repr(sorted(r.items())))
+        additive = {
+            "scope_owner",
+            "scope_kind",
+            "scope_id",
+            "dispatch_started_at",
+            "event_envelope",
+            "event_context",
+            "application_ref",
+        }
+        rows[name] = sorted(
+            ({k: v for k, v in r.items() if k not in additive or v is not None} for r in result),
+            key=lambda r: repr(sorted(r.items())),
+        )
     return rows
 
 
@@ -702,9 +775,6 @@ async def test_original_history_survives_without_dispatch(schema_database):
         PointDemand,
         PointRef,
     )
-    from app.businesses.runtime import build_runtime
-    from app.integrations.ecs_command.service import EcsCommands
-    from app.reliable import Outbox
 
     url, engine, _ = await old_store(schema_database)
     untouched = (
@@ -719,34 +789,15 @@ async def test_original_history_survives_without_dispatch(schema_database):
         before = await snapshot(conn, untouched)
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stdout + result.stderr
-    await current_runtime_schema(engine)
+    async with engine.connect() as conn:
+        assert await snapshot(conn, untouched) == before
+    result = await migrate(url, "upgrade", "rollerfoundation")
+    assert result.returncode == 0, result.stderr
+    await engine.dispose()
+    async with engine.connect() as conn:
+        before = await snapshot(conn, untouched)
     async with async_sessionmaker(engine)() as db:
-        outbox = Outbox({}, {})
-        host = build_runtime(
-            outbox=outbox,
-            ecs_commands=EcsCommands(outbox, None),
-            session_factory=async_sessionmaker(engine),
-        ).services["smt_manual"]
-        dispatch = host.components["rack_dispatch"]
-        roller_component = host.components["bin_roller"]
-        assert roller_component.rack_dispatch is dispatch
-        (supply,) = await roller_component.get_supply_progress(
-            db, work_line_id=7, task_id="task-active"
-        )
-        assert {
-            ORDINARY,
-            "supplying",
-            "feed",
-            "segment",
-            "feed-original",
-            "box-original",
-            "box-submit",
-        } <= set(supply.original_ids)
-        pending_ids = await roller_component.list_pending(
-            db, kind="RACK_CYCLE", after_id=None, upper_id="zz", limit=10
-        )
-        assert {work.record_id for work in pending_ids} == {ORDINARY, ACK, UNBOUND_CYCLE}
-
+        dispatch = runtime(engine).rack_dispatch
         job = await dispatch.progress(db, job_id="manual")
         assert job.state == "COMPLETED" and job.completed_at_ms is None
         assert job.origin.source_ref == "member-manual" and job.origin.cycle_id == "manual"
@@ -856,7 +907,8 @@ async def test_original_history_survives_without_dispatch(schema_database):
             ).one()
         ) == (ACTIVE, "active-ENTER")
     result = await migrate(url, "downgrade", "racksubmitack")
-    assert result.returncode != 0 and "downgrade would discard" in result.stderr
+    assert result.returncode != 0
+    assert "capacity preflight: admission orders exist" in result.stdout + result.stderr
     async with engine.connect() as conn:
         assert await snapshot(conn, untouched) == before
         assert (
@@ -1058,50 +1110,7 @@ async def test_pruned_consumed_report_requires_complete_native_proof(schema_data
             )
 
 
-async def current_runtime_schema(engine):
-    """Keep historical revision assertions separate from current model requirements."""
-    from app.businesses import catalog
-    from app.models import WorkLinePosition
-
-    async with engine.begin() as conn:
-        # This only supplies nullable runtime shape; capacity migration is tested separately.
-        await conn.execute(
-            text(
-                "ALTER TABLE enterprise_backend.rack_dispatch_job "
-                "ADD COLUMN IF NOT EXISTS admission_order BIGINT"
-            )
-        )
-        await conn.run_sync(lambda bind: WorkLinePosition.__table__.create(bind, checkfirst=True))
-        rows = (await conn.execute(text("SELECT * FROM enterprise_backend.work_lines"))).mappings()
-        for line in rows:
-            if not line["business_code"]:
-                continue
-            definition = catalog.get_definition(line["business_code"])
-            declared = {
-                p.slot_key for p in definition.position_slots if p.position_type == "RACK_POSITION"
-            }
-            points = {code for role, code in line["position_bindings"].items() if role in declared}
-            for point in points:
-                await conn.execute(
-                    text(
-                        "INSERT INTO enterprise_backend.workline_positions "
-                        "(work_line_id,position_code,capacity) VALUES (:line,:point,:capacity) "
-                        "ON CONFLICT DO NOTHING"
-                    ),
-                    {
-                        "line": line["id"],
-                        "point": point,
-                        "capacity": line["five_rack_request_limit"]
-                        if point == line["position_bindings"].get("FIVE_RACK")
-                        else 1,
-                    },
-                )
-    await engine.dispose()
-
-
-async def runtime(engine):
-    await current_runtime_schema(engine)
-
+def runtime(engine):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.businesses.runtime import build_runtime
@@ -1129,14 +1138,16 @@ async def runtime(engine):
     "permission",
     ["active", "missing", "empty_drain", "cancelled", "disabled", "conflict", "elsewhere"],
 )
-async def test_first_migrated_entry_requires_original_host_permission(schema_database, permission):
-    url, engine, t = await old_store(schema_database, runtime_subject=UNBOUND_CYCLE)
+async def test_old_entry_refuses_four_table_cutover_under_each_host_context(
+    schema_database, permission
+):
+    url, engine, t = await old_store(schema_database)
     async with engine.begin() as conn:
         await conn.execute(
             t["work_lines"]
-            .insert()
+            .update()
+            .where(t["work_lines"].c.id == 7)
             .values(
-                id=7,
                 line_code="L",
                 line_name="L",
                 business_code="smt_manual",
@@ -1156,6 +1167,21 @@ async def test_first_migrated_entry_requires_original_host_permission(schema_dat
                     purpose="ORDINARY",
                     task_id="task-active",
                     rack_id="incoming",
+                )
+            )
+            await conn.execute(
+                t["smt_manual_task_member"]
+                .insert()
+                .values(
+                    id="member-incoming",
+                    slot_id="S",
+                    task_id="task-active",
+                    plan_revision=1,
+                    kind="BIN",
+                    rack_id="incoming",
+                    rack_face="A",
+                    member_order=10,
+                    status="PENDING",
                 )
             )
             await conn.execute(
@@ -1179,83 +1205,25 @@ async def test_first_migrated_entry_requires_original_host_permission(schema_dat
             )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
-    faces = host.roller.tables["face_work"]
-    async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "UPDATE enterprise_backend.rack_dispatch_job SET admission_order=1 "
-                "WHERE id=:job AND task_id IS NOT NULL"
-            ),
-            {"job": UNBOUND_CYCLE},
-        )
-        if permission == "missing":
-            grant = dict(
-                (await conn.execute(sa.select(faces).where(faces.c.id == "original-demand")))
-                .mappings()
-                .one()
-            )
-            await conn.execute(faces.delete().where(faces.c.id == "original-demand"))
-        before = await snapshot(conn, ("transport_task", "reliable_message"))
-    for _ in range(2):
-        await host.advance("RACK_CYCLE", UNBOUND_CYCLE)
-    async with host.capabilities.session_factory() as db:
-        job = await host.rack_dispatch.progress(db, job_id=UNBOUND_CYCLE)
-        (action,) = job.actions
-        assert action.basis["registration_at_cutover"] == "LOCAL_ONLY"
-        assert (action.id, action.client_request_id) == ("client-only", UNBOUND_CLIENT)
-        assert (job.state == "WITHDRAWN") == (permission in ("cancelled", "empty_drain"))
-        assert bool(action.transport_task_id) == (permission in ("active", "elsewhere"))
-    async with engine.connect() as conn:
-        after = await snapshot(conn, ("transport_task", "reliable_message"))
-        if permission not in ("active", "elsewhere"):
-            assert action.outcome is None and action.submit_message_id is None
-            if job.state == "WITHDRAWN":
-                assert job.closure_basis["client_request_id"] == UNBOUND_CLIENT
-            assert after == before
-        else:
-            assert len(after["transport_task"]) == len(before["transport_task"]) + 1
-            assert len(after["reliable_message"]) == len(before["reliable_message"]) + 1
-            (registered,) = [
-                r for r in after["transport_task"] if r["client_request_id"] == UNBOUND_CLIENT
-            ]
-            assert (
-                registered["cycle_id"] == UNBOUND_CYCLE
-                and registered["transport_task_id"] == action.transport_task_id
-            )
-            assert [
-                m["id"]
-                for m in after["reliable_message"]
-                if m["business_key"] == action.transport_task_id
-            ] == [action.submit_message_id]
-
-    if permission in ("disabled", "missing"):
-        async with engine.begin() as conn:
-            if permission == "missing":
-                await conn.execute(faces.insert().values(**grant))
-            else:
-                await conn.execute(
-                    t["work_lines"]
-                    .update()
-                    .where(t["work_lines"].c.id == 7)
-                    .values(is_enabled=True)
-                )
-        for _ in range(2):
-            await host.advance("RACK_CYCLE", UNBOUND_CYCLE)
-        async with engine.connect() as conn:
-            resumed = await snapshot(conn, ("transport_task", "reliable_message"))
-            assert len(resumed["transport_task"]) == len(before["transport_task"]) + 1
-            assert len(resumed["reliable_message"]) == len(before["reliable_message"]) + 1
-            assert (
-                sum(r["client_request_id"] == UNBOUND_CLIENT for r in resumed["transport_task"])
-                == 1
-            )
+    await assert_four_table_cutover_refused(url, engine)
 
 
 @pytest.mark.parametrize("evidence", ["point", "resource", "observation", "configured"])
 async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_database, evidence):
-    url, engine, t = await old_store(schema_database)
+    url, engine, t = await old_store(schema_database, runtime_subject="cancelled")
     async with engine.begin() as conn:
+        await conn.execute(
+            t["work_lines"]
+            .update()
+            .where(t["work_lines"].c.id == 7)
+            .values(
+                position_bindings={
+                    "FIVE_RACK": "P-active",
+                    "RETURN_RACK": "P-manual",
+                    "TRANSFER_RACK": "P-active",
+                }
+            )
+        )
         # The still-needed DIRECT grant has its own line and a provable original member.
         for key in ("smt_manual_task", "smt_manual_rack", "smt_manual_input"):
             table = t[key]
@@ -1287,9 +1255,9 @@ async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_
         if evidence == "configured":
             await conn.execute(
                 t["work_lines"]
-                .insert()
+                .update()
+                .where(t["work_lines"].c.id == 7)
                 .values(
-                    id=7,
                     line_code="L",
                     line_name="L",
                     business_code="smt_manual",
@@ -1356,7 +1324,16 @@ async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_
             and job["closure_reason"] is None
         )
 
-    host = await runtime(engine)
+    if evidence == "resource":
+        # The isolated supported-runtime case uses a retained MANUAL job's frozen resource.
+        async with engine.begin() as conn:
+            metadata = sa.MetaData(schema="enterprise_backend")
+            await conn.run_sync(metadata.reflect, only=["rack_dispatch_job"])
+            jobs = metadata.tables["enterprise_backend.rack_dispatch_job"]
+            resource = await conn.scalar(sa.select(jobs.c.resources).where(jobs.c.id == ORDINARY))
+            await conn.execute(jobs.update().where(jobs.c.id == ACTIVE).values(resources=resource))
+    await isolate_retained_manual_runtime(url, engine)
+    host = runtime(engine)
     assert await host.advance("MANUAL_RACK", CANCELLED) == "POSITION_CONFLICT"
     if evidence == "configured":
         async with engine.begin() as conn:
@@ -1365,6 +1342,12 @@ async def test_cancelled_entry_stays_pending_at_other_protected_location(schema_
                 .update()
                 .where(t["work_lines"].c.id == 7)
                 .values(position_bindings={})
+            )
+            await conn.execute(
+                text(
+                    "DELETE FROM enterprise_backend.workline_positions "
+                    "WHERE work_line_id=7 AND position_code='Z'"
+                )
             )
         assert await host.advance("MANUAL_RACK", CANCELLED) == "NOT_ARRIVED"
 
@@ -1392,7 +1375,8 @@ async def test_unconsumed_bound_transfer_result_advances_original_manual_job(sch
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
+    await isolate_retained_manual_runtime(url, engine)
+    host = runtime(engine)
     async with host.capabilities.session_factory() as db:
         before = await host.rack_dispatch.progress(db, job_id=ACTIVE)
         assert before.actions[0].outcome_revision is None
@@ -1404,7 +1388,7 @@ async def test_unconsumed_bound_transfer_result_advances_original_manual_job(sch
         assert job.actions[0].submit_operation_id == before.actions[0].submit_operation_id
 
 
-async def test_roller_position_uses_kind_from_matching_original_outcome(schema_database):
+async def test_old_roller_position_preserves_original_kind_before_cutover_refusal(schema_database):
     url, engine, t = await old_store(schema_database)
     async with engine.begin() as conn:
         move, task, decision, position = (
@@ -1445,16 +1429,9 @@ async def test_roller_position_uses_kind_from_matching_original_outcome(schema_d
         before = await snapshot(conn, ("bin_roller_position_fact", "transport_task"))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
-    async with host.capabilities.session_factory() as db:
-        job = await host.rack_dispatch.progress(db, job_id=ACK)
-        assert (
-            job.actions[0].actual_position
-            == job.actual_position
-            == {"kind": "ZONE", "location_code": "EXTERNAL"}
-        )
     async with engine.connect() as conn:
-        assert await snapshot(conn, ("bin_roller_position_fact", "transport_task")) == before
+        assert await snapshot(conn, tuple(before)) == before
+    await assert_four_table_cutover_refused(url, engine)
 
 
 async def test_fallback_return_keeps_later_member_unbound(schema_database):
@@ -1462,9 +1439,9 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
     async with engine.begin() as conn:
         await conn.execute(
             t["work_lines"]
-            .insert()
+            .update()
+            .where(t["work_lines"].c.id == 7)
             .values(
-                id=7,
                 line_code="L",
                 line_name="L",
                 business_code="smt_manual",
@@ -1490,7 +1467,8 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
+    await isolate_retained_manual_runtime(url, engine)
+    host = runtime(engine)
     async with engine.begin() as conn:
         await conn.execute(
             t["smt_manual_input"]
@@ -1573,10 +1551,10 @@ async def test_fallback_return_keeps_later_member_unbound(schema_database):
         ("ROTATE", "conflict"),
     ],
 )
-async def test_first_followup_move_waits_for_current_host_authority(schema_database, kind, case):
-    url, engine, t = await old_store(
-        schema_database, runtime_subject="ordinary" if kind == "ROTATE" else "ack"
-    )
+async def test_old_followup_move_refuses_four_table_cutover_under_each_host_context(
+    schema_database, kind, case
+):
+    url, engine, t = await old_store(schema_database)
     cycle = ORDINARY if kind == "ROTATE" else ACK
     client = "019a1111-2222-7333-8444-555555555589"
     async with engine.begin() as conn:
@@ -1584,8 +1562,9 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
             t[n] for n in ("work_lines", "bin_roller_rack_action", "bin_roller_position_fact")
         )
         await conn.execute(
-            line.insert().values(
-                id=7,
+            line.update()
+            .where(line.c.id == 7)
+            .values(
                 line_code="L",
                 line_name="L",
                 business_code="smt_manual",
@@ -1692,117 +1671,7 @@ async def test_first_followup_move_waits_for_current_host_authority(schema_datab
         await conn.execute(position.update().where(position.c.id == prior).values(is_current=True))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
-
-    async def original():
-        async with host.capabilities.session_factory() as db:
-            return (await host.rack_dispatch.progress(db, job_id=cycle)).actions[-1]
-
-    await host.advance("RACK_CYCLE", cycle)
-    assert (await original()).transport_task_id is None
-    async with engine.begin() as conn:
-        await conn.execute(line.update().where(line.c.id == 7).values(is_enabled=True))
-        if case == "withdrawn":
-            await conn.execute(
-                faces.update().where(faces.c.id == "turn-grant").values(demand_state="WITHDRAWN")
-            )
-        before = await snapshot(conn, ("transport_task", "reliable_message"))
-    if case.endswith("_with_return"):
-        from app.businesses._components.bin_roller.rack_flow import evaluate_roller_point
-        from app.businesses._components.bin_roller.scan_flow import bin_identity
-
-        repo = host.roller.repository(7)
-        async with host.capabilities.session_factory.begin() as db:
-            raw = "A000000001-B"
-            bin_code = bin_identity(raw)
-            assert bin_code
-            arrival = await repo.accept_scan_fact(
-                db,
-                digest="a" * 64,
-                receipt_id=1,
-                point="SCAN3",
-                device_code="SCAN3-L",
-                raw_bin_code=raw,
-                bin_code=bin_code,
-                scanned_at=42,
-            )
-            round_ = await repo.bind_scan_round(db, arrival, valid=True)
-            assert round_["return_state"] == "PENDING"
-            job = await host.rack_dispatch.progress(db, job_id=cycle)
-            demand, handoff = await evaluate_roller_point(host.roller, db, job)
-            assert (demand.state, handoff.state) == ("CONTINUE", "CLEAR")
-        if case != "success_with_return":
-            for _ in range(2):
-                await host.advance("RACK_CYCLE", cycle)
-                held = await original()
-                assert held.client_request_id == client and held.transport_task_id is None
-            async with host.capabilities.session_factory.begin() as db:
-                held = await host.rack_dispatch.advance(
-                    db,
-                    job_id=cycle,
-                    demand=demand,
-                    handoff=handoff,
-                    now_ms=43000,
-                    authorized_original_id=held.id,
-                )
-                assert held.actions[-1].transport_task_id is None
-            async with engine.connect() as conn:
-                assert await snapshot(conn, ("transport_task", "reliable_message")) == before
-            async with host.capabilities.session_factory.begin() as db:
-                # Clear that exact return round while keeping its original scan and identity.
-                await repo.update_scan(db, round_["id"], removed=True)
-                job = await host.rack_dispatch.progress(db, job_id=cycle)
-                demand, handoff = await evaluate_roller_point(host.roller, db, job)
-                assert (demand.state, handoff.state) == ("NONE", "CLEAR")
-    for _ in range(3):
-        await host.advance("RACK_CYCLE", cycle)
-    if case in ("withdrawn", "conflict"):
-        async with host.capabilities.session_factory() as db:
-            job = await host.rack_dispatch.progress(db, job_id=cycle)
-            turn = next(a for a in job.actions if a.kind == "ROTATE")
-            assert (
-                turn.client_request_id == client
-                and turn.transport_task_id is None
-                and turn.outcome is None
-            )
-            roots = [a for a in job.actions if a.kind == "DEPARTURE_DECIDE"]
-            if case == "withdrawn":
-                assert (
-                    len(roots) == 1
-                    and roots[0].previous_action_id is None
-                    and turn.phase == "WITHDRAWN"
-                )
-                assert job.state == "RELEASING" and job.review_reason is None
-                assert turn.basis["withdrawal_reason"] == "NO_FACE_DEMAND"
-                assert (
-                    turn.basis["demand"]["state"] == "NONE"
-                    and turn.basis["handoff"]["state"] == "CLEAR"
-                )
-            else:
-                assert not roots and job.state == "ACTIVE"
-        async with engine.connect() as conn:
-            after = await snapshot(conn, ("transport_task", "reliable_message"))
-            assert after["transport_task"] == before["transport_task"]
-            assert len(after["reliable_message"]) == len(before["reliable_message"]) + int(
-                case == "withdrawn"
-            )
-        return
-    bound = await original()
-    assert bound.client_request_id == client and bound.kind == kind and bound.transport_task_id
-    async with engine.connect() as conn:
-        after = await snapshot(conn, ("transport_task", "reliable_message"))
-        assert len(after["transport_task"]) == len(before["transport_task"]) + 1
-        assert len(after["reliable_message"]) == len(before["reliable_message"]) + 1
-        assert [
-            row["transport_task_id"]
-            for row in after["transport_task"]
-            if row["client_request_id"] == client
-        ] == [bound.transport_task_id]
-        assert [
-            row["id"]
-            for row in after["reliable_message"]
-            if row["business_key"] == bound.transport_task_id
-        ] == [bound.submit_message_id]
+    await assert_four_table_cutover_refused(url, engine)
 
 
 async def retained_observation(conn, t, point):
@@ -1831,10 +1700,8 @@ async def retained_observation(conn, t, point):
 
 
 @pytest.mark.parametrize("contested", [True, False])
-async def test_ready_feed_honors_location_before_observation_owner_sweep(
-    schema_database, contested
-):
-    url, engine, t = await old_store(schema_database, runtime_subject="ordinary")
+async def test_old_ready_feed_with_position_observation_refuses_cutover(schema_database, contested):
+    url, engine, t = await old_store(schema_database)
     async with engine.begin() as conn:
         await retained_observation(conn, t, "P" if contested else "elsewhere")
         cycles = t["bin_roller_rack_cycle"]
@@ -1881,20 +1748,13 @@ async def test_ready_feed_honors_location_before_observation_owner_sweep(
         )
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
-    for _ in range(2):
-        await host.advance("FEED", "demand")
-    async with engine.connect() as conn:
-        boxes = [
-            r
-            for r in (await snapshot(conn, ("transport_task",)))["transport_task"]
-            if r["kind"] == "BIN_MOVE"
-        ]
-        assert len(boxes) == int(not contested)
+    await assert_four_table_cutover_refused(url, engine)
 
 
 @pytest.mark.parametrize("ack", [True, False])
-async def test_bound_departure_retains_opaque_consumed_preparation(schema_database, ack):
+async def test_old_departure_retains_opaque_preparation_before_cutover_refusal(
+    schema_database, ack
+):
     url, engine, t = await old_store(schema_database)
     async with engine.begin() as conn:
         await retained_observation(conn, t, "P")
@@ -1923,16 +1783,9 @@ async def test_bound_departure_retains_opaque_consumed_preparation(schema_databa
         before = await snapshot(conn, ("transport_task", "reliable_message"))
     result = await migrate(url, "upgrade", "sharedrackdispatch")
     assert result.returncode == 0, result.stderr
-    host = await runtime(engine)
-    for _ in range(2):
-        await host.advance("RACK_CYCLE", ACK)
-    async with host.capabilities.session_factory() as db:
-        job = await host.rack_dispatch.progress(db, job_id=ACK)
-        assert await host.rack_dispatch.has_position_conflict(db, point="P")
-        assert job.actions[0].submit_operation_id == "old-entry-op"
-        assert job.state == ("COMPLETED" if ack else "RELEASING")
     async with engine.connect() as conn:
-        assert await snapshot(conn, ("transport_task", "reliable_message")) == before
+        assert await snapshot(conn, tuple(before)) == before
+    await assert_four_table_cutover_refused(url, engine)
 
 
 async def test_bound_departure_with_unreadable_original_operation_refuses_cutover(schema_database):

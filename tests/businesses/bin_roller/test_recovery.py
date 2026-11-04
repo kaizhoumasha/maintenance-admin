@@ -22,6 +22,9 @@ async def test_waiting_pages_and_one_failure_do_not_starve_other_kinds(
     host.production.permit = True
     await flow.application_scan("first", "SCAN2", "A000000009-B", timestamp=9)
     async with flow.factory() as session:
+        row = (await flow.rows(session, "bin_passage"))[-1]
+    await host.complete_production(row["id"])
+    async with flow.factory() as session:
         arrivals = await flow.rows(session, "scan_arrival")
         release = (await flow.rows(session, "scan2_release"))[0]
     await flow.result(release["command_code"], "SCAN2")
@@ -94,7 +97,7 @@ async def test_serializable_advance_does_not_leak_to_receiver_or_other_business(
         )
 
     try:
-        await host.advance(RollerWorkRef("SCAN", scan["id"]), before=observe)
+        await host.advance(RollerWorkRef("PASSAGE", scan["id"]), before=observe)
         assert observed[0][0] == "serializable"
         monkeypatch.setattr(flow, "factory", factory)
         async with factory() as session, session.begin():
@@ -132,7 +135,7 @@ async def test_commit_serialization_retry_reopens_whole_transaction_and_retains_
     function, sequence, trigger = (
         f"test_{name}_{suffix}" for name in ("commit", "attempt", "retry")
     )
-    table = flow.store.tables["scan_arrival"]
+    table = flow.store.tables["bin_passage"]
     qualified = f"{flow.store.schema}.{table.name}"
     async with engine.begin() as connection:
         await connection.execute(text(f"CREATE SEQUENCE {sequence}"))
@@ -151,10 +154,11 @@ async def test_commit_serialization_retry_reopens_whole_transaction_and_retains_
             text(f"""
             CREATE CONSTRAINT TRIGGER {trigger} AFTER UPDATE ON {qualified}
             DEFERRABLE INITIALLY DEFERRED FOR EACH ROW
-            WHEN (OLD.pending AND NOT NEW.pending) EXECUTE FUNCTION {function}()
+            WHEN (OLD.scan1_consumed_result_id IS NULL AND NEW.scan1_consumed_result_id IS NOT NULL)
+            EXECUTE FUNCTION {function}()
         """)
         )
-    work = RollerWorkRef("SCAN", scan["id"])
+    work = RollerWorkRef("PASSAGE", scan["id"])
     try:
         if failures == 3:
             with pytest.raises(DBAPIError) as error:
@@ -200,20 +204,20 @@ async def test_ctu03_acceptance_wakes_original_owner_and_recovers_without_final_
 
     flow = roller_lifecycle
     demand = await flow.demand()
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     arrival = (await flow.all_rows("rack_action"))[0]
     await flow.rack_result(arrival)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     feed = (await flow.all_rows("feed"))[0]
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     departure = (await flow.all_rows("departure"))[0]
     await flow.decision(
         "departure",
         departure["id"],
         dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORAGE")),
     )
-    await flow.advance("FEED", demand)
+    await flow.advance("RACK_CYCLE", arrival["cycle_id"])
     action = (await flow.all_rows("rack_action"))[-1]
     assert action["kind"] == "CTU03"
     for entry in catalog.entries():

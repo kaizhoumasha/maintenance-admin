@@ -2,54 +2,58 @@ import pytest
 from sqlalchemy import select
 
 from app.core.identifiers import uuid7
+from app.integrations.ecs_callback import get_event
+from app.reliable import ScopeRef
 
 
-async def fact(store, digest, raw="A", *, point="SCAN2", separator=None):
-    async with store.factory.begin() as session:
-        return await store.repo.accept_scan_fact(
-            session,
-            digest=digest,
-            receipt_id=10,
-            point=point,
-            device_code="C",
-            raw_bin_code=raw,
-            bin_code=None,
-            scanned_at=100,
-            separator_command_code=separator,
+async def test_equivalent_event_keeps_original_canonical_reference(roller_scans):
+    flow = roller_scans
+    await flow.scan("SCAN2", "A000000001-C", timestamp=10)
+    await flow.scan("SCAN2", "A000000001-C", timestamp=11)
+    async with flow.factory() as session:
+        rows = await flow.rows(session, "bin_passage")
+        facts = await flow.rows(session, "scan_fact")
+        assert len(rows) == 1 and len(facts) == 2
+        records = [(await get_event(session, event_id=f["receipt_id"])).record for f in facts]
+        assert {r.application_ref.subject_id for r in records} == {rows[0]["id"]}
+        assert {r.application_ref.canonical_event_id for r in records} == {
+            rows[0]["scan2_event_id"]
+        }
+
+
+async def test_raw_codes_and_original_result_separate_real_arrivals(roller_scans):
+    flow = roller_scans
+    for time, raw in enumerate(("A000000001-C", "A000000001-C", "A000000002-C", "A000000001-C"), 1):
+        await flow.scan("SCAN2", raw, timestamp=time)
+    async with flow.factory.begin() as session:
+        rows = await flow.rows(session, "bin_passage")
+        assert len(rows) == 3
+        code = await flow.roller.release_scan2(session, arrival_id=rows[-1]["id"])
+    await flow.result(code, "SCAN2")
+    await flow.scan("SCAN2", "A000000001-C", timestamp=10)
+    await flow.scan("SCAN2", "A000000001-C", timestamp=11)
+    async with flow.factory() as session:
+        rows = await flow.rows(session, "bin_passage")
+        assert len(rows) == 4 and rows[-1]["release_command_code"] is None
+
+
+async def test_original_message_cannot_be_rebound(roller_scans):
+    flow = roller_scans
+    await flow.scan("SCAN2", "A000000001-C", timestamp=10)
+    flow.work_line_id = 2
+    flow.rebuild("second")
+    await flow.scan("SCAN2", "A000000001-C", timestamp=10)
+    async with flow.factory() as session:
+        from app.models import CallbackReceipt
+
+        receipt = await session.scalar(
+            select(CallbackReceipt).where(CallbackReceipt.device_code == flow.devices["SCAN2"])
         )
-
-
-async def test_receipt_cleanup_keeps_original_digest_to_arrival(roller_store):
-    store = roller_store
-    first = await fact(store, "one")
-    assert (await fact(store, "two"))["id"] == first["id"]
-    await fact(store, "three", "B")
-    assert (await fact(store, "two"))["id"] == first["id"]
-    async with store.factory() as session:
-        rows = (await session.execute(select(store.tables["scan_fact"]))).mappings().all()
-        assert [(r["digest"], r["arrival_id"]) for r in rows[:2]] == [
-            ("one", first["id"]),
-            ("two", first["id"]),
-        ]
-
-
-async def test_raw_codes_and_original_result_separate_real_arrivals(roller_store):
-    store = roller_store
-    a = await fact(store, "one")
-    assert (await fact(store, "two"))["id"] == a["id"]
-    b = await fact(store, "three", "B")
-    a2 = await fact(store, "four")
-    assert a2["id"] not in {a["id"], b["id"]}
-    a3 = await fact(store, "five", separator="original-command")
-    assert a3["id"] != a2["id"]
-    assert (await fact(store, "six", separator="original-command"))["id"] == a3["id"]
-
-
-async def test_original_message_cannot_be_rebound(roller_store):
-    store = roller_store
-    await fact(store, "one")
-    with pytest.raises(ValueError):
-        await fact(store, "one", "B")
+        assert (
+            receipt.event_context["owner_domain"] == "first"
+            and receipt.event_context["work_line_id"] == 1
+        )
+        assert {r["owner_domain"] for r in await flow.rows(session, "bin_passage")} == {"first"}
 
 
 async def test_original_owner_and_request_identity_survive_restart(roller_lifecycle):
@@ -58,14 +62,19 @@ async def test_original_owner_and_request_identity_survive_restart(roller_lifecy
 
     flow = roller_lifecycle
     demand = await flow.demand()
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     original = (await flow.all_rows("rack_action"))[0]
     job_id = original["cycle_id"]
     async with flow.factory.begin() as session:
         dispatch = RackDispatch("first", flow.roller.capabilities)
         job = await dispatch.progress(session, job_id=job_id)
         action = job.actions[0]
-        assert await dispatch.register(session, job.origin) == job_id
+        assert (
+            await dispatch.register(
+                session, job.origin, scope=ScopeRef("first", "TASK", "task-original")
+            )
+            == job_id
+        )
         assert (
             await dispatch.prepare(
                 session,
@@ -116,7 +125,7 @@ async def test_applied_entry_and_prepared_rotation_share_outer_transaction(rolle
     await flow.feed_success((await flow.all_rows("feed_segment"))[0])
     with pytest.raises(RuntimeError, match="abort"):
         async with flow.factory.begin() as session:
-            await flow.roller.advance(session, RollerWorkRef("FEED", first))
+            await flow.roller.advance(session, RollerWorkRef("FACE", first))
             job = await flow.roller.rack_dispatch.progress(session, job_id=job_id)
             assert len(job.actions) == 2
             rolled_back = job.actions[-1]
@@ -140,7 +149,7 @@ async def test_applied_entry_and_prepared_rotation_share_outer_transaction(rolle
             is None
         )
         assert len((await flow.roller.rack_dispatch.progress(session, job_id=job_id)).actions) == 1
-    await flow.advance("FEED", first)
+    await flow.advance("FACE", first)
     await flow.advance("RACK_CYCLE", job_id)
     actions = await flow.all_rows("rack_action")
     assert [a["kind"] for a in actions] == ["CTU01", "CTU02"]
@@ -189,20 +198,20 @@ async def test_three_face_rounds_reuse_only_their_original_movements(roller_life
     first, job_id = await flow.ready_supply(count=1)
     second = await flow.demand(face="B", revision=2)
     await flow.feed_success((await flow.all_rows("feed_segment"))[0])
-    await flow.advance("FEED", first)
+    await flow.advance("FACE", first)
     first_rotation = (await flow.all_rows("rack_action"))[-1]
     await flow.rack_result(first_rotation)
-    await flow.advance("FEED", second)
+    await flow.advance("FACE", second)
     third = await flow.demand(face="A", revision=3)
     feed = (await flow.all_rows("feed"))[-1]
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", second)
+    await flow.advance("FACE", second)
     second_rotation = (await flow.all_rows("rack_action"))[-1]
     await flow.rack_result(second_rotation)
-    await flow.advance("FEED", third)
+    await flow.advance("FACE", third)
     feed = (await flow.all_rows("feed"))[-1]
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", third)
+    await flow.advance("FACE", third)
     await flow.finish_departure(job_id)
     await flow.advance("RACK_CYCLE", job_id)
     async with flow.factory() as session:

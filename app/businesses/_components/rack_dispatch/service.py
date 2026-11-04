@@ -18,6 +18,7 @@ from app.integrations.wms_transport import (
     OPERATION as TRANSPORT_OPERATION,
 )
 from app.integrations.wms_transport import (
+    AcceptanceBasis,
     Rack,
     RackPosition,
     TransportCaller,
@@ -25,6 +26,7 @@ from app.integrations.wms_transport import (
     Zone,
 )
 from app.models import WorkLine, WorkLinePosition
+from app.reliable import ScopeRef
 
 from .contracts import (
     ActionProgress,
@@ -184,7 +186,9 @@ class RackDispatch:
             query = query.order_by(RackAction.id).with_for_update()
         return sorted(await session.scalars(query), key=lambda row: row.ordinal)
 
-    async def register(self, session: AsyncSession, origin: JobOrigin) -> str:
+    async def register(
+        self, session: AsyncSession, origin: JobOrigin, *, scope: ScopeRef | None = None
+    ) -> str:
         identity = dict(
             owner_domain=self.owner_domain,
             work_line_id=origin.work_line_id,
@@ -194,13 +198,21 @@ class RackDispatch:
         )
         if not all(identity.values()) or not origin.cycle_id:
             raise ValueError("incomplete rack origin")
+        if scope is not None and scope.owner_domain != self.owner_domain:
+            raise ValueError("rack scope owner mismatch")
         values = asdict(origin)
+        tags = dict(
+            scope_owner=scope.owner_domain if scope else None,
+            scope_kind=scope.kind if scope else None,
+            scope_id=scope.scope_id if scope else None,
+        )
         del values["cycle_id"]
         insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
         await session.execute(
             insert(RackJob)
             .values(
                 **values,
+                **tags,
                 id=origin.cycle_id,
                 original_cycle_id=origin.cycle_id,
                 owner_domain=self.owner_domain,
@@ -214,6 +226,8 @@ class RackDispatch:
                 .execution_options(populate_existing=True)
             )
         ).one()
+        if any(getattr(job, key) != value for key, value in tags.items()):
+            raise ValueError("original rack scope cannot change")
         # A drain candidate can acquire its original approved resources exactly once.
         if (
             job.state == "ACTIVE"
@@ -241,6 +255,84 @@ class RackDispatch:
             job.admission_order = (maximum or 0) + 1
             await session.flush()
         return job.id
+
+    async def close_scope(self, session, scope: ScopeRef, *, reason: str):
+        if scope.owner_domain != self.owner_domain:
+            raise ValueError("rack scope owner mismatch")
+        jobs = list(
+            await session.scalars(
+                self._jobs.where(
+                    RackJob.scope_owner == scope.owner_domain,
+                    RackJob.scope_kind == scope.kind,
+                    RackJob.scope_id == scope.scope_id,
+                    RackJob.pending.is_(True),
+                )
+                .order_by(RackJob.id)
+                .with_for_update()
+            )
+        )
+        for job in jobs:
+            job.state = "CLOSED_BY_SCOPE"
+            if job.closure_reason != "CLOSED_BY_SCOPE":
+                job.closure_reason = "CLOSED_BY_SCOPE"
+                job.closure_basis = dict(
+                    reason=reason, scope_kind=scope.kind, scope_id=scope.scope_id
+                )
+            actions = await self._actions(session, job, lock=True)
+            await self._release_unused_scope(session, job, actions, unix_ms(datetime.now(UTC)))
+        await session.flush()
+
+    async def get_point_preparations(self, session, *, work_line_id: int, point: str):
+        jobs = await self.jobs(
+            session,
+            work_line_id=work_line_id,
+            source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+            pending=True,
+        )
+        eligible = []
+        if await self.has_position_conflict(session, point=point):
+            return ()
+        for job in jobs:
+            if (
+                job.state != "ACTIVE"
+                or job.review_reason
+                or job.origin.point != point
+                or not job.actions
+            ):
+                continue
+            action = job.actions[-1]
+            if (
+                action.id != job.current_action_id
+                or action.id != job.position_action_id
+                or action.kind not in ("ENTER", "ROTATE")
+                or action.phase != "APPLIED"
+                or not action.outcome
+                or action.outcome.get("status") != "SUCCEEDED"
+                or action.target_face != job.actual_face
+                or action.actual_face != job.actual_face
+                or action.target != _point(point)
+                or job.actual_position != action.target
+                or action.actual_position != action.target
+                or action.position_revision != action.outcome_revision
+            ):
+                continue
+            valid = True
+            for original in job.actions:
+                result = await self.final_result(session, job_id=job.id, action_id=original.id)
+                if (
+                    original.phase != "APPLIED"
+                    or not result
+                    or result.closure != "CLOSED"
+                    or result.has_pending_outcome
+                    or result.outcome_revision != original.outcome_revision
+                    or result.outcome != original.outcome
+                    or result.position_observation != original.position_observation
+                ):
+                    valid = False
+                    break
+            if valid:
+                eligible.append(job)
+        return tuple(eligible)
 
     async def progress(self, session: AsyncSession, *, job_id: str) -> RackProgress | None:
         job = await self._job(session, job_id)
@@ -317,20 +409,58 @@ class RackDispatch:
             .join(RackJob, RackJob.id == RackAction.job_id)
             .where(
                 RackAction.id.in_(source_versions),
+                RackJob.owner_domain == self.owner_domain,
                 RackJob.point == point,
                 RackJob.pending.is_(False),
-                RackJob.closure_reason == "DEPARTURE_ACK",
+                RackJob.closure_reason.in_(("DEPARTURE_ACK", "CLOSED_BY_SCOPE")),
             )
         )
-        return frozenset(
-            action.id
-            for action, job in rows
-            if action.position_revision == source_versions[action.id]
-            and job.closure_basis
-            and job.closure_basis.get("action_id") == job.current_action_id
-            and job.closure_basis.get("acceptance_basis")
-            and job.completed_at_ms is not None
-        )
+        handed_off = set()
+        for source, job in rows:
+            proof = job.closure_basis or {}
+            if job.closure_reason == "CLOSED_BY_SCOPE":
+                proof = proof.get("responsibility_release") or {}
+                if (
+                    proof.get("kind") != "DEPARTURE_ACK"
+                    or proof.get("completed_at_ms") != job.completed_at_ms
+                ):
+                    continue
+            actions = await self._actions(session, job)
+            departure = next((a for a in actions if a.id == job.current_action_id), None)
+            ready = next(
+                (a for a in actions if departure and a.id == departure.previous_action_id), None
+            )
+            try:
+                stored = proof["acceptance_basis"]
+                basis = AcceptanceBasis(**{**stored, "caller": TransportCaller(**stored["caller"])})
+                destination = ready.decision["rack_destination"]
+                valid = (
+                    departure.kind == "DEPART"
+                    and departure.phase == "ACCEPTED"
+                    and departure.completion_rule == "ACCEPTED_DEPARTURE"
+                    and departure.id == proof.get("action_id")
+                    and departure.acceptance_basis == stored
+                    and departure.accepted_at_ms == basis.accepted_at
+                    and ready.kind == "DEPARTURE_DECIDE"
+                    and ready.phase == "READY"
+                    and departure.source == _point(point)
+                    and departure.target_face is None
+                    and departure.target
+                    == {"kind": destination["type"], "location_code": destination["location_code"]}
+                    and departure.caller == job.caller
+                    and self._matches_acceptance(job, departure, basis)
+                )
+            except (AttributeError, KeyError, TypeError, ValueError):
+                continue
+            if (
+                valid
+                and job.completed_at_ms is not None
+                and source.kind in ("ENTER", "ROTATE")
+                and source.actual_position == _point(point)
+                and source.position_revision == source_versions[source.id]
+            ):
+                handed_off.add(source.id)
+        return frozenset(handed_off)
 
     async def has_position_conflict(self, session: AsyncSession, *, point: str) -> bool:
         holders = await session.scalar(
@@ -370,7 +500,18 @@ class RackDispatch:
         )
         if exclude_job_id is not None:
             query = query.where(RackJob.id != exclude_job_id)
-        return bool(await session.scalar(query.limit(1)))
+        if await session.scalar(query.limit(1)):
+            return True
+        claims = await session.scalar(
+            select(func.count())
+            .select_from(RackJob)
+            .where(
+                RackJob.pending,
+                RackJob.position_action_id.is_not(None),
+                RackJob.actual_position["location_code"].as_string() == point,
+            )
+        )
+        return claims > 1
 
     async def withdraw_unused(
         self, session: AsyncSession, *, job_id: str, source: Coverage
@@ -525,7 +666,7 @@ class RackDispatch:
         if kind not in ("ENTER", "ROTATE") or not source_ref or (kind == "ROTATE" and face is None):
             return None
         job = await self._job(session, job_id, lock=True)
-        if not job:
+        if not job or job.state == "CLOSED_BY_SCOPE":
             return None
         actions = await self._actions(session, job, lock=True)
         target = _point(job.point)
@@ -617,6 +758,9 @@ class RackDispatch:
             cycle_id=job.original_cycle_id,
             rcs_template_id=action.template,
             target_face=action.target_face,
+            scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
+            if job.scope_owner
+            else None,
         )
         transport = self.capabilities.transport
         if action.kind == "ROTATE":
@@ -690,7 +834,26 @@ class RackDispatch:
                 return await self._result(session, job, action)
         return None
 
-    async def _reject_unarrived(self, session, job, actions, demand, handoff, now_ms):
+    @staticmethod
+    def _matches_entry(job, action, result):
+        return (
+            action.kind == "ENTER"
+            and action.source == {"kind": "RACK", "location_code": job.rack_id}
+            and action.target == _point(job.point)
+            and action.caller == job.caller
+            and action.template == ("F01" if job.source_kind.startswith("MANUAL_") else "CTU01")
+            and result.frozen
+            == {
+                "kind": "RACK_MOVE",
+                "rack_id": job.rack_id,
+                "rcs_template_id": action.template,
+                "source": action.source,
+                "target": action.target,
+                "target_face": action.target_face,
+            }
+        )
+
+    async def _submission_rejection(self, session, job, actions, demand, handoff):
         if (
             len(actions) != 1
             or actions[0].kind != "ENTER"
@@ -698,7 +861,7 @@ class RackDispatch:
             or job.position_action_id
         ):
             return False
-        if not (
+        if job.state != "CLOSED_BY_SCOPE" and not (
             _at_point(demand, job)
             and demand.state in ("NONE", "CONTINUE")
             and _at_point(handoff, job)
@@ -709,6 +872,7 @@ class RackDispatch:
         result = await self._result(session, job, action)
         if not (
             result
+            and self._matches_entry(job, action, result)
             and result.closure == "CLOSED"
             and result.closure_reason == "SUBMIT_REJECTION"
             and result.submission_state == "AVAILABLE"
@@ -720,6 +884,7 @@ class RackDispatch:
             and result.position_observation is None
             and result.submission_message_id == action.submit_message_id
             and result.submission_target == action.submit_target
+            and (job.state != "CLOSED_BY_SCOPE" or result.has_submission_acceptance is False)
         ):
             return False
         predecessors = await self.capabilities.transport.list_unclosed_predecessors(
@@ -741,19 +906,99 @@ class RackDispatch:
             != [(action.transport_task_id, action.client_request_id)]
         ):
             return False
-        _close(
-            job,
-            "NOT_ARRIVED",
-            "NOT_ARRIVED",
-            dict(
-                action_id=action.id,
-                submission_rejection=result.closure_basis,
-                demand=asdict(demand),
-                handoff=asdict(handoff),
-            ),
-            now_ms,
+        return dict(
+            action_id=action.id,
+            submission_rejection=result.closure_basis,
+            demand=asdict(demand),
+            handoff=asdict(handoff),
         )
+
+    @staticmethod
+    def _release_scope(job, basis, now_ms):
+        job.pending = False
+        job.completed_at_ms = now_ms
+        job.closure_basis = {
+            **job.closure_basis,
+            "responsibility_release": _json({**basis, "completed_at_ms": now_ms}),
+        }
+        job.review_reason = None
+
+    async def _release_unused_scope(self, session, job, actions, now_ms):
+        if not self.has_external_responsibility(job, actions):
+            self._release_scope(job, dict(kind="NO_PHYSICAL_INTENT"), now_ms)
+            return True
+        if (
+            len(actions) != 1
+            or actions[0].kind != "ENTER"
+            or actions[0].phase != "REGISTERED"
+            or job.actual_position
+            or job.position_action_id
+        ):
+            return False
+        action = actions[0]
+        if (
+            action.outcome
+            or action.outcome_revision
+            or action.position_observation
+            or action.observation_revision
+            or action.actual_position
+            or action.position_revision
+            or action.pending_revision
+            or action.acceptance_basis
+            or (action.basis or {}).get("unconsumed_locations")
+        ):
+            return False
+        result = await self._result(session, job, action)
+        if not (
+            result
+            and self._matches_entry(job, action, result)
+            and result.submission_state == "AVAILABLE"
+            and result.submission_message_id == action.submit_message_id
+            and result.submission_target == action.submit_target
+            and result.submission_dispatch_started is False
+            and result.submission_delivery_uncertain is False
+            and result.submission_delivery_status in ("PENDING", "ABANDONED")
+            and result.submission_response_state == "NONE"
+            and not result.outcome
+            and not result.position_observation
+            and not result.member_facts
+            and not result.has_pending_outcome
+        ):
+            return False
+        acceptance = await self.capabilities.transport.get_submission_acceptance(
+            session,
+            transport_task_id=action.transport_task_id,
+            client_request_id=action.client_request_id,
+            caller=_caller(action),
+        )
+        if acceptance.state != "MISSING":
+            return False
+        self._release_scope(job, dict(kind="NEVER_DISPATCHED", action_id=action.id), now_ms)
         return True
+
+    async def _advance_stopped(self, session, job, actions, demand, handoff, now_ms):
+        if await self._release_unused_scope(session, job, actions, now_ms):
+            return
+        rejection = await self._submission_rejection(session, job, actions, demand, handoff)
+        if rejection:
+            self._release_scope(job, dict(kind="SUBMIT_REJECTION", **rejection), now_ms)
+            return
+        if actions and actions[-1].kind == "DEPART" and actions[-1].transport_task_id:
+            basis = await self._departure_acceptance(session, job, actions, now_ms)
+            if basis is not None:
+                action = actions[-1]
+                action.phase, action.acceptance_basis, action.accepted_at_ms = (
+                    "ACCEPTED",
+                    asdict(basis),
+                    basis.accepted_at,
+                )
+                self._release_scope(
+                    job,
+                    dict(kind="DEPARTURE_ACK", action_id=action.id, acceptance_basis=asdict(basis)),
+                    now_ms,
+                )
+            return
+        await self._applied(session, job, actions)
 
     async def _applied(self, session, job, actions):
         """Refresh only original moves. Older unresolved observations still protect the line."""
@@ -882,7 +1127,13 @@ class RackDispatch:
         actions = await self._actions(session, job, lock=True)
         if not job.pending:
             return _snapshot(job, actions)
-        if await self._reject_unarrived(session, job, actions, demand, handoff, now_ms):
+        if job.state == "CLOSED_BY_SCOPE":
+            await self._advance_stopped(session, job, actions, demand, handoff, now_ms)
+            await session.flush()
+            return _snapshot(job, actions)
+        rejection = await self._submission_rejection(session, job, actions, demand, handoff)
+        if rejection:
+            _close(job, "NOT_ARRIVED", "NOT_ARRIVED", rejection, now_ms)
             return _snapshot(job, actions)
         original = actions[-1] if actions else None
         unbound = (
@@ -1188,7 +1439,14 @@ class RackDispatch:
             current_face=job.actual_face,
         )
         op_id = _id()
-        message = await self.capabilities.wms.send(session, payload, operation_id=op_id)
+        message = await self.capabilities.wms.send(
+            session,
+            payload,
+            operation_id=op_id,
+            scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
+            if job.scope_owner
+            else None,
+        )
         row = RackAction(
             id=_id(),
             job_id=job.id,
@@ -1215,11 +1473,12 @@ class RackDispatch:
         if not previous:
             job.release_basis = basis
 
-    async def _accept(self, session, job, actions, now_ms):
+    async def _departure_acceptance(self, session, job, actions, now_ms):
         action = actions[-1]
         ready = next((a for a in actions if a.id == action.previous_action_id), None)
         if (
-            job.state != "RELEASING"
+            action.id != job.current_action_id
+            or action.kind != "DEPART"
             or action.completion_rule != "ACCEPTED_DEPARTURE"
             or not ready
             or ready.kind != "DEPARTURE_DECIDE"
@@ -1251,7 +1510,15 @@ class RackDispatch:
         if (
             acceptance.state != "ACCEPTED"
             or basis is None
-            or basis.owner_domain != job.owner_domain
+            or not self._matches_acceptance(job, action, basis)
+        ):
+            return None
+        return basis
+
+    @staticmethod
+    def _matches_acceptance(job, action, basis):
+        return not (
+            basis.owner_domain != job.owner_domain
             or basis.cycle_id != job.original_cycle_id
             or basis.caller != _caller(action)
             or (basis.kind, basis.operation) != ("RACK_MOVE", TRANSPORT_OPERATION)
@@ -1271,8 +1538,15 @@ class RackDispatch:
                 "source": action.source,
                 "target": action.target,
             }
-        ):
+        )
+
+    async def _accept(self, session, job, actions, now_ms):
+        if job.state != "RELEASING":
             return
+        basis = await self._departure_acceptance(session, job, actions, now_ms)
+        if basis is None:
+            return
+        action = actions[-1]
         action.phase, action.acceptance_basis, action.accepted_at_ms = (
             "ACCEPTED",
             asdict(basis),
@@ -1286,3 +1560,40 @@ class RackDispatch:
             now_ms,
         )
         await session.flush()
+
+
+async def pending_message_references(session, *, candidate_ids):
+    """Original active rack references for one cleanup batch, including their line owners."""
+    if not candidate_ids:
+        return ()
+    rows = await session.execute(
+        select(RackJob.work_line_id, RackAction.message_id, RackAction.submit_message_id)
+        .join(RackAction, RackAction.job_id == RackJob.id)
+        .where(
+            RackJob.pending.is_(True),
+            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN")),
+            (RackAction.message_id.in_(candidate_ids))
+            | (RackAction.submit_message_id.in_(candidate_ids)),
+        )
+    )
+    return tuple(
+        (line, identity)
+        for line, message, submission in rows
+        for identity in (message, submission)
+        if identity in candidate_ids
+    )
+
+
+async def get_job(session, *, owner_domain, job_id):
+    """Pure original job projection for reference retention."""
+    job = await session.scalar(
+        select(RackJob).where(RackJob.owner_domain == owner_domain, RackJob.id == job_id)
+    )
+    if job is None:
+        return None
+    actions = list(
+        await session.scalars(
+            select(RackAction).where(RackAction.job_id == job.id).order_by(RackAction.ordinal)
+        )
+    )
+    return _snapshot(job, actions)

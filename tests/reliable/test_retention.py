@@ -7,6 +7,31 @@ from sqlalchemy import select, update
 from app.models import ReliableMessage
 
 
+@pytest.fixture
+def reference_rig(request):
+    return (
+        request.getfixturevalue("storage")
+        if "storage" in request.fixturenames
+        else request.getfixturevalue("rig")
+    )
+
+
+@pytest.fixture(autouse=True)
+async def reference_tables(reference_rig):
+    from sqlalchemy import MetaData
+
+    from app.businesses._components.bin_roller.models import TABLES
+    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+
+    rig = reference_rig
+    if rig.engine.dialect.name == "sqlite":
+        metadata = MetaData()
+        for table in (*TABLES.values(), RackJob.__table__, RackAction.__table__):
+            table.to_metadata(metadata, schema=None)
+        async with rig.engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
+
+
 @pytest.mark.parametrize("status", ["DONE", "FAILED", "EXPIRED"])
 async def test_terminal_retention_exact_boundary_and_reenqueue(storage, status):
     from app.reliable import DuplicateMessage, InvalidMessage

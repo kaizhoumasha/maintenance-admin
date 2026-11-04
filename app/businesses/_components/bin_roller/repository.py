@@ -1,19 +1,13 @@
-"""Original component identities; every write uses the caller's transaction."""
+"""Current checkpoints; writes stay inside the receiver/host transaction."""
 
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from types import EllipsisType
 
-from sqlalchemy import Table, and_, or_, select
+from sqlalchemy import Table, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import RowMapping
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.elements import ColumnElement
 
-from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.core.identifiers import uuid7
-from app.core.strict_json import canonical_digest
 
 from .models import TABLES
 from .ports import SourceFaceRef, SupplyChange, SupplyProgress
@@ -22,100 +16,168 @@ from .ports import SourceFaceRef, SupplyChange, SupplyProgress
 class RollerRepository:
     def __init__(
         self,
-        owner_domain: str,
-        work_line_id: int,
+        owner_domain,
+        work_line_id,
         *,
-        rack_dispatch: RackDispatch,
+        rack_dispatch,
         tables: Mapping[str, Table] | None = None,
-    ) -> None:
+    ):
+        self.owner_domain, self.work_line_id = owner_domain, work_line_id
         self.rack_dispatch = rack_dispatch
-        self.owner_domain = owner_domain
-        self.work_line_id = work_line_id
         self.tables = TABLES if tables is None else tables
 
     @property
-    def scope(self) -> dict[str, str | int]:
+    def scope(self):
         return dict(owner_domain=self.owner_domain, work_line_id=self.work_line_id)
 
-    def scoped(self, table: Table) -> tuple[ColumnElement[bool], ...]:
-        return (
-            table.c.owner_domain == self.owner_domain,
-            table.c.work_line_id == self.work_line_id,
-        )
+    def scoped(self, table):
+        return table.c.owner_domain == self.owner_domain, table.c.work_line_id == self.work_line_id
 
-    async def _one(
-        self, session: AsyncSession, table: Table, *conditions: ColumnElement[bool]
-    ) -> RowMapping | None:
-        return (
-            (await session.execute(select(table).where(*self.scoped(table), *conditions)))
-            .mappings()
-            .one_or_none()
-        )
+    async def _one(self, session, table, *conditions, lock=False):
+        query = select(table).where(*self.scoped(table), *conditions)
+        if lock:
+            query = query.with_for_update()
+        return (await session.execute(query)).mappings().one_or_none()
 
-    async def _register(
-        self,
-        session: AsyncSession,
-        table: Table,
-        values: dict,
-        keys: Sequence[str],
-        compare: Sequence[str],
-    ) -> RowMapping:
+    async def _register(self, session, table, values, keys: Sequence[str], compare: Sequence[str]):
         insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
         await session.execute(insert(table).values(**values).on_conflict_do_nothing())
         row = await self._one(session, table, *(table.c[key] == values[key] for key in keys))
-        if row is None:
-            raise ValueError("original business identity is not visible in this transaction")
-        if any(row[key] != values[key] for key in compare):
-            raise ValueError("original business input cannot change")
+        if row is None or any(row[key] != values[key] for key in compare):
+            raise ValueError("original business identity has conflicting input")
         return row
 
-    async def apply_supply_change(self, session: AsyncSession, change: SupplyChange) -> None:
+    async def update(self, session, key, record_id=None, **values):
+        table = self.tables[key]
+        conditions = self.scoped(table)
+        if record_id is not None:
+            conditions += (table.c.id == record_id,)
+        await session.execute(
+            table.update()
+            .where(*conditions)
+            .values(
+                **values,
+                revision=table.c.revision + 1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    async def close(self, session, key, record_id, reason):
+        table = self.tables[key]
+        await session.execute(
+            table.update()
+            .where(*self.scoped(table), table.c.id == record_id, table.c.closed_at.is_(None))
+            .values(
+                closed_at=datetime.now(UTC),
+                close_reason=reason,
+                revision=table.c.revision + 1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    async def close_retired_return(self, session, identity):
+        table = self.tables["bin_return"]
+        row = await self._one(session, table, table.c.id == identity)
+        if (
+            row
+            and row["closed_at"] is None
+            and not row["is_current"]
+            and row["selected_face_work_id"] is None
+            and row["transport_task_id"] is None
+            and all(
+                row[point + "_command_code"] is None
+                or row[point + "_consumed_result_id"] is not None
+                for point in ("scan3", "scan4")
+            )
+        ):
+            await self.close(session, "bin_return", identity, "SUPERSEDED")
+
+    async def line_state(self, session, *, start=False):
+        table = self.tables["workline_state"]
+        row = await self._register(
+            session,
+            table,
+            dict(**self.scope, drain_phase="IDLE"),
+            ("owner_domain", "work_line_id"),
+            (),
+        )
+        if start and (row["line_run_id"] is None or row["drain_review_reason"] == "LINE_STOPPED"):
+            await self.update(
+                session, "workline_state", line_run_id=str(uuid7()), drain_review_reason=None
+            )
+            row = await self._one(session, table, lock=True)
+        return row
+
+    async def finish_line_if_idle(self, session):
+        state_table = self.tables["workline_state"]
+        state = await self._one(session, state_table)
+        if not state or state["line_run_id"] is None or state["drain_phase"] != "IDLE":
+            return
+        for key in ("bin_passage", "bin_return", "face_work"):
+            table = self.tables[key]
+            query = select(table.c.id).where(
+                *self.scoped(table),
+                table.c.closed_at.is_(None),
+                table.c.scope_id == state["line_run_id"],
+            )
+            if key == "bin_passage":
+                query = query.where(table.c.scope_kind == "LINE")
+            elif key == "face_work":
+                query = query.where(table.c.purpose == "DRAIN")
+            if await session.scalar(query.limit(1)) is not None:
+                return
+        if await self.rack_dispatch.jobs(
+            session, work_line_id=self.work_line_id, source_kinds=("ROLLER_DRAIN",), pending=True
+        ):
+            return
+        await self.update(session, "workline_state", line_run_id=None)
+
+    async def apply_supply_change(self, session, change: SupplyChange):
         table = self.tables["face_work"]
         for source in change.added:
-            demand_id = str(uuid7())
             await self._register(
                 session,
                 table,
                 dict(
-                    id=demand_id,
-                    demand_id=demand_id,
-                    purpose="SUPPLY",
+                    id=str(uuid7()),
                     **self.scope,
-                    task_id=change.task_id,
-                    change_id=change.change_id,
+                    scope_id=change.task_id,
+                    purpose="SUPPLY",
                     plan_revision=source.plan_revision,
+                    change_id=change.change_id,
                     rack_id=source.rack_id,
                     rack_face=source.rack_face,
                     demand_state="ACTIVE",
+                    phase="WAIT_RACK",
+                    feed_cursor=0,
                 ),
-                ("purpose", "task_id", "plan_revision", "rack_id", "rack_face"),
+                ("purpose", "scope_id", "plan_revision", "rack_id", "rack_face"),
                 (),
             )
         for source in change.withdrawn:
-            await session.execute(
-                table.update()
-                .where(
-                    *self.scoped(table),
-                    table.c.purpose == "SUPPLY",
-                    table.c.task_id == change.task_id,
-                    table.c.plan_revision == source.plan_revision,
-                    table.c.rack_id == source.rack_id,
-                    table.c.rack_face == source.rack_face,
-                )
-                .values(demand_state="WITHDRAWN")
+            row = await self._one(
+                session,
+                table,
+                table.c.purpose == "SUPPLY",
+                table.c.scope_id == change.task_id,
+                table.c.plan_revision == source.plan_revision,
+                table.c.rack_id == source.rack_id,
+                table.c.rack_face == source.rack_face,
             )
+            if row and row["closed_at"] is None:
+                await self.update(session, "face_work", row["id"], demand_state="WITHDRAWN")
+                if not await self.supply_started(session, row):
+                    await self.close(session, "face_work", row["id"], "WITHDRAWN")
 
-    async def demand(self, session: AsyncSession, demand_id: str) -> RowMapping | None:
+    async def demand(self, session, demand_id):
         table = self.tables["face_work"]
-        return await self._one(session, table, table.c.demand_id == demand_id)
+        return await self._one(session, table, table.c.id == demand_id, table.c.purpose == "SUPPLY")
 
-    async def supply_started(self, session: AsyncSession, demand: RowMapping) -> bool:
-        if demand["service_state"] == "WITHDRAWN":
-            return False
-        if demand["feed_id"] is not None:
+    async def supply_started(self, session, demand):
+        if demand["feed_operation_id"] is not None:
             return True
-        if demand["cycle_id"] and demand["preparation_action_id"]:
-            job = await self.rack_dispatch.progress(session, job_id=demand["cycle_id"])
+        if demand["rack_job_id"] and demand["preparation_action_id"]:
+            job = await self.rack_dispatch.progress(session, job_id=demand["rack_job_id"])
             return bool(
                 job
                 and any(
@@ -125,451 +187,90 @@ class RollerRepository:
             )
         return False
 
-    async def bind_supply(
-        self, session: AsyncSession, *, demand_id: str, cycle_id: str, service_id: str | None = None
-    ) -> None:
+    async def bind_supply(self, session, *, demand_id, cycle_id):
         demand = await self.demand(session, demand_id)
-        cycle = await self.rack_dispatch.progress(session, job_id=cycle_id)
+        job = await self.rack_dispatch.progress(session, job_id=cycle_id)
         if (
-            demand is None
-            or cycle is None
+            not demand
+            or not job
             or (
-                cycle.origin.task_id != demand["task_id"]
-                or cycle.origin.rack_id != demand["rack_id"]
-                or cycle.origin.source_kind != "ROLLER_ORDINARY"
-                or cycle.origin.work_line_id != self.work_line_id
-                or (demand["cycle_id"] is not None and demand["cycle_id"] != cycle_id)
-                or (
-                    service_id is not None
-                    and demand["service_id"] is not None
-                    and demand["service_id"] != service_id
-                )
+                job.origin.task_id,
+                job.origin.rack_id,
+                job.origin.work_line_id,
+                job.origin.source_kind,
             )
+            != (demand["scope_id"], demand["rack_id"], self.work_line_id, "ROLLER_ORDINARY")
+            or demand["rack_job_id"] not in (None, cycle_id)
         ):
-            raise ValueError("original supply cycle association mismatch")
-        values = {"cycle_id": cycle_id}
-        if service_id is not None and demand["service_id"] is None:
-            values.update(service_id=service_id, source_ref=demand_id, service_state="PENDING")
-        table = self.tables["face_work"]
-        await session.execute(
-            table.update()
-            .where(*self.scoped(table), table.c.demand_id == demand_id)
-            .values(**values)
-        )
+            raise ValueError("original supply job association mismatch")
+        await self.update(session, "face_work", demand_id, rack_job_id=cycle_id)
 
-    async def supply_progress(
-        self, session: AsyncSession, task_id: str
-    ) -> tuple[SupplyProgress, ...]:
+    async def supply_progress(self, session, task_id):
         table = self.tables["face_work"]
         rows = (
-            (
-                await session.execute(
-                    select(table)
-                    .where(
-                        *self.scoped(table), table.c.purpose == "SUPPLY", table.c.task_id == task_id
-                    )
-                    .order_by(table.c.id)
+            await session.execute(
+                select(table)
+                .where(
+                    *self.scoped(table), table.c.purpose == "SUPPLY", table.c.scope_id == task_id
                 )
+                .order_by(table.c.id)
             )
-            .mappings()
-            .all()
-        )
-        progress = []
-        for demand in rows:
-            original = [demand["demand_id"]]
-            original.extend(demand[key] for key in ("cycle_id", "service_id") if demand[key])
-            if demand["feed_id"] is not None:
-                original.extend((demand["feed_id"], demand["operation_id"]))
-                if demand["message_id"] is not None:
-                    original.append(str(demand["message_id"]))
-                segments = self.tables["feed_segment"]
-                members = (
-                    await session.execute(
-                        select(segments)
-                        .where(*self.scoped(segments), segments.c.feed_id == demand["feed_id"])
-                        .order_by(segments.c.segment_index)
-                    )
-                ).mappings()
-                for segment in members:
-                    original.extend(
-                        segment[key]
-                        for key in ("id", "client_request_id", "transport_task_id", "operation_id")
-                        if segment[key] is not None
-                    )
-            progress.append(
+        ).mappings()
+        result = []
+        for face in rows:
+            complete = face["close_reason"] == "COMPLETED"
+            # Feed completion is independent of the current return window.
+            if not complete and face["feed_message_id"] is not None:
+                from .feed_flow import read_feed_manifest
+
+                manifest = await read_feed_manifest(self.rack_dispatch.capabilities, session, face)
+                complete = manifest is not None and (
+                    manifest["result"] == "RACK_FACE_DONE"
+                    or face["feed_cursor"] == len(manifest.get("bins", ()))
+                )
+            ids = tuple(
+                str(face[k])
+                for k in (
+                    "id",
+                    "rack_job_id",
+                    "preparation_action_id",
+                    "feed_operation_id",
+                    "feed_message_id",
+                    "step_id",
+                    "current_client_request_id",
+                    "current_transport_task_id",
+                )
+                if face[k] is not None
+            )
+            result.append(
                 SupplyProgress(
                     task_id,
-                    SourceFaceRef(demand["plan_revision"], demand["rack_id"], demand["rack_face"]),
-                    demand["feed_state"] == "COMPLETED",
-                    demand["feed_state"] != "COMPLETED"
+                    SourceFaceRef(face["plan_revision"], face["rack_id"], face["rack_face"]),
+                    complete,
+                    face["closed_at"] is None
                     and (
-                        demand["demand_state"] == "ACTIVE"
-                        or await self.supply_started(session, demand)
+                        face["demand_state"] == "ACTIVE" or await self.supply_started(session, face)
                     ),
-                    tuple(original),
+                    ids,
                 )
             )
-        return tuple(progress)
+        return tuple(result)
 
-    async def accept_scan_fact(
-        self,
-        session: AsyncSession,
-        *,
-        digest: str,
-        receipt_id: int,
-        point: str,
-        device_code: str,
-        raw_bin_code: str,
-        bin_code: str | None,
-        scanned_at: int,
-        separator_command_code: str | None = None,
-        binding_snapshot: dict | None = None,
-        previous_arrival: RowMapping | None | EllipsisType = ...,
-    ) -> RowMapping:
-        if point not in {"SCAN1", "SCAN2", "SCAN3", "SCAN4"}:
-            raise ValueError("invalid roller scan point")
-        facts, arrivals = self.tables["scan_fact"], self.tables["scan_arrival"]
-        original = await self._one(session, facts, facts.c.digest == digest)
-        content = dict(
-            point=point,
-            device_code=device_code,
-            raw_bin_code=raw_bin_code,
-            bin_code=bin_code,
-            scanned_at=scanned_at,
-        )
-        if original is not None:
-            if any(original[key] != value for key, value in content.items()):
-                raise ValueError("original scan message cannot change")
-            return await self._one(session, arrivals, arrivals.c.id == original["arrival_id"])
-        # The caller's verified Result and predecessor must use the same original read basis.
-        previous = (
-            await self.latest_scan(session, point) if previous_arrival is ... else previous_arrival
-        )
-        same = previous is not None and all(
-            previous[key] == content[key] for key in ("device_code", "raw_bin_code", "bin_code")
-        )
-        if not same:
-            separator_command_code = None
-        # Only the owning point's already-verified original command Result separates equal content.
-        separated = separator_command_code is not None and (
-            previous is None or separator_command_code != previous["separator_command_code"]
-        )
-        if same and not separated:
-            arrival = previous
-        else:
-            previous_id = previous["id"] if previous is not None else None
-            basis = dict(
-                point=point,
-                previous_arrival_id=previous_id,
-                separator_command_code=separator_command_code,
-                device_code=device_code,
-                raw_bin_code=raw_bin_code,
-                bin_code=bin_code,
-            )
-            values = dict(
-                **self.scope,
-                id=str(uuid7()),
-                received_at=datetime.now(UTC),
-                business_key=canonical_digest(basis),
-                first_digest=digest,
-                **basis,
-                scanned_at=scanned_at,
-                delegation_state="PENDING" if point == "SCAN2" else None,
-                pending=True,
-                command_code=None,
-            )
-            arrival = await self._register(
-                session,
-                arrivals,
-                values,
-                ["owner_domain", "work_line_id", "business_key"],
-                tuple(basis),
-            )
-            if arrival["id"] == values["id"] and bin_code is not None:
-                await self.record_position(
-                    session,
-                    object_kind="BIN",
-                    object_code=bin_code,
-                    location_code=point,
-                    rack_face=None,
-                    source_kind="SCAN",
-                    source_id=arrival["id"],
-                    source_revision=0,
-                )
-        await self._register(
-            session,
-            facts,
-            dict(
-                **self.scope,
-                id=str(uuid7()),
-                digest=digest,
-                receipt_id=receipt_id,
-                arrival_id=arrival["id"],
-                binding_snapshot=binding_snapshot,
-                **content,
-            ),
-            ["digest"],
-            (*content, "arrival_id"),
-        )
-        return arrival
-
-    async def latest_scan(self, session: AsyncSession, point: str) -> RowMapping | None:
-        arrivals = self.tables["scan_arrival"]
-        return (
-            (
-                await session.execute(
-                    select(arrivals)
-                    .where(
-                        *self.scoped(arrivals),
-                        arrivals.c.point == point,
-                    )
-                    .order_by(arrivals.c.received_at.desc(), arrivals.c.id.desc())
-                    .limit(1)
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
-
-    async def update_scan(self, session: AsyncSession, arrival_id: str, **values) -> None:
-        table = self.tables["scan_arrival"]
-        await session.execute(
-            table.update().where(*self.scoped(table), table.c.id == arrival_id).values(**values)
-        )
-
-    async def bind_scan_round(
-        self, session: AsyncSession, arrival: RowMapping, *, valid: bool
-    ) -> RowMapping | None:
-        arrivals = self.tables["scan_arrival"]
-        if arrival["round_id"] is not None:
-            return await self._one(
-                session,
-                arrivals,
-                arrivals.c.point == "SCAN3",
-                arrivals.c.round_id == arrival["round_id"],
-            )
-        if not valid:
-            return None
-        if arrival["point"] == "SCAN3":
-            await session.execute(
-                arrivals.update()
-                .where(
-                    *self.scoped(arrivals),
-                    arrivals.c.id == arrival["id"],
-                    arrivals.c.round_id.is_(None),
-                )
-                .values(round_id=str(uuid7()), return_state="PENDING", removed=False)
-            )
-            return await self._one(session, arrivals, arrivals.c.id == arrival["id"])
-        root = await self._one(
-            session,
-            arrivals,
-            arrivals.c.bin_code == arrival["bin_code"],
-            self.current_round_condition(),
-            arrivals.c.removed.is_(False),
-            arrivals.c.return_state != "COMPLETED",
-        )
-        if root is not None:
-            await self.update_scan(session, arrival["id"], round_id=root["round_id"])
-            if root["first_scan4_arrival_id"] is None:
-                await session.execute(
-                    arrivals.update()
-                    .where(
-                        *self.scoped(arrivals),
-                        arrivals.c.id == root["id"],
-                        arrivals.c.first_scan4_arrival_id.is_(None),
-                    )
-                    .values(first_scan4_arrival_id=arrival["id"])
-                )
-        return root
-
-    async def point_attempts(
-        self, session: AsyncSession, round_id: str, point: str
-    ) -> Sequence[RowMapping]:
-        table = self.tables["scan_arrival"]
+    async def return_queue(self, session):
+        table = self.tables["bin_return"]
         return (
             (
                 await session.execute(
                     select(table)
                     .where(
                         *self.scoped(table),
-                        table.c.round_id == round_id,
-                        table.c.point == point,
-                        table.c.command_code.is_not(None),
+                        table.c.closed_at.is_(None),
+                        table.c.first_scan4_event_id.is_not(None),
+                        table.c.is_current.is_(True),
                     )
-                    .order_by(table.c.received_at, table.c.id)
+                    .order_by(table.c.first_scan4_received_at, table.c.fifo_visit_key)
                 )
             )
             .mappings()
             .all()
         )
-
-    async def current_position(
-        self, session: AsyncSession, object_kind: str, object_code: str
-    ) -> RowMapping | None:
-        table = self.tables["position_fact"]
-        return await self._one(
-            session,
-            table,
-            table.c.object_kind == object_kind,
-            table.c.object_code == object_code,
-            table.c.is_current.is_(True),
-        )
-
-    async def position_at(
-        self, session: AsyncSession, object_kind: str, location_code: str
-    ) -> RowMapping | None:
-        table = self.tables["position_fact"]
-        return await self._one(
-            session,
-            table,
-            table.c.object_kind == object_kind,
-            table.c.location_code == location_code,
-            table.c.is_current.is_(True),
-        )
-
-    async def record_position(
-        self,
-        session: AsyncSession,
-        *,
-        object_kind: str,
-        object_code: str,
-        location_code: str,
-        rack_face: str | None,
-        source_kind: str,
-        source_id: str,
-        source_revision: int,
-        history_only: bool = False,
-    ) -> str:
-        table = self.tables["position_fact"]
-        original = await self._one(
-            session,
-            table,
-            table.c.source_kind == source_kind,
-            table.c.source_id == source_id,
-            table.c.source_revision == source_revision,
-        )
-        values = dict(
-            **self.scope,
-            id=str(uuid7()),
-            object_kind=object_kind,
-            object_code=object_code,
-            location_code=location_code,
-            rack_face=rack_face,
-            source_kind=source_kind,
-            source_id=source_id,
-            source_revision=source_revision,
-        )
-        if original is not None:
-            if any(
-                original[key] != values[key]
-                for key in ("object_kind", "object_code", "location_code", "rack_face")
-            ):
-                raise ValueError("original position fact cannot change")
-            return "HISTORY_ONLY"
-        newer = await session.scalar(
-            select(table.c.id)
-            .where(
-                *self.scoped(table),
-                table.c.source_kind == source_kind,
-                table.c.source_id == source_id,
-                table.c.source_revision > source_revision,
-            )
-            .limit(1)
-        )
-        history_only = history_only or newer is not None
-        if not history_only:
-            await session.execute(
-                table.update()
-                .where(
-                    *self.scoped(table),
-                    table.c.object_kind == object_kind,
-                    table.c.is_current.is_(True),
-                    or_(table.c.object_code == object_code, table.c.location_code == location_code),
-                )
-                .values(is_current=False)
-            )
-        await session.execute(table.insert().values(**values, is_current=not history_only))
-        return "HISTORY_ONLY" if history_only else "UPDATED"
-
-    def current_round_condition(self, root=None) -> ColumnElement[bool]:
-        root = self.tables["scan_arrival"] if root is None else root
-        scan3 = self.tables["scan_arrival"].alias("latest_scan3")
-        # An accepted visit without a bound round also retires the preceding physical visit.
-        latest = (
-            select(scan3.c.id)
-            .where(
-                *self.scoped(scan3),
-                scan3.c.point == "SCAN3",
-                scan3.c.bin_code == root.c.bin_code,
-                scan3.c.raw_bin_code.endswith("-B"),
-            )
-            .order_by(scan3.c.received_at.desc(), scan3.c.id.desc())
-            .limit(1)
-            .correlate(root)
-        )
-        return and_(
-            root.c.point == "SCAN3",
-            root.c.round_id.is_not(None),
-            root.c.id == latest.scalar_subquery(),
-        )
-
-    async def return_queue(self, session: AsyncSession) -> Sequence[RowMapping]:
-        arrivals = self.tables["scan_arrival"]
-        root, scan3 = arrivals.alias("round_root"), arrivals.alias("later_scan3")
-        later_visit = (
-            select(scan3.c.id)
-            .where(
-                *self.scoped(scan3),
-                scan3.c.point == "SCAN3",
-                scan3.c.bin_code == arrivals.c.bin_code,
-                scan3.c.raw_bin_code.endswith("-B"),
-                or_(
-                    scan3.c.received_at > arrivals.c.received_at,
-                    and_(scan3.c.received_at == arrivals.c.received_at, scan3.c.id > arrivals.c.id),
-                ),
-            )
-            .correlate(arrivals)
-            .exists()
-        )
-        # The public candidate identity is the original round, ordered by first physical SCAN4.
-        query = (
-            select(
-                arrivals.c.id.label("fifo_arrival_id"),
-                arrivals.c.received_work.label("received_work"),
-                root.c.round_id.label("id"),
-                root.c.id.label("scan3_arrival_id"),
-                root.c.first_scan4_arrival_id.label("scan4_arrival_id"),
-                root.c.bin_code,
-                root.c.return_state.label("status"),
-                root.c.removed,
-                root.c.owner_domain,
-                root.c.work_line_id,
-            )
-            .select_from(
-                arrivals.outerjoin(
-                    root,
-                    and_(
-                        root.c.point == "SCAN3",
-                        root.c.first_scan4_arrival_id == arrivals.c.id,
-                        root.c.round_id == arrivals.c.round_id,
-                        root.c.work_line_id == arrivals.c.work_line_id,
-                        root.c.owner_domain == arrivals.c.owner_domain,
-                    ),
-                )
-            )
-            .where(
-                *self.scoped(arrivals),
-                arrivals.c.point == "SCAN4",
-                or_(
-                    and_(
-                        root.c.removed.is_(False),
-                        root.c.return_state != "COMPLETED",
-                        self.current_round_condition(root),
-                    ),
-                    and_(arrivals.c.round_id.is_(None), arrivals.c.pending.is_(True), ~later_visit),
-                ),
-            )
-            .order_by(arrivals.c.received_at, arrivals.c.id)
-        )
-        return (await session.execute(query)).mappings().all()

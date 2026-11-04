@@ -62,11 +62,17 @@ async def scans(flow, records):
                 assert arrival["command_code"] is None
                 await flow.roller.release_scan2(session, arrival_id=arrival["id"])
                 await flow.roller.release_scan2(session, arrival_id=arrival["id"])
-                arrival = await flow.roller.original_record(session, "scan_arrival", arrival["id"])
+                arrival = next(
+                    a
+                    for a in await flow.rows(session, "scan_arrival")
+                    if a["id"] == arrival["id"] and a["point"] == record["point"]
+                )
             runtime_commands[record["command_code"]] = arrival["command_code"]
         await flow.result(
             arrival["command_code"], record["point"], finish_time=record["finish_time"]
         )
+        if record["point"] in ("SCAN3", "SCAN4"):
+            await flow.advance("RETURN", arrival["id"])
     return runtime_commands
 
 
@@ -77,9 +83,9 @@ async def returned(flow, archived):
         m["bin_code"] for m in data["moves"]
     ]
     await flow.decision("return_batch", batch["id"], data)
-    await flow.advance("RETURN_BATCH", batch["id"])
+    await flow.advance("FACE", batch["id"])
     async with flow.factory() as session:
-        frozen = await flow.roller.original_record(session, "return_batch", batch["id"])
+        frozen = await flow.record(session, "return_batch", batch["id"])
         assert frozen["manifest"]["moves"] == data["moves"]
         raw = await session.scalar(
             select(ReliableMessage.request_raw).where(
@@ -119,7 +125,7 @@ async def returned(flow, archived):
             ],
         )
     )
-    await flow.advance("RETURN_BATCH", batch["id"])
+    await flow.advance("FACE", batch["id"])
     return batch["id"]
 
 
@@ -195,7 +201,7 @@ async def test_recorded_good_six_bin_shared_flow(roller_lifecycle):
         member = data["bins"][0]
         locator = member["source_locator"]
         demand = await flow.demand(rack=locator["rack_id"], face=locator["rack_face"])
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
         entry = (await flow.all_rows("rack_action"))[-1]
         assert entry["kind"] == "CTU01" and entry["target_face"] == locator["rack_face"]
         await flow.rack_result(entry)
@@ -203,11 +209,11 @@ async def test_recorded_good_six_bin_shared_flow(roller_lifecycle):
         feed = (await flow.all_rows("feed"))[-1]
         request_map[archived["operation_id"]] = feed["operation_id"]
         await flow.decision("feed", feed["id"], data)
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
         segment = (await flow.all_rows("feed_segment"))[-1]
         assert segment["members"] == data["bins"]
         await flow.feed_success(segment)
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
         if index in (1, 2, 3):
             prior = GOOD["inbounds"][index - 1]["normalized_payload"]["data"]["bins"][0]["bin_code"]
             returned_case = next(
@@ -263,7 +269,9 @@ async def test_recorded_good_six_bin_shared_flow(roller_lifecycle):
         ("ORDINARY", "90"): "transport-1838ce1c-6c40-44fc-940d-d45886eee220",
         ("DRAIN", "270"): "transport-e2f1e84c-0c66-43ea-8e46-e254d8de32f8",
     }
-    assert len(await flow.all_rows("feed_segment")) == 6
+    assert all(
+        f["feed_cursor"] == 1 for f in await flow.all_rows("face_work") if f["purpose"] == "SUPPLY"
+    )
     async with flow.factory() as session:
         assert len(await flow.messages(session)) == 24
         assert len((await session.execute(select(flow.production_table))).all()) == 6
@@ -272,7 +280,7 @@ async def test_recorded_good_six_bin_shared_flow(roller_lifecycle):
 
 async def drain_recorded(flow, archived, completed_returns):
     scan = next(a for a in reversed(await flow.all_rows("scan_arrival")) if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
+    await flow.advance("RETURN", scan["id"])
     drain = (await flow.all_rows("drain"))[-1]
     await flow.decision("drain", drain["id"], archived["normalized_payload"]["data"])
     await flow.advance("DRAIN", drain["id"])
@@ -308,18 +316,20 @@ async def test_recorded_unfinished_return_blocks_original_rack(
     await flow.scan("SCAN4", move["bin_code"] + "-B", timestamp=11)
     scan = (await flow.all_rows("scan_arrival"))[-1]
     await flow.result(scan["command_code"], "SCAN4")
+    await flow.advance("RETURN", scan["id"])
     if purpose == "DRAIN" and next_action == "CTU02":
         # A second real GOOD bin is a synthetic tail to keep this drain's next face needed.
         await flow.scan("SCAN3", "A000002456-B", timestamp=20)
         await flow.scan("SCAN4", "A000002456-B", timestamp=21)
         tail = (await flow.all_rows("scan_arrival"))[-1]
         await flow.result(tail["command_code"], "SCAN4")
+        await flow.advance("RETURN", tail["id"])
     if purpose == "ORDINARY":
         demand = await flow.demand(rack=target["rack_id"], face=target["rack_face"])
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
     else:
         flow.successor = "NONE"
-        await flow.advance("SCAN", scan["id"])
+        await flow.advance("RETURN", scan["id"])
         drain = (await flow.all_rows("drain"))[0]
         faces = [target["rack_face"], "90"] if next_action == "CTU02" else [target["rack_face"]]
         await flow.decision(
@@ -336,14 +346,14 @@ async def test_recorded_unfinished_return_blocks_original_rack(
             await flow.demand(rack=target["rack_id"], face="90", revision=2)
         feed = (await flow.all_rows("feed"))[0]
         await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-        await flow.advance("FEED", demand)
+        await flow.advance("FACE", demand)
     batch = (await flow.all_rows("return_batch"))[0]
     await flow.decision(
         "return_batch",
         batch["id"],
         dict(result="READY", moves=[dict(sequence_no=1, bin_code=move["bin_code"], target=target)]),
     )
-    await flow.advance("RETURN_BATCH", batch["id"])
+    await flow.advance("FACE", batch["id"])
     original = (await flow.all_rows("return_batch"))[0]
     await flow.accepted({**original, "operation_id": original["transport_operation_id"]})
     async with flow.factory() as session:
@@ -370,14 +380,14 @@ async def test_recorded_unfinished_return_blocks_original_rack(
     for _ in range(2):
         restart(flow)
         await flow.advance("RACK_CYCLE", entry["cycle_id"])
-        await flow.advance("RETURN_BATCH", batch["id"])
+        await flow.advance("FACE", batch["id"])
     assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01"]
     # Controlled completion stimulus; the source archive itself never captured this success.
     await flow.success(batch["id"], placed=False)
-    await flow.advance("RETURN_BATCH", batch["id"])
+    await flow.advance("FACE", batch["id"])
     assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01"]
     await flow.success(batch["id"], placed=True)
-    await flow.advance("RETURN_BATCH", batch["id"])
+    await flow.advance("FACE", batch["id"])
     await flow.advance("RACK_CYCLE", entry["cycle_id"])
     if purpose == "DRAIN" and next_action == "CTU02":
         await flow.complete_return(no_batch=True)
@@ -385,12 +395,21 @@ async def test_recorded_unfinished_return_blocks_original_rack(
         await depart(flow, entry["cycle_id"])
     actions = await flow.all_rows("rack_action")
     assert [a["kind"] for a in actions] == ["CTU01", next_action]
-    finished = (await flow.all_rows("return_batch"))[0]
-    for key in ("operation_id", "transport_task_id", "client_request_id", "manifest"):
-        assert finished[key] == original[key]
-    await flow.success(batch["id"], placed=True)
-    await flow.advance("RETURN_BATCH", batch["id"])
-    assert [a["id"] for a in await flow.all_rows("rack_action")] == [a["id"] for a in actions]
+    async with flow.factory() as session:
+        from app.integrations.wms_transport import TransportCaller
+
+        result = await flow.roller.capabilities.transport.get_result(
+            session,
+            transport_task_id=original["transport_task_id"],
+            client_request_id=original["client_request_id"],
+            caller=TransportCaller(original["caller_workline_id"], original["station_id"]),
+        )
+        assert result.outcome and result.closure == "CLOSED"
+    assert all(
+        r["closed_at"]
+        for r in await flow.all_rows("bin_return")
+        if r["bin_code"] == move["bin_code"]
+    )
 
 
 async def test_recorded_cancelled_arrival_consumes_face_done_once(roller_lifecycle):
@@ -398,7 +417,7 @@ async def test_recorded_cancelled_arrival_consumes_face_done_once(roller_lifecyc
     case = BAD["cancelled_face_done"]
     await configure(flow, case["task_id"])
     demand = await flow.demand(rack=case["rack_id"], face=case["rack_face"])
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     entry = (await flow.all_rows("rack_action"))[0]
     async with flow.factory.begin() as session:
         await flow.roller.apply_supply_change(
@@ -415,9 +434,9 @@ async def test_recorded_cancelled_arrival_consumes_face_done_once(roller_lifecyc
     await flow.advance("RACK_CYCLE", entry["cycle_id"])
     feed = (await flow.all_rows("feed"))[0]
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     restart(flow)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     assert len(await flow.all_rows("feed")) == 1
     assert not await flow.all_rows("feed_segment")
     await depart(flow, entry["cycle_id"])
@@ -476,13 +495,25 @@ async def test_recorded_missing_scan4_result_keeps_fifo_until_original_success(r
     async with flow.factory() as session:
         arrivals = [a for a in await flow.rows(session, "scan_arrival") if a["point"] == "SCAN4"]
     await flow.result(arrivals[1]["command_code"], "SCAN4")
+    async with flow.factory.begin() as session:
+        from app.businesses._components.bin_roller.ports import RollerWorkRef
+
+        await flow.roller.advance(session, RollerWorkRef("RETURN", arrivals[1]["id"]))
     for _ in range(2):
         flow.rebuild()
         async with flow.factory() as session:
             assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()
             assert not await flow.roller.return_channel_empty(session, work_line_id=1)
     await flow.result(arrivals[0]["command_code"], "SCAN4", finish_time=101)
+    async with flow.factory.begin() as session:
+        from app.businesses._components.bin_roller.ports import RollerWorkRef
+
+        await flow.roller.advance(session, RollerWorkRef("RETURN", arrivals[0]["id"]))
     await flow.result(arrivals[0]["command_code"], "SCAN4", finish_time=101)
+    async with flow.factory.begin() as session:
+        from app.businesses._components.bin_roller.ports import RollerWorkRef
+
+        await flow.roller.advance(session, RollerWorkRef("RETURN", arrivals[0]["id"]))
     async with flow.factory() as session:
         candidates = await flow.roller.get_return_candidates(session, work_line_id=1)
         assert [r["bin_code"] for r in candidates] == [first[:-2], second[:-2]]
@@ -503,7 +534,7 @@ async def test_recorded_scan_replay_keeps_frozen_original_command(roller_scans, 
         arrival = next(a for a in await flow.rows(session, "scan_arrival") if a["point"] == point)
         if point == "SCAN2":
             await flow.roller.release_scan2(session, arrival_id=arrival["id"])
-            arrival = await flow.roller.original_record(session, "scan_arrival", arrival["id"])
+            arrival = await flow.record(session, "scan_arrival", arrival["id"])
         command = await flow.command(session, arrival["command_code"])
         frozen = (command.command_code, command.expires_at, command.request_raw)
     await flow.result(arrival["command_code"], point, finish_time=record["finish_time"])
@@ -540,15 +571,15 @@ async def test_recorded_departure_native_ack_wakes_and_releases_without_result(
     data = archived["normalized_payload"]["data"]
     locator = data["bins"][0]["source_locator"]
     demand = await flow.demand(rack=locator["rack_id"], face=locator["rack_face"])
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     entry = (await flow.all_rows("rack_action"))[0]
     await flow.rack_result(entry)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     feed = (await flow.all_rows("feed"))[0]
     await flow.decision("feed", feed["id"], data)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     await flow.feed_success((await flow.all_rows("feed_segment"))[0])
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     departure = (await flow.all_rows("departure"))[0]
     await flow.decision(
         "departure",
@@ -607,24 +638,24 @@ async def test_recorded_new_cycle_ignores_closed_cycle_replayed_acceptance(rolle
     case = BAD["closed_history"]
     await configure(flow, "isolated-closed-history")
     old_demand = await flow.demand(rack=case["rack_id"], face=case["rack_face"])
-    await flow.advance("FEED", old_demand)
+    await flow.advance("FACE", old_demand)
     old_entry = (await flow.all_rows("rack_action"))[0]
     await flow.rack_result(old_entry)
-    await flow.advance("FEED", old_demand)
+    await flow.advance("FACE", old_demand)
     feed = (await flow.all_rows("feed"))[0]
     # Controlled closed-cycle history, not conversion of archived RECONCILING to success.
     await flow.decision("feed", feed["id"], dict(result="RACK_FACE_DONE"))
-    await flow.advance("FEED", old_demand)
+    await flow.advance("FACE", old_demand)
     await depart(flow, old_entry["cycle_id"])
     old_departure = (await flow.all_rows("rack_action"))[-1]
     old_snapshot = await flow.all_rows("rack_cycle")
     flow.current_task = case["task_id"]
     demand = await flow.demand(rack=case["rack_id"], face=case["rack_face"], revision=8)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     entry = (await flow.all_rows("rack_action"))[-1]
     assert entry["cycle_id"] != old_entry["cycle_id"]
     await flow.rack_result(entry)
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     new_feed = (await flow.all_rows("feed"))[-1]
     await flow.decision(
         "feed",
@@ -644,7 +675,7 @@ async def test_recorded_new_cycle_ignores_closed_cycle_replayed_acceptance(rolle
             ],
         ),
     )
-    await flow.advance("FEED", demand)
+    await flow.advance("FACE", demand)
     await flow.accepted(old_departure)
     await flow.advance("RACK_CYCLE", old_entry["cycle_id"])
     cycles = await flow.all_rows("rack_cycle")

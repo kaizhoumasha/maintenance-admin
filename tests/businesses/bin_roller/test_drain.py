@@ -1,129 +1,75 @@
+"""Finite LINE drain keeps original decision, ordered candidates and native rack obligations."""
+
+import json
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
+from app.models import ReliableMessage
 
 
-@pytest.mark.parametrize("rack_count", [1, 2])
-async def test_original_drain_release_commits_before_unconfigured_next_supply(
-    roller_lifecycle, rack_count
-):
-    from app.models import WorkLine
-
-    flow = roller_lifecycle
+async def request_drain(flow, count=1):
+    await flow.bins(count)
     flow.successor = "NONE"
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        drain["id"],
-        dict(
-            result="READY",
-            racks=[dict(rack_id=f"D{i}", rack_face=["A"]) for i in range(1, rack_count + 1)],
-        ),
-    )
-    await flow.advance("DRAIN", drain["id"])
-    entry = (await flow.all_rows("rack_action"))[0]
-    await flow.rack_result(entry)
-    await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    await flow.complete_return(no_batch=True)
-    departure = (await flow.all_rows("departure"))[0]
-    await flow.decision(
-        "departure",
-        departure["id"],
-        dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORAGE")),
-    )
-    await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    action = (await flow.all_rows("rack_action"))[-1]
-    async with flow.factory.begin() as session:
-        await session.execute(
-            WorkLine.__table__.update().where(WorkLine.id == 1).values(position_bindings={})
-        )
-    await flow.accepted(action)
-    await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    cycles = await flow.all_rows("rack_cycle")
-    assert [(c["id"], c["status"]) for c in cycles] == [(entry["cycle_id"], "RELEASED")]
-    assert cycles[0]["release_basis"]["transport_task_id"] == action["transport_task_id"]
-    assert [a["id"] for a in await flow.all_rows("rack_action")] == [entry["id"], action["id"]]
-    assert [d["operation_id"] for d in await flow.all_rows("drain")] == [drain["operation_id"]]
-    assert (await flow.all_rows("drain"))[0]["status"] == (
-        "COMPLETED" if rack_count == 1 else "READY"
-    )
-    async with flow.factory.begin() as session:
-        await session.execute(
-            WorkLine.__table__.update()
-            .where(WorkLine.id == 1)
-            .values(position_bindings=dict(FIVE_RACK="RACK-WORK", INLET="INLET", OUTLET="OUTLET"))
-        )
-    await flow.advance("SCAN", scan["id"])
-    if rack_count == 1:
-        assert len(await flow.all_rows("drain")) == 2
-        assert len(await flow.all_rows("rack_cycle")) == 1
-    else:
-        assert len(await flow.all_rows("drain")) == 1
-        assert [(c["rack_id"], c["status"]) for c in await flow.all_rows("rack_cycle")] == [
-            ("D1", "RELEASED"),
-            ("D2", "ACTIVE"),
-        ]
+    row = (await flow.all_rows("bin_return"))[0]
+    await flow.advance("RETURN", row["id"])
+    return (await flow.all_rows("workline_state"))[0]
+
+
+async def test_first_ready_fifo_requests_drain_without_existing_cycle(roller_lifecycle):
+    flow = roller_lifecycle
+    state = await request_drain(flow, 6)
+    async with flow.factory() as session:
+        msg = await session.get(ReliableMessage, state["drain_message_id"])
+        assert json.loads(msg.request_raw)["data"] == {
+            "workline_code": "LINE-1",
+            "required_slot_count": 6,
+        }
+    assert not await flow.all_rows("rack_cycle")
+    await flow.advance("RETURN", (await flow.all_rows("bin_return"))[-1]["id"])
+    assert (await flow.all_rows("workline_state"))[0] == state
 
 
 async def test_scan4_prefers_original_supply_demand_before_drain(roller_lifecycle):
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.demand()
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    assert not await flow.all_rows("drain")
-    assert [c["purpose"] for c in await flow.all_rows("rack_cycle")] == ["ORDINARY"]
+    demand = await flow.demand()
+    await request_drain(flow)
+    state = (await flow.all_rows("workline_state"))[0]
+    assert state["drain_phase"] == "IDLE" and state["drain_message_id"] is None
+    await flow.advance("FACE", demand)
+    assert [r["purpose"] for r in await flow.all_rows("rack_cycle")] == ["ORDINARY"]
 
 
-@pytest.mark.parametrize("wait", [False, True])
-async def test_ended_ordinary_departure_does_not_block_new_drain(roller_lifecycle, wait):
+async def test_successor_becoming_none_rechecks_original_unassigned_fifo(roller_lifecycle):
     flow = roller_lifecycle
-    demand, cycle = await flow.ready_supply(count=1)
-    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
-    await flow.advance("FEED", demand)
-    departure = (await flow.all_rows("departure"))[0]
-    if wait:
-        await flow.decision("departure", departure["id"], dict(result="WAIT", retry_after_ms=60000))
-        await flow.advance("RACK_CYCLE", cycle)
-    flow.successor = "NONE"
     await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    assert len(await flow.all_rows("drain")) == 1
-    assert (await flow.all_rows("departure"))[0]["operation_id"] == departure["operation_id"]
-    assert (await flow.all_rows("rack_cycle"))[0]["status"] == "ACTIVE"
+    row = (await flow.all_rows("bin_return"))[0]
+    async with flow.factory() as session:
+        upper = await flow.roller.get_pending_upper_id(session, kind="RETURN")
+        pending = await flow.roller.list_pending(
+            session, kind="RETURN", after_id=None, upper_id=upper, limit=20
+        )
+        assert RollerWorkRef("RETURN", row["id"]) in pending
+    flow.successor = "NONE"
+    await flow.advance("RETURN", row["id"])
+    assert (await flow.all_rows("workline_state"))[0]["drain_phase"] == "REQUESTED"
 
 
-@pytest.mark.parametrize("decision", ["WAIT", "READY"])
-async def test_original_supply_request_survives_head_change_and_restart(roller_lifecycle, decision):
-    from sqlalchemy import update
-
+@pytest.mark.parametrize("answer", ["WAIT", "READY"])
+async def test_original_supply_request_survives_head_change_and_restart(roller_lifecycle, answer):
     from app.businesses._components.bin_roller.service import BinRoller
 
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(2)
-    scans = [a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4"]
-    await flow.advance("SCAN", scans[0]["id"])
-    original = (await flow.all_rows("drain"))[0]
+    state = await request_drain(flow, 2)
     data = (
         dict(result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms=60000)
-        if decision == "WAIT"
+        if answer == "WAIT"
         else dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
     )
-    await flow.decision("drain", original["id"], data)
-    await flow.advance("DRAIN", original["id"])
-    rounds = await flow.all_rows("return_round")
-    async with flow.factory.begin() as session:
-        await session.execute(
-            update(flow.store.tables["scan_arrival"])
-            .where(flow.store.tables["scan_arrival"].c.id == rounds[0]["scan3_arrival_id"])
-            .values(removed=True)
-        )
+    await flow.decide_current(state["drain_message_id"], data)
+    await flow.advance("DRAIN", state["line_run_id"])
+    current = (await flow.all_rows("workline_state"))[0]
     old = flow.roller
     flow.roller = BinRoller(
         old.context,
@@ -132,289 +78,147 @@ async def test_original_supply_request_survives_head_change_and_restart(roller_l
         rack_dispatch=old.rack_dispatch,
         tables=old.tables,
     )
-    await flow.advance("SCAN", scans[1]["id"])
-    current = (await flow.all_rows("drain"))[0]
-    assert len(await flow.all_rows("drain")) == 1
-    assert (
-        current["id"],
-        current["operation_id"],
-        current["request"],
-        current["input_snapshot"],
-    ) == (original["id"], original["operation_id"], original["request"], original["input_snapshot"])
+    await flow.scan("SCAN3", "A000000003-B", timestamp=100)
+    await flow.scan("SCAN3", "A000000001-B", timestamp=101)
+    await flow.advance("DRAIN", state["line_run_id"])
+    after = (await flow.all_rows("workline_state"))[0]
+    for field in ("line_run_id", "drain_operation_id", "drain_message_id", "drain_retry_at"):
+        assert after[field] == current[field]
 
 
 async def test_expired_wait_registers_one_new_original_evaluation(roller_lifecycle):
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    original = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        original["id"],
+    state = await request_drain(flow)
+    await flow.decide_current(
+        state["drain_message_id"],
         dict(result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms=60000),
     )
-    await flow.advance("DRAIN", original["id"])
+    await flow.advance("DRAIN", state["line_run_id"])
+    waiting = (await flow.all_rows("workline_state"))[0]
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert (await flow.all_rows("workline_state"))[0] == waiting
     async with flow.factory.begin() as session:
-        table = flow.store.tables["decision"]
-        await session.execute(
-            table.update()
-            .where(table.c.kind == "DRAIN", table.c.id == original["id"])
-            .values(due_at=0)
+        await flow.roller.repository(1).update(
+            session, "workline_state", drain_retry_at=datetime.now(UTC) - timedelta(seconds=1)
         )
-    await flow.advance("SCAN", scan["id"])
-    await flow.advance("DRAIN", original["id"])
-    drains = await flow.all_rows("drain")
-    assert len(drains) == 2
-    assert drains[1]["input_ref"] == original["id"]
-    assert drains[1]["operation_id"] != original["operation_id"]
-
-
-async def test_first_ready_fifo_requests_drain_without_existing_cycle(roller_lifecycle):
-    flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(6)
-    scans = [a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4"]
-    await flow.advance("SCAN", scans[0]["id"])
-    drains = await flow.all_rows("drain")
-    assert len(drains) == 1
-    assert drains[0]["request"] == dict(workline_code="LINE-1", required_slot_count=6)
-    assert not await flow.all_rows("rack_cycle")
-    await flow.advance("SCAN", scans[1]["id"])
-    assert [r["id"] for r in await flow.all_rows("drain")] == [drains[0]["id"]]
-
-
-async def test_successor_becoming_none_rechecks_original_unassigned_fifo(roller_lifecycle):
-    flow = roller_lifecycle
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    assert not await flow.all_rows("drain")
-    async with flow.factory() as session:
-        upper = await flow.roller.get_pending_upper_id(session, kind="SCAN")
-        work = await flow.roller.list_pending(
-            session, kind="SCAN", after_id=None, upper_id=upper, limit=20
-        )
-    assert RollerWorkRef("SCAN", scan["id"]) in work
-    flow.successor = "NONE"
-    await flow.advance("SCAN", scan["id"])
-    assert len(await flow.all_rows("drain")) == 1
+    await flow.advance("DRAIN", state["line_run_id"])
+    later = (await flow.all_rows("workline_state"))[0]
+    assert (
+        later["drain_operation_id"] != state["drain_operation_id"]
+        and later["line_run_id"] == state["line_run_id"]
+    )
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert (await flow.all_rows("workline_state"))[0] == later
 
 
 async def test_two_rack_drain_graph_uses_first_batch_before_new_supply(roller_lifecycle):
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(6)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        drain["id"],
-        dict(
-            result="READY",
-            racks=[
-                dict(rack_id="D1", rack_face=["A", "B"]),
-                dict(rack_id="D2", rack_face=["A", "B"]),
-            ],
-        ),
-    )
-    await flow.advance("DRAIN", drain["id"])
-    actions = await flow.all_rows("rack_action")
-    assert [a["kind"] for a in actions] == ["CTU01"]
-    first_cycle = actions[0]["cycle_id"]
-    await flow.rack_result(actions[0])
-    await flow.advance("RACK_CYCLE", first_cycle)
-    await flow.complete_return(count=2)
-    await flow.complete_return(no_batch=True)
-    rotate = (await flow.all_rows("rack_action"))[-1]
-    assert rotate["kind"] == "CTU02"
-    await flow.rack_result(rotate)
-    await flow.advance("RACK_CYCLE", first_cycle)
-    await flow.complete_return(count=2)
-    await flow.complete_return(no_batch=True)
-    await flow.finish_departure(first_cycle)
-    second_entry = (await flow.all_rows("rack_action"))[-1]
-    assert second_entry["kind"] == "CTU01" and second_entry["cycle_id"] != first_cycle
-    assert len(await flow.all_rows("drain")) == 1
-    await flow.rack_result(second_entry)
-    await flow.advance("RACK_CYCLE", second_entry["cycle_id"])
-    await flow.complete_return(count=2)
-    await flow.finish_departure(second_entry["cycle_id"])
-    assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
-    assert [a["kind"] for a in await flow.all_rows("rack_action")].count("CTU02") == 1
-    assert len(await flow.all_rows("return_batch")) == 5
-    assert not await flow.all_rows("feed")
-
-
-async def test_empty_buffer_keeps_registered_arrival_and_unused_candidates(roller_lifecycle):
-    flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        drain["id"],
+    state = await request_drain(flow, 6)
+    await flow.decide_current(
+        state["drain_message_id"],
         dict(
             result="READY",
             racks=[dict(rack_id="D1", rack_face=["A", "B"]), dict(rack_id="D2", rack_face=["A"])],
         ),
     )
-    await flow.advance("DRAIN", drain["id"])
+    await flow.advance("DRAIN", state["line_run_id"])
+    first = (await flow.all_rows("rack_action"))[0]
+    await flow.rack_result(first)
+    await flow.advance("RACK_CYCLE", first["cycle_id"])
+    await flow.complete_return(count=2)
+    await flow.complete_return(no_batch=True)
+    rotate = (await flow.all_rows("rack_action"))[-1]
+    assert rotate["kind"] == "CTU02"
+    await flow.rack_result(rotate)
+    await flow.advance("RACK_CYCLE", first["cycle_id"])
+    await flow.complete_return(count=2)
+    await flow.complete_return(no_batch=True)
+    await flow.finish_departure(first["cycle_id"])
+    second = (await flow.all_rows("rack_action"))[-1]
+    assert second["cycle_id"] != first["cycle_id"] and second["kind"] == "CTU01"
+    await flow.rack_result(second)
+    await flow.advance("RACK_CYCLE", second["cycle_id"])
+    await flow.complete_return(count=2)
+    await flow.finish_departure(second["cycle_id"])
+    await flow.advance("DRAIN", state["line_run_id"])
+    after = (await flow.all_rows("workline_state"))[0]
+    assert after["drain_phase"] == "IDLE" and after["candidate_cursor"] is None
+    assert not await flow.all_rows("feed")
+    actions = await flow.all_rows("rack_action")
+    assert [a["kind"] for a in actions] == ["CTU01", "CTU02", "CTU03", "CTU01", "CTU03"]
+
+
+async def test_empty_buffer_keeps_registered_arrival_and_unused_candidates(roller_lifecycle):
+    flow = roller_lifecycle
+    state = await request_drain(flow)
+    await flow.decide_current(
+        state["drain_message_id"],
+        dict(
+            result="READY",
+            racks=[dict(rack_id="D1", rack_face=["A", "B"]), dict(rack_id="D2", rack_face=["A"])],
+        ),
+    )
+    await flow.advance("DRAIN", state["line_run_id"])
     entry = (await flow.all_rows("rack_action"))[0]
+    # Simulate a definitive independent physical exit under the line transaction.
     async with flow.factory.begin() as session:
-        table = flow.store.tables["scan_arrival"]
-        await session.execute(
-            table.update()
-            .where(table.c.point == "SCAN3", table.c.round_id.is_not(None))
-            .values(removed=True)
-        )
-    await flow.advance("DRAIN", drain["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    assert drain["status"] == "READY" and drain["unused_racks"] == ["D2"]
-    assert not await flow.all_rows("departure")
+        row = (await flow.rows(session, "bin_return"))[0]
+        await flow.roller.repository(1).close(session, "bin_return", row["id"], "EXITED")
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert len(await flow.all_rows("rack_action")) == 1
     await flow.rack_result(entry)
     await flow.advance("RACK_CYCLE", entry["cycle_id"])
-    assert not await flow.all_rows("return_batch")
-    assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01"]
     await flow.finish_departure(entry["cycle_id"])
-    assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
+    await flow.advance("DRAIN", state["line_run_id"])
     assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01", "CTU03"]
+    assert (await flow.all_rows("workline_state"))[0]["drain_phase"] == "IDLE"
 
 
 async def test_completed_supply_history_allows_new_demand(roller_lifecycle):
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    first = (await flow.all_rows("drain"))[0]
+    state = await request_drain(flow)
     async with flow.factory.begin() as session:
-        table = flow.store.tables["scan_arrival"]
-        await session.execute(
-            table.update()
-            .where(table.c.point == "SCAN3", table.c.round_id.is_not(None))
-            .values(removed=True)
-        )
-    await flow.decision(
-        "drain", first["id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
+        row = (await flow.rows(session, "bin_return"))[0]
+        await flow.roller.repository(1).close(session, "bin_return", row["id"], "EXITED")
+    await flow.decide_current(
+        state["drain_message_id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
     )
-    await flow.advance("DRAIN", first["id"])
-    assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
-    assert not await flow.all_rows("rack_action")
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert (await flow.all_rows("workline_state"))[0]["drain_phase"] == "IDLE"
     await flow.bins(1, offset=5)
-    later = [a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4"][-1]
-    await flow.advance("SCAN", later["id"])
-    await flow.advance("DRAIN", first["id"])
-    drains = await flow.all_rows("drain")
-    assert len(drains) == 2
-    assert drains[1]["input_kind"] == "COMPLETED"
-    assert drains[1]["input_ref"] == first["id"]
+    later = (await flow.all_rows("workline_state"))[0]
+    assert later["drain_operation_id"] != state["drain_operation_id"]
+    assert not await flow.all_rows("rack_action")
 
 
 async def test_completed_or_removed_round_is_not_pending_scan_work(roller_lifecycle):
     flow = roller_lifecycle
-    await flow.bins(2)
-    scans = [a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4"]
-    async with flow.factory.begin() as session:
-        rounds = flow.store.tables["scan_arrival"]
-        await session.execute(
-            rounds.update()
-            .where(rounds.c.point == "SCAN3", rounds.c.round_id == scans[0]["round_id"])
-            .values(return_state="COMPLETED")
-        )
-        await session.execute(
-            rounds.update()
-            .where(rounds.c.point == "SCAN3", rounds.c.round_id == scans[1]["round_id"])
-            .values(removed=True)
-        )
-        upper = await flow.roller.get_pending_upper_id(session, kind="SCAN")
-        pending = await flow.roller.list_pending(
-            session, kind="SCAN", after_id=None, upper_id=upper, limit=20
-        )
-        assert not {s["id"] for s in scans} & {p.record_id for p in pending}
-
-
-async def test_empty_box_flow_does_not_wait_for_another_original_arrival(roller_lifecycle):
-
-    flow = roller_lifecycle
-    flow.successor = "NONE"
     await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain",
-        drain["id"],
-        dict(
-            result="READY",
-            racks=[
-                dict(rack_id="D1", rack_face=["A", "B"]),
-                dict(rack_id="D2", rack_face=["A", "B"]),
-            ],
-        ),
-    )
-    await flow.advance("DRAIN", drain["id"])
-    first = (await flow.all_rows("rack_cycle"))[0]
-    # An unsubmitted second candidate has no independent arrival obligation.
+    row = (await flow.all_rows("bin_return"))[0]
     async with flow.factory.begin() as session:
-        from app.businesses._components.bin_roller.rack_flow import register_job
-
-        second_id = await register_job(
-            flow.roller,
-            session,
-            flow.roller.repository(1),
-            "ROLLER_DRAIN",
-            drain["id"],
-            "D2",
-            "A",
-            None,
-            first["resources"],
-        )
-    await flow.advance("RACK_CYCLE", second_id)
-    entries = await flow.all_rows("rack_action")
-    assert len(entries) == 1
-    await flow.rack_result(entries[0])
-    await flow.advance("RACK_CYCLE", first["id"])
-    await flow.complete_return(count=1)
-    assert [d["cycle_id"] for d in await flow.all_rows("departure")] == [first["id"]]
-    await flow.finish_departure(first["id"])
-    assert (
-        next(c for c in await flow.all_rows("rack_cycle") if c["id"] == second_id)["status"]
-        == "WITHDRAWN"
-    )
-    assert (await flow.all_rows("drain"))[0]["status"] == "COMPLETED"
-    assert [a["kind"] for a in await flow.all_rows("rack_action")].count("CTU02") == 0
+        await flow.roller.repository(1).close(session, "bin_return", row["id"], "EXITED")
+        assert await flow.roller.get_pending_upper_id(session, kind="RETURN") is None
 
 
 async def test_new_task_does_not_convert_original_drain_purpose(roller_lifecycle):
     flow = roller_lifecycle
-    flow.successor = "NONE"
-    await flow.bins(1)
-    scan = next(a for a in await flow.all_rows("scan_arrival") if a["point"] == "SCAN4")
-    await flow.advance("SCAN", scan["id"])
-    drain = (await flow.all_rows("drain"))[0]
-    await flow.decision(
-        "drain", drain["id"], dict(result="READY", racks=[dict(rack_id="R1", rack_face=["A"])])
+    state = await request_drain(flow)
+    await flow.decide_current(
+        state["drain_message_id"], dict(result="READY", racks=[dict(rack_id="R1", rack_face=["A"])])
     )
-    await flow.advance("DRAIN", drain["id"])
-    original = (await flow.all_rows("rack_action"))[0]
+    await flow.advance("DRAIN", state["line_run_id"])
+    entry = (await flow.all_rows("rack_action"))[0]
     flow.current_task, flow.successor = "T2", "UNKNOWN"
     demand = await flow.demand(task="T2")
-    await flow.advance("FEED", demand)
-    assert {c["purpose"] for c in await flow.all_rows("rack_cycle")} == {"DRAIN", "ORDINARY"}
-    await flow.rack_result(original)
-    await flow.advance("RACK_CYCLE", original["cycle_id"])
-    assert len(await flow.all_rows("return_batch")) == 1
-    assert not await flow.all_rows("feed")
-    assert (
-        next(c for c in await flow.all_rows("rack_cycle") if c["id"] == original["cycle_id"])[
-            "purpose"
-        ]
-        == "DRAIN"
+    await flow.advance("FACE", demand)
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=entry["cycle_id"])
+        assert job.origin.source_kind == "ROLLER_DRAIN" and job.origin.task_id is None
+    assert any(
+        f["purpose"] == "DRAIN" and f["scope_id"] == state["line_run_id"]
+        for f in await flow.all_rows("face_work")
     )
 
 

@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -36,63 +35,48 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                 ),
             )
             for key, values in {
-                "scan_arrival": dict(
-                    business_key=identity,
-                    first_digest=identity,
-                    received_at=datetime.now(UTC),
-                    point="SCAN1",
-                    device_code="SCAN1",
-                    raw_bin_code="A000000001-C",
-                    scanned_at=1,
+                "bin_passage": dict(
+                    scope_kind="TASK",
+                    scope_id="T0",
+                    scan1_event_id=i + 1,
+                    scan1_visit_key=identity,
+                    scan1_command_code=identity,
+                    scan2_event_id=i + 11,
+                    scan2_visit_key="release-" + identity,
+                    production_record_id=identity,
+                    release_command_code="release-" + identity,
+                ),
+                "bin_return": dict(
+                    scope_id="line-run",
+                    bin_code=f"A{i:09}",
+                    scan3_event_id=i + 21,
+                    scan3_visit_key=identity,
+                    scan3_command_code=identity,
+                    return_state="WAITING",
                 ),
                 "face_work": dict(
+                    scope_id="T0",
                     purpose="SUPPLY",
-                    demand_id=identity,
-                    demand_state="ACTIVE",
-                    task_id="T0",
                     change_id=identity,
                     plan_revision=i,
                     rack_id="R",
                     rack_face="A",
-                ),
-                "return_batch": dict(
-                    opportunity_id=identity,
-                    source_ref=identity,
-                    operation_id=identity,
-                    members=[],
-                    worklinecode="unused",
-                ),
-                "decision": dict(
-                    kind="DRAIN",
-                    unused_racks=[],
-                    input_kind="NONE",
-                    input_ref=identity,
-                    operation_id=identity,
+                    demand_state="ACTIVE",
+                    feed_cursor=0,
                 ),
             }.items():
-                if key == "return_batch":
-                    values.pop("worklinecode")
-                    values.update(
-                        workline_code="SMT-M1-1", caller_workline_id=str(flow.lines[0]), source={}
-                    )
                 await session.execute(flow.roller_tables[key].insert().values(**scope, **values))
             await session.execute(
-                flow.roller_tables["scan_arrival"]
+                flow.roller_tables["workline_state"]
                 .insert()
                 .values(
-                    **(scope | {"id": f"scan2-{2 - i}"}),
-                    business_key=f"scan2-{i}",
-                    first_digest=f"digest-{i}",
-                    received_at=datetime.now(UTC),
-                    point="SCAN2",
-                    device_code="SCAN2",
-                    raw_bin_code="A000000001-C",
-                    scanned_at=1,
-                    delegation_state="ACCEPTED",
-                    pending=False,
-                    release_record_id=identity,
-                    release_state="PENDING",
-                    release_call_key=identity,
+                    owner_domain="smt_manual",
+                    work_line_id=100 + i,
+                    line_run_id=identity,
+                    drain_phase="REQUESTED",
+                    drain_operation_id=identity,
+                    drain_message_id=i + 1,
+                    candidate_cursor=0,
                 )
             )
             await session.execute(
@@ -180,7 +164,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
     assert ("TASK", later_task_id) in visited
 
 
-async def test_terminal_task_keeps_original_pending(
+async def test_terminal_task_stops_original_scheduling_pending(
     manual_host, manual_completion_tools, monkeypatch
 ):
     flow = manual_host
@@ -203,7 +187,7 @@ async def test_terminal_task_keeps_original_pending(
 
     monkeypatch.setattr(flow.host, "advance", record)
     await flow.host.scan_pending(limit=1)
-    assert ("SCAN2_RELEASE", release["id"]) in visited
+    assert ("SCAN2_RELEASE", release["id"]) not in visited
     assert (await flow.rows("scan2_release", component=True))[0]["command_code"] == release[
         "command_code"
     ]

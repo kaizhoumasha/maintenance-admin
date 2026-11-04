@@ -138,7 +138,7 @@ async def test_wait_accepts_exact_wire_bounds(manual_bins, retry_after_ms):
     assert (await flow.rows("admission"))[0]["due_at_ms"] == 1000 + retry_after_ms
 
 
-async def test_original_admission_survives_task_completion_and_line_disable(manual_bins):
+async def test_terminal_task_does_not_resume_original_admission(manual_bins):
     from sqlalchemy import update
 
     from app.models import WorkLine
@@ -153,5 +153,5 @@ async def test_original_admission_survives_task_completion_and_line_disable(manu
             update(WorkLine).where(WorkLine.id == flow.lines[0]).values(is_enabled=False)
         )
     await flow.decision({"result": "NO_WORK"})
-    assert await flow.advance("bin", arrival) == "RELEASED"
-    assert len(await flow.rows("scan2_release", component=True)) == 1
+    assert await flow.advance("bin", arrival) == "CLOSED"
+    assert not await flow.rows("scan2_release", component=True)

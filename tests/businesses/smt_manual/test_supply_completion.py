@@ -31,7 +31,7 @@ async def test_started_withdrawal_keeps_original_pending(manual_supply):
     assert await flow.confirmations() == []
     async with flow.factory() as session:
         pending = await flow.roller.list_pending(
-            session, kind="FEED", upper_id=demand_id, after_id=None, limit=100
+            session, kind="FACE", upper_id=demand_id, after_id=None, limit=100
         )
         assert pending[0].record_id == demand_id
 
@@ -71,7 +71,7 @@ async def test_missing_progress_or_withdrawal_evidence_never_implies_completion(
             await session.execute(update(flow.tables["member"]).values(cancelled_operation_id=None))
         elif missing == "association":
             await session.execute(
-                update(faces).where(faces.c.purpose == "SUPPLY").values(task_id="OTHER")
+                update(faces).where(faces.c.purpose == "SUPPLY").values(scope_id="OTHER")
             )
         else:
             await session.execute(delete(flow.tables["member"]))

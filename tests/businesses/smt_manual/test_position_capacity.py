@@ -289,9 +289,9 @@ async def test_formal_sender_delivers_only_current_task_position_capacity(
     delivered = [
         body for _, body in flow.requests if body.get("operation") == "transport.task.submit@v1"
     ]
-    assert [body["data"]["transport_task_id"] for body in delivered] == [
+    assert sorted(body["data"]["transport_task_id"] for body in delivered) == sorted(
         a["transport_task_id"] for a in entries
-    ]
+    )
     assert len({body["data"]["rack_id"] for body in delivered}) == expected
     await flow.host.scan_pending()
     await flow.dispatch()
@@ -340,7 +340,7 @@ async def test_advancing_bound_sources_keeps_face_reads_bounded(manual_host):
         )
     identities = {job.id: job.admission_order for job in original}
     demands = await flow.rows("face_work", component=True)
-    demand = next(row for row in demands if row["demand_id"] and row["cycle_id"])
+    demand = next(row for row in demands if row["purpose"] == "SUPPLY" and row["rack_job_id"])
     reads = []
 
     def count_reads(connection, cursor, statement, parameters, context, executemany):
@@ -354,7 +354,7 @@ async def test_advancing_bound_sources_keeps_face_reads_bounded(manual_host):
     engine = flow.factory.kw["bind"].sync_engine
     event.listen(engine, "before_cursor_execute", count_reads)
     try:
-        await flow.host.advance("FEED", demand["demand_id"])
+        await flow.host.advance("FACE", demand["id"])
     finally:
         event.remove(engine, "before_cursor_execute", count_reads)
     assert len(reads) <= 2, f"bound source advance repeated {len(reads)} face point reads"
@@ -364,3 +364,22 @@ async def test_advancing_bound_sources_keeps_face_reads_bounded(manual_host):
         )
     assert {job.id: job.admission_order for job in after} == identities
     assert sum(action.kind == "ENTER" for job in after for action in job.actions) == 3
+
+
+async def test_reconciliation_keeps_original_preparation_when_entry_was_cancelled(manual_host):
+    flow = manual_host
+    await flow.ready()
+    await direct_plan(flow, 1)
+    await flow.host.advance("TASK", "T1")
+    entry = next(a for a in await flow.rows("rack_action") if a["kind"] == "ENTER")
+    await flow.rack_outcome(entry, status="CANCELLED")
+    await flow.host.advance("MANUAL_RACK", entry["rack_work_id"])
+    for _ in range(2):
+        await flow.host.advance("TASK", "T1")
+    member = next(
+        m for m in await flow.rows("member") if m["rack_work_id"] == entry["rack_work_id"]
+    )
+    assert member["preparation_action_id"] == entry["id"]
+    assert [a["id"] for a in await flow.rows("rack_action") if a["kind"] == "ENTER"] == [
+        entry["id"]
+    ]

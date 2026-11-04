@@ -1,112 +1,78 @@
+"""Feed contracts through original allocations, current cursor and frozen public moves."""
+
+from copy import deepcopy
+from dataclasses import replace
+
 import pytest
 from sqlalchemy import select
 
+from app.businesses._components.bin_roller.ports import RollerWorkRef
+from app.models import TransportTask
 
-@pytest.mark.asyncio
-async def test_five_bins_split_four_and_one(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id)
-        await env.consume_feed(session, original["id"])
-        feed = (await env.rows(session, "feed"))[0]
-        segments = await env.rows(session, "feed_segment")
-        assert len(feed["manifest"]["bins"]) == 5
-        assert [m["bin_code"] for m in segments[0]["members"]] == [
-            "A000000001",
-            "A000000002",
-            "A000000003",
-            "A000000004",
-        ]
-        assert len(segments) == 1
-        assert not feed["feed_complete"]
-        from app.models import ReliableMessage
 
-        request = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.id == feed["message_id"])
-        )
-        import json
-
-        assert json.loads(request.request_raw)["data"] == {
-            "task_id": "T1",
-            "rack_id": "R1",
-            "rack_face": "A",
-        }
-        from app.models import TransportTask
-
+async def test_five_bins_split_four_and_one(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    first = (await flow.current_rows("face_work"))[0]
+    async with flow.factory() as session:
         task = await session.scalar(
             select(TransportTask).where(
-                TransportTask.transport_task_id == segments[0]["transport_task_id"]
+                TransportTask.transport_task_id == first["current_transport_task_id"]
             )
         )
-        assert task.workline_id == "LINE-ORIGINAL"
-        assert task.frozen["moves"][0] == {
-            "container_id": "A000000001",
-            "source": {"kind": "RACK_BIN_SLOT", "rack_id": "R1", "rack_face": "A", "slot_id": "S1"},
-            "target": {"kind": "HANDOFF_POSITION", "location_code": "INLET-ORIGINAL"},
+        assert len(task.frozen["moves"]) == 4
+        assert task.frozen["moves"][0]["target"] == {
+            "kind": "HANDOFF_POSITION",
+            "location_code": "IN",
         }
-
-
-@pytest.mark.asyncio
-async def test_segment_success_does_not_wait_for_scans(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id)
-        await env.consume_feed(session, original["id"])
-        segment = (await env.rows(session, "feed_segment"))[0]
-    await env.success(segment)
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        opportunity = (await env.rows(session, "return_opportunity"))[0]
-        assert opportunity["kind"] == "SEGMENT"
-        assert not opportunity["ended"]
-        assert await env.rows(session, "scan_fact") == []
-        assert len(await env.rows(session, "feed_segment")) == 1
-        table = env.store.tables["return_opportunity"]
-        await session.execute(
-            table.update()
-            .where(table.c.id == opportunity["id"])
-            .values(ended=True, end_reason="NO_CANDIDATES", end_evidence={})
+    await flow.complete_transport(first["current_transport_task_id"])
+    await flow.advance_current("FACE", face_id)
+    await flow.advance_current("FACE", face_id)
+    current = (await flow.current_rows("face_work"))[0]
+    assert current["feed_cursor"] == 4 and current["phase"] == "FEED_MOVE"
+    async with flow.factory() as session:
+        task = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == current["current_transport_task_id"]
+            )
         )
-        await env.consume_feed(session, original["id"])
-        segments = sorted(await env.rows(session, "feed_segment"), key=lambda r: r["segment_index"])
-        assert [m["bin_code"] for m in segments[1]["members"]] == ["A000000005"]
-        second = segments[1]
-    await env.success(second)
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        await env.consume_feed(session, original["id"])
-        assert [r["kind"] for r in await env.rows(session, "return_opportunity")] == [
-            "SEGMENT",
-            "FACE_END",
-        ]
-        progress = await env.roller.get_supply_progress(session, work_line_id=1, task_id="T1")
+        assert (
+            len(task.frozen["moves"]) == 1
+            and task.client_request_id != first["current_client_request_id"]
+        )
+
+
+async def test_segment_success_does_not_wait_for_scans(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.complete_transport(before["current_transport_task_id"])
+    await flow.advance_current("FACE", face_id)
+    after = (await flow.current_rows("face_work"))[0]
+    assert after["feed_cursor"] == 4
+    assert await flow.current_rows("bin_passage") == await flow.current_rows("bin_return") == []
+    assert after["step_id"] != before["step_id"]
+
+
+async def test_face_done_opens_return_without_fake_feed(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=None)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.decide_current(before["feed_message_id"], {"result": "RACK_FACE_DONE"})
+    await flow.advance_current("FACE", face_id)
+    await flow.advance_current("FACE", face_id)
+    after = (await flow.current_rows("face_work"))[0]
+    assert after["close_reason"] == "COMPLETED" and after["feed_cursor"] == 0
+    async with flow.factory() as session:
+        assert not list(
+            await session.scalars(select(TransportTask.id).where(TransportTask.kind == "BIN_MOVE"))
+        )
+        progress = await flow.roller.get_supply_progress(
+            session, work_line_id=1, task_id="task-original"
+        )
         assert progress[0].feed_complete and not progress[0].pending
 
 
-@pytest.mark.asyncio
-async def test_face_done_opens_return_without_fake_feed(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id, data={"result": "RACK_FACE_DONE"})
-        await env.consume_feed(session, original["id"])
-        await env.consume_feed(session, original["id"])
-        assert await env.rows(session, "feed_segment") == []
-        assert [r["kind"] for r in await env.rows(session, "return_opportunity")] == ["FACE_END"]
-        assert (await env.roller.get_supply_progress(session, work_line_id=1, task_id="T1"))[
-            0
-        ].feed_complete
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "data",
     [
@@ -129,205 +95,122 @@ async def test_face_done_opens_return_without_fake_feed(roller_feed):
         },
     ],
 )
-async def test_invalid_manifest_keeps_original_request_pending(roller_feed, data):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id, data=data)
-        await env.consume_feed(session, original["id"])
-        assert await env.rows(session, "feed_segment") == []
-        feed = (await env.rows(session, "feed"))[0]
-        assert feed["manifest"] is None and feed["pending"] and not feed["feed_complete"]
+async def test_invalid_manifest_keeps_original_request_pending(roller_current, data):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=None)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.decide_current(before["feed_message_id"], data)
+    await flow.advance_current("FACE", face_id)
+    after = (await flow.current_rows("face_work"))[0]
+    assert after["phase"] == "WAIT_FEED_DECISION" and after["step_id"] is None
+    assert after["feed_operation_id"] == before["feed_operation_id"] and after["feed_cursor"] == 0
 
 
-@pytest.mark.asyncio
-async def test_recovery_keeps_frozen_segments_and_original_message(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id)
-        await env.consume_feed(session, original["id"])
-        before = (await env.rows(session, "feed"))[0]
-        segment = (await env.rows(session, "feed_segment"))[0]
-    async with env.store.factory.begin() as session:
-        assert await env.start(session, original, inlet="CHANGED") == feed_id
-        await env.consume_feed(session, original["id"])
-        assert dict((await env.rows(session, "feed"))[0]) == dict(before)
-        assert dict((await env.rows(session, "feed_segment"))[0]) == dict(segment)
-    await env.success(segment, status="FAILED")
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        assert await env.rows(session, "return_opportunity") == []
-        progress = (await env.roller.get_supply_progress(session, work_line_id=1, task_id="T1"))[0]
-        assert progress.pending and not progress.feed_complete
-        assert segment["client_request_id"] in progress.original_ids
-        assert segment["transport_task_id"] in progress.original_ids
-        assert (await env.rows(session, "feed_segment"))[0]["transport_task_id"] == segment[
-            "transport_task_id"
-        ]
+async def test_recovery_keeps_frozen_segments_and_original_message(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    before = (await flow.current_rows("face_work"))[0]
+    from app.businesses._components.bin_roller.service import BinRoller
+
+    original = flow.roller
+    flow.roller = BinRoller(
+        original.context,
+        original.capabilities,
+        original.production,
+        rack_dispatch=original.rack_dispatch,
+        tables=original.tables,
+    )
+    for _ in range(2):
+        await flow.advance_current("FACE", face_id)
+    after = (await flow.current_rows("face_work"))[0]
+    for key in (
+        "step_id",
+        "feed_operation_id",
+        "feed_message_id",
+        "current_client_request_id",
+        "current_transport_task_id",
+    ):
+        assert after[key] == before[key]
 
 
-@pytest.mark.asyncio
-async def test_feed_consumption_and_next_segment_roll_back_together(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id)
-        await env.consume_feed(session, original["id"])
-        first = (await env.rows(session, "feed_segment"))[0]
-    await env.success(first)
+async def test_feed_consumption_and_next_segment_roll_back_together(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.complete_transport(before["current_transport_task_id"])
     with pytest.raises(RuntimeError, match="rollback"):
-        async with env.store.factory.begin() as session:
-            await env.consume_feed(session, original["id"])
-            opportunity = (await env.rows(session, "return_opportunity"))[0]
-            table = env.store.tables["return_opportunity"]
-            await session.execute(
-                table.update()
-                .where(table.c.id == opportunity["id"])
-                .values(ended=True, end_reason="NO_CANDIDATES", end_evidence={})
-            )
-            await env.consume_feed(session, original["id"])
-            assert len(await env.rows(session, "feed_segment")) == 2
+        async with flow.factory.begin() as session:
+            await flow.roller.advance(session, RollerWorkRef("FACE", face_id))
             raise RuntimeError("rollback")
-    async with env.store.factory.begin() as session:
-        assert dict((await env.rows(session, "feed_segment"))[0]) == dict(first)
-        assert await env.rows(session, "return_opportunity") == []
-        await env.consume_feed(session, original["id"])
-        assert len(await env.rows(session, "return_opportunity")) == 1
+    after = (await flow.current_rows("face_work"))[0]
+    assert after["feed_cursor"] == 0 and after["step_id"] == before["step_id"]
+    await flow.advance_current("FACE", face_id)
+    assert (await flow.current_rows("face_work"))[0]["feed_cursor"] == 4
 
 
-@pytest.mark.asyncio
-async def test_concurrent_feed_completion_selects_one_original_next_segment(roller_feed):
-    import asyncio
-
-    from sqlalchemy import text
-    from sqlalchemy.exc import DBAPIError
-
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id)
-        await env.consume_feed(session, original["id"])
-        first = (await env.rows(session, "feed_segment"))[0]
-    await env.success(first)
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        opportunity = (await env.rows(session, "return_opportunity"))[0]
-        table = env.store.tables["return_opportunity"]
-        await session.execute(
-            table.update()
-            .where(table.c.id == opportunity["id"])
-            .values(ended=True, end_reason="NO_CANDIDATES", end_evidence={})
-        )
-
-    gate = asyncio.Barrier(2)
-    postgres = env.store.factory.kw["bind"].dialect.name == "postgresql"
-
-    async def advance():
-        for attempt in range(3):
-            try:
-                async with env.store.factory.begin() as session:
-                    if postgres:
-                        await session.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-                    if postgres and attempt == 0:
-                        await gate.wait()
-                    await env.consume_feed(session, original["id"])
-                return
-            except DBAPIError as error:
-                assert getattr(error.orig, "sqlstate", None) == "40001"
-                if attempt == 2:
-                    raise
-
-    if postgres:
-        await asyncio.gather(advance(), advance())
-    else:
-        await advance()
-        await advance()
-    async with env.store.factory.begin() as session:
-        segments = sorted(await env.rows(session, "feed_segment"), key=lambda r: r["segment_index"])
-        assert len(segments) == 2
-        assert segments[0]["transport_task_id"] == first["transport_task_id"]
-        assert [m["bin_code"] for m in segments[1]["members"]] == ["A000000005"]
-        from app.models import ReliableMessage, TransportTask
-
-        tasks = (
-            await session.scalars(
-                select(TransportTask).where(
-                    TransportTask.cycle_id == (await env.rows(session, "rack_cycle"))[0]["id"],
-                    TransportTask.kind == "BIN_MOVE",
-                )
-            )
-        ).all()
-        assert len(tasks) == 2
-        messages = (
-            await session.scalars(
-                select(ReliableMessage).where(
-                    ReliableMessage.operation_id.in_([t.operation_id for t in tasks])
-                )
-            )
-        ).all()
-        assert len(messages) == 2
-
-
-@pytest.mark.asyncio
-async def test_feed_success_requires_original_applied_members_and_target(roller_feed):
-    from dataclasses import replace
-
-    from app.integrations.wms_transport import TransportCaller
-
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id, count=1)
-        await env.consume_feed(session, original["id"])
-        segment = (await env.rows(session, "feed_segment"))[0]
-    await env.success(segment)
-    async with env.store.factory.begin() as session:
-        result = await env.roller.capabilities.transport.get_result(
+@pytest.mark.parametrize(
+    "mismatch", ["owner", "task", "client", "caller", "cycle", "members", "target", "pending"]
+)
+async def test_feed_success_requires_original_applied_members_and_target(
+    roller_current, monkeypatch, mismatch
+):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.complete_transport(before["current_transport_task_id"])
+    port = flow.roller.capabilities.transport
+    original_get = port.get_result
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=before["rack_job_id"])
+        result = await port.get_result(
             session,
-            transport_task_id=segment["transport_task_id"],
-            client_request_id=segment["client_request_id"],
-            caller=TransportCaller("LINE-ORIGINAL"),
+            transport_task_id=before["current_transport_task_id"],
+            client_request_id=before["current_client_request_id"],
+            caller=job.origin.caller,
         )
-        wrong_target = {
-            **result.outcome,
-            "results": [
-                {
-                    **result.outcome["results"][0],
-                    "final_position": {"kind": "HANDOFF_POSITION", "location_code": "OTHER"},
-                }
-            ],
-        }
-        for invalid in (
-            replace(result, owner_domain="second"),
-            replace(result, cycle_id="other"),
-            replace(result, operation_id="other"),
-            replace(result, has_pending_outcome=True),
-            replace(result, outcome=None),
-            replace(result, outcome=wrong_target),
-        ):
-            assert (
-                await env.roller.record_feed_success(
-                    session, feed_id=feed_id, segment_id=segment["id"], result=invalid
-                )
-                == ""
-            )
-        assert await env.rows(session, "return_opportunity") == []
-        assert not (await env.rows(session, "feed"))[0]["feed_complete"]
-        assert await env.roller.record_feed_success(
-            session, feed_id=feed_id, segment_id=segment["id"], result=result
-        )
-        assert (await env.rows(session, "feed_segment"))[0]["status"] == "SUCCEEDED"
+    changes = {
+        "owner": {"owner_domain": "other"},
+        "task": {"transport_task_id": "other"},
+        "client": {"client_request_id": "other"},
+        "caller": {"workline_id": "other"},
+        "cycle": {"cycle_id": "other"},
+        "pending": {"has_pending_outcome": True},
+    }
+    if mismatch in changes:
+        bad = replace(result, **changes[mismatch])
+    else:
+        frozen = deepcopy(result.frozen)
+        if mismatch == "members":
+            frozen["moves"].pop()
+        else:
+            frozen["moves"][0]["target"]["location_code"] = "OTHER"
+        bad = replace(result, frozen=frozen)
+
+    async def wrong(*args, **kwargs):
+        return bad
+
+    monkeypatch.setattr(port, "get_result", wrong)
+    await flow.advance_current("FACE", face_id)
+    assert (await flow.current_rows("face_work"))[0]["feed_cursor"] == 0
+    monkeypatch.setattr(port, "get_result", original_get)
+    await flow.advance_current("FACE", face_id)
+    assert (await flow.current_rows("face_work"))[0]["feed_cursor"] == 4
+
+
+async def test_unknown_feed_keeps_original_unresolved_obligation(roller_current):
+    flow = roller_current
+    face_id = await flow.ready_supply_current(count=5)
+    before = (await flow.current_rows("face_work"))[0]
+    await flow.complete_transport(before["current_transport_task_id"], status="UNKNOWN")
+    await flow.advance_current("FACE", face_id)
+    after = (await flow.current_rows("face_work"))[0]
+    assert (
+        after["feed_cursor"] == 0
+        and after["current_transport_task_id"] == before["current_transport_task_id"]
+    )
+    await flow.complete_transport(before["current_transport_task_id"], revision=2)
+    await flow.advance_current("FACE", face_id)
+    assert (await flow.current_rows("face_work"))[0]["feed_cursor"] == 4
 
 
 @pytest.mark.asyncio
@@ -352,36 +235,3 @@ async def test_inbound_request_is_strict_three_fields_and_opaque_face(roller_fee
     ):
         with pytest.raises(ValidationError):
             InboundBatch(**values)
-
-
-@pytest.mark.asyncio
-async def test_unknown_feed_keeps_original_unresolved_obligation(roller_feed):
-    env = roller_feed
-    async with env.store.factory.begin() as session:
-        original = await env.demand(session)
-        await env.ready(session, original)
-        feed_id = await env.start(session, original)
-        await env.decide(session, feed_id, count=1)
-        await env.consume_feed(session, original["id"])
-        first = (await env.rows(session, "feed_segment"))[0]
-    await env.success(first, status="UNKNOWN")
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        segment = (await env.rows(session, "feed_segment"))[0]
-        assert segment["status"] == "UNKNOWN"
-        assert segment["pending"] and segment["transport_task_id"] == first["transport_task_id"]
-        assert await env.rows(session, "return_opportunity") == []
-        assert not (await env.roller.get_supply_progress(session, work_line_id=1, task_id="T1"))[
-            0
-        ].feed_complete
-    await env.success(first, revision=2)
-    async with env.store.factory.begin() as session:
-        await env.consume_feed(session, original["id"])
-        assert len(await env.rows(session, "feed_segment")) == 1
-        assert (await env.rows(session, "feed_segment"))[0]["transport_task_id"] == first[
-            "transport_task_id"
-        ]
-        assert (await env.roller.get_supply_progress(session, work_line_id=1, task_id="T1"))[
-            0
-        ].feed_complete
-        assert await env.roller.get_pending_upper_id(session, kind="FEED") is None

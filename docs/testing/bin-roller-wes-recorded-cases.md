@@ -1,5 +1,8 @@
 # BIN_Roller：WES 现场 BAD / GOOD 记录的当前组件验证
 
+2026-11-03 更新：BIN_Roller 当前检查点采用[四表设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。原 TASK 完成/取消即停止其后续调度，独立 LINE 回流只按自身责任继续；WAIT_FACT 不重发旧动作。旧八表历史不迁移。本文既往表数量/中间实体和运行快照保留为历史证据，当前软件验证见[本轮验收](2026-11-03-bin-roller-four-table-acceptance.md)；WMS/ECS wire 与现场验收边界不因此改变。
+
+
 本次将 `wes_backend` 的真实记录取样，经过明确的协议适配，在当前 `maintenance-admin` 的公开 receiver、BIN_Roller、WMS/Transport、ECS Result 入口执行。**这是当前共享组件的场景适配验证，不是原始现场全量 trace replay，也不是人工拣选业务、真实 worker 或设备现场验收。** 原仓库只读；未部署、未修改数据库配置或现场数据。初轮为验证；后续 SCAN3 专项按实际 RED 修复了当前 BIN_Roller 轮次绑定、当前 FIFO 和旧候选决定消费，范围见下文。
 
 ## 可重复执行的交付

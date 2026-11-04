@@ -92,3 +92,30 @@ async def test_enqueue_returns_original_business_key_even_when_new_metadata_diff
         assert again.message_id == first.message_id and again.business_key == "opaque:first"
         row = await session.get(ReliableMessage, first.message_id)
         assert row.request_raw == b"A:payload" and row.business_key == "opaque:first"
+
+
+async def test_scope_is_frozen_with_original_identity(rig):
+    from app.reliable import ScopeRef
+
+    scope = ScopeRef("owner", "TASK", "original")
+    async with rig.factory.begin() as session:
+        first = await rig.outbox.enqueue(session, rig.draft(scope=scope))
+        assert await rig.outbox.enqueue(session, rig.draft(scope=scope)) == first
+        for changed in (
+            None,
+            ScopeRef("owner", "LINE", "original"),
+            ScopeRef("other", "TASK", "original"),
+        ):
+            with pytest.raises(DuplicateMessage):
+                await rig.outbox.enqueue(session, rig.draft(scope=changed))
+
+
+@pytest.mark.parametrize(
+    "values",
+    [("", "TASK", "id"), ("owner", "OTHER", "id"), ("owner", "TASK", ""), ("owner", "TASK", None)],
+)
+def test_scope_requires_complete_storage_identity(values):
+    from app.reliable import ScopeRef
+
+    with pytest.raises(ValueError):
+        ScopeRef(*values)

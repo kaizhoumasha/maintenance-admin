@@ -18,6 +18,7 @@ from app.integrations.registration import (
 from app.integrations.wms_callback.operation import CallbackPayload
 
 from .binding import DeviceBinding
+from .results import EventApplicationRef
 
 _EVENT_TYPE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
@@ -32,6 +33,7 @@ class EcsEventContext:
     timestamp: int
     binding: DeviceBinding
     notes: list[dict] = field(default_factory=list)
+    _applications: list[EventApplicationRef] = field(default_factory=list, repr=False)
     runtime: object | None = None
     business_code: str | None = None
     component_key: str | None = None
@@ -43,6 +45,14 @@ class EcsEventContext:
     @property
     def work_line_id(self) -> int:
         return self.binding.work_line_id
+
+    def bind_application(self, reference: EventApplicationRef) -> None:
+        if not isinstance(reference, EventApplicationRef):
+            raise ValueError("invalid event application reference")
+        if self._applications and self._applications[0] != reference:
+            raise ValueError("event already has a different application")
+        if not self._applications:
+            self._applications.append(reference)
 
     def note(self, reason_code: str, **detail) -> None:
         """附上诊断:事件已接收但没有(完全)应用的事实,随收据同事务持久化。"""

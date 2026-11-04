@@ -39,6 +39,9 @@ class CallbackReceipt(Base):
     body: Mapped[dict] = mapped_column(JSON)
     resp_timestamp: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    event_envelope: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    event_context: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    application_ref: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     diagnostic: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
 
 

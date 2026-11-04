@@ -1,5 +1,8 @@
 # SMT 手工分拣、入库 WES 与 WMS API 对接文档
 
+2026-11-03 更新：BIN_Roller 当前检查点采用[四表设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。原 TASK 完成/取消即停止其后续调度，独立 LINE 回流只按自身责任继续；WAIT_FACT 不重发旧动作。旧八表历史不迁移。本文既往表数量/中间实体和运行快照保留为历史证据，当前软件验证见[本轮验收](../testing/2026-11-03-bin-roller-four-table-acceptance.md)；WMS/ECS wire 与现场验收边界不因此改变。
+
+
 > 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
 
 2026-11-02 后续交付：SMT / BIN_Roller 已按[共同设计](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)收敛至 7 + 10 张业务表，新增可省略的[每线 CTU01 请求额度](#manual-request-limit)，原任务/operation/owner 和冻结身份保持。永久 KT16/KT18 配置专项为 12 passed / 0 skipped，最终全仓/整体复核待执行；[当前证据](../testing/smt-manual-kt16-kt18.md#current-factory-profile)与下文旧 M1～M6 软件快照分开记录。未提交、未部署。
@@ -679,7 +682,7 @@ field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信
 
 额度内登记原 ENTER 与原 Transport/outbox 后才会实际发送，登记成功即占 1；排队、到位、换面一直占额。满额候选保留原 job 和关联但不创建 Transport，释放或上调后由原 pending/Beat 补位，无须新计划。降低上限不撤销已登记请求，未知、超时及未证明的失败不释放。原 DEPART 严格取得 202 RECEIVED 或 200 DUPLICATE 接纳，或可靠证明未到场并收口，才释放一次；离场接纳不等于物理离场成功。
 
-任务终态只停止尚未提交的候选；已提交 outbox 尚未网络发送也属于原责任。后继任务即使计数为零，同点旧任务/drain 未交出责任仍阻止进场；原结果继续归原任务，不能改绑。生产只认精确原架/点/面到位事实，不能凭 ACK 或排队记录生产，正常队尾不阻止队头按原条件离场。
+任务终态停止本 TASK 的后续投递，包括已提交但尚未发送的 outbox；消息停止不等于物理责任解除。原 RackJob 进入 CLOSED_BY_SCOPE，pending 只用于消费原事实，不允许新动作。纯候选或严格证明原 ENTER 从未派发才解除门禁；已过发送门禁、可能在途或已到位时保留原架责任，直到严格原交出接纳或既有无执行责任依据成立。后继任务即使计数为零，同点旧任务/drain 未交出责任仍阻止进场；原结果继续归原任务，不能改绑。生产只认精确原架/点/面到位事实，不能凭 ACK 或排队记录生产，正常队尾不阻止队头按原条件离场。
 
 迁移 `sharedrackdispatch → positioncapacity` 搬迁本项目原五层架限额（含 null），其他架位初值 1，保存原身份、冻结载荷与证据；不导入旧 wes_backend 历史。停写预检拒绝重复物理点、无归属额度与无法证明顺序的数据。有损降级在 DDL 前拒绝。API/worker 与管理客户端须同步切换，旧 `five_rack_request_limit` 不再是可写接口。
 

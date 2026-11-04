@@ -220,7 +220,7 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
         entry = (await flow.rows("rack_action", roller=True))[0]
         waiting = next(
             r
-            for r in await flow.rows("face_work", roller=True)
+            for r in await flow.rows("face_service", roller=True)
             if r["cycle_id"] != entry["cycle_id"]
         )
         assert waiting["service_id"] and waiting["cycle_id"]
@@ -228,7 +228,10 @@ async def test_disabled_line_keeps_original_departure_and_resumes_selected_waite
         flow.inbound_decision = {"result": "RACK_FACE_DONE"}
         await rack_result(flow, entry)
         await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
-        assert len([f for f in await flow.rows("face_work", roller=True) if f["feed_id"]]) == 1
+        assert (
+            len([f for f in await flow.rows("face_work", roller=True) if f["feed_operation_id"]])
+            == 1
+        )
         await configure(is_enabled=False)
         await plan(flow, tasks[1], ["OTHER-LINE"])
         await cycle_departure(flow, entry, arrived=True)
@@ -400,7 +403,7 @@ async def test_wait_due_work_required_completion_original_release(
     releases = [
         r
         for r in await flow.rows("scan_arrival", roller=True)
-        if r["release_record_id"] is not None
+        if r["release_command_code"] is not None
     ]
     assert len(releases) == 1 and releases[0]["release_command_code"] == released["command_code"]
     async with flow.factory() as session:
@@ -422,7 +425,7 @@ async def test_scan3_independent_scan4_own_success_fifo_outlet(profile_flow, lin
     arrivals = await flow.rows("scan_arrival", roller=True)
     scans4 = sorted([r for r in arrivals if r["point"] == "SCAN4"], key=lambda r: r["scanned_at"])
     await flow.result(scans4[1]["command_code"])
-    await flow.host.advance("SCAN", scans4[1]["id"])
+    await flow.host.advance("RETURN", scans4[1]["id"])
     async with flow.factory() as session:
         assert await flow.roller.get_return_candidates(session, work_line_id=flow.lines[line]) == ()
         assert (
@@ -430,7 +433,7 @@ async def test_scan3_independent_scan4_own_success_fifo_outlet(profile_flow, lin
             == ()
         )
     await flow.result(scans4[0]["command_code"])
-    await flow.host.advance("SCAN", scans4[0]["id"])
+    await flow.host.advance("RETURN", scans4[0]["id"])
     async with flow.factory() as session:
         candidates = await flow.roller.get_return_candidates(session, work_line_id=flow.lines[line])
         assert [r["bin_code"] for r in candidates] == ["A000000001", "A000000002"]
@@ -453,7 +456,7 @@ async def test_scan3_independent_scan4_own_success_fifo_outlet(profile_flow, lin
         ],
     )
     await flow.dispatch()
-    await flow.host.advance("RETURN_BATCH", batch_id)
+    await flow.host.advance("FACE", batch_id)
     await flow.dispatch()
     batch = (await flow.rows("return_batch", roller=True))[0]
     transport = next(
@@ -533,8 +536,10 @@ async def test_ctu01_inlet_and_distinct_return_transfer_positions(profile_flow, 
     )
     await rack_result(flow, action)
     await flow.dispatch()
-    demand = next(r for r in await flow.rows("face_work", roller=True) if r["purpose"] == "SUPPLY")
-    await flow.host.advance("FEED", demand["id"])
+    demand = next(
+        r for r in await flow.rows("face_service", roller=True) if r["purpose"] == "SUPPLY"
+    )
+    await flow.host.advance("FACE", demand["id"])
     await flow.dispatch()
     segment = (await flow.rows("feed_segment", roller=True))[0]
     transport = next(
@@ -806,8 +811,8 @@ async def test_manual_position_blocks_fresh_roller_work(profile_flow, stage):
         await rack_result(flow, entry)
         await flow.dispatch()
         if stage == "registered":
-            (face,) = await flow.rows("face_work", roller=True)
-            await flow.host.advance("FEED", face["id"])
+            (face,) = await flow.rows("face_service", roller=True)
+            await flow.host.advance("FACE", face["id"])
             (segment,) = await flow.rows("feed_segment", roller=True)
     (work,) = await flow.rows("rack")
     (manual_entry,) = await flow.rows("rack_action")
@@ -848,13 +853,13 @@ async def test_manual_position_blocks_fresh_roller_work(profile_flow, stage):
                 ),
             )
         ).status_code == 202
-        await flow.host.advance("FEED", face["id"])
-        (consumed,) = await flow.rows("feed_segment", roller=True)
-        assert consumed["id"] == segment["id"] and consumed["consumed_revision"] == 1
+        await flow.host.advance("FACE", face["id"])
+        (consumed,) = await flow.rows("face_work", roller=True)
+        assert consumed["feed_cursor"] == 1 and consumed["current_transport_task_id"] is None
     elif ready_face:
-        (face,) = await flow.rows("face_work", roller=True)
+        (face,) = await flow.rows("face_service", roller=True)
         assert face["service_state"] == "READY"
-        await flow.host.advance("FEED", face["id"])
+        await flow.host.advance("FACE", face["id"])
         assert not [t for t in await saved_transports(flow) if t["kind"] == "BIN_MOVE"]
     else:
         await plan(flow, task, [rack], revision=2)

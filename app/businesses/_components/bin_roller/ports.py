@@ -55,7 +55,7 @@ class Scan2Arrival:
 
 @dataclass(frozen=True, slots=True)
 class RollerWorkRef:
-    kind: Literal["SCAN", "SCAN2_RELEASE", "FEED", "RETURN_BATCH", "RACK_CYCLE", "DRAIN"]
+    kind: Literal["PASSAGE", "SCAN2_RELEASE", "RETURN", "FACE", "RACK_CYCLE", "DRAIN"]
     record_id: str
 
 
@@ -76,6 +76,8 @@ class Production(Protocol):
         self, session: AsyncSession, *, work_line_id: int
     ) -> SuccessorContext: ...
 
-    async def lock_scan2_task(self, session: AsyncSession, *, work_line_id: int) -> None: ...
+    async def resolve_scan2_task(
+        self, session: AsyncSession, *, work_line_id: int
+    ) -> CurrentTask: ...
 
-    async def accept_scan2(self, ctx, arrival: Scan2Arrival) -> None: ...
+    async def accept_scan2(self, ctx, arrival: Scan2Arrival) -> str: ...

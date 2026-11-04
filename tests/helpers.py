@@ -1454,11 +1454,15 @@ async def formal_manual_fixture(
                 {"result": "RACK_FACE_DONE" if source_profile is not None else "NO_BATCH"},
             )
         elif operation == "workline.return_buffer.drain_rack_decide@v1":
-            data = {
-                "result": "WAIT",
-                "reason_code": "NO_DRAIN_RACK_AVAILABLE",
-                "retry_after_ms": 60000,
-            }
+            data = getattr(
+                state,
+                "drain_decision",
+                {
+                    "result": "WAIT",
+                    "reason_code": "NO_DRAIN_RACK_AVAILABLE",
+                    "retry_after_ms": 60000,
+                },
+            )
         elif path.endswith("facts"):
             code = "RECORDED"
         return JSONResponse(
@@ -1673,15 +1677,10 @@ async def formal_manual_fixture(
                         for row in await roller_dispatch_rows(session, state.roller, key, line)
                     ]
                     return sorted(records, key=lambda row: row["id"])
-            if source_profile is not None:
-                table = ROLLER_TABLES[key] if roller else TABLES[key]
-                query = select(table).order_by(*table.primary_key.columns)
-            else:
-                query = (
-                    bin_roller_query(ROLLER_TABLES, key)
-                    if roller
-                    else smt_manual_query(TABLES, key)
-                )
+            if roller:
+                async with factory() as session:
+                    return await bin_roller_rows(session, state.roller, key)
+            query = smt_manual_query(TABLES, key)
             async with factory() as session:
                 return [dict(row) for row in (await session.execute(query)).mappings()]
 
@@ -1796,7 +1795,9 @@ async def formal_manual_fixture(
                     )
                 )
                 await clear_test_rack_jobs(session, state.lines)
-                for key, table in reversed(tuple(tables.items())):
+                cleanup_tables = list(reversed(tuple(tables.items())))
+                cleanup_tables.sort(key=lambda pair: pair[1].name != "bin_roller_bin_return")
+                for key, table in cleanup_tables:
                     current = (await session.execute(select(*table.primary_key.columns))).all()
                     for row in set(current) - before[key]:
                         await session.execute(
@@ -1993,7 +1994,7 @@ async def manual_source_departure(flow, entry):
     assert response.status_code == 202
     await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
     await flow.dispatch()
-    await flow.host.advance("FEED", cycle["source_ref"])
+    await flow.host.advance("FACE", cycle["source_ref"])
     await flow.dispatch()
     await flow.host.advance("RACK_CYCLE", entry["cycle_id"])
     return next(
@@ -2024,7 +2025,7 @@ async def manual_departure_obligation(flow, *, line=0):
     [demand] = [
         row for row in await flow.rows("supply_demand", roller=True) if row["task_id"] == task
     ]
-    await flow.host.advance("FEED", demand["id"])
+    await flow.host.advance("FACE", demand["id"])
     [entry] = [
         row
         for row in await flow.rows("rack_action", roller=True)
@@ -2039,80 +2040,41 @@ async def manual_departure_obligation(flow, *, line=0):
 
 async def manual_return_opportunity(flow, *, line=0):
     """A controlled original drain selection enters and serves its face through real Transport."""
-    from app.core.identifiers import uuid7
-
-    line_id = flow.lines[line]
-    async with flow.factory() as session:
-        jobs = await flow.host.rack_dispatch.jobs(
-            session, work_line_id=line_id, source_kinds=("ROLLER_ORDINARY",), pending=True
-        )
-    original = next(
-        (j for j in jobs if any(a.kind == "ENTER" and a.transport_task_id for a in j.actions)), None
+    from app.businesses._components.bin_roller.request import (
+        workline_return_buffer_drain_rack_decide_v1 as drain_contract,
     )
-    if original is not None:
-        entry = next(a for a in original.actions if a.kind == "ENTER")
-        response = await flow.callback(
-            "transport.task.resulted@v1",
-            dict(
-                transport_task_id=entry.transport_task_id,
-                kind="RACK_MOVE",
-                rack_id=original.origin.rack_id,
-                outcome_revision=1,
-                status="SUCCEEDED",
-                final_position=entry.target,
-                arrival_face=entry.target_face,
-            ),
-        )
-        assert response.status_code == 202
-        flow.inbound_decision = {"result": "RACK_FACE_DONE"}
-        flow.departure_decision = dict(
-            result="READY", rack_destination=dict(type="ZONE", location_code="LOCAL-RETURN")
-        )
-        for _ in range(4):
-            await flow.host.advance("RACK_CYCLE", original.id)
-            batches = [
-                b
-                for b in await flow.rows("return_batch", roller=True)
-                if b["work_line_id"] == line_id and b["pending"]
-            ]
-            if batches:
-                return batches[0]["id"]
-            await flow.dispatch()
-            await flow.host.advance("FEED", original.origin.source_ref)
-            async with flow.factory() as session:
-                progress = await flow.host.rack_dispatch.progress(session, job_id=original.id)
-            if not progress.pending:
-                break
-        else:
-            raise AssertionError(
-                "original task rack neither served returns nor completed departure"
-            )
-    decision_id = str(uuid7())
+    from app.core.identifiers import uuid7
+    from app.reliable import ScopeRef
+
     line_id = flow.lines[line]
     rack = flow.prefix + f"-return-{line}"
     async with flow.factory.begin() as session:
         repo = flow.roller.repository(line_id)
         candidates = await flow.roller.get_return_candidates(session, work_line_id=line_id)
         assert candidates
-        await session.execute(
-            repo.tables["decision"]
-            .insert()
-            .values(
-                id=decision_id,
-                kind="DRAIN",
-                unused_racks=[],
-                **repo.scope,
-                input_kind="FIFO_OBSERVATION",
-                input_ref=decision_id,
-                input_snapshot={"round_id": candidates[0]["id"]},
-                operation_id=str(uuid7()),
-                status="READY",
-                decision={"result": "READY", "racks": [{"rack_id": rack, "rack_face": ["A"]}]},
-            )
+        state = await repo.line_state(session, start=True)
+        operation_id = str(uuid7())
+        message = await flow.host.capabilities.wms.send(
+            session,
+            drain_contract.DrainRequest(
+                workline_code=flow.prefix + f"-{line + 1}", required_slot_count=len(candidates)
+            ),
+            operation_id=operation_id,
+            scope=ScopeRef("smt_manual", "LINE", state["line_run_id"]),
         )
-    await flow.host.advance("DRAIN", decision_id)
+        await repo.update(
+            session,
+            "workline_state",
+            drain_phase="REQUESTED",
+            drain_operation_id=operation_id,
+            drain_message_id=message.message_id,
+            candidate_cursor=0,
+        )
+    flow.drain_decision = {"result": "READY", "racks": [{"rack_id": rack, "rack_face": ["A"]}]}
+    await flow.dispatch()
+    await flow.host.advance("DRAIN", state["line_run_id"])
     [cycle] = [
-        r for r in await flow.rows("rack_cycle", roller=True) if r["source_ref"] == decision_id
+        r for r in await flow.rows("rack_cycle", roller=True) if r["source_ref"] == operation_id
     ]
     [entry] = [
         r for r in await flow.rows("rack_action", roller=True) if r["cycle_id"] == cycle["id"]
@@ -2173,100 +2135,409 @@ def smt_manual_query(tables, key):
 
 
 def bin_roller_query(tables, key):
-    """Inspect one original responsibility and identity in the compact component tables."""
-    from sqlalchemy import select
+    """Read current checkpoints; host tests keep their responsibility-oriented helpers."""
+    from sqlalchemy import BigInteger, case, literal, select, union_all
 
-    if key == "drain":
-        t = tables["decision"]
-        return select(t).where(t.c.kind == key.upper()).order_by(t.c.id)
-    if key in {"scan2_release", "return_round"}:
-        c = tables["scan_arrival"].c
-        if key == "scan2_release":
-            return (
-                select(
-                    c.release_record_id.label("id"),
-                    c.owner_domain,
-                    c.work_line_id,
-                    c.id.label("arrival_id"),
-                    c.release_call_key.label("call_key"),
-                    c.release_command_code.label("command_code"),
-                    (c.release_state == "PENDING").label("pending"),
-                    c.release_consumed_result_id.label("consumed_result_id"),
-                )
-                .where(c.release_record_id.is_not(None))
-                .order_by(c.release_record_id)
-            )
+    from app.models import CallbackReceipt
+
+    if key == "scan2_release":
+        c = tables["bin_passage"].c
         return (
             select(
-                c.round_id.label("id"),
+                c.id,
                 c.owner_domain,
                 c.work_line_id,
-                c.id.label("scan3_arrival_id"),
-                c.first_scan4_arrival_id.label("scan4_arrival_id"),
-                c.bin_code,
-                c.return_state.label("status"),
-                c.removed,
+                c.id.label("arrival_id"),
+                (literal("bin_roller:scan2_release:") + c.id).label("call_key"),
+                c.release_command_code.label("command_code"),
+                (c.closed_at.is_(None) & c.release_consumed_result_id.is_(None)).label("pending"),
+                c.release_consumed_result_id.label("consumed_result_id"),
             )
-            .where(c.point == "SCAN3", c.round_id.is_not(None))
-            .order_by(c.round_id)
+            .where(c.release_command_code.is_not(None))
+            .order_by(c.id)
         )
-    if key in {"supply_demand", "face_service", "feed"}:
+    if key in ("supply_demand", "face_service", "feed"):
         c = tables["face_work"].c
+        complete = (c.close_reason == "COMPLETED") | (c.window_kind == "FACE_END")
+        query = select(
+            *c,
+            c.scope_id.label("task_id"),
+            c.id.label("demand_id"),
+            c.id.label("service_id"),
+            c.id.label("feed_id"),
+            c.rack_job_id.label("cycle_id"),
+            c.id.label("source_ref"),
+            c.feed_message_id.label("message_id"),
+            c.feed_operation_id.label("operation_id"),
+            (c.demand_state == "WITHDRAWN").label("withdrawn"),
+            complete.label("feed_complete"),
+            c.closed_at.is_(None).label("pending"),
+            case(
+                (c.closed_at.is_not(None), c.close_reason),
+                (c.preparation_action_id.is_not(None), "READY"),
+                else_="PENDING",
+            ).label("status"),
+        )
         if key == "supply_demand":
-            return (
+            query = query.where(c.purpose == "SUPPLY")
+        elif key == "feed":
+            query = query.where(c.feed_operation_id.is_not(None))
+        else:
+            query = query.where(c.rack_job_id.is_not(None))
+        return query.order_by(c.id)
+    if key == "scan_arrival":
+        queries = []
+        for point, table_key in (
+            ("SCAN1", "bin_passage"),
+            ("SCAN2", "bin_passage"),
+            ("SCAN3", "bin_return"),
+            ("SCAN4", "bin_return"),
+        ):
+            c = tables[table_key].c
+            event = c[point.lower() + "_event_id"]
+            receipt = CallbackReceipt.__table__
+            command = (
+                c.release_command_code if point == "SCAN2" else c[point.lower() + "_command_code"]
+            )
+            consumed = (
+                c.release_consumed_result_id
+                if point == "SCAN2"
+                else c[point.lower() + "_consumed_result_id"]
+            )
+            reference = receipt.c.application_ref
+            queries.append(
                 select(
-                    c.demand_id.label("id"),
+                    c.id,
                     c.owner_domain,
                     c.work_line_id,
-                    c.task_id,
-                    c.change_id,
-                    c.plan_revision,
-                    c.rack_id,
-                    c.rack_face,
-                    c.cycle_id,
-                    c.service_id,
-                    (c.demand_state == "WITHDRAWN").label("withdrawn"),
+                    literal(point).label("point"),
+                    c.bin_code,
+                    case((c.scan3_event_id.is_not(None), c.id), else_=None).label("round_id")
+                    if table_key == "bin_return"
+                    else literal(None).label("round_id"),
+                    receipt.c.device_code,
+                    receipt.c.event_envelope["data"]["bin_code"].as_string().label("raw_bin_code"),
+                    receipt.c.event_envelope["timestamp"]
+                    .as_string()
+                    .cast(BigInteger)
+                    .label("scanned_at"),
+                    receipt.c.created_at.label("received_at"),
+                    receipt.c.operation_id.label("first_digest"),
+                    c[point.lower() + "_visit_key"].label("business_key"),
+                    command.label("command_code"),
+                    consumed.label("consumed_result_id"),
+                    (c.closed_at.is_(None) & consumed.is_(None)).label("pending"),
+                    reference["separator_command_code"].as_string().label("separator_command_code"),
+                    c.release_command_code.label("release_command_code")
+                    if table_key == "bin_passage"
+                    else literal(None).label("release_command_code"),
+                    case((c.production_record_id.is_not(None), "ACCEPTED"), else_="PENDING").label(
+                        "delegation_state"
+                    )
+                    if table_key == "bin_passage"
+                    else literal(None).label("delegation_state"),
                 )
-                .where(c.demand_id.is_not(None))
-                .order_by(c.demand_id)
+                .select_from(tables[table_key].join(receipt, receipt.c.id == event))
+                .where(event.is_not(None))
             )
-        if key == "feed":
-            return (
-                select(
-                    c.feed_id.label("id"),
-                    c.owner_domain,
-                    c.work_line_id,
-                    c.service_id,
-                    c.caller_workline_id,
-                    c.station_id,
-                    c.target,
-                    c.operation_id,
-                    c.message_id,
-                    c.manifest,
-                    (c.feed_state == "COMPLETED").label("feed_complete"),
-                    (c.feed_state != "COMPLETED").label("pending"),
-                )
-                .where(c.feed_id.is_not(None))
-                .order_by(c.feed_id)
-            )
+        return select(union_all(*queries).subquery()).order_by("received_at", "id")
+    if key == "return_round":
+        c = tables["bin_return"].c
         return (
             select(
-                c.service_id.label("id"),
-                c.owner_domain,
-                c.work_line_id,
-                c.task_id,
-                c.plan_revision,
-                c.cycle_id,
-                c.source_ref,
-                c.rack_face,
-                c.service_state.label("status"),
-                c.service_state.in_(("PENDING", "READY")).label("pending"),
+                *c,
+                c.id.label("round_id"),
+                c.id.label("scan3_arrival_id"),
+                c.scan4_event_id.label("scan4_arrival_id"),
+                case((c.close_reason == "COMPLETED", "COMPLETED"), else_=c.return_state).label(
+                    "status"
+                ),
+                (~c.is_current).label("removed"),
             )
-            .where(c.service_id.is_not(None))
-            .order_by(c.service_id)
+            .where(c.scan3_event_id.is_not(None))
+            .order_by(c.id)
+        )
+    if key == "scan_fact":
+        c = CallbackReceipt.__table__.c
+        subjects = union_all(select(tables["bin_passage"].c.id), select(tables["bin_return"].c.id))
+        return (
+            select(
+                c.id,
+                c.operation_id.label("digest"),
+                c.id.label("receipt_id"),
+                c.application_ref["subject_id"].as_string().label("arrival_id"),
+                c.event_context["device_role"].as_string().label("point"),
+                c.event_context.label("binding_snapshot"),
+            )
+            .where(
+                c.operation == "ecs.event",
+                c.application_ref["subject_id"].as_string().in_(subjects),
+            )
+            .order_by(c.id)
         )
     table = tables[key]
     return select(table).order_by(*table.primary_key.columns)
+
+
+def copy_roller_tables(metadata, prefix):
+    """Copy independent component metadata, remapping only its internal foreign keys."""
+    from sqlalchemy import ForeignKeyConstraint
+
+    from app.businesses._components.bin_roller.models import TABLES
+
+    copies = {
+        key: table.to_metadata(metadata, name=prefix + key, schema=metadata.schema)
+        for key, table in TABLES.items()
+    }
+    originals = {table.name: key for key, table in TABLES.items()}
+    for table in copies.values():
+        for constraint in tuple(table.foreign_key_constraints):
+            local = [element.parent.name for element in constraint.elements]
+            targets = []
+            for element in constraint.elements:
+                parts = element.target_fullname.split(".")
+                key = originals[parts[-2]]
+                targets.append(
+                    f"{metadata.schema + '.' if metadata.schema else ''}{prefix + key}.{parts[-1]}"
+                )
+            table.constraints.remove(constraint)
+            for element in constraint.elements:
+                table.foreign_keys.remove(element)
+                element.parent.foreign_keys.remove(element)
+            table.append_constraint(
+                ForeignKeyConstraint(
+                    local, targets, name=constraint.name, ondelete=constraint.ondelete
+                )
+            )
+    return copies
+
+
+async def bin_roller_rows(session, roller, key):
+    """Inspect current responsibilities using their original public allocation/move evidence."""
+    from sqlalchemy import select
+
+    from app.businesses._components.bin_roller.feed_flow import read_feed_manifest
+    from app.businesses._components.bin_roller.return_flow import (
+        read_drain_manifest,
+        read_return_manifest,
+    )
+
+    if key == "rack_position":
+        face_table = roller.tables["face_work"]
+        line_ids = set(await session.scalars(select(face_table.c.work_line_id).distinct()))
+        state = roller.tables["workline_state"]
+        line_ids.update(await session.scalars(select(state.c.work_line_id).distinct()))
+        rows = []
+        for line in sorted(line_ids):
+            jobs = await roller.rack_dispatch.jobs(
+                session, work_line_id=line, source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN")
+            )
+            for job in jobs:
+                for action in job.actions:
+                    if action.actual_position is not None and action.position_revision is not None:
+                        rows.append(
+                            dict(
+                                id=action.id,
+                                object_kind="RACK",
+                                object_code=job.origin.rack_id,
+                                source_kind="RACK",
+                                source_id=action.id,
+                                source_revision=action.position_revision,
+                                location_code=action.actual_position["location_code"],
+                                rack_face=action.actual_face,
+                                is_current=job.pending and job.position_action_id == action.id,
+                            )
+                        )
+        return rows
+    if key not in {
+        "feed",
+        "feed_segment",
+        "face_service",
+        "supply_demand",
+        "return_opportunity",
+        "return_batch",
+        "drain",
+    }:
+        return [
+            dict(r)
+            for r in (await session.execute(bin_roller_query(roller.tables, key))).mappings()
+        ]
+    if key == "drain":
+        table = roller.tables["workline_state"]
+        result = []
+        for row in (await session.execute(select(table).order_by(*table.primary_key))).mappings():
+            if row["drain_operation_id"] is not None:
+                decision = await read_drain_manifest(roller, session, row)
+                result.append(
+                    dict(
+                        row,
+                        id=row["line_run_id"],
+                        operation_id=row["drain_operation_id"],
+                        message_id=row["drain_message_id"],
+                        status={"REQUESTED": "PENDING", "WAIT": "WAIT", "USING": "READY"}[
+                            row["drain_phase"]
+                        ],
+                        pending=True,
+                        decision=decision,
+                        due_at=int(row["drain_retry_at"].timestamp() * 1000)
+                        if row["drain_retry_at"]
+                        else None,
+                    )
+                )
+        return result
+    table = roller.tables["face_work"]
+    faces = (await session.execute(select(table).order_by(table.c.id))).mappings().all()
+    result = []
+    for original in faces:
+        face = dict(original)
+        job = (
+            await roller.rack_dispatch.progress(session, job_id=face["rack_job_id"])
+            if face["rack_job_id"]
+            else None
+        )
+        manifest = (
+            await read_feed_manifest(roller.capabilities, session, face)
+            if face["feed_operation_id"] and roller.capabilities.wms
+            else None
+        )
+        common = dict(
+            face,
+            task_id=face["scope_id"] if face["purpose"] == "SUPPLY" else None,
+            cycle_id=face["rack_job_id"],
+            demand_id=face["id"] if face["purpose"] == "SUPPLY" else None,
+            service_id=face["id"] if job else None,
+            feed_id=face["id"] if face["feed_operation_id"] else None,
+            source_ref=face["id"],
+            pending=face["closed_at"] is None,
+            withdrawn=face["demand_state"] == "WITHDRAWN",
+            caller_workline_id=job.origin.caller.workline_id if job and job.origin.caller else None,
+            station_id=job.origin.caller.station_id if job and job.origin.caller else None,
+            workline_code=job.origin.workline_code if job else None,
+            target={
+                "kind": "HANDOFF_POSITION",
+                "location_code": job.origin.resources["positions"]["INLET"],
+            }
+            if job and job.origin.resources
+            else None,
+        )
+        complete = manifest is not None and (
+            manifest["result"] == "RACK_FACE_DONE"
+            or face["feed_cursor"] == len(manifest.get("bins", ()))
+        )
+        common.update(
+            feed_complete=complete,
+            manifest=manifest,
+            feed_state="COMPLETED"
+            if complete
+            else "REVIEW"
+            if face["review_reason"]
+            else "ALLOCATED"
+            if manifest
+            else "REQUESTED"
+            if face["feed_operation_id"]
+            else None,
+            service_state=face["close_reason"]
+            if face["closed_at"]
+            else "READY"
+            if face["phase"] != "WAIT_RACK"
+            else "PENDING",
+        )
+        if key == "supply_demand" and face["purpose"] == "SUPPLY":
+            result.append(common)
+        elif key == "face_service" and job:
+            result.append(dict(common, status=common["service_state"]))
+        elif key == "feed" and face["feed_operation_id"]:
+            result.append(
+                dict(
+                    common,
+                    operation_id=face["feed_operation_id"],
+                    message_id=face["feed_message_id"],
+                    pending=not complete,
+                )
+            )
+        elif key == "return_opportunity" and face["window_id"]:
+            result.append(
+                dict(common, kind=face["window_kind"], ended=face["closed_at"] is not None)
+            )
+        elif key == "return_batch" and face["return_operation_id"]:
+            decision = await read_return_manifest(roller, session, face)
+            view = (
+                await roller.capabilities.transport.get_result(
+                    session,
+                    transport_task_id=face["current_transport_task_id"],
+                    client_request_id=face["current_client_request_id"],
+                    caller=job.origin.caller,
+                )
+                if face["current_transport_task_id"]
+                else None
+            )
+            result.append(
+                dict(
+                    common,
+                    opportunity_id=face["id"],
+                    members=face["return_members"] or [],
+                    transport_operation_id=view.operation_id if view else None,
+                    operation_id=face["return_operation_id"],
+                    message_id=face["return_message_id"],
+                    manifest=decision,
+                    client_request_id=face["current_client_request_id"],
+                    transport_task_id=face["current_transport_task_id"],
+                    status="NO_BATCH"
+                    if decision and decision["result"] == "NO_BATCH"
+                    else "PENDING",
+                    source={
+                        "kind": "HANDOFF_POSITION",
+                        "location_code": job.origin.resources["positions"]["OUTLET"],
+                    },
+                )
+            )
+        elif key == "feed_segment" and face["phase"] == "FEED_MOVE" and face["closed_at"] is None:
+            view = await roller.capabilities.transport.get_result(
+                session,
+                transport_task_id=face["current_transport_task_id"],
+                client_request_id=face["current_client_request_id"],
+                caller=job.origin.caller,
+            )
+            frozen = (view.frozen or {}).get("moves", ())
+            members = [
+                dict(
+                    bin_code=m["container_id"],
+                    source_locator={
+                        "type": "RACK_BIN_SLOT",
+                        **{k: v for k, v in m["source"].items() if k != "kind"},
+                    },
+                )
+                for m in frozen
+            ]
+            outcome_members = (view.outcome or {}).get("results", ())
+            status = (
+                "SUCCEEDED"
+                if outcome_members
+                and all(m["status"] == "SUCCEEDED" for m in outcome_members)
+                and not view.has_pending_outcome
+                else "UNKNOWN"
+                if view.has_pending_outcome
+                or any(m.get("position_unknown") for m in outcome_members)
+                else "FAILED"
+                if outcome_members
+                else "PENDING"
+            )
+            result.append(
+                dict(
+                    common,
+                    id=face["step_id"],
+                    feed_id=face["id"],
+                    segment_index=face["feed_cursor"] // 4 + 1,
+                    members=members,
+                    client_request_id=face["current_client_request_id"],
+                    transport_task_id=face["current_transport_task_id"],
+                    operation_id=view.operation_id,
+                    consumed_revision=face["consumed_outcome_revision"],
+                    status=status,
+                    pending=status != "SUCCEEDED",
+                )
+            )
+    return result
 
 
 async def configure_rack_positions(session, line, *, five_capacity=None, capacity=1):
@@ -2325,7 +2596,7 @@ def fixture_supply_order(tables, *, owner):
                 .where(
                     face.c.owner_domain == owner,
                     face.c.work_line_id == work_line_id,
-                    face.c.task_id == task_id,
+                    face.c.scope_id == task_id,
                     face.c.purpose == "SUPPLY",
                 )
                 .order_by(face.c.plan_revision, face.c.id)

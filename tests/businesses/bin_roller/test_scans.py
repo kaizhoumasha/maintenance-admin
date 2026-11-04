@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from sqlalchemy import delete
 
 
 def test_roller_declares_one_scan_contract_and_exact_empty_directions():
@@ -64,16 +63,9 @@ async def test_scan_direction_uses_only_local_suffix_and_current_task(
 
 async def test_consecutive_equal_scans_share_arrival_and_original_message_replay(roller_scans):
     flow = roller_scans
-    first = await flow.scan("SCAN1", "A000000001-B", timestamp=10)
+    await flow.scan("SCAN1", "A000000001-B", timestamp=10)
     await flow.scan("SCAN1", "A000000001-B", timestamp=20)
     await flow.scan("SCAN1", "A000000002-B", timestamp=30)
-    # Technical receipt retention cannot erase the original component association.
-    from app.models import CallbackReceipt
-
-    async with flow.factory.begin() as session:
-        await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.operation_id == first.digest)
-        )
     await flow.scan("SCAN1", "A000000001-B", timestamp=10)
     async with flow.factory() as session:
         facts = await flow.rows(session, "scan_fact")
@@ -82,8 +74,8 @@ async def test_consecutive_equal_scans_share_arrival_and_original_message_replay
         assert facts[0]["arrival_id"] == facts[1]["arrival_id"]
         assert arrivals[0]["scanned_at"] == 10
         assert len(await flow.messages(session)) == 2
-        position = await flow.store.repo.current_position(session, "BIN", "A000000002")
-        assert position["location_code"] == "SCAN1"
+        passages = await flow.rows(session, "bin_passage")
+        assert {r["bin_code"] for r in passages} == {"A000000001", "A000000002"}
 
 
 async def test_distinct_raw_scans_are_not_merged_by_null_parse(roller_scans):
@@ -159,19 +151,14 @@ async def test_scan_payload_preserves_unreadable_but_rejects_wrong_json_type(rol
         assert len(await flow.rows(session, "scan_fact")) == 1
 
 
-async def test_original_message_replay_after_receipt_cleanup_and_binding_change(roller_scans):
+async def test_original_message_replay_keeps_receipt_owner_after_binding_change(roller_scans):
     from sqlalchemy import select
-
-    from app.models import CallbackReceipt
 
     flow = roller_scans
     first = await flow.scan("SCAN2", "A000000001-C", timestamp=10)
     await flow.scan("SCAN2", "A000000001-C", timestamp=20)
     async with flow.factory.begin() as session:
         original = list(await flow.rows(session, "scan_fact"))
-        await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.device_code == flow.devices["SCAN2"])
-        )
     flow.rebuild("second")
     flow.work_line_id = 2
     flow.production.release_requested = True
@@ -181,7 +168,7 @@ async def test_original_message_replay_after_receipt_cleanup_and_binding_change(
         facts = await flow.rows(session, "scan_fact")
         assert list(facts) == original
         assert facts[0]["digest"] == first.digest
-        assert facts[0]["binding_snapshot"]["business_code"] == "first"
+        assert facts[0]["binding_snapshot"]["owner_domain"] == "first"
         assert facts[0]["binding_snapshot"]["work_line_id"] == 1
         admitted = (await session.execute(select(flow.production_table))).mappings().all()
         assert len(admitted) == 1 and admitted[0]["business"] == "first"
@@ -190,67 +177,56 @@ async def test_original_message_replay_after_receipt_cleanup_and_binding_change(
     await flow.scan("SCAN2", "A000000001-C", timestamp=30)
     async with flow.factory() as session:
         assert len(await flow.rows(session, "scan_arrival")) == 2
-        assert len(await flow.messages(session)) == 1
+        assert not await flow.messages(session)
 
 
-async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(
-    roller_scans, monkeypatch
-):
+@pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
+async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(roller_current):
     import asyncio
 
     from sqlalchemy import select
+    from sqlalchemy.exc import DBAPIError
 
-    from app.businesses._components.bin_roller.repository import RollerRepository
-
-    flow = roller_scans
-    if flow.factory.kw["bind"].dialect.name != "postgresql":
-        # SQLite has a single in-memory connection; PostgreSQL proves the actual concurrent writes.
-        return
-    original_latest = RollerRepository.latest_scan
+    flow = roller_current
+    # Seed the existing collection; both receivers establish their old snapshot before the lock.
+    await flow.scan("SCAN1", "NOREAD", timestamp=1)
     barrier = asyncio.Barrier(2)
-    sessions = set()
+    attempts = []
 
-    async def simultaneous_latest(repository, session, point):
-        result = await original_latest(repository, session, point)
-        if id(session) not in sessions:
-            sessions.add(id(session))
-            await barrier.wait()
-        return result
+    async def receive(timestamp):
+        for attempt in range(3):
+            try:
+                async with flow.factory() as session, session.begin():
+                    await session.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    if attempt == 0:
+                        await session.execute(select(flow.store.tables["bin_passage"]))
+                        await asyncio.wait_for(barrier.wait(), 5)
+                    attempts.append(attempt)
+                    await flow.scan("SCAN2", "A000000001-C", timestamp=timestamp, session=session)
+                return
+            except DBAPIError as error:
+                assert getattr(error.orig, "sqlstate", None) == "40001"
+                if attempt == 2:
+                    raise
 
-    monkeypatch.setattr(RollerRepository, "latest_scan", simultaneous_latest)
-    await asyncio.gather(
-        flow.scan("SCAN2", "A000000001-C", timestamp=10),
-        flow.scan("SCAN2", "A000000001-C", timestamp=20),
-    )
+    await asyncio.wait_for(asyncio.gather(receive(10), receive(20)), 15)
     async with flow.factory() as session:
-        assert len(await flow.rows(session, "scan_arrival")) == 1
-        assert len(await flow.rows(session, "scan_fact")) == 2
-        admitted = (await session.execute(select(flow.production_table))).mappings().all()
+        admitted = (await session.execute(select(flow.production_table))).all()
         assert len(admitted) == 1
+        assert len([r for r in await flow.rows(session, "bin_passage") if r["scan2_event_id"]]) == 1
+    assert 1 in attempts
 
 
-async def test_result_separator_stays_with_its_original_arrival_when_stream_changes(
-    roller_scans, monkeypatch
-):
-    from app.businesses._components.bin_roller.repository import RollerRepository
-
+async def test_result_separator_stays_with_its_original_arrival_when_stream_changes(roller_scans):
     flow = roller_scans
     await flow.scan("SCAN1", "A000000001-B", timestamp=10)
     async with flow.factory() as session:
-        old = (await flow.rows(session, "scan_arrival"))[0]
+        old = (await flow.rows(session, "bin_passage"))[0]
     await flow.scan("SCAN1", "A000000002-B", timestamp=20)
-    await flow.result(old["command_code"], "SCAN1")
-    latest = RollerRepository.latest_scan
-    reads = 0
-
-    async def interleaved_latest(repository, session, point):
-        nonlocal reads
-        reads += 1
-        # The receiver observed the old Result before a concurrent receiver committed.
-        return old if reads == 1 else await latest(repository, session, point)
-
-    monkeypatch.setattr(RollerRepository, "latest_scan", interleaved_latest)
+    await flow.result(old["scan1_command_code"], "SCAN1")
     await flow.scan("SCAN1", "A000000002-B", timestamp=30)
     async with flow.factory() as session:
-        assert len(await flow.rows(session, "scan_arrival")) == 2
+        assert len(await flow.rows(session, "bin_passage")) == 2
         assert len(await flow.messages(session)) == 2

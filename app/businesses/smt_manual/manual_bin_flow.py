@@ -15,6 +15,7 @@ from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import EcsEventContext
 from app.integrations.wms_callback import Accepted, CallbackContext, Outcome, Rejected, Unavailable
 from app.models import WorkLine
+from app.reliable import ScopeRef
 
 from .contracts import ADMISSION_DECISION, ManualCompleted
 from .manual_rack_flow import ManualRackFlow
@@ -96,6 +97,7 @@ class ManualBinFlow:
                 task_id=work["task_id"], bin_code=work["bin_code"], scanned_at=work["scanned_at"]
             ),
             operation_id=operation_id,
+            scope=ScopeRef(self.roller.context.domain, "TASK", work["task_id"]),
         )
         await session.execute(
             self.tables["request"]
@@ -129,11 +131,11 @@ class ManualBinFlow:
             pending=True,
         )
 
-    async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> None:
+    async def accept_scan2(self, ctx: EcsEventContext, arrival: Scan2Arrival) -> str:
         table = self.tables["manual_bin"]
         # The ECS binding resolver already holds the original line and source device.
         if await self._one(ctx.session, "manual_bin", table.c.arrival_id == arrival.arrival_id):
-            return
+            return arrival.arrival_id
         current = await self.roller.production.read_current_task(
             ctx.session, work_line_id=arrival.work_line_id
         )
@@ -169,6 +171,7 @@ class ManualBinFlow:
             )
         if reason is None and not deferred:
             await self._request(ctx.session, values)
+        return arrival.arrival_id
 
     async def advance_bin(
         self, session: AsyncSession, *, arrival_id: str, now_ms: int, locked: bool = False
@@ -183,6 +186,10 @@ class ManualBinFlow:
             )
         line = await session.get(WorkLine, located["work_line_id"])
         work = await self._one(session, "manual_bin", table.c.arrival_id == arrival_id, lock=True)
+        if work["task_id"]:
+            task = await self.repository.task(session, work["task_id"])
+            if task is None or task["status"] in ("COMPLETED", "CANCELLED"):
+                return "CLOSED"
         if work["state"] == "DEFERRED":
             task = await self.repository.task(session, work["task_id"])
             current = await self.roller.production.read_current_task(
@@ -376,6 +383,16 @@ class ManualBinFlow:
                 original_operation_id=prior["original_operation_id"] or prior["operation_id"],
             )
             return state
+        task = await self.repository.task(session, notice["task_id"])
+        if task and task["status"] in ("COMPLETED", "CANCELLED"):
+            await self._save(
+                session,
+                "input",
+                table.c.operation_id == operation_id,
+                state="APPLIED",
+                reason="TASK_CLOSED",
+            )
+            return "APPLIED"
         works = self.tables["manual_bin"]
         candidates = (
             (

@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import MetaData, delete, select, update
+from sqlalchemy import MetaData, case, delete, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
@@ -79,7 +79,6 @@ async def manual_sessions(request, tmp_path, postgres_tables):
 async def manual_flow(manual_sessions, monkeypatch):
     from app.businesses import catalog
     from app.businesses._components.bin_roller.composition import COMPONENT as ROLLER
-    from app.businesses._components.bin_roller.models import TABLES as ROLLER_TABLES
     from app.businesses._components.bin_roller.service import BinRoller
     from app.businesses._components.sorting_task.composition import COMPONENT as TASK
     from app.businesses._components.sorting_task.service import SortingTask
@@ -112,7 +111,14 @@ async def manual_flow(manual_sessions, monkeypatch):
         return result
 
     tables = clone(TABLES, "test_smt_manual_")
-    roller_tables = clone(ROLLER_TABLES, "test_smt_roller_")
+    from tests.helpers import copy_roller_tables
+
+    roller_tables = copy_roller_tables(metadata, "test_smt_roller_")
+    for table in roller_tables.values():
+        for number, constraint in enumerate(table.constraints):
+            constraint.name = f"{table.name}_constraint_{number}"
+        for index in table.indexes:
+            index.name = "test_smt_roller_" + index.name
     engine = manual_sessions.kw["bind"]
     entry = business_composition("smt_manual")
     entry.DEFINITION = BusinessDefinition(
@@ -263,7 +269,7 @@ async def manual_flow(manual_sessions, monkeypatch):
             return await deliver(message("issued", data))
 
         async def rows(key, *, component=False):
-            from tests.helpers import bin_roller_query, roller_dispatch_rows, smt_manual_query
+            from tests.helpers import bin_roller_rows, roller_dispatch_rows, smt_manual_query
 
             if component and key in ("rack_cycle", "rack_action", "departure"):
                 async with manual_sessions() as session:
@@ -277,9 +283,10 @@ async def manual_flow(manual_sessions, monkeypatch):
 
                 async with manual_sessions() as session:
                     return await manual_dispatch_rows(session, roller.rack_dispatch, key, lines)
-            query = (
-                bin_roller_query(roller_tables, key) if component else smt_manual_query(tables, key)
-            )
+            if component:
+                async with manual_sessions() as session:
+                    return await bin_roller_rows(session, roller, key)
+            query = smt_manual_query(tables, key)
             async with manual_sessions() as session:
                 return (await session.execute(query)).mappings().all()
 
@@ -306,7 +313,9 @@ async def manual_flow(manual_sessions, monkeypatch):
                     update(ReliableMessage)
                     .where(ReliableMessage.id == row["prepare_message_id"])
                     .values(
-                        status="DONE",
+                        status=case(
+                            (ReliableMessage.status == "ABANDONED", "ABANDONED"), else_="DONE"
+                        ),
                         last_http_status=202,
                         last_verdict="DELIVERED",
                         response_raw=json.dumps(
@@ -449,6 +458,7 @@ async def manual_bins(manual_flow, monkeypatch):
     ecs = EcsCommands(outbox, prefix, Routes(), annexes)
     lifecycle = EcsLifecycle(ecs)
     outbox.lifecycles = {PROTOCOL: lifecycle}
+    flow.task.capabilities.wms.outbox.lifecycles.update(outbox.lifecycles)
     capabilities = replace(flow.task.capabilities, ecs=ecs)
     flow.roller.capabilities = capabilities
     modules = (
@@ -689,7 +699,9 @@ async def manual_racks(manual_flow, monkeypatch):
     )
     wms = flow.task.capabilities.wms
     facts = TargetConfig(prefix + "-facts", "http://facts.test", "wms-facts")
-    wms._outbox = Outbox({**wms.outbox.targets, facts.name: facts}, ADAPTERS)
+    wms._outbox = Outbox(
+        {**wms.outbox.targets, facts.name: facts}, ADAPTERS, lifecycles=wms.outbox.lifecycles
+    )
     capabilities = replace(flow.task.capabilities, transport=transport)
     flow.task.capabilities = capabilities
     flow.roller.capabilities = capabilities
@@ -908,7 +920,7 @@ async def manual_completion_tools(manual_flow, monkeypatch):
                 update(ReliableMessage)
                 .where(ReliableMessage.id == original.id)
                 .values(
-                    status="DONE",
+                    status="ABANDONED" if original.status == "ABANDONED" else "DONE",
                     last_http_status=http,
                     last_verdict="DELIVERED",
                     response_raw=json.dumps(
@@ -959,7 +971,7 @@ async def manual_completion_tools(manual_flow, monkeypatch):
 @pytest.fixture
 async def manual_supply(manual_racks, manual_completion_tools):
     from app.businesses import catalog
-    from app.businesses._components.bin_roller.feed_flow import advance_feed
+    from app.businesses._components.bin_roller.feed_flow import advance_face
     from app.integrations.wms_request import operation
 
     flow = manual_racks
@@ -978,7 +990,7 @@ async def manual_supply(manual_racks, manual_completion_tools):
 
         original = (await flow.rows("supply_demand", component=True))[0]
         async with flow.factory.begin() as session:
-            await flow.roller.advance(session, RollerWorkRef("FEED", original["id"]))
+            await flow.roller.advance(session, RollerWorkRef("FACE", original["id"]))
         if feed:
             entry = (await flow.rows("rack_action", component=True))[0]
             await flow.rack_outcome(entry, face=entry["target_face"])
@@ -1003,7 +1015,7 @@ async def manual_supply(manual_racks, manual_completion_tools):
     async def advance(demand_id):
         async with flow.factory.begin() as session:
             await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
-            return await advance_feed(flow.roller, session, demand_id)
+            return await advance_face(flow.roller, session, demand_id)
 
     async def feed_success(demand_id):
         original = (await flow.rows("feed", component=True))[0]
@@ -1058,6 +1070,7 @@ async def manual_supply(manual_racks, manual_completion_tools):
         )
         assert (await flow.deliver(json.dumps(raw).encode())).status_code == 202
         await advance(demand_id)
+        await advance(demand_id)
 
     flow.start_supply, flow.withdraw_supply = started, withdraw
     flow.feed_success, flow.advance_supply = feed_success, advance
@@ -1068,9 +1081,10 @@ async def manual_supply(manual_racks, manual_completion_tools):
 async def native_manual_sessions(manual_sessions):
     from app.businesses._components.bin_roller.models import TABLES as ROLLER
     from app.businesses.smt_manual.models import TABLES
+    from app.database import SCHEMA
     from app.models import AuditLog
 
-    metadata = MetaData()
+    metadata = MetaData(schema=SCHEMA)
     for table in (*TABLES.values(), *ROLLER.values(), AuditLog.__table__):
         table.to_metadata(metadata)
     engine = manual_sessions.kw["bind"]

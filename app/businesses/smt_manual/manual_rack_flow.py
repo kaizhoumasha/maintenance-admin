@@ -421,7 +421,7 @@ class ManualRackFlow:
                 for member in selected:
                     preparation = (
                         action_id
-                        if member["rack_face"] == face
+                        if action_id and member["rack_face"] == face
                         else member["preparation_action_id"]
                     )
                     if (member["rack_work_id"], member["preparation_action_id"]) == (
@@ -434,9 +434,7 @@ class ManualRackFlow:
                         .where(members.c.id == member["id"])
                         .values(
                             rack_work_id=job.id,
-                            preparation_action_id=action_id
-                            if member["rack_face"] == face
-                            else member["preparation_action_id"],
+                            preparation_action_id=preparation,
                         )
                     )
 

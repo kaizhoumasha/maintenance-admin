@@ -44,7 +44,20 @@ async def test_serialization_retries_whole_advance_in_new_session(manual_host, f
 
 
 @pytest.mark.parametrize(
-    "kind", ["MANUAL_BIN", "MANUAL_COMPLETION", "MANUAL_RACK", "SCAN2_RELEASE", "RACK_REPORT"]
+    "kind",
+    [
+        "TASK",
+        "MANUAL_BIN",
+        "MANUAL_COMPLETION",
+        "MANUAL_RACK",
+        "SCAN2_RELEASE",
+        "RACK_REPORT",
+        "PASSAGE",
+        "RETURN",
+        "FACE",
+        "RACK_CYCLE",
+        "DRAIN",
+    ],
 )
 async def test_isolation_matches_original_work_kind(manual_host, kind, monkeypatch):
     flow = manual_host

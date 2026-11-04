@@ -78,6 +78,9 @@ class CommandView:
     result: dict | None
     hold_reason: str | None
     needs_reconciliation: bool
+    message_id: int | None = field(default=None, kw_only=True)
+    task_type: str | None = field(default=None, kw_only=True)
+    device_code: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

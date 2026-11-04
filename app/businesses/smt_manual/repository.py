@@ -16,6 +16,18 @@ class TaskRepository:
     def __init__(self, *, tables: Mapping[str, Table] | None = None) -> None:
         self.tables = TABLES if tables is None else tables
 
+    async def stop_bin_scheduling(self, session, task_id):
+        table = self.tables["manual_bin"]
+        await session.execute(
+            select(table.c.arrival_id)
+            .where(table.c.task_id == task_id)
+            .order_by(table.c.arrival_id)
+            .with_for_update()
+        )
+        await session.execute(
+            table.update().where(table.c.task_id == task_id).values(pending=False)
+        )
+
     async def task(
         self, session: AsyncSession, task_id: str, *, lock: bool = False
     ) -> RowMapping | None:
@@ -274,8 +286,7 @@ class TaskRepository:
         if (
             scan["point"] != "SCAN2"
             or scan["release_command_code"] != work["command_code"]
-            or not scan["release_call_key"]
-            or not scan["release_record_id"]
+            or not scan["production_record_id"]
             or any(
                 scan[k] != work[k]
                 for k in ("work_line_id", "device_code", "bin_code", "scanned_at")
@@ -284,9 +295,9 @@ class TaskRepository:
             return None
         return FactRef(
             "scan2_release",
-            (scan["id"], scan["release_record_id"]),
+            (scan["id"], scan["production_record_id"]),
             (
-                scan["release_call_key"],
+                f"bin_roller:scan2_release:{scan['id']}",
                 work["command_code"],
                 original["operation_id"],
                 str(original["message_id"]),

@@ -90,7 +90,7 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
             await connection.scalar(
                 text("SELECT version_num FROM enterprise_backend.alembic_version")
             )
-            == "positioncapacity"
+            == "rollerfour"
         )
 
 
@@ -219,3 +219,15 @@ def test_postgres_offline_sql_requires_online_ownership_checks():
     assert result.returncode != 0
     assert "requires online ownership checks" in result.stdout + result.stderr
     assert "CREATE TABLE" not in result.stdout
+
+
+def test_migration_chain_applies_capacity_before_four_table_cutover():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    scripts = ScriptDirectory.from_config(Config("alembic.ini"))
+    heads = scripts.get_heads()
+    assert len(heads) == 1, heads
+    revisions = [r.revision for r in scripts.walk_revisions(base="base", head=heads[0])]
+    assert revisions.index("rollerfour") < revisions.index("rollerfoundation")
+    assert revisions.index("rollerfoundation") < revisions.index("positioncapacity")

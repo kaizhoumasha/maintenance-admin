@@ -174,3 +174,10 @@ POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略�
 扫描首次失败输出完整诊断。同阶段、异常类型、驱动类型、SQLSTATE、缺失对象、约束名和抛出位置均相同的连续失败，在每 60 秒后的下一次失败时汇总总次数与本窗口抑制次数，不重复堆栈。每条汇总仍保留首次诊断的 SQLSTATE、驱动类型、项目内调用位置和修复提示；标准 PostgreSQL 缺列/缺表错误还给出受限格式的 `missing` 对象名，不回显任意驱动消息。错误变化时先用原诊断结算被抑制次数，再立即输出新诊断。完整扫描再次成功后记录一次 `scan recovered`，包含失败总次数、尚未汇总的抑制次数和持续时间；满并发而跳过领取的扫描不作为恢复证据。计数仅保存在当前 Sender 内存中，重启后重新开始。独立投递任务的异常逐条记录，避免合并不同消息的问题。
 
 日志降噪不改变轮询间隔、重试、事务或未知交付处理。`scan recovered` 只表示扫描恢复，不证明消息已交付、设备已执行或业务已完成。
+
+
+### 可终止调度与原执行证据
+
+可终止调度登记可传入冻结 `scope=ScopeRef(owner_domain, "TASK" | "LINE", scope_id)`。`stop_scope` 经原 snapshot lifecycle 锁序将尚未结束的投递置为 ABANDONED，停止后续尝试；不改变原 DISPATCHING/WAITING_RESULT、Result、needs_reconciliation 或原冻结请求。原派发门禁已提交时，该次 HTTP 仍可能发生；晚到发送证据和严格匹配 Result 继续接收，不使 ABANDONED 或父 TASK 复活。
+
+可靠消息上的首个 `dispatch_started_at` 仅为带范围标签的消息记录取得派发权的持久依据，claim/attempts/last_attempt_at 不等价。未标签消息不写入此新增字段；原 EcsCommand 派发记录和 EcsSendEvidence 继续按既有生命周期保存。现有路由、角色、配置代次和原附录授权保持，Sender 不增加业务状态回调。只需读原命令时可使用 `ecs_command.results.get_command`，不创建第二个发送器或 runtime。

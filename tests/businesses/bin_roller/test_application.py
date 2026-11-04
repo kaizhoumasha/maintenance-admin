@@ -44,4 +44,7 @@ def test_one_component_owns_all_four_scan_inputs(roller_declaration):
         "get_supply_progress",
         "release_scan2",
         "get_scan2_release_result",
+        "close_scope",
+        "consume_return_fact",
+        "cleanup_closed",
     }

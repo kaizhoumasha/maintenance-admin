@@ -218,3 +218,108 @@ async def test_pool_unavailable_keeps_original_retry_without_failure_log(
         assert row.status == "PENDING" and not row.delivery_uncertain
         assert row.next_attempt_at is not None and row.attempts == 1
     assert not any(r.getMessage().startswith("reliable delivery failed ") for r in caplog.records)
+
+
+@pytest.mark.parametrize("gate_first", [False, True])
+async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evidence(
+    ecs, gate_first
+):
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.models import EcsCommand, EcsSendEvidence
+    from app.reliable import ScopeRef
+    from app.reliable.store import MessageStore
+
+    scope = ScopeRef(ecs.owner.domain, "TASK", "original")
+    async with ecs.factory.begin() as session:
+        command = await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="scoped",
+            device_code="D1",
+            timeout_ms=30000,
+            command=EcsMove(qty=1),
+            scope=scope,
+        )
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    (claim,) = await store.claim(1, ecs.targets)
+    if gate_first:
+        assert await store.before_send(claim, ecs.targets["ecs"])
+    async with ecs.factory.begin() as session:
+        (stopped,) = await ecs.outbox.stop_scope(session, scope, reason="TASK_COMPLETED")
+        assert stopped.dispatch == ("MAY_HAVE_DISPATCHED" if gate_first else "NEVER_DISPATCHED")
+        current = await session.get(EcsCommand, command.command_code)
+        assert current.status == ("DISPATCHING" if gate_first else "QUEUED")
+        assert current.delivery_status == "ABANDONED"
+    assert await store.before_send(claim, ecs.targets["ecs"]) is None
+    assert not await store.release(claim, ecs.targets)
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, claim.message_id)
+        assert message.status == "ABANDONED" and message.next_attempt_at is None
+        evidence = list(
+            await session.scalars(
+                select(EcsSendEvidence).where(EcsSendEvidence.command_code == command.command_code)
+            )
+        )
+        assert bool(evidence) == gate_first
+    assert not await store.claim(1, ecs.targets)
+
+
+async def test_unscoped_snapshot_preserves_native_dispatch_without_scope_evidence(ecs, delivery):
+    from app.models import EcsCommand, EcsSendEvidence
+
+    delivery.client.results[0] = replace(
+        delivery.client.results[0], headers=(("Content-Type", "application/json"),)
+    )
+    await delivery.send(**delivery.args)
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, delivery.claim.message_id)
+        assert message.status == "DONE" and message.response_raw is not None
+        assert message.scope_owner is None and message.dispatch_started_at is None
+        command = await session.get(EcsCommand, delivery.claim.message.operation_id)
+        assert command.dispatch_started_at is not None
+        assert await session.scalar(
+            select(EcsSendEvidence.id).where(EcsSendEvidence.command_code == command.command_code)
+        )
+
+
+async def test_scope_stop_before_snapshot_send_makes_no_http_request(ecs):
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.reliable import ScopeRef
+    from app.reliable.delivery import send_one
+    from app.reliable.store import MessageStore
+    from app.reliable.testing import ScriptedHttpClient
+
+    scope = ScopeRef(ecs.owner.domain, "TASK", "original")
+    async with ecs.factory.begin() as session:
+        await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="scoped",
+            device_code="D1",
+            timeout_ms=30000,
+            command=EcsMove(qty=1),
+            scope=scope,
+        )
+    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    (claim,) = await store.claim(1, ecs.targets)
+    async with ecs.factory.begin() as session:
+        await ecs.outbox.stop_scope(session, scope, reason="TASK_CANCELLED")
+    client = ScriptedHttpClient()
+    provider = DynamicClients(factory=lambda config: client, capacity=1)
+    try:
+        await send_one(
+            claim,
+            store=store,
+            targets=ecs.targets,
+            adapters=ecs.adapters,
+            clients={},
+            provider=provider,
+            clock=ecs.service.clock,
+            uniform=lambda low, high: high,
+        )
+        assert client.requests == []
+    finally:
+        await provider.aclose()

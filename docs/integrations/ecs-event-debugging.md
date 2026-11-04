@@ -166,3 +166,10 @@ ECS HTTP 200 `{"code":200,"message":"ACK"}` 只确认接收。原设备通过公
 本轮不请求箱格、不执行 PUT_TO_BIN 或 MOVE_TO_NG。FAILED 可使用空 data 和严格 error_detail；SUCCESS 缺少数量仍只保存原证据，停在 MOVE_RECONCILIATION_REQUIRED，不能当作完成或另发命令。错误数量、错误字段类型或错误原命令/设备身份在原 Result 接收边界拒绝。
 
 以上超时和 MOCK 响应是内部开发基线。供应商合同确认、部署与现场物理验收分别记录。
+
+
+### 原 EVENT 读取
+
+正式已注册事件在原 `callback_receipt` 同事务保存 `event_envelope`、最小原 `event_context` 和可选 `application_ref`，handler 失败时与业务/出箱一起回滚。`get_event` / `list_point_events` 是 caller 事务内的纯读函数，不组装 runtime、不消费或补发事件；旧内容缺失明确返回 UNAVAILABLE。列表按 canonical 收据首次受理顺序，技术等价别名不刷新点位顺序。未注册/非法/超限事件沿原诊断策略，仍无未知事件 replay。
+
+EVENT、ecs_send_evidence、ecs_result_evidence 分别表示原扫码事件、命令发送尝试和命令 Result，三者不能互相替代。当前调度引用的 canonical/前驱及点位锚点在同事务清理中受保护；TASK 终态且引用结束后按有限保存期清理，无永久业务历史。

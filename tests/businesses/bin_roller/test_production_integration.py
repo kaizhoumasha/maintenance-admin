@@ -19,6 +19,7 @@ async def test_two_businesses_have_separate_production_ports_and_original_owners
     for timestamp, owner in enumerate(("first", "second"), 1):
         response = await flow.application_scan(owner, "SCAN2", "A000000001-B", timestamp=timestamp)
         assert response.status_code == 200
+        await flow.hosts[owner].scan_pending()
     async with flow.factory() as session:
         rows = (await session.execute(select(flow.production_table))).mappings().all()
         commands = (await session.scalars(select(EcsCommand))).all()
@@ -28,7 +29,7 @@ async def test_two_businesses_have_separate_production_ports_and_original_owners
         }
         assert [command.owner_domain for command in commands] == ["first"]
     second_id = next(row["arrival_id"] for row in rows if row["business"] == "second")
-    with pytest.raises(ValueError, match="original roller record is missing"):
+    with pytest.raises(ValueError, match="original roller checkpoint is missing"):
         async with flow.factory.begin() as session:
             await first.components["bin_roller"].release_scan2(session, arrival_id=second_id)
     await second.complete_production(second_id)

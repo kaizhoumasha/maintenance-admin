@@ -108,6 +108,8 @@ class EcsLifecycle:
         if outcome.result is not None or outcome.delivery_uncertain is True:
             await self.record(session, command, claim, outcome)
         command.delivery_status = outcome.status
+        if outcome.status == "ABANDONED":
+            return
         if command.applied_result_id or command.blocked:
             return
         if outcome.status == "HELD":

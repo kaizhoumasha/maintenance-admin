@@ -5,7 +5,7 @@
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import partial
 
@@ -237,8 +237,32 @@ async def receive_ecs_event(
             business_code=business_code,
             component_key=component_key,
         )
+        await session.execute(
+            update(CallbackReceipt)
+            .where(CallbackReceipt.id == receipt_id)
+            .values(
+                event_envelope=_event(envelope),
+                event_context={
+                    "owner_domain": business_code,
+                    "component_key": component_key,
+                    "work_line_id": binding.work_line_id,
+                    "device_id": binding.device_id,
+                    "device_role": binding.device_role,
+                    "device_version": binding.device_version,
+                    "work_line_version": binding.work_line_version,
+                },
+            )
+        )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
+        if ctx._applications:
+            await session.execute(
+                update(CallbackReceipt)
+                .where(CallbackReceipt.id == receipt_id)
+                .values(
+                    application_ref=asdict(ctx._applications[0]),
+                )
+            )
         if shared and on_business_committed is not None:
             after_commit(session, partial(on_business_committed, business_code))
         elif not shared and on_committed is not None:

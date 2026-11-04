@@ -1,5 +1,8 @@
 # SMT 手工正式组合软件验收
 
+2026-11-03 四表重构后的实体、TASK 终态停发、独立 LINE/WAIT_FACT 与清理边界见[本轮软件验收](2026-11-03-bin-roller-four-table-acceptance.md)及[新设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。下列旧轮次的表数量、service/segment/opportunity/decision 历史结构及终态继续旧调度的叙述仅为历史验收证据，不作为新 runtime 的恢复合同。
+
+
 **2026-11-03 实施状态。** 手工 MANUAL_RACK、MANUAL_BIN、MANUAL_COMPLETION 与组件相关推进在首条 SQL 前采用 SERIALIZABLE。独立 RACK_REPORT 与 SCAN2_RELEASE 保留 REPEATABLE READ。
 
 <a id="position-capacity"></a>
@@ -21,11 +24,11 @@
 
 **2026-11-04 SHIP 复验。** 在上述已推送源码上，独立迁移组 **272 passed / 0 skipped（675.75 秒）**，其余全组 **5,286 passed / 47 skipped（738.07 秒）**，均 exit 0；不重叠并集为 **5,558 passed / 47 SQLite 条件 skipped / 0 failed**。Ruff check、682 文件 format check、diff check 与唯一 head `positioncapacity` 均通过。原始执行日志保存在本机外部目录 `/tmp/maintenance-ship-audits/` 的 `workline-migrations.log`、`workline-tests.log` 和 `workline-lint.log`；该目录不随仓库分发。复验没有补齐上表五组直接验收，PARTIAL 状态保留；下文 5,557 快照不改写为本次结果。
 
-**并行分支边界。** 本迁移读取四表改造前的 BIN_Roller 原面服务关系，因此容量须先于后续四表迁移。两分支尚未完成共同集成；后续分支须接续实际 head，并协调任务终态与原货架外部责任的收口后重新验证，不能以各分支单独通过证明可直接组合。管理调用端改用 `positions`、API/worker/schema 同版切换及供应商/现场验收仍是独立上线前提。
+**并行分支边界。** 本迁移读取四表改造前的 BIN_Roller 原面服务关系，因此容量须先于后续四表迁移。2026-11-04 已在四表分支接入容量，单链为 sharedrackdispatch → positioncapacity → rollerfoundation → rollerfour；组合验证、审查修复及初验失败/复验记录见[四表验收](2026-11-03-bin-roller-four-table-acceptance.md)。实际合入仍按容量 PR #53 → 四表 PR #54，并在 #53 合入后同步 develop、等待 required test。管理调用端改用 `positions`、API/worker/schema 同版切换及供应商/现场验收仍是独立上线前提。
 
 工作位 `positions` 统一配置三类架额度，省略 capacity 默认 1、显式 null 不限额，角色绑定仍为字符串。运行额度与顺序严格限定在本线/本任务/本点；同线仅一个 PREPARING/EXECUTING，后续任务不提前 prepare。五层架和取料架可以真实登记多条原进场 Transport，转运架仍只用首版唯一目标；额度不是同时物理到位架数。只有精确原 ENTER/ROTATE 的点和面可以生产，两个未交出的真实到位持有者会阻止生产。
 
-满额候选保持原 job/order，原 DEPART 有效提交接纳释放后由既有 pending 补位；候选未下发不占额，已提交 outbox 即占额，不因 Sender 尚未发送或父任务终态而撤销。旧任务同点外部责任隔离新任务，旧结果可以收尾，不能新增生产授权。无任务 drain 仍单架串行，原已冻结回箱分配及 FIFO 责任保持。
+满额候选保持原 job/order，原 DEPART 有效提交接纳释放后由既有 pending 补位；候选未下发不占额，已提交 outbox 即占额。与四表整合后的 TASK 终态停止原后续投递；未决原架以 CLOSED_BY_SCOPE/pending 仅消费原事实，严格未派发、原明确拒绝或严格交出接纳成立才解除门禁。旧任务同点外部责任隔离新任务，旧结果可以收尾，不能新增生产授权。无任务 drain 仍单架串行，原已冻结回箱分配及 FIFO 责任保持。
 
 迁移唯一 head 为 `positioncapacity`（前序 `sharedrackdispatch`）：搬迁旧 FIVE 限额、同点别名只一行、其他架位初始 1；历史 Transport 注册顺序决定原进场先后，不排序 UUID；无法归属/排序时在 DDL 前拒绝。有 admission_order 或其他架位非 1 容量时拒绝有损 downgrade。
 
