@@ -1,8 +1,8 @@
 # BIN_Roller 四表软件验收
 
-基线：`caca3c0bef16d6a9eff31ff7628fea0e378a05d3`。工作分支：`feature/bin-roller-four-tables`；独立工作树实现。无提交、推送、部署或运行库操作。旧八表数据不迁移。
+基线：`caca3c0bef16d6a9eff31ff7628fea0e378a05d3`。工作分支：`feature/bin-roller-four-tables`；独立工作树实现。源码已按后续 SHIP 授权提交并推送；未部署或操作运行库。旧八表数据不迁移。
 
-状态：**本地软件实施与验收完成**。实现复审三项修订后，全仓串行回归 5517 passed、118 skipped、零失败，包含本轮新增 40 项回归。历史首轮旧终态断言失败及其修复记录保留在下表。本文件只记录本地软件验证，不证明 ECS/WMS/RCS/现场物理完成。
+状态：**本地软件实施完成，计划中的五组直接验收仍为部分覆盖**，详见下方待验组合。实现复审三项修订后的历史全仓串行回归为 5517 passed、118 skipped、零失败，包含当轮新增 40 项回归；后续 SHIP 复验另列，不覆盖历史记录。历史首轮旧终态断言失败及其修复记录保留在下表。本文件只记录本地软件验证，不证明 ECS/WMS/RCS/现场物理完成。
 
 ## 交付范围
 
@@ -25,11 +25,11 @@ A 不回填旧公共行。B 在任何旧私表删除前检查旧待办、可能�
 
 所有 PostgreSQL/Redis 验证仅使用任务自建可丢弃实例；迁移测试与业务回归分库，最终完整测试串行执行。SQLAlchemy 模型与全新迁移 schema 比对：`alembic check` 返回 No new upgrade operations detected。
 
-最终软件证据（数量存在重叠，不相加）：
+实施阶段历史软件证据（数量存在重叠，不相加）：
 
 | 检查 | 结果及边界 |
 | --- | --- |
-| 复审修订后全仓串行回归（最新） | **5517 passed、118 skipped，零失败，987.79s**；包含本轮新增 40 项回归，配置可丢弃 PostgreSQL/Redis，完整执行至 worker/Beat 和维护任务 |
+| 复审修订后全仓串行回归（历史） | **5517 passed、118 skipped，零失败，987.79s**；包含本轮新增 40 项回归，配置可丢弃 PostgreSQL/Redis，完整执行至 worker/Beat 和维护任务 |
 | 全仓串行回归（原实施首轮） | 5463 passed、118 skipped、1 failed，耗时 997.53s。唯一失败为 worker 用例仍期待已完成 TASK 的 SCAN2 release 保持 pending；按新边界改为关闭后，相关 task/worker/Beat 套件 13 passed。没有将初轮报为全绿或将 skip 计为通过 |
 | 审查修复后 BIN_Roller + smt_manual + rack_dispatch 全套 | 1097 passed、3 skipped，SQLite 与可丢弃 PostgreSQL；3 个跳过为 SQLite 无法证明的并发/隔离分支，PostgreSQL 对应路径已执行 |
 | 两类发送门禁 / scope-stop | 44 passed，含 PostgreSQL stop 持锁时 gate 等待、提交/回滚两种结果 |
@@ -40,7 +40,7 @@ A 不回填旧公共行。B 在任何旧私表删除前检查旧待办、可能�
 | 最终清理专项（含真实交错） | 19 passed；清理持 WorkLine 锁时新 SCAN2 等待，提交后沿原 SCAN1 唯一关联，原事件不悬空 |
 | Ruff / 格式 / diff | 全仓 check、690 文件 format --check、git diff --check 通过 |
 | 结构 | 唯一 head rollerfour；全新 schema 的 alembic check：No new upgrade operations detected |
-| 最终收集 | 5595 tests collected；包含审查期间新增的回归，所有新增项已在上述对应专项执行 |
+| 历史收集快照 | 5595 tests collected 为较早快照，不能作为最终总数；随后历史完整回归为 5517 + 118 = 5635 项 |
 
 全仓回归期间完成审查收敛，随后完整复验受影响业务及 worker/新增迁移与清理用例；未为格式或无关模块反复全量执行。所有列出的测试连接均为本任务可丢弃数据库/Redis；真实本地 Celery worker/Beat 测试使用测试 HTTP 对端。
 
@@ -52,6 +52,24 @@ A 不回填旧公共行。B 在任何旧私表删除前检查旧待办、可能�
 4. 旧共享 MANUAL 搬运的原结果消费、保护位置和历史 fallback 不绑定后续成员覆盖已恢复。夹具先隔离无关旧 BIN 样本，再 A→B，保留 MANUAL/native 身份和正文；恢复用例 6 passed。
 
 四项审查问题均已复核关闭，无遗留 Critical/Important 审查项。
+
+## SHIP 复验与待验组合（2026-11-04）
+
+已推送 `7169d80` 对应的运行时代码完成独立迁移库与业务库复验：迁移套件 **301 passed、0 skipped、0 failed（901.28s）**；其余套件 **5292 passed、44 skipped、0 failed（817.32s）**，合计 **5593 passed、44 skipped，共 5637 项**。44 项为 SQLite 不能证明的条件分支，不计为通过。本轮新增的两项清理保存期校验覆盖 0/-1 在访问存储前拒绝。Ruff、690 文件格式、差异检查及唯一 `rollerfour` head 通过；本次文档同步不再次全量运行测试。
+
+计划逐项审计仍有五组直接验证未完整覆盖，现有通过结果不能代替这些组合；这表示验证缺口，未据此确认运行时缺陷：
+
+- snapshot 门禁与 stop 的独立 PostgreSQL 会话竞争（含其额外生命周期锁）；普通消息竞争已有证据。
+- 跨 owner/工作线的选面外键、当前步骤冲突、关闭行清引用等完整数据库约束组合。
+- 新合格 SCAN1 与 SCAN2 选择前驱的候选集合竞争；现有等价 SCAN2 竞争不等同此项。
+- 业务新意图登记与 TASK 终态关闭的双事务竞争，以及整个关闭事务注入回滚后的原子性。
+- 成功切换时包含其他 owner 的 RackJob、收据、ECS/Result、Transport 等完整混合公共数据保全，以及破坏性 DDL 之后注入 PostgreSQL 失败的回滚证明。
+
+## 与工作线容量分支的集成前提
+
+本分支当前独立迁移链保持不变。与 `feature/workline-position-capacity` 集成时须先合入容量变更：容量迁移读取 B 将删除的旧 demand_id/task 等列，拟议组合链为 `sharedrackdispatch → positioncapacity → rollerfoundation → rollerfour`，仍须正式调整与复验。不得先执行 B 再运行容量迁移。
+
+源码也需协调：本分支 `close_scope` 将架作业设为 `pending=False`，容量准入仍按 pending 查询原架责任，机械组合会遗漏旧架物理责任保护。第二次合入前须明确终态责任合同、将候选排序移植到四表，并处理已识别的 12 处文本冲突/31 条共享修改路径后执行组合验证。此项是跨分支集成前提，不作为本分支新增独立运行时缺陷；尚未证明组合正确，PR 保持 Draft。
 
 ## 未验证边界
 

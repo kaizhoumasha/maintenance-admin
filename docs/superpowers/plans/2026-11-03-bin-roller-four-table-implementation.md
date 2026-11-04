@@ -10,7 +10,7 @@
 
 **Spec:** [四表实体与状态机设计](../specs/2026-11-03-bin-roller-four-table-design.md)，含本轮再审查后的 §8～9、§11～12 与字段精简清单。
 
-日期：2026-11-03。状态：**本地软件实施与验收完成**。以 `caca3c0` 为基线的独立工作树中完成修改；旧数据不迁移。未提交、推送或部署。实际检查与待验边界统一记录在 [软件验收记录](../../testing/2026-11-03-bin-roller-four-table-acceptance.md)。
+日期：2026-11-03；2026-11-04 SHIP 复核。状态：**本地软件实施完成，五组直接验收仍部分覆盖**。以 `caca3c0` 为基线的独立工作树中完成修改；旧数据不迁移。源码已按后续 SHIP 授权提交并推送，未部署或操作运行库。实际检查与待验边界统一记录在 [软件验收记录](../../testing/2026-11-03-bin-roller-four-table-acceptance.md)。
 
 ## Global Constraints
 
@@ -159,7 +159,7 @@ WmsRequests.send、EcsCommands.create、TransportService 的各登记方法增�
 - [x] **Step 2 — 冻结标签。** Draft/OutgoingMessage/Claim 传 scope；business_key 不变。Sender 仅核对消息原身份、状态/租约，scope 只用于 stop 精确选择。
 - [x] **Step 3 — 实现持久派发起点。** gate 在框架事务中确认原消息/租约，仅对带范围标签的消息设置首个 dispatch_started_at，提交后允许原尝试；未标签普通/snapshot 消息保留原保守语义，不扩大新增派发证据及降级限制；无数据库事务/连接跨 HTTP。last_attempt_at/attempts 不能冒充真正派发证据。
 - [x] **Step 4 — 实现 stop。** PENDING/SENDING/STALLED/HELD 的精确标签匹配行停止；snapshot 沿原 lifecycle 锁序，保留既有冻结路由/角色/代次授权门禁及真实证据。ABANDONED 单独处理，不能走默认状态映射把实际 DISPATCHING/WAITING_RESULT 重置 QUEUED；原 Result/核对事实不改。空派发起点且无矛盾原证据才 NEVER_DISPATCHED；TERMINAL 不等于物理完成。
-- [x] **Step 5 — PostgreSQL 交错。** 原 message gate 与 stop 争消息锁，业务不在 Sender 内被查询/锁定；旧租约不能越过 stop，新事务不为旧任务重新入队（后者由 Task 7 业务锁验证）。
+- [ ] **Step 5 — PostgreSQL 交错（部分覆盖）。** 原 message gate 与 stop 争消息锁，业务不在 Sender 内被查询/锁定；旧租约不能越过 stop，新事务不为旧任务重新入队（后者由 Task 7 业务锁验证）。
 
 **Run:** `rtk uv run pytest tests/reliable/test_scope_stop.py tests/reliable/test_delivery.py tests/reliable/test_leases.py tests/reliable/test_postgres.py tests/integrations/ecs_command/test_snapshot.py -q`。
 **Expected:** 两条真实发送路径闭合，非 scope 和原 ECS HOLD/UNKNOWN 行为不被放宽。
@@ -169,7 +169,7 @@ WmsRequests.send、EcsCommands.create、TransportService 的各登记方法增�
 **Files:** Modify `app/businesses/_components/bin_roller/` 的 models/repository/ports/service/composition、`tests/businesses/bin_roller/conftest.py`、`tests/helpers.py` 的对应装配；Create `tests/businesses/bin_roller/test_model_constraints.py`。
 **Interfaces:** 四表键 bin_passage/bin_return/face_work/workline_state，列以设计 §3～7/15 为唯一清单。
 
-- [x] **Step 1 — 写并运行约束失败测试。** 关闭行保留阶段且清引用合法；未关闭 MOVING 缺 Transport、跨 owner/线引用、当前步骤冲突拒绝；WAIT_FACT 无旧选择但有原事实引用合法；同箱关闭旧轮不占当前根唯一键，新轮可登记。
+- [ ] **Step 1 — 写并运行约束失败测试（部分覆盖）。** 关闭行保留阶段且清引用合法；未关闭 MOVING 缺 Transport、跨 owner/线引用、当前步骤冲突拒绝；WAIT_FACT 无旧选择但有原事实引用合法；同箱关闭旧轮不占当前根唯一键，新轮可登记。
 - [x] **Step 2 — 定义四表。** 无 origin_service_id、FaceWork.source_ref、drain_source_ref、旧 ID 映射或别名；scope_kind、终态、分段范围等按设计推导。
 - [x] **Step 3 — 实现状态/身份仓储。** 初次登记生成新 ID，重复当前输入用原唯一依据；旧状态不能伪造新外部身份。WAIT_FACT 与 MOVING 区分的是执行权，不是重复的错误状态。
 - [x] **Step 4 — 适配 fixture。** 独立 MetaData/显式清理，测试不互相导入；允许更新物理表键，不放宽业务断言，不建八表影子。
@@ -184,7 +184,7 @@ WmsRequests.send、EcsCommands.create、TransportService 的各登记方法增�
 
 - [x] **Step 1 — 写失败用例。** 唯一同线同箱/原任务/向前命令前驱才合并；零/多候选、任务不同、旁路、不可读独立；不等 SCAN1 Result，先 SCAN2 后 SCAN1 不反向补绑。
 - [x] **Step 2 — 实现本点优先去重。** 原 receiver 事务按 WorkLine→Devices→宿主→Passage 锁集合，先解析原任务，再重验唯一候选，最后以最终 passage_id 委托；不新增 wire 字段/临时换号。
-- [x] **Step 3 — 验证并发。** 等价 SCAN2 只委托一次，新 SCAN1 不能穿过候选集合锁；技术失败整笔回滚。使用独立 PG 会话和屏障，不用 sleep 充当证明。
+- [ ] **Step 3 — 验证并发（部分覆盖）。** 等价 SCAN2 只委托一次，新 SCAN1 不能穿过候选集合锁；技术失败整笔回滚。使用独立 PG 会话和屏障，不用 sleep 充当证明。
 - [x] **Step 4 — 实现回流本点状态。** SCAN3 无任务独立；SCAN4 不等 SCAN3 Result；孤立 SCAN4 阻挡 FIFO；C07 真失败重扫保留首次序，新轮不继承旧命令。每次原应用关联同事务保存。
 - [x] **Step 5 — 验证点位锚点。** 本点最新已消费 canonical 经过仍是后续判等依据，不能因它“已消费”提前清掉；重复/同码重扫/A→B→A 不误判。
 
@@ -212,7 +212,7 @@ WmsRequests.send、EcsCommands.create、TransportService 的各登记方法增�
 
 - [x] **Step 1 — 固定归属测试。** SUPPLY 窗口中 feed/return 调度意图为 TASK，DRAIN 为 LINE；独立 SCAN3/4 不随无关 TASK 关闭；已提交 facts/report 和结果 ACK 不被批量停掉。
 - [x] **Step 2 — 接入原终态事务。** 真正写 COMPLETED/CANCELLED 时先持原 WorkLine/任务锁，stop 该范围消息、关闭业务后继及原 RackJob 同事务提交。所有创建 TASK 意图入口锁后重验；成员撤回不误关整 TASK。
-- [x] **Step 3 — 验证登记竞争。** 新消息先提交则终态可见并停止；终态先提交则登记方不得新增。关闭回滚不留下半闭合/ABANDONED；发送与业务锁序无环。不得依赖 Sender 查询宿主兜底。
+- [ ] **Step 3 — 验证登记竞争（待直接验证）。** 新消息先提交则终态可见并停止；终态先提交则登记方不得新增。关闭回滚不留下半闭合/ABANDONED；发送与业务锁序无环。不得依赖 Sender 查询宿主兜底。
 - [x] **Step 4 — 实现 TASK 选中 LINE 箱的收尾。** 未登记 Transport 或明确 NEVER_DISPATCHED 时解除选择，按原资格恢复；可能已发时进入 WAIT_FACT，清旧 FaceWork 选择但保留原结果关联，消息仍是原 TASK 且不重试。
 - [x] **Step 5 — 实现事实消费，禁止旧动作恢复。** WAIT_FACT 分支仅用匹配原结果/新可靠物理事实更新 FIFO，不调用 send/create/move/prepare/release。沿原 business 通知和既有 pending/Beat 可消费已到事实，不新建对账/专门轮询任务，不创建旧 TASK 后继；未到事实不因此重新投递。确定在源且资格仍有效才 READY；原最终事实明确且已被真实新轮替代时，以 SUPERSEDED 关闭旧检查点并保留原关联；确定退出则关闭，位置未知保持 WAIT_FACT。
 - [x] **Step 6 — 同步宿主/worker。** PASSAGE/RETURN/FACE/WORKLINE/RACK_JOB 分页，事实消费与动作推进在同入口分支明确区分；RR/SERIALIZABLE/三次整事务恢复保留；独立 LINE 自己的有效 DRAIN 动作可正常恢复。显式停止 LINE 也不能删除未知物理队首；新范围仍看见原 WAIT_FACT，不因重置运行 ID 误判空通道。
@@ -226,10 +226,10 @@ WmsRequests.send、EcsCommands.create、TransportService 的各登记方法增�
 **Interfaces:** A→B 连续追加真实 head。迁移自有冻结表定义；不导入当前业务服务、调用 Sender 或写回旧记录。
 
 - [x] **Step 1 — 写 DDL 测试并确认失败。** 空库直接 head；旧结构带可弃历史可替换；新四表为空；旧表不残留；关闭行/唯一索引符合 metadata。
-- [x] **Step 2 — 写共享数据保全用例。** 旧库预置其他 owner/非 ROLLER RackJob、收据、WMS 消息、ECS/Transport 证据；A/B 后原行数、原字段/正文哈希不变。旧公共 NULL 新列保持 NULL，不回填。
+- [ ] **Step 2 — 写共享数据保全用例（部分覆盖）。** 旧库预置其他 owner/非 ROLLER RackJob、收据、WMS 消息、ECS/Transport 证据；A/B 后原行数、原字段/正文哈希不变。旧公共 NULL 新列保持 NULL，不回填。
 - [x] **Step 3 — 写旧责任拒绝用例。** 由旧私表原 ID 定位仍待发/可能已接纳的 BIN 命令/消息/作业，或宿主活跃引用时，首个破坏性 DDL 前失败；B 执行前原 schema/数据/head 保持（已完成的 A 可保留，不要求撤回整个 A→B 链）。未决清除归另行授权运维，不在迁移里 stop/删除共享行。
 - [x] **Step 4 — 实现 schema 替换。** 无 COPY/INSERT SELECT/循环映射、旧 receipt 恢复、原 scope/FIFO/WAIT 搬运。处理 face_work 同名替换、依赖删除顺序，不用 CASCADE 隐式丢其他业务；正式 runtime 无双路径。
-- [x] **Step 5 — 验证 DDL 失败与降级。** PG 事务失败回滚，SQLite batch 路径明确验证；空新结构可重建空旧表，但不承诺恢复已丢弃历史。新四表非空/公共新语义不可表达时，任何破坏性 downgrade 前拒绝。
+- [ ] **Step 5 — 验证 DDL 失败与降级（部分覆盖）。** PG 事务失败回滚，SQLite batch 路径明确验证；空新结构可重建空旧表，但不承诺恢复已丢弃历史。新四表非空/公共新语义不可表达时，任何破坏性 downgrade 前拒绝。
 
 **Run:** `rtk uv run pytest tests/migrations/test_roller_runtime_foundation.py tests/migrations/test_bin_roller_four_tables.py tests/migrations/test_project_schema.py -q`。
 **Expected:** 单 head、四张新空表、无旧行转换、其他业务原数据保全、旧责任阻止切换；无任何外部发送。
@@ -305,10 +305,12 @@ rtk git diff --check
 
 本轮自审已修正：基础层 scope 授权与全仓事件能力装配过度；TASK 引用转存 LINE 后继续恢复旧动作的边界漏洞；旧数据无需迁移但仍设计兼容 ID/回填/重建的冗余；遗漏的事实报告、点位锚点、清理竞争、共享数据保全和无旧队列切换测试。
 
-完成定义：四表/基础增量/schema 一致，旧 TASK 无新投递，LINE 事实不被误删或转成旧执行权，必要 PG/DDL/回归有真实证据。实际执行状态以下方实施收口与验收记录为准；外部启用合同不计为软件验收通过，未执行运行库切换、提交、推送或部署。
+完成定义：四表/基础增量/schema 一致，旧 TASK 无新投递，LINE 事实不被误删或转成旧执行权，必要 PG/DDL/回归有真实证据。实际执行状态以下方实施收口与验收记录为准；外部启用合同不计为软件验收通过，未执行运行库切换或部署。
 
 
-## 实施收口
+## 实施收口（历史记录）
+
+以下保留实施阶段未授权提交/推送时的检查快照；当前 SHIP 状态以下方复核及验收记录为准。
 
 基线 `caca3c0`、工作分支 `feature/bin-roller-four-tables`，用户要求不提交/推送/部署。本地代码、A/B 脚本、固定清理、宿主/fixture、文档与相关软件检查均已完成；上述复选框只表示本地交付。外部启用合同保留未勾选；没有执行运行库切换。
 
@@ -316,3 +318,12 @@ rtk git diff --check
 
 
 实现复审修订收口：已替代 WAIT_FACT 的明确来源终位以 SUPERSEDED 关闭，未知继续等待；两类 Sender 只对带范围标签的消息写新增派发起点。新增 13 类旧公共/宿主责任独立拒绝迁移用例及未标签投递后基础迁移降级用例。最终全仓串行验证 **5517 passed、118 skipped，零失败（987.79s）**，包含本轮新增 40 项回归；未增加迁移 revision 或执行旧数据搬迁，未提交、推送或部署。详见软件验收记录。
+
+
+## SHIP 复核（2026-11-04）
+
+源码已提交并推送，未部署。计划审计将 snapshot 独立会话竞争、完整模型约束、新 SCAN1/SCAN2 候选竞争、业务登记/终态关闭竞争与回滚、完整混合公共数据保全与注入 DDL 失败这五组列为部分覆盖；对应步骤取消完成勾选，既有专项证据保留。保留测试实际位于 `test_four_table_retention.py`，与计划文件名不同，交付行为不因此缺失。
+
+已推送 `7169d80` 对应运行时代码的 SHIP 矩阵为迁移 301 passed、其余 5292 passed/44 skipped，合计 5593 passed/44 skipped（5637 项），Ruff/690 文件格式/差异检查/单 head 通过。历史 5595 收集快照不再作为最终总数；详细耗时、跳过边界及未覆盖组合见[验收记录](../../testing/2026-11-03-bin-roller-four-table-acceptance.md#ship-复验与待验组合2026-11-04)。
+
+与容量分支集成须容量先行，拟议链为 sharedrackdispatch → positioncapacity → rollerfoundation → rollerfour；当前独立链不修改。合入前还须协调关闭架作业 pending 与容量准入的原物理责任合同、移植四表候选排序、处理 12 处文本冲突/31 条共享修改路径并执行组合检查。尚无组合验证，PR 保持 Draft；详见[集成前提](../../testing/2026-11-03-bin-roller-four-table-acceptance.md#与工作线容量分支的集成前提)。
