@@ -4,7 +4,7 @@ from app.core.identifiers import uuid7
 from app.integrations.wms_transport import BinMove, HandoffPosition, RackBinSlot
 from app.reliable import ScopeRef
 
-from .request.outbound_bin_inbound_batch_v1 import DECISION, OPERATION, InboundBatch
+from .request.bin_inbound_batch_v1 import DECISION, OPERATION, InboundBatch
 
 
 async def read_decision(capabilities, session, *, message_id, operation, operation_id, validator):
@@ -231,7 +231,8 @@ def valid_move(result, *, owner, task_id, client_id, caller, cycle_id=None):
         and result.owner_domain == owner
         and result.transport_task_id == task_id
         and result.client_request_id == client_id
-        and (result.workline_id, result.station_id) == (caller.workline_id, caller.station_id)
+        and (str(result.workline_id), result.station_id)
+        == (str(caller.workline_id), caller.station_id)
         and (cycle_id is None or result.cycle_id == cycle_id)
         and result.kind == "BIN_MOVE"
         and not result.has_pending_outcome

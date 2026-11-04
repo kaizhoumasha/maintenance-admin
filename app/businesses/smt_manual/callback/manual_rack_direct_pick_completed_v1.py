@@ -4,7 +4,7 @@ from ..contracts import DirectPickCompleted
 
 
 @callback_operation(
-    "outbound.manual_rack.direct_pick_completed@v1",
+    "manual_rack.direct_pick_completed@v1",
     data=DirectPickCompleted,
     errors=CallbackErrors("INVALID_DATA", "INVALID_ENVELOPE", "IDEMPOTENCY_CONFLICT"),
 )

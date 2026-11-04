@@ -351,7 +351,7 @@ async def test_return_request_has_only_original_wire_fields(roller_return):
     from pydantic import ValidationError
     from sqlalchemy import select
 
-    from app.businesses._components.bin_roller.request.outbound_bin_return_batch_v1 import (
+    from app.businesses._components.bin_roller.request.bin_return_batch_v1 import (
         ReturnBatchRequest,
     )
     from app.models import ReliableMessage

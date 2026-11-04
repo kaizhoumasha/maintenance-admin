@@ -72,7 +72,7 @@
     "inbounds": [
       {
         "id": 353501602861632,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da71-faf8-7d63-bac1-9cd45de1318c",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:21:42.246814",
@@ -98,7 +98,7 @@
       },
       {
         "id": 353501971206720,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da73-66cc-73bf-bba1-394a9e48d63a",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:23:12.178078",
@@ -124,7 +124,7 @@
       },
       {
         "id": 353502627287616,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da75-b1ed-73c7-b373-da907afc7c9d",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:25:52.354857",
@@ -150,7 +150,7 @@
       },
       {
         "id": 353503241241152,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da78-1710-7885-87b3-776c34191388",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:28:22.24535",
@@ -176,7 +176,7 @@
       },
       {
         "id": 353503855493696,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da7a-6591-7842-b591-b49c81944c25",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:30:52.210125",
@@ -202,7 +202,7 @@
       },
       {
         "id": 353504920633920,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a0da7e-4f63-7cdc-b33a-7ee4791e20c5",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:35:12.25704",
@@ -230,7 +230,7 @@
     "returns": [
       {
         "id": 353502135034432,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da73-ec2a-798c-b948-ca2dfdfff33d",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:23:52.177064",
@@ -257,7 +257,7 @@
       },
       {
         "id": 353502790914624,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da76-5c64-76ab-ba10-75e0a714df4f",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:26:32.304338",
@@ -284,7 +284,7 @@
       },
       {
         "id": 353503405060672,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da78-989f-714e-b282-2ebb34bc6bca",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:29:02.240898",
@@ -311,7 +311,7 @@
       },
       {
         "id": 353504265212480,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da7b-e592-72b9-8799-486c647f2fb7",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:32:32.242241",
@@ -338,7 +338,7 @@
       },
       {
         "id": 353504428864064,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da7c-7c38-76c6-9cb9-e1998aa7c90e",
         "apply_status": "RECONCILING",
         "received_at": "2026-09-25T21:33:12.196197",
@@ -365,7 +365,7 @@
       },
       {
         "id": 353504470053440,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da7c-9303-7fde-b2a9-d6fafcb1d5a0",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:33:22.250795",
@@ -392,7 +392,7 @@
       },
       {
         "id": 353506559111744,
-        "operation": "outbound.bin.return_batch@v1",
+        "operation": "bin.return_batch@v1",
         "operation_id": "01a0da84-5bd3-71b9-8d6c-28d4be3a9c55",
         "apply_status": "APPLIED",
         "received_at": "2026-09-25T21:41:52.271821",
@@ -2062,7 +2062,7 @@
       },
       "inbound": {
         "id": 359505070551616,
-        "operation": "outbound.bin.inbound_batch@v1",
+        "operation": "bin.inbound_batch@v1",
         "operation_id": "01a131ce-9b42-743d-a19c-c4a4af7774ee",
         "apply_status": "APPLIED",
         "received_at": "2026-10-12T20:29:52.604512",

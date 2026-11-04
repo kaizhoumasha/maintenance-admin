@@ -971,8 +971,8 @@ def roller_declaration(monkeypatch):
     monkeypatch.setattr(callbacks, "_registry", {})
     monkeypatch.setattr(requests, "_registry", {})
     request_models = {
-        "outbound_bin_inbound_batch_v1": "InboundBatch",
-        "outbound_bin_return_batch_v1": "ReturnBatchRequest",
+        "bin_inbound_batch_v1": "InboundBatch",
+        "bin_return_batch_v1": "ReturnBatchRequest",
         "workline_return_buffer_drain_rack_decide_v1": "DrainRequest",
         "rack_departure_decide_v1": "DepartureRequest",
     }

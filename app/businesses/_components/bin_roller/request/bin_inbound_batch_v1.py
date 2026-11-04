@@ -9,7 +9,7 @@ from app.integrations.wms_transport.types import validate_face
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")]
 RackFace = Annotated[str, AfterValidator(validate_face)]
-OPERATION = "outbound.bin.inbound_batch@v1"
+OPERATION = "bin.inbound_batch@v1"
 
 
 @request_operation(OPERATION, Endpoint.DECISIONS)

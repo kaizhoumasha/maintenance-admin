@@ -661,7 +661,7 @@ async def manual_racks(manual_flow, monkeypatch):
     flow = manual_flow
     entry = catalog.entries()[0]
     modules = (
-        "app.businesses.smt_manual.callback.outbound_manual_rack_direct_pick_completed_v1",
+        "app.businesses.smt_manual.callback.manual_rack_direct_pick_completed_v1",
         "app.businesses.smt_manual.callback.outbound_return_rack_task_completed_v1",
         "app.businesses.smt_manual.request.outbound_return_rack_arrival_report_v1",
     )
@@ -716,7 +716,7 @@ async def manual_racks(manual_flow, monkeypatch):
     def notification(*, face=None, revision=1, task_id="T1", rack_id="DIRECT", **values):
         raw = json.loads(flow.message("unused", {}))
         raw["operation"] = (
-            "outbound.manual_rack.direct_pick_completed@v1"
+            "manual_rack.direct_pick_completed@v1"
             if face is not None
             else "outbound.return_rack.task_completed@v1"
         )
@@ -975,11 +975,11 @@ async def manual_supply(manual_racks, manual_completion_tools):
     from app.integrations.wms_request import operation
 
     flow = manual_racks
-    module = "app.businesses._components.bin_roller.request.outbound_bin_inbound_batch_v1"
+    module = "app.businesses._components.bin_roller.request.bin_inbound_batch_v1"
     if module in sys.modules:
-        if "outbound.bin.inbound_batch@v1" not in operation._registry:
+        if "bin.inbound_batch@v1" not in operation._registry:
             operation.request_operation(
-                "outbound.bin.inbound_batch@v1", operation.Endpoint.DECISIONS
+                "bin.inbound_batch@v1", operation.Endpoint.DECISIONS
             )(sys.modules[module].InboundBatch)
     else:
         importlib.import_module(module)

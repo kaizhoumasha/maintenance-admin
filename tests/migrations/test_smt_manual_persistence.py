@@ -8,7 +8,7 @@ import sqlalchemy as sa
 OLD = "0177313880f9"
 NEW = "smtmanualcompact"
 BIN_NOTICE = "manual_bin.work_completed@v1"
-RACK_NOTICE = "outbound.manual_rack.direct_pick_completed@v1"
+RACK_NOTICE = "manual_rack.direct_pick_completed@v1"
 PLAN = "sorting.task.plan_delta@v1"
 
 

@@ -770,6 +770,23 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
+        if any(
+            m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members
+        ) and not bins:
+            return False, {}
+        faces = self.roller.repository(task["work_line_id"]).tables["face_work"]
+        if await session.scalar(
+            select(faces.c.id).where(
+                faces.c.scope_id == task["task_id"],
+                faces.c.purpose == "SUPPLY",
+                faces.c.closed_at.is_(None),
+                or_(
+                    faces.c.current_transport_task_id.is_not(None),
+                    faces.c.phase.in_(("FEED_MOVE", "RETURN_MOVE")),
+                ),
+            ).limit(1)
+        ):
+            return False, {}
         for work in bins:
             if not await self.repository.bin_release_evidence(session, self.roller, work):
                 return False, {}

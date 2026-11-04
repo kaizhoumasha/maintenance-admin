@@ -370,7 +370,7 @@ async def test_recorded_unfinished_return_blocks_original_rack(
         decision = await flow.roller.capabilities.wms.get_result(
             session,
             message_id=original["message_id"],
-            operation="outbound.bin.return_batch@v1",
+            operation="bin.return_batch@v1",
             operation_id=original["operation_id"],
         )
         assert decision.response_state == "VALID" and decision.response_code == "DECIDED"

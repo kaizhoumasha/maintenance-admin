@@ -9,7 +9,7 @@ from .definition import DEFINITION as DEFINITION
 COMPONENTS = (SORTING_TASK, BIN_ROLLER, RACK_DISPATCH)
 ENTRY_MODULES = (
     "app.businesses.smt_manual.callback.manual_bin_work_completed_v1",
-    "app.businesses.smt_manual.callback.outbound_manual_rack_direct_pick_completed_v1",
+    "app.businesses.smt_manual.callback.manual_rack_direct_pick_completed_v1",
     "app.businesses.smt_manual.callback.outbound_return_rack_task_completed_v1",
     "app.businesses.smt_manual.request.manual_bin_work_admission_decide_v1",
     "app.businesses.smt_manual.request.outbound_return_rack_arrival_report_v1",
