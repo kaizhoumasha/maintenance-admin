@@ -717,7 +717,7 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        progress = await self.roller.get_supply_progress(
+        all_progress = await self.roller.get_supply_progress(
             session, work_line_id=task["work_line_id"], task_id=task["task_id"]
         )
         active_sources = {
@@ -725,7 +725,17 @@ class SmtManualTaskFlow:
             for m in members
             if m["kind"] == "BIN" and m["status"] != "CANCELLED"
         }
-        progress = tuple(p for p in progress if p.source in active_sources)
+        cancelled_sources = {
+            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+            for m in members
+            if m["kind"] == "BIN" and m["status"] == "CANCELLED"
+        }
+        progress_sources = {p.source for p in all_progress}
+        if progress_sources != active_sources | cancelled_sources:
+            return False, {}
+        if any(p.pending for p in all_progress if p.source in cancelled_sources):
+            return False, {}
+        progress = tuple(p for p in all_progress if p.source in active_sources)
         if len(progress) != sum(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members):
             return False, {}
         for member in members:
