@@ -326,6 +326,7 @@ class TaskRepository:
 
     async def has_pending_plan(self, session: AsyncSession, task_id: str) -> bool:
         table = self.tables["input"]
+        applied = table.alias("applied_plan")
         return bool(
             await session.scalar(
                 select(table.c.operation_id)
@@ -336,6 +337,14 @@ class TaskRepository:
                     table.c.reason.in_(
                         ("PREPARE_PENDING", "MISSING_REVISION", "WORKLINE_DISABLED")
                     ),
+                    ~select(applied.c.operation_id)
+                    .where(
+                        applied.c.task_id == table.c.task_id,
+                        applied.c.operation == table.c.operation,
+                        applied.c.plan_revision == table.c.plan_revision,
+                        applied.c.state == "APPLIED",
+                    )
+                    .exists(),
                 )
                 .limit(1)
             )

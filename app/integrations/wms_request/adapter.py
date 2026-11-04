@@ -69,9 +69,13 @@ class WmsEndpointAdapter:
         ):
             return UNKNOWN
         data = ack["data"]
+        if not isinstance(data, dict):
+            return UNKNOWN
         data_fields = set(data)
         pair = (result.status_code, ack["code"])
         if pair in self.success:
+            if pair == (202, "PREPARE_ACCEPTED"):
+                return Verdict(VerdictKind.DELIVERED, response=result.body)
             if data and pair != (200, "DECIDED"):
                 return UNKNOWN
             return Verdict(VerdictKind.DELIVERED, response=result.body)
