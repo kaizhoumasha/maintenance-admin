@@ -941,6 +941,8 @@ class ManualRackFlow:
                         for a in job.actions
                     )
             elif m["kind"] == "BIN":
+                if m["status"] == "CANCELLED":
+                    continue
                 matched = [
                     p
                     for p in supply

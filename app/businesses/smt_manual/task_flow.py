@@ -720,11 +720,21 @@ class SmtManualTaskFlow:
         progress = await self.roller.get_supply_progress(
             session, work_line_id=task["work_line_id"], task_id=task["task_id"]
         )
-        if len(progress) != sum(m["kind"] == "BIN" for m in members):
+        active_sources = {
+            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+            for m in members
+            if m["kind"] == "BIN" and m["status"] != "CANCELLED"
+        }
+        progress = tuple(p for p in progress if p.source in active_sources)
+        if len(progress) != sum(
+            m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members
+        ):
             return False, {}
         for member in members:
             if member["status"] == "CANCELLED" and not member["cancelled_operation_id"]:
                 return False, {}
+            if member["status"] == "CANCELLED":
+                continue
             if member["kind"] == "DIRECT":
                 if member["status"] not in {"COMPLETED", "CANCELLED"}:
                     return False, {}

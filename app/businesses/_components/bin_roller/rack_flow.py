@@ -248,7 +248,11 @@ async def evaluate_roller_point(roller, session, job):
         return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
             point, "UNKNOWN", tuple(coverage)
         )
-    active = [f for f in faces if f["closed_at"] is None]
+    active = [
+        f
+        for f in faces
+        if f["closed_at"] is None and f.get("demand_state") != "WITHDRAWN"
+    ]
     if (
         ordinary
         and job.actions
@@ -296,8 +300,8 @@ async def evaluate_roller_point(roller, session, job):
             set(candidate["rack_face"]) - done
         ) and not await roller.return_channel_empty(session, work_line_id=repo.work_line_id)
     if ordinary and task.rows and not remaining:
-        return PointDemand(point, "UNKNOWN", tuple(coverage)), DirectHandoff(
-            point, "UNKNOWN", tuple(coverage)
+        return PointDemand(point, "NONE", tuple(coverage)), DirectHandoff(
+            point, "CLEAR", tuple(coverage)
         )
     responsibility = any(f["phase"] != "WAIT_RACK" for f in active)
     return PointDemand(point, "CONTINUE" if remaining else "NONE", tuple(coverage)), DirectHandoff(
