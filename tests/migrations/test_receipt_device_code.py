@@ -1,12 +1,10 @@
-import asyncio
 import os
-import subprocess
-import sys
 
 import pytest
 from sqlalchemy import inspect, text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 BASE = "d7cf20261029"
 REVISION = "ea8b20261029"
@@ -22,13 +20,7 @@ async def receipt_migration(request, tmp_path):
             pytest.skip("requires a separate disposable RECEIPT_DEVICE_MIGRATION_DATABASE_URL")
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": url, "RELIABLE_TARGETS": "{}"},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, command, revision, environment={"RELIABLE_TARGETS": "{}"})
 
     for command in ("upgrade", "downgrade"):
         result = await migrate(command, BASE)

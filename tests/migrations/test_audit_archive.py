@@ -1,9 +1,4 @@
-import asyncio
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select, text
@@ -11,17 +6,7 @@ from sqlalchemy import delete, select, text
 from app.core.identifiers import uuid7
 from app.models import AuditLog, AuditLogArchive, Permission, Role, role_permission
 from app.services.audit_service import archive_old
-
-
-async def _migrate(url, command, revision):
-    return await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", command, revision],
-        cwd=Path(__file__).parents[2],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+from tests.helpers import run_alembic as _migrate
 
 
 @pytest.mark.parametrize("has_archive", [False, True])

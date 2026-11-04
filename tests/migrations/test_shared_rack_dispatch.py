@@ -1,13 +1,11 @@
-import asyncio
 import json
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
+
+from tests.helpers import run_alembic as migrate
 
 ACTIVE = "019a1111-2222-7333-8444-555555555561"
 CANCELLED = "019a1111-2222-7333-8444-555555555562"
@@ -16,16 +14,6 @@ ACK = "019a1111-2222-7333-8444-555555555564"
 ACTIVE_TRANSPORT = "transport-019a1111-2222-7333-8444-555555555565"
 UNBOUND_CYCLE = "019a1111-2222-7333-8444-555555555551"
 UNBOUND_CLIENT = "019a1111-2222-7333-8444-555555555552"
-
-
-async def migrate(url, direction, revision):
-    return await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", direction, revision],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
 
 
 async def test_empty_cutover_round_trip(schema_database):

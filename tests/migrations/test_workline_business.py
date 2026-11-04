@@ -1,8 +1,4 @@
-import asyncio
-import os
 import shutil
-import subprocess
-import sys
 
 import pytest
 from alembic.config import Config
@@ -10,6 +6,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 BASE = "c31f20261027"
 
@@ -46,13 +43,7 @@ async def test_old_line_stays_null_and_selected_business_blocks_downgrade(
     )
 
     async def migrate(direction, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, direction, revision)
 
     up = await migrate("upgrade", "head")
     assert up.returncode == 0, up.stdout + up.stderr

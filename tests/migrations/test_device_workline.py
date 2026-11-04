@@ -1,12 +1,10 @@
-import asyncio
 import os
-import subprocess
-import sys
 
 import pytest
 from sqlalchemy import inspect, text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 HEAD = "11e090516bf1"
 BASE = "a025a20261025"
@@ -22,13 +20,7 @@ async def test_device_migration_preserves_history_and_empty_schema_roundtrips(ba
         url = f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}"
 
     async def migrate(direction, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url, "RELIABLE_TARGETS": "{}"},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, direction, revision, environment={"RELIABLE_TARGETS": "{}"})
 
     up = await migrate("upgrade", HEAD)
     assert up.returncode == 0, up.stderr

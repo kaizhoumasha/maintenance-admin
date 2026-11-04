@@ -1,12 +1,8 @@
-import asyncio
-import os
-import subprocess
-import sys
-
 import pytest
 from sqlalchemy import text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
@@ -18,13 +14,7 @@ async def test_ecs_schema_roundtrip_and_guard_preserve_static_data(backend, tmp_
     )
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, command, revision)
 
     result = await migrate("upgrade", "head")
     assert result.returncode == 0, result.stderr

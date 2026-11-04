@@ -1,7 +1,5 @@
 """STALLED 状态、未知事实标记与未送达计数的迁移:存量回填、约束、安全降级(说明书 §5)。"""
 
-import asyncio
-import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -13,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine as create_async_engine
+from tests.helpers import run_alembic as migrate
 
 BASE, HEAD = "a019b20261021", "a019c20261022"
 ROOT = Path(__file__).parents[2]
@@ -39,17 +38,6 @@ def test_revision_discovery_has_one_head_without_running_migrations():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert len([line for line in result.stdout.splitlines() if line.endswith(" (head)")]) == 1
-
-
-async def migrate(url, command, revision):
-    return await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", command, revision],
-        cwd=ROOT,
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
 
 
 async def query(url, sql, **params):

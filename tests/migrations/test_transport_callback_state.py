@@ -1,14 +1,11 @@
-import asyncio
 import json
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime
 
 import pytest
 import sqlalchemy as sa
 
 from app.database import create_database_engine as create_async_engine
+from tests.helpers import run_alembic
 
 BASE = "a020a20261022"
 REVISION = "a021a20261023"
@@ -59,13 +56,7 @@ async def state_db(request, tmp_path):
     )
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, command, revision)
 
     for step in ("upgrade", "downgrade"):  # 共享库可能已在 head:先收敛到迁移前版本
         done = await migrate(step, BASE)

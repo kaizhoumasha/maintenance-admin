@@ -1,7 +1,3 @@
-import asyncio
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime
 
 import pytest
@@ -10,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.database import create_database_engine as create_async_engine
 from app.models import CallbackReceipt, CallbackSnapshot
+from tests.helpers import run_alembic
 
 BASE = "a023a20261024"
 REVISION = "a024a20261024"
@@ -24,13 +21,7 @@ async def callback_db(request, tmp_path):
     )
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, command, revision)
 
     upgraded = await migrate("upgrade", REVISION)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
