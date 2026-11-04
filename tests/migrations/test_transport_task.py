@@ -1,7 +1,3 @@
-import asyncio
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime
 
 import pytest
@@ -12,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.core.identifiers import uuid7
 from app.database import create_database_engine as create_async_engine
 from app.models import TransportTask
+from tests.helpers import run_alembic
 
 BASE = "a019c20261022"
 REVISION = "a019d20261022"
@@ -31,13 +28,7 @@ async def transport_db(transport_migration_url):
     url = transport_migration_url
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, command, revision)
 
     upgraded = await migrate("upgrade", REVISION)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr

@@ -12,6 +12,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32"
 os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 
+import aiosqlite  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
@@ -50,6 +51,36 @@ from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E40
 from scripts.seed_admin import seed_admin  # noqa: E402
 
 load_business_models()
+
+
+@pytest.fixture(scope="session")
+def sqlite_tables(tmp_path_factory):
+    """Copy an empty fixed schema without sharing engines or case data."""
+    template = None
+
+    async def populate(engine):
+        nonlocal template
+        assert engine.dialect.name == "sqlite"
+        try:
+            if template is None:
+                candidate = tmp_path_factory.mktemp("sqlite-schema") / "base.db"
+                builder = create_async_engine(f"sqlite+aiosqlite:///{candidate}")
+                try:
+                    async with builder.begin() as connection:
+                        await connection.run_sync(Base.metadata.create_all, checkfirst=False)
+                finally:
+                    await builder.dispose()
+                template = candidate
+            async with engine.connect() as connection:
+                raw = await connection.get_raw_connection()
+                # Drain the source worker before resetting the destination on cancellation.
+                async with aiosqlite.connect(f"{template.as_uri()}?mode=ro", uri=True) as source:
+                    await source.backup(raw.driver_connection)
+        except BaseException:
+            await engine.dispose()
+            raise
+
+    return populate
 
 
 @pytest.fixture(scope="session")
@@ -136,15 +167,14 @@ async def postgres_tables():
                 cleanup.push_async_callback(drop_schema, url, schema)
 
 
-# WMS 回调相关的共享存储夹具:SQLite(create_all)与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
+# WMS 回调相关的共享存储夹具:SQLite 空库副本与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
 @pytest.fixture(params=["sqlite", "postgres"])
-async def callback_db(request, tmp_path, monkeypatch):
+async def callback_db(request, tmp_path, monkeypatch, sqlite_tables):
     if request.param == "postgres":
         engine = create_async_engine(request.getfixturevalue("pg_url"))
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}")
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+        await sqlite_tables(engine)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(app.state, "callback_session_factory", factory, raising=False)
     try:
@@ -265,13 +295,12 @@ class FakeRedis:
 
 
 @pytest.fixture
-async def db():
+async def db(sqlite_tables):
     """service 层测试用的独立会话(内存 SQLite)。"""
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await sqlite_tables(engine)
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         yield session
     await engine.dispose()
@@ -282,15 +311,10 @@ async def redis():
     return FakeRedis()
 
 
-@pytest.fixture
-async def client(redis):
-    # 内存 SQLite 隔离测试；StaticPool 让所有连接共享同一个内存库
-    engine = create_async_engine(
-        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+@asynccontextmanager
+async def application_client(factory, redis):
+    overrides = app.dependency_overrides.copy()
+    audit_factory = app.state.audit_session_factory
 
     async def override():
         async with factory() as session:
@@ -299,12 +323,36 @@ async def client(redis):
     app.dependency_overrides[get_session] = override
     app.dependency_overrides[get_redis] = lambda: redis
     app.state.audit_session_factory = factory
-    async with AsyncClient(
-        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-    ) as c:
-        yield c
-    app.dependency_overrides.clear()
-    await engine.dispose()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+        app.state.audit_session_factory = audit_factory
+
+
+@pytest.fixture
+async def client(redis, sqlite_tables):
+    # 内存 SQLite 隔离测试；StaticPool 让所有连接共享同一个内存库
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    try:
+        await sqlite_tables(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with application_client(factory, redis) as client:
+            yield client
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def callback_client(callback_db, redis):
+    async with application_client(callback_db, redis) as client:
+        yield client
 
 
 @pytest.fixture
@@ -416,10 +464,9 @@ async def pg_client(pg_sessions, redis):
 
 
 @pytest.fixture
-async def asset_factory(tmp_path):
+async def asset_factory(tmp_path, sqlite_tables):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await sqlite_tables(engine)
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:

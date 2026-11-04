@@ -1,12 +1,8 @@
-import asyncio
-import os
-import subprocess
-import sys
-
 import pytest
 from sqlalchemy import text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 BASE = "f0b220261031"
 REVISION = "a39a1988a81a"
@@ -21,13 +17,7 @@ async def test_enable_upgrade_preserves_lines_and_disabled_state(backend, tmp_pa
     )
 
     async def migrate(direction, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, direction, revision)
 
     for direction in ("upgrade", "downgrade"):
         result = await migrate(direction, BASE)

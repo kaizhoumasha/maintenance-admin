@@ -1,7 +1,3 @@
-import asyncio
-import os
-import subprocess
-import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,6 +5,7 @@ from sqlalchemy import delete, insert, inspect, text
 
 from app.core.identifiers import uuid7
 from app.models import ReliableMessage
+from tests.helpers import run_alembic
 
 
 @pytest.mark.parametrize("occupied", [False, True])
@@ -33,13 +30,7 @@ async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occup
             await session.commit()
 
     async def migrate(command, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", command, revision],
-            env={**os.environ, "DATABASE_URL": pg_url},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(pg_url, command, revision)
 
     try:
         async with pg_sessions() as session:

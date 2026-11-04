@@ -8,16 +8,7 @@ from sqlalchemy import text
 
 from app.database import create_database_engine
 from app.models import Permission
-
-
-async def run_alembic(url: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", *arguments],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+from tests.helpers import run_alembic
 
 
 async def legacy_database(url, engine):

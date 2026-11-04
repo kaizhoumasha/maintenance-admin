@@ -63,13 +63,8 @@ async def manual_sessions(request, tmp_path, postgres_tables):
             engine = create_database_engine(url)
             stack.push_async_callback(engine.dispose)
             async with engine.begin() as connection:
-                await connection.run_sync(metadata.create_all)
-        try:
-            yield async_sessionmaker(engine, expire_on_commit=False)
-        finally:
-            if not postgres:
-                async with engine.begin() as connection:
-                    await connection.run_sync(metadata.drop_all)
+                await connection.run_sync(metadata.create_all, checkfirst=False)
+        yield async_sessionmaker(engine, expire_on_commit=False)
 
 
 @pytest.fixture
@@ -381,8 +376,8 @@ async def manual_bins(manual_flow, monkeypatch):
     if engine.dialect.name == "sqlite":
         for model in models:
             model.__table__.to_metadata(metadata)
-    async with engine.begin() as connection:
-        await connection.run_sync(metadata.create_all)
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
     devices = {point: prefix + "-" + point for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")}
     route_ids = []
     async with flow.factory.begin() as session:
@@ -607,8 +602,9 @@ async def manual_bins(manual_flow, monkeypatch):
             )
             await session.execute(delete(Device).where(Device.device_code.in_(devices.values())))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id.in_(route_ids)))
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.drop_all)
+        if engine.dialect.name == "sqlite":
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.drop_all)
 
 
 @pytest.fixture

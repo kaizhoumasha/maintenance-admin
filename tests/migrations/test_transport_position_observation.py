@@ -1,7 +1,4 @@
-import asyncio
 import os
-import subprocess
-import sys
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +6,7 @@ from sqlalchemy import MetaData, Table, inspect, null, select
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
@@ -22,13 +20,7 @@ async def test_position_observation_upgrade_preserves_original_tasks(backend, tm
         url = f"sqlite+aiosqlite:///{tmp_path / 'position-observation.db'}"
 
     async def migrate(direction, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url, "RELIABLE_TARGETS": "{}"},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, direction, revision, environment={"RELIABLE_TARGETS": "{}"})
 
     before = "f0b120261030"
     assert (reply := await migrate("upgrade", before)).returncode == 0, reply.stderr

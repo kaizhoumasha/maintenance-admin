@@ -1047,20 +1047,15 @@ async def roller_store(request, postgres_tables):
             engine = create_database_engine(url)
             stack.push_async_callback(engine.dispose)
             async with engine.begin() as connection:
-                await connection.run_sync(metadata.create_all)
-        try:
-            yield SimpleNamespace(
-                schema=schema,
-                factory=async_sessionmaker(engine, expire_on_commit=False),
-                repo=RollerRepository(
-                    "first", 1, rack_dispatch=RackDispatch("first", None), tables=tables
-                ),
-                tables=tables,
-            )
-        finally:
-            if schema is None:
-                async with engine.begin() as connection:
-                    await connection.run_sync(metadata.drop_all)
+                await connection.run_sync(metadata.create_all, checkfirst=False)
+        yield SimpleNamespace(
+            schema=schema,
+            factory=async_sessionmaker(engine, expire_on_commit=False),
+            repo=RollerRepository(
+                "first", 1, rack_dispatch=RackDispatch("first", None), tables=tables
+            ),
+            tables=tables,
+        )
 
 
 @pytest.fixture

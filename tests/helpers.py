@@ -1,5 +1,6 @@
 """跨测试文件共享的辅助函数(夹具放 conftest.py,这里放普通函数)。"""
 
+import asyncio
 import base64
 import json
 import os
@@ -119,6 +120,18 @@ def run_isolated_module(module, arguments, *, cwd, bootstrap="", environment=Non
         capture_output=True,
         text=True,
         timeout=30,
+    )
+
+
+async def run_alembic(url, *arguments, environment=None):
+    """Execute one real migration CLI command and preserve its exit status and output."""
+    return await asyncio.to_thread(
+        subprocess.run,
+        [sys.executable, "-m", "alembic", *arguments],
+        cwd=Path(__file__).parents[1],
+        env={**os.environ, "DATABASE_URL": url, **(environment or {})},
+        capture_output=True,
+        text=True,
     )
 
 
@@ -1326,8 +1339,10 @@ def coarse_sorting_composition(table):
 
 
 @asynccontextmanager
-async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
-    """Formal catalog/default tables with bound lines and only loopback peers."""
+async def formal_manual_fixture(
+    factory, monkeypatch, *, line_count=2, source_profile=None, evidence_path=None
+):
+    """Formal runtime with generated or supplied lines and only loopback peers."""
     import asyncio
     import json
     from types import SimpleNamespace
@@ -1387,6 +1402,15 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
             key: set((await session.execute(select(*table.primary_key.columns))).all())
             for key, table in tables.items()
         }
+    owned_codes = (
+        [d["device_code"] for line in source_profile["lines"] for d in line["devices"]]
+        if source_profile is not None
+        else None
+    )
+
+    def owned_device(column):
+        return column.in_(owned_codes) if owned_codes is not None else column.like(prefix + "%")
+
     peer = FastAPI()
 
     @peer.post("/{path:path}")
@@ -1418,7 +1442,11 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
         elif operation == "outbound.bin.return_batch@v1":
             data = getattr(state, "return_decision", {"result": "NO_BATCH"})
         elif operation == "outbound.bin.inbound_batch@v1":
-            data = getattr(state, "inbound_decision", {"result": "NO_BATCH"})
+            data = getattr(
+                state,
+                "inbound_decision",
+                {"result": "RACK_FACE_DONE" if source_profile is not None else "NO_BATCH"},
+            )
         elif operation == "workline.return_buffer.drain_rack_decide@v1":
             data = {
                 "result": "WAIT",
@@ -1464,39 +1492,86 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
         )
         state.sender = sender
         async with factory.begin() as session:
-            for number in range(1, line_count + 1):
-                devices = {
-                    point: f"{prefix}-{number}-{point}"
-                    for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")
-                }
-                positions = {
-                    slot: f"{prefix}-{number}-{slot}"
-                    for slot in ("FIVE_RACK", "INLET", "OUTLET", "RETURN_RACK", "TRANSFER_RACK")
-                }
-                line = WorkLine(
-                    line_code=f"{prefix}-{number}",
-                    line_name="M6 manual",
-                    business_code="smt_manual",
-                    device_bindings=devices,
-                    position_bindings=positions,
-                )
+            profiles = (
+                source_profile["lines"] if source_profile is not None else [None] * line_count
+            )
+            for number, profile in enumerate(profiles, 1):
+                if profile is None:
+                    devices = {
+                        point: f"{prefix}-{number}-{point}"
+                        for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")
+                    }
+                    positions = {
+                        slot: f"{prefix}-{number}-{slot}"
+                        for slot in ("FIVE_RACK", "INLET", "OUTLET", "RETURN_RACK", "TRANSFER_RACK")
+                    }
+                    line = WorkLine(
+                        line_code=f"{prefix}-{number}",
+                        line_name="M6 manual",
+                        business_code="smt_manual",
+                        device_bindings=devices,
+                        position_bindings=positions,
+                    )
+                else:
+                    devices = {d["role"]: d["device_code"] for d in profile["devices"] if d["role"]}
+                    positions = {p["role"]: p["code"] for p in profile["positions"]}
+                    line = WorkLine(
+                        line_code=profile["code"],
+                        line_name=profile["code"],
+                        business_code="smt_manual",
+                        is_enabled=profile["enabled"],
+                        five_rack_request_limit=next(
+                            p["capacity"] for p in profile["positions"] if p["role"] == "FIVE_RACK"
+                        ),
+                        version=profile["version"],
+                        device_bindings=devices,
+                        position_bindings=positions,
+                    )
                 session.add(line)
                 await session.flush()
                 state.lines.append(line.id)
                 state.devices.append(devices)
                 state.positions.append(positions)
-                for code in devices.values():
+                line_devices = (
+                    profile["devices"]
+                    if profile is not None
+                    else [{"device_code": code} for code in devices.values()]
+                )
+                for device in line_devices:
+                    code = device["device_code"]
                     route = DeviceRoute(id=str(uuid7()), device_code=code, ecs_origin=origin)
                     session.add(route)
                     await session.flush()
                     session.add(
                         Device(
                             device_code=code,
-                            display_name=code,
+                            display_name=device.get("display_name", code),
                             work_line_id=line.id,
                             current_route_id=route.id,
                         )
                     )
+
+        if source_profile is not None:
+            # Validate every active route/target before callbacks can freeze an intent.
+            from urllib.parse import urlsplit
+
+            assert urlsplit(origin).hostname == "127.0.0.1"
+            assert {target["base_url"] for target in targets.values()} == {origin}
+            async with factory() as session:
+                assert set(await session.scalars(select(DeviceRoute.ecs_origin))) == {origin}
+            state.source_mapping = {
+                "checked_at": source_profile["checked_at"],
+                "origin": {"source": source_profile["endpoint_base_url"], "test": origin},
+                "lines": [
+                    {
+                        "source_id": p["source_work_line_id"],
+                        "local_id": line_id,
+                        "code": p["code"],
+                        "version": p["version"],
+                    }
+                    for p, line_id in zip(source_profile["lines"], state.lines, strict=True)
+                ],
+            }
 
         def envelope(operation, data, *, identity=None, timestamp=100):
             identity = identity or str(uuid7())
@@ -1526,7 +1601,9 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                     task_id=task,
                     task_type="MANUAL",
                     business_type=direction,
-                    workline_code=f"{prefix}-{line + 1}",
+                    workline_code=source_profile["lines"][line]["code"]
+                    if source_profile is not None
+                    else f"{prefix}-{line + 1}",
                     queue_revision=1,
                     dispatch_sequence=1,
                 ),
@@ -1554,6 +1631,10 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                 return response
 
         async def dispatch():
+            if source_profile is not None:
+                async with factory() as session:
+                    assert set(await session.scalars(select(DeviceRoute.ecs_origin))) == {origin}
+                assert all(t["base_url"] == origin for t in state.target_config["targets"].values())
             total = 0
             for _ in range(100):
                 count = await sender.tick(maintain=False)
@@ -1579,9 +1660,15 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                         for row in await roller_dispatch_rows(session, state.roller, key, line)
                     ]
                     return sorted(records, key=lambda row: row["id"])
-            query = (
-                bin_roller_query(ROLLER_TABLES, key) if roller else smt_manual_query(TABLES, key)
-            )
+            if source_profile is not None:
+                table = ROLLER_TABLES[key] if roller else TABLES[key]
+                query = select(table).order_by(*table.primary_key.columns)
+            else:
+                query = (
+                    bin_roller_query(ROLLER_TABLES, key)
+                    if roller
+                    else smt_manual_query(TABLES, key)
+                )
             async with factory() as session:
                 return [dict(row) for row in (await session.execute(query)).mappings()]
 
@@ -1615,11 +1702,56 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
         try:
             yield state
         finally:
+            if source_profile is not None:
+                evidence_dir, evidence_name = evidence_path
+                # Evidence is retained before cleanup even when a capacity assertion fails.
+                evidence = {
+                    "mapping": state.source_mapping,
+                    "requests": state.requests,
+                    "observations": getattr(state, "observations", {}),
+                }
+                async with factory() as session:
+                    from dataclasses import asdict
+
+                    from app.businesses._components.bin_roller.service import ROLLER_SOURCES
+
+                    evidence["rack_dispatch/jobs"] = [
+                        asdict(j)
+                        for line in state.lines
+                        for j in await state.roller.rack_dispatch.jobs(
+                            session, work_line_id=line, source_kinds=ROLLER_SOURCES
+                        )
+                    ]
+                    for key, table in tables.items():
+                        evidence["/".join(key)] = [
+                            dict(r) for r in (await session.execute(select(table))).mappings()
+                        ]
+                    for model in (
+                        WorkLine,
+                        Device,
+                        DeviceRoute,
+                        EcsCommand,
+                        ReliableMessage,
+                        TransportTask,
+                        CallbackReceipt,
+                        EcsResultEvidence,
+                        EcsSendEvidence,
+                    ):
+                        evidence[model.__tablename__] = [
+                            dict(r)
+                            for r in (await session.execute(select(model.__table__))).mappings()
+                        ]
+                (evidence_dir / (evidence_name + ".evidence.json")).write_text(
+                    json.dumps(
+                        evidence,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=lambda v: v.decode() if isinstance(v, bytes) else str(v),
+                    )
+                )
             await sender.aclose()
             async with factory.begin() as session:
-                codes = select(EcsCommand.command_code).where(
-                    EcsCommand.device_code.like(prefix + "%")
-                )
+                codes = select(EcsCommand.command_code).where(owned_device(EcsCommand.device_code))
                 await session.execute(
                     delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
                 )
@@ -1630,7 +1762,7 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                     delete(ReliableMessage).where(ReliableMessage.operation_id.in_(codes))
                 )
                 await session.execute(
-                    delete(EcsCommand).where(EcsCommand.device_code.like(prefix + "%"))
+                    delete(EcsCommand).where(owned_device(EcsCommand.device_code))
                 )
                 await session.execute(
                     delete(TransportTask).where(
@@ -1647,7 +1779,7 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                 await session.execute(
                     delete(CallbackReceipt).where(
                         (CallbackReceipt.operation_id.in_(state.receipts))
-                        | CallbackReceipt.device_code.like(prefix + "%")
+                        | owned_device(CallbackReceipt.device_code)
                     )
                 )
                 await clear_test_rack_jobs(session, state.lines)
@@ -1666,11 +1798,42 @@ async def formal_manual_fixture(factory, monkeypatch, *, line_count=2):
                                 )
                             )
                         )
-                await session.execute(delete(Device).where(Device.device_code.like(prefix + "%")))
+                await session.execute(delete(Device).where(owned_device(Device.device_code)))
                 await session.execute(
-                    delete(DeviceRoute).where(DeviceRoute.device_code.like(prefix + "%"))
+                    delete(DeviceRoute).where(owned_device(DeviceRoute.device_code))
                 )
                 await session.execute(delete(WorkLine).where(WorkLine.id.in_(state.lines)))
+
+            if source_profile is not None:
+                async with factory() as session:
+                    counts = {
+                        "/".join(key): await session.scalar(
+                            select(__import__("sqlalchemy").func.count()).select_from(table)
+                        )
+                        for key, table in tables.items()
+                    }
+                    counts.update(
+                        {
+                            model.__tablename__: await session.scalar(
+                                select(__import__("sqlalchemy").func.count()).select_from(model)
+                            )
+                            for model in (
+                                WorkLine,
+                                Device,
+                                DeviceRoute,
+                                EcsCommand,
+                                ReliableMessage,
+                                TransportTask,
+                                CallbackReceipt,
+                                EcsResultEvidence,
+                                EcsSendEvidence,
+                            )
+                        }
+                    )
+                (evidence_dir / (evidence_name + ".cleanup.json")).write_text(
+                    json.dumps(counts, indent=2)
+                )
+                assert all(n == 0 for n in counts.values()), counts
 
 
 async def clear_test_rack_jobs(session, lines):

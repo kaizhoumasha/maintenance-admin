@@ -1,7 +1,5 @@
-import asyncio
 import os
-import subprocess
-import sys
+import shutil
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -11,10 +9,26 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
+
+
+@pytest.fixture(scope="session")
+def sqlite_migration_start(tmp_path_factory):
+    templates = {}
+
+    async def copy(revision, destination):
+        if revision not in templates:
+            template = tmp_path_factory.mktemp("migration-start") / "state.db"
+            result = await run_alembic(f"sqlite+aiosqlite:///{template}", "upgrade", revision)
+            assert result.returncode == 0, result.stdout + result.stderr
+            templates[revision] = template
+        shutil.copyfile(templates[revision], destination)
+
+    return copy
 
 
 @pytest.fixture
-async def state_migration(request, tmp_path):
+async def state_migration(request, tmp_path, sqlite_migration_start):
     key, backend, *initial = request.param
     if backend == "sqlite":
         url = f"sqlite+aiosqlite:///{tmp_path / 'state.db'}"
@@ -29,13 +43,7 @@ async def state_migration(request, tmp_path):
     engine = create_database_engine(url)
 
     async def migrate(direction, revision):
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url},
-            capture_output=True,
-            text=True,
-        )
+        result = await run_alembic(url, direction, revision)
         assert result.returncode == 0, result.stdout + result.stderr
 
     async def schema_snapshot(prefix):
@@ -85,9 +93,12 @@ async def state_migration(request, tmp_path):
             return await connection.run_sync(inspect_schema)
 
     try:
-        if initial:
-            await migrate("downgrade", "base")
-        await migrate("upgrade", initial[0] if initial else "head")
+        if backend == "sqlite" and initial:
+            await sqlite_migration_start(initial[0], tmp_path / "state.db")
+        else:
+            if initial:
+                await migrate("downgrade", "base")
+            await migrate("upgrade", initial[0] if initial else "head")
         yield SimpleNamespace(
             engine=engine, migrate=migrate, backend=backend, schema_snapshot=schema_snapshot
         )

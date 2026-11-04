@@ -1,13 +1,11 @@
-import asyncio
 import json
 import os
-import subprocess
-import sys
 
 import pytest
 from sqlalchemy import text
 
 from app.database import create_database_engine
+from tests.helpers import run_alembic
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
@@ -22,13 +20,7 @@ async def test_existing_worklines_receive_empty_bindings_and_bound_data_blocks_d
         url = f"sqlite+aiosqlite:///{tmp_path / 'bindings.db'}"
 
     async def migrate(direction, revision):
-        return await asyncio.to_thread(
-            subprocess.run,
-            [sys.executable, "-m", "alembic", direction, revision],
-            env={**os.environ, "DATABASE_URL": url, "RELIABLE_TARGETS": "{}"},
-            capture_output=True,
-            text=True,
-        )
+        return await run_alembic(url, direction, revision, environment={"RELIABLE_TARGETS": "{}"})
 
     base = await migrate("upgrade", "11e090516bf1")
     assert base.returncode == 0, base.stderr
