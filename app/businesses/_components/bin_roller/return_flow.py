@@ -1,8 +1,8 @@
 """FIFO allocation, independent return facts and the current finite LINE run."""
 
+import logging
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
-import logging
 
 from sqlalchemy import select
 
