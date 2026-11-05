@@ -323,6 +323,23 @@ async def test_unknown_return_keeps_original_transport_and_corrected_result(roll
         assert await flow.consume_return(session, face_id) == "RETURN_SUCCEEDED"
 
 
+async def test_return_success_requires_target_placed_fact(roller_return):
+    flow = roller_return
+    await flow.bins(1)
+    async with flow.factory.begin() as session:
+        face_id = await flow.selected(session)
+        await flow.start(session, face_id)
+        await flow.decide(session, face_id)
+        await flow.consume_return(session, face_id)
+    await flow.success(face_id, placed=False)
+    async with flow.factory.begin() as session:
+        assert await flow.consume_return(session, face_id) == "WAITING_FOR_RETURN_RESULT"
+        assert (await flow.roller.original_record(session, "face_work", face_id))["step_id"]
+    await flow.success(face_id, placed=True, revision=2)
+    async with flow.factory.begin() as session:
+        assert await flow.consume_return(session, face_id) == "RETURN_SUCCEEDED"
+
+
 @pytest.mark.parametrize("http,code", [(503, "UNAVAILABLE"), (409, "CONFLICT"), (422, "REJECTED")])
 async def test_original_request_failure_never_becomes_no_batch(roller_return, http, code):
     flow = roller_return

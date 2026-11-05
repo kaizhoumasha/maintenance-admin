@@ -311,10 +311,8 @@ async def advance_return(roller, session, face_id):
             outcome["status"] == "SUCCEEDED"
             and not outcome.get("position_unknown")
             and outcome["final_position"] == targets[member["bin_code"]]
-            and (
-                member_facts is None
-                or member_facts.get("TARGET_PLACED") == targets[member["bin_code"]]
-            )
+            and member_facts is not None
+            and member_facts.get("TARGET_PLACED") == targets[member["bin_code"]]
         )
         all_success &= success
         if (
