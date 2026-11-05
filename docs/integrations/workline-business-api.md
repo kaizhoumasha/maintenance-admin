@@ -14,6 +14,7 @@
 | [业务开发唯一用法设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md) | 唯一公开模型 API、命令声明、业务目录及迁移边界 | 已实现；MOCK 与内部验证结果见当前验收说明 |
 
 业务使用模型 send/create、`@ecs_command(..., device_roles=(...))` 及 composition `COMMANDS`，catalog 内部编译；业务目录唯一为 `app/businesses/<business>/`。
+2026-11-03 用户确认的工作线配置分别维护于[手工KT16/KT18](manual-picking-api.md#manual-config)、[自动KT11/KT14](smt-auto-api.md#auto-config)及[自动线ECS位置映射](smt-auto-api.md#auto-ecs-locations)。四线非机械臂设备共用`{ECS_SHARED_ORIGIN}`，自动线两组机械臂另用各自服务；现场OUTxx/CNVxx用于WMS/RCS，机械臂使用独立内部位置常量。本次配置记录不表示已保存、部署或通过现场验收。
 最短调用见[注册指南](registration.md)与[ECS 命令](ecs-command.md)，模型约束、不兼容变化及可执行证据见
 [验收说明](business-development-single-api-acceptance.md)。这些能力不登记新的真实 operation 或业务。
 

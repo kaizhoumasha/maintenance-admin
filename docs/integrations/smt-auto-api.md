@@ -1,10 +1,32 @@
 # SMT 自动上架与拣料 API 对接文档
 
-> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+**当前工作区状态（2026-11-05）**　见[SMT AUTO 实施与验收](../testing/smt-auto.md)。入库、出库正常流、共同原释放/完成确认及实际宿主已接入隔离装配，代码迁移 head 为 `smtautosources`。出库空取和 NG 已按本方确认的规则接入隔离装配，ECS/WMS 联调和实机验收待完成。下文任务记录中的状态与测试数字保留当时范围。
 
-合同版本日期：2026-10-31；交付状态核对：2026-11-02。本文统一维护smt_auto的AUTO/inbound和AUTO/outbound合同：共同项只定义一次，方向差异使用严格字段联合、差异表与专属子节。交付状态：**本方合同/设计，共享任务ST1/ST2已随[PR #44](https://github.com/kaizhoumasha/maintenance-admin/pull/44)合入develop（380aeba）；smt_auto业务实施、正式注册及部署仍未完成；完整人工首宿主及BIN_Roller后续收敛已随PR #47/064b5c8合入，既有软件证据见[手工记录](../testing/smt-manual.md#current-delivery)，真实对端联调和现场验收仍未执行。** 示例仅供对接，不表示已发送或设备已接受。
+当前实现核对：2026-11-05，develop 基线 `98008ff`；原 AUTO S1 foundation 的7表及 `smtautofoundation` 是历史基线。本工作区 ORM 已有11张AUTO表及原成员/输入/首目标的 typed job/action 引用；增量迁移链为 `smtautofoundation` → `smtautorackfacts` → `smtautofirstplan` → `smtautosourcearrival` → `smtautofirstdeadline` → 唯一代码 head `smtautobarcode`；Task 10/11增补原首问/终局、原到位时间和期限typed字段，保留既有表/身份/数据，有证据时拒绝有损降级。迁移未应用，既有部署未改变；手工宿主5表、BIN_Roller 4表、RackDispatch 2表保持。**S1/S2整体未完成，AUTO未正式注册/装配或现场验收**；PR #49 表数及 `sharedrackdispatch` 仅为历史快照。
 
-跨仓库资料引用中，已提交且本地未改动的实现/附录/Markdown说明固定到源仓库已发布提交；尚未提交的WMS合同修订和未纳入源仓库提交的PDF仅保留明确来源路径，不作为可下载链接。本PR不发布这些源工作区材料，本方字段/响应仍以本文为准，对端签认及真实联调仍待独立验收。
+Task 8历史有界进展（2026-11-05，未提交）：在Task 7公共三类AUTO来源/固定模板基础上，真实持久化 `AutoRackPorts` 已提供原任务/工作线十一类集合的 FactRef/Coverage、PointDemand/DirectHandoff、原 DeviceBinding 快照与当前绑定/代际/启用归属核对，以及初始 ENTER 和原最终 BIN/RackSlot 目标 ROTATE 门禁。WORK_PLAN只认对应真实 operation、原subject/request及完整 HTTP 200/DECIDED/READY；最终决定按原盘主体分别核对 `outbound.bin.material.decide@v1` / `outbound.rackslot.material.decide@v1` 的原请求、完整最终 ACCEPT 和目标。RackSlot来源还须原准备动作 APPLIED/SUCCEEDED，原目标/实际/当前point与face精确一致；原pending/applied动作重放复用原身份且不新增意图，原引用/动作/outbox同事务回滚；旧PUT、报警、未知物理责任及非空 `physical_closure_basis` JSON不能据此授予CLEAR。聚焦组合验证 **339 passed / 118 skipped**，独立有界复审无未解决Important/Critical；该测试结果来自实施报告，非本次文档同步重跑。生产Alembic RackJob来源CHECK仍只允许原四来源，保留扩充归S6；不得据此创建真实AUTO job。具体AUTO ECS合同/公开严格物理Result读者、方向完整writer、NEXT/RETRY/取尽运行写入、完整锁集/40001事务装配、资源现场准入及catalog激活仍未实施；PostgreSQL/SSI、全仓库、浏览器及现场未验证。
+
+Task 9历史有界进展（2026-11-05，未提交）：真实 AUTO `RollerPorts` 已提供当前/后继任务、原计划顺序供给面及 SCAN2 原到箱关联；当前 PREPARING/EXECUTING 保留原任务身份，有效性核对恰好一条原PREPARE关联、精确 `sorting.task.prepare@v1` operation及原已消费 PREPARE_ACCEPTED、启用及宿主/编码，revision 0不被排除。错误operation或多条PREPARE关联保留原无效任务，后继为 `CHECKING`，SCAN2冻结原方向并保持 `CONTEXT_NOT_READY`/nonpending。SCAN2冻结原arrival/line/device/bin/scanned_at/task/方向，重放先返原关联，不随取消或配置变化改绑。宿主注入实际 `BinRoller` 时，规范已应用计划及实际供给成员撤回以原输入change_id、精确版本成员引用，在同一调用方事务交付公共 `apply_supply_change`；重复、别名确认及已撤回不重复交付。未注入时没有供给交付，也不证明以后自动补送。聚焦适配器 **15 passed**，AUTO/BIN_Roller/RackDispatch/迁移有界组合 **668 passed / 384 skipped**；证据来自Task 9实施报告，独立有界复审PASS，本次文档同步未重跑。SQLite证据不证明PostgreSQL锁/SSI；未完成全S2验收。S5仍须权威原在制查询、无任务旁路门禁、原释放决定/命令/结果消费、方向首次WMS work_plan及原完成确认恢复；`NO_TASK`/pending只保留关联，不授权旁路或证明释放，历史COMPLETION请求仍保守保持 `CONFIRMATION_PENDING`，`CONTEXT_NOT_READY`不自动激活。S6实际组件注入、唯一正式runtime装配/catalog激活及完整receiver路径仍未实施；11张AUTO表及代码head不变，迁移未应用，无真实WMS/ECS、部署或现场验收。 以下Task 10/11状态取代本段当时的S5待实现/代码head及事务缺口描述；历史测试数字不变。
+
+Task 12当前有界进展（2026-11-05，未提交）：正常 inbound I2 已贯通原 READY/NEXT 授权→原架侧取盘→实际原 SUCCESS/1/PUT_FINISHED 及完整 barcode/scanned_at→`putaway.material.decide@v1`→当前 ACCEPT 的原 BIN 侧放盘→实际原成功 Result→`putaway.material.movement_report@v1`→严格原公开报告收妥→TaskFlow 原 BIN 释放及实际 roller MOVE_FORWARD Result。无效 NEXT 不阻合法当前 PUT/报告，也不能伪装无后继或闭箱；有效 NEXT 创建独立下一盘。非空物理/报告闭合须实际注入可选 normal-inbound 证明读者，重读原公开命令及报告身份/状态/数据；裸 JSON、时间戳或 ACK 不足，未注入仍保守阻塞。正常正例保留独立活跃来源责任，task 仍为 EXECUTING，不证明来源离场或整单完成。
+
+原来源取尽修正已按原已消费 MATERIAL_DECIDE 的公开严格 ACCEPT/source_rack_exhausted、原盘/任务/请求/目标及原 RackDispatch job/action/到位资源证明派生，立即排除后续 work_plan/material_decide 的 source_racks、新取盘准入及迟到原 READY 消费；重启/重放仍保留原身份，回滚不遗留消费事实，同码新 job 不继承旧到位取尽。当前已合法授权的 PUT/报告继续；取尽后的 PointDemand NONE 不等于 DirectHandoff CLEAR，不制造撤回、离场或释放证明。原始空目标占用 0/0、完整 Unicode 条码最多1000 code point 保持；新增双向 barcode 扩容迁移 `smtautobarcode` 接 `smtautofirstdeadline`，降级先核对两表并拒绝有损收窄，仍11表、迁移未应用。
+
+`BIN_ARM`/`RACK_ARM` 为内部逻辑角色，正常两段共用严格命令声明；每线原身份/版本、来源工位映射及两臂 timeout 必须 typed 注入，不取示例30000默认值。1..2**63-1仅协议数值边界，不代表供应商/现场 timeout 签认；S6必须提供真实配置适配及正式组件/catalog/runtime装配。Task 12修正受影响快照 **224 passed**，最后补原资源/点位/工作线核对后的 inbound 独立快照 **26 passed**，数字不可相加或当最终组合；修正后最终组合门槛 **1297 passed / 650 skipped（102.53s）**，精确命令见Task 12实施报告；这是受影响组合证据，不代表全仓库或PostgreSQL验证，本次文档同步未重跑。原独立复审的重要取尽问题及修正见实施报告，尚不据此声称全 I2/S2 验收通过。NG、空取/重试、outbound实际执行、material WAIT重求值、迟到结果更正、来源交出/整单闭合、撤回never-started、生产RackJob来源CHECK扩充（仍原四类）、PostgreSQL迁移/锁/SSI及现场验收仍明确开放；无正式激活、真实发送、部署或现场完成。
+
+Task 10/11历史有界进展（2026-11-05，未提交）：`WorkPlans` 已实现三方向首问（inbound BIN、outbound BIN、outbound RETURN）及严格 READY/WAIT/NO_WORK 原请求/公开结果消费。RETURN 的 `arrived_at_ms` 仅在原 ENTER/ROTATE 首次可靠 APPLIED/SUCCEEDED 且原任务、成员、绑定、point/face 核对通过时同事务写一次；迟到首问/恢复/WAIT沿用原时间，历史缺失不得用后来时间补造。WorkPlans/AutoRackPorts共用 WorkLine → Devices → RackJobs → 固定顺序AUTO主体 → RackActions 锁序；锁集漂移整事务重试。
+
+Task 11 的共同 `TaskFlow` 已提供原线/BIN在制查询与原任务责任保持、无任务/矛盾到位暂缓、同事务原释放决定及实际 BinRoller `release_scan2` 命令引用；只认公开原命令严格 SUCCESS/SUCCEEDED 且无hold/reconciliation的释放结果。完成确认复用严格 CompletionConfirm/CompletionDecision，保留原请求身份、版本及恢复责任，COMPLETED重查当前依据，STALE须严格超过原请求版本；有效非终局按原到期/新依据恢复原held首问，CONTEXT_NOT_READY/ORIGINAL_INPROCESS不自动放行。可选首计划等待默认None，原prepare首次可靠接纳时冻结显式配置及期限（含时间0），重启/改配置不刷新。独立入口首SQL前SERIALIZABLE，RackLockSetChanged/40001含commit最多三次新会话整事务重试；不改变receiver的RR合同。两方向已通过原WAIT完整链→到期续问→NO_WORK→实际原释放SUCCESS→CONFIRMING→COMPLETED的隔离公开入口回归，核对每轮原关联、连续编号、前序链接、scan上下文、严格公开结果及原retry/due依据；孤儿、未决及损坏历史仍阻完成。
+
+Task 10/11独立有界复审均PASS，最终受影响组合 **928 passed / 388 skipped** 包含到位时间、锁序、STALE/物理标记及WAIT链修正；这是实施报告证据，本次文档同步未重跑，也不代表全仓库验证。当时真实方向正常生产ECS/报告writer、非空物理责任闭合及撤回成员严格never-started证明仍缺失并保守阻塞（正常 inbound 局部能力以下述Task 12状态为准），不以JSON/ACK/空进度替代。S1/S2/S5整体验收仍未完成；S6正式catalog/runtime、组件/资源政策与生产RR装配、PostgreSQL锁/SSI及生产RackJob来源CHECK扩充仍为前置门槛（现仍仅原四来源）。无真实WMS/ECS请求、迁移应用、部署或现场验收。
+
+ENTER/ROTATE只认原严格已应用成功及精确point/face；DEPART/RACK_MOVE+CTU03/F01按公共原提交接纳完成调度，ZONE/不同RACK_POSITION（含生产线工作位）相同，后续结果仅备查、不回退/重搬。该接纳不证明机械臂取放、报告、SCAN2释放或整单完成。公共与宿主事实分工见[总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)及[#49复审](../superpowers/reviews/2026-11-03-smt-auto-pr49-plan-review.md)。
+
+跨仓库已提交参考仍固定原提交；未交付对端合同/PDF仅作明确来源，不表示已签认。wire operation、字段、有效摘要、原身份/字节/owner/路由/期限不因此次规划重排而改变。
+
+当前共享边界：复用工作线 `positions[].capacity` 的共享、按本任务/点位准入：额度只约束当前任务在该点的申请，不预准备未来任务，不另设AUTO额度。容量不证明物理到位、交接或任务完成；roller原CTU01/公共job释放责任仍由组件维护。新工作须核对 WorkLine 的原业务、启用状态及编码/归属；停用、删除或改绑不能清除原结果、必报、已开始动作与原身份恢复责任，也不能授权新生产。KT16/KT18 的 `smt_manual` 配置不构成AUTO验收；AUTO只用隔离fixture及KT11/KT14目标配置，本轮不操作现场。
+
+共享 `PrepareAccepted` 只在原请求公开结果 `FOUND/VALID` 且 HTTP `202/PREPARE_ACCEPTED` 时按其解析器消费，`data` 不要求 `result`、版本或重试字段，额外data字段按该模型忽略；这不放宽 `CompletionDecision` 的严格分支或其他协议。早到计划须WMS重试原消息，在原prepare可靠保存后重新核验；不得prepare一到便自动应用。AUTO宿主已有调用方事务内的持久队列领取、唯一原prepare登记/公开原结果消费及TaskHost原计划重验入口；Task 6已通过测试专用catalog/runtime、真实共享WMS receiver及公开WmsRequests/Outbox结果口验证早到503原收据/BLOCKED、原prepare接纳不自动应用、原重试202/重复200空data、两方向成员/版本/输入/收据原子回滚及原归属恢复。新增仅供当前S1 prepare领取/原结果消费的AutoS1Transactions独立入口，首SQL前SERIALIZABLE，40001含commit最多三次新会话整事务重试；耗尽保留已提交原身份/pending，不改receiver的RR合同。聚焦验证221 passed / 82 skipped；本次未配置TEST_DATABASE_URL，PostgreSQL用例跳过。设备/位置/方向完整资源声明与准入、正式catalog/runtime激活及PostgreSQL锁/SSI并发证据仍开放；SQLite及注入40001不证明真实SSI冲突或物理完成。
 
 ## 目录
 
@@ -15,16 +37,16 @@
 - [5. 共同授权、等待、关联与收口](#production-rules)
 - [6. 货架资源、准备与原搬运](#rack-flows)
 - [7. ECS公共协议与方向参数](#ecs)
-- [8. BIN_Roller统一接缝](#roller-seams)
+- [8. BIN_Roller与RackDispatch接缝](#roller-seams)
 - [9. 公共协议、字段、幂等与保存](#protocol)
 - [10. 交付依赖与统一验收](#delivery)
 
-快速定位：[plan_delta资源联合](#task-plan) · [完成前置差异](#task-completion-conditions) · [WAIT](#production-wait) · [原箱释放](#scan2-release) · [入库7天保留](#inbound-retention)。
+快速定位：[KT11/KT14配置与ECS位置映射](#auto-config) · [plan_delta资源联合](#task-plan) · [完成前置差异](#task-completion-conditions) · [WAIT](#production-wait) · [原箱释放](#scan2-release) · [入库7天保留](#inbound-retention)。
 
 <a id="business-scope"></a>
 ## 1 业务范围、主体与方向
 
-`smt_auto` 是一个业务子包，统一任务、队列、版本、服务、工厂和 `scan_pending`。工作线绑定宿主；原 `issued.task_type=AUTO`、不可变 `business_type=inbound|outbound` 决定内部生产流程。人工两方向仍归 [smt_manual](manual-picking-api.md)。[业务设计](../superpowers/specs/2026-10-31-smt-auto-business-design.md)维护代码归属；[数据模型草案](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md)维护拟定持久化实体/约束及待收敛边界，不增加wire字段。六类任务合同及分派共用[sorting_task实施计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)，宿主任务状态、方向生产及组合验收按[smt_auto总实施计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)交付。
+`smt_auto` 是一个业务子包，统一任务、队列、版本、服务、工厂和 `scan_pending`。工作线绑定宿主；原 `issued.task_type=AUTO`、不可变 `business_type=inbound|outbound` 决定内部生产流程。人工两方向仍归 [smt_manual](manual-picking-api.md)。[业务设计](../superpowers/specs/2026-10-31-smt-auto-business-design.md)维护代码归属；[数据模型草案](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md)维护拟定持久化实体/约束及已确认边界，不增加wire字段。六类任务合同及分派共用[sorting_task实施计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)，宿主任务状态、方向生产及组合验收按[smt_auto总实施计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)交付。
 
 | 主体 | 共同责任 |
 | --- | --- |
@@ -32,6 +54,7 @@
 | WES / smt_auto | 原任务/成员、到位/执行引用、授权消费、原命令/Result/扫码、位置报告与交付、生产架准备及释放决定；不建库存、箱架绑定、同格在途/容量预留账 |
 | sorting_task | 六类任务严格合同、单份注册及可信薄分派；无任务表、队列领取或独立调度 |
 | BIN_Roller | 唯一受理 SCAN1～4，原事务委托 SCAN2 生产，执行原释放及公共供箱/回流/FIFO/drain/五层架流 |
+| RackDispatch | 原owner范围的架job/action、进场/换面原结果、公共离场决定及严格提交接纳完成；不拥有盘生产/报告/任务终局 |
 | ECS / PLC | 机械臂动作/扫码、实际交接、并行/互锁、HOLD 和实物异常处置；返回原命令权威结果 |
 | RCS / CTU | 货架/料箱实际搬运及交接，沿原 Transport 返回物理事实；接纳 ACK 不证明到位或搬离 |
 
@@ -40,12 +63,77 @@
 | 计划资源 | 五层料箱供箱架 + 单层来源架；不包含整箱交换 | 五层料箱供箱架 + 转运目标架 + 退料来源架 |
 | 正常物料路径 | 单层架 → ARM02 → 扫码台 → ARM01 → SCAN2 接料箱 | BIN → ARM01 → 扫码台 → ARM02 → 转运架；RackSlot 两段均 ARM02 |
 | 报告范围 | 仅正常明确成功放盘；FAILED/NG 不报告 | 正常与 NG 明确成功、位置确定均报告；空取无移动不报告 |
-| 空取 | 明确 FAILED/0/PICK_EMPTY；SOURCE_ABSENT | 权威无料载体仍待设备附录；SOURCE_DONE，普通失败/0不证明空取 |
+| 空取 | 明确 FAILED/0/PICK_EMPTY；SOURCE_ABSENT | 原取盘 FAILED/0/PICK_FAILED，observed_at 取原 finish_time；SOURCE_DONE 仅关闭原 Cell/SLOT |
 | 明细清理 | 仅本方向采用终态且直接义务收口后7天和最小终态摘要 | 保持原保存/恢复合同，不套入库7天清理及清理后拒绝 |
 
 五层供箱架中的箱在可靠取出后由 WMS 依据 RCS 物理事实维护解绑/位置；BIN_Roller 只保存本线本点事实/投影，不构成库存、绑定或占位许可。已到 SCAN2 的 BIN 不再依赖原供箱架、面、投箱成员或原架进出场结果；RackSlot 和单层来源架仍保留自己的原到位关联。
 
-实际设备码、位置、架型和模板由 WORKLINE 显式绑定，示例不作默认。按本次方向实际使用校验资源，不能要求仅做一种方向的线具备另一方向全部专属资源，也不能用设备前缀或任务号推断业务。
+实际设备码、现场位置、架型和模板由 WORKLINE 显式绑定；机械臂位置按下节已确认的 ECS 常量映射，不把现场位置码直接填入 `location_id`。按本次方向实际使用校验资源，不能要求仅做一种方向的线具备另一方向全部专属资源，也不能用设备前缀或任务号推断业务。
+
+<a id="auto-config"></a>
+### 1.1 KT11 / KT14 已确认配置
+
+来源：**2026-11-03 用户在本次配置核对中确认**的设备、现场点位、ECS 地址、机械臂分工及左右布局。两线目标宿主均为 `smt_auto`，任务 `task_type=AUTO`，内部支持 `inbound/outbound`；手工线配置见[KT16/KT18](manual-picking-api.md#manual-config)。本节只记录配置基线，不表示已写入系统、AUTO 已实施/注册/部署或设备已通过现场验收。
+
+| 设备 / 逻辑角色 | KT11 | KT14 | 用途 |
+| --- | --- | --- | --- |
+| 入料设备 | STATION_INPUT1 | STATION_INPUT2 | 本线入料设备 |
+| 出料设备 | STATION_OUTPUT1 | STATION_OUTPUT2 | 本线出料设备 |
+| SCAN1 | STATION_SCAN1 | STATION_SCAN5 | 入口扫码、分流 |
+| SCAN2 | STATION_SCAN2 | STATION_SCAN6 | 自动取放料箱工作位扫码 |
+| SCAN3 | STATION_SCAN3 | STATION_SCAN7 | 公共回流分流 |
+| SCAN4 | STATION_SCAN4 | STATION_SCAN8 | 公共回流到位 |
+| 料箱侧机械臂（机器人1） | ARM01 | ARM03 | 料箱与扫码平台之间取放；入库和出库 NG 沿此臂 |
+| 货架侧机械臂（机器人2） | ARM02 | ARM04 | 单层/退料架取盘、向转运架放盘 |
+
+入料/出料设备关联不增加额外扫码或命令角色；SCAN1～4 由 BIN_Roller 声明。两臂及生产资源由自动宿主声明，表中实际设备码不作为全场默认值。
+
+| 现场位置角色 | KT11 | KT14 | WMS / Transport 位置类型及用途 |
+| --- | --- | --- | --- |
+| INLET | CNV0101 | CNV0201 | HANDOFF_POSITION，投箱交接位 |
+| OUTLET | CNV0102 | CNV0202 | HANDOFF_POSITION，回流统一取箱交接入口 |
+| FIVE_RACK | KT11 | KT14 | RACK_POSITION，公共五层料箱供箱/回箱架工作位 |
+| RETURN_RACK | OUT62 | OUT64 | RACK_POSITION，右侧退料生产来源架位 |
+| TRANSFER_RACK | OUT61 | OUT63 | RACK_POSITION，左侧转运生产目标架位 |
+| STATION_A | OUT51 | OUT53 | RACK_POSITION，左侧单层来源架位 |
+| STATION_B | OUT52 | OUT54 | RACK_POSITION，右侧单层来源架位 |
+
+FIVE_RACK 用于滚筒供箱/回箱，不作为机械臂直接取放盘的生产架位；RETURN_RACK 用于取盘，正常生产货架放盘目标只使用 TRANSFER_RACK。两类生产架不进入公共 Feed/drain。OUTLET 表示公共回流交接入口，不证明每个候选箱已到最终取箱点，不推导缓存总容量。
+
+| 工作线 / 设备范围 | ECS 服务地址 | Status 接口与已知边界 |
+| --- | --- | --- |
+| KT11 / KT14 入料、出料及 SCAN1～4 | `{ECS_SHARED_ORIGIN}` | /api/v1/device/status；与 KT16/KT18 同一服务 |
+| KT11 ARM01 / ARM02 | `{ECS_KT11_ARM_ORIGIN}` | /api/v1/device/status；用户说明暂不可访问 |
+| KT14 ARM03 / ARM04 | `{ECS_KT14_ARM_ORIGIN}` | /api/v1/device/status；本轮未访问 |
+
+实际服务地址取部署环境的设备配置，Status 路径不作为命令 URL；命令路径沿 §7 的 `/api/v1/device/command` 合同及创建时冻结路由。共用服务不合并各线设备、事件、FIFO 或业务身份。本轮未调用 Status、发送命令或修改现场配置。
+
+<a id="auto-ecs-locations"></a>
+### 1.2 现场位置与机械臂 ECS 位置映射
+
+WMS/RCS 使用上表 OUTxx/CNVxx 等现场位置码；机械臂使用设备内部 `location_id` 和 `location_type`。**从机械臂视角看，左侧为 A（转运/单层），右侧为 B（退料/单层）。** 同一 ECS 位置标识在不同动作中配合对应位置类型使用，不把 A/B 当作 `rack_face`、架内 `bin_location` 或全场唯一库位。
+
+| 动作用途 | KT11 现场位置 | KT14 现场位置 | ECS location_id | ECS location_type |
+| --- | --- | --- | --- | --- |
+| 左侧单层来源架取盘 | OUT51 | OUT53 | STATION_A | ONE_LAYER_RACK |
+| 右侧单层来源架取盘 | OUT52 | OUT54 | STATION_B | ONE_LAYER_RACK |
+| 右侧退料架取盘 | OUT62 | OUT64 | STATION_B | FIVE_LAYER_RACK |
+| 左侧转运架放盘 | OUT61 | OUT63 | STATION_A | FIVE_LAYER_RACK |
+| 扫码平台取放 | 设备内部位置 | 设备内部位置 | STATION_SCAN | SCAN_PLATFORM |
+| SCAN2 料箱取放 | 设备内部位置 | 设备内部位置 | STATION_WORK1 | BIN |
+| NG 平台放盘 | 设备内部位置 | 设备内部位置 | STATION_NG | SCAN_NG |
+
+位置类型及内部位置标识依据供应商说明书 §3.1.4（PDF 第6～7页）；实际左右用途以本次用户确认为准：移库步骤1的五层架是右侧退料架，步骤2的五层架是左侧转运架，路径为 **B退料架 → 扫码平台 → A转运架**，两段均由本线货架侧机械臂执行。不得沿 PDF 场景5/6示例的 A取/B放覆盖已确认布局。BIN 来源正常出库也只向 A转运架放盘。PDF 来源及参数差异见[§6.1](#rack-role-mapping)。
+
+两线可共用这组 ECS 常量，通过原设备码及各自服务地址确定执行范围。料箱工位采用 PDF 取放示例的 STATION_WORK1；枚举表另列 `STATTION_SCAN1`（原文拼写），本次不将其作为已验证别名。扫码设备 STATION_SCAN2/STATION_SCAN6 不替代料箱位置 STATION_WORK1，也不等同于扫码平台 STATION_SCAN。上述内部位置不另造 OUTxx/CNVxx 现场码；出库 NG 使用本线料箱侧臂，ECS 与 WMS 分别使用下文确认的工位参数与业务区域。实际放置及区域映射沿 D5 联调验证。
+
+正常路径按已确认设备分工为：
+
+- inbound：A/B单层架 → 货架侧臂（KT11 ARM02 / KT14 ARM04）→ 扫码平台 → 料箱侧臂（KT11 ARM01 / KT14 ARM03）→ SCAN2料箱。
+- outbound BIN：SCAN2料箱 → 料箱侧臂 → 扫码平台 → 货架侧臂 → A转运架。
+- outbound RackSlot：B退料架 → 货架侧臂 → 扫码平台 → 同一货架侧臂 → A转运架。
+
+后文 ARM01/ARM02 报文以 KT11 为设备实例，KT14 分别对应 ARM03/ARM04；WMS/Transport 位置示例采用 KT11 的现场码，ECS 报文沿本节内部常量。实际运行仍须原授权、精确到位/面向及当前设备许可；新配置不改变任何历史冻结身份、路由、位置或重试正文。CTU01请求沿工作位 `positions[].capacity` 的共享本任务/点位准入，不另设每线AUTO额度、不预准备未来任务；首批等待期限独立为显式可选配置，不由点位容量或设备超时推定数值。
 
 <a id="flows"></a>
 ## 2 完整业务流程
@@ -165,13 +253,13 @@ flowchart TB
     B3 -->|ACCEPT| B4["目标准备；机器人 2 / ARM02：扫码平台 → 转运货架储位"]
     B3 -->|ACCEPT 有有效后继| B2
     B3 -->|正常 ACCEPT 明确无后继| BT
-    B3 -->|REJECT| BNG["原 NG 动作；设备参数按附录交付"]
+    B3 -->|REJECT| BNG["本线料箱侧臂执行原 NG 动作"]
     B4 -->|成功且实际位置确定| B5["原 movement_report"]
     BNG -->|原 NG 明确成功| B5
     B5 -->|RECORDED / DUPLICATE 已消费| BA{"满足原 NG 收口或 SOURCE_DONE<br/>及 §5.9 异常续问条件？"}
     B5 -->|未知 / 503| BREP["只恢复原报告，不重做取放"]
     BREP -->|原身份交付| B5
-    B2 -->|权威明确无料| BE{"source.empty_decide"}
+    B2 -->|原 Result 明确取料失败| BE{"source.empty_decide"}
     BE -->|WAIT| BEW["保持原无料事实，到期新身份续问"]
     BEW --> BE
     BE -->|RETRY，原许可只消费一次| B2
@@ -234,7 +322,7 @@ flowchart TB
     R6 -->|RECORDED / DUPLICATE 已消费| RA{"原 NG 收口或 SOURCE_DONE<br/>满足 §5.9 异常续问条件？"}
     R6 -->|未知 / 503| RREP["只恢复原报告"]
     RREP --> R6
-    R3 -->|权威明确无料| RE{"source.empty_decide"}
+    R3 -->|原 Result 明确取料失败| RE{"source.empty_decide"}
     RE -->|WAIT| REW["保持原无料事实，到期续问"]
     REW --> RE
     RE -->|RETRY，原许可只消费一次| R3
@@ -338,7 +426,7 @@ flowchart TB
     "task_id": "PUTAWAY-001",
     "task_type": "AUTO",
     "business_type": "inbound",
-    "workline_code": "SORTING-LINE-01",
+    "workline_code": "KT11",
     "queue_revision": 1,
     "dispatch_sequence": 100
   }
@@ -451,7 +539,7 @@ HTTP 202；保留明细期间同消息重放 200 / DUPLICATE。同任务不能�
   "timestamp": 1793376001000,
   "data": {
     "task_id": "PUTAWAY-001",
-    "workline_code": "SORTING-LINE-01"
+    "workline_code": "KT11"
   }
 }
 ```
@@ -609,13 +697,13 @@ WMS → WES events。取消不推进plan_revision、不改原计划正文或issu
 
 方向执行边界：outbound RETURN面沿手工“未开始可撤回、STARTED保留”，自动将首次本面work_plan原意图登记作为开始依据，不等READY或首盘命令才保护；已开始面跳过取消，仍按原面终局/直接义务处理。目标TRANSFER不在选择器内。五层供箱仍按组件自身开始/撤回语义，不能套面生产判断。
 
-2026-11-02用户确认的inbound单层增量：同次在位的所有有效成员覆盖被按原版本精确撤回后，停止新选该来源；仍有其他有效覆盖则不退架。原授权、可能授权本架的未决求值、在途/未知取盘及安全交出责任全部收口后，可用“全部成员已撤回”作为离场依据，沿现有四字段rack.departure_decide求去向，再登记唯一原搬离，不必另等WMS标记取尽、不填写source_rack_exhausted。已可靠取离盘的目标放盘/报告独立继续；该依据不产生箱/面终局、不改变原释放/整单前置。原动作登记前重查覆盖，已登记后不因新计划重建/撤销动作；详细关联见[模型§10.2](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#102-成员撤回与在位来源退架共同规则沿用单层增量已由用户选择)。
+2026-11-02用户确认的inbound单层增量：同次在位的所有有效成员覆盖被按原版本精确撤回后，停止新选该来源；仍有其他有效覆盖则不退架。原授权、可能授权本架的未决求值、在途/未知取盘及安全交出责任全部收口后，可用“全部成员已撤回”作为离场依据，沿现有四字段rack.departure_decide求去向，再登记唯一原搬离，不必另等WMS标记取尽、不填写source_rack_exhausted。已可靠取离盘的目标放盘/报告独立继续；该依据不产生箱/面终局、不改变原释放/整单前置。原首次离场决定意图登记前重查覆盖，已登记后不因新计划重建/撤销原离场链；详细关联见[模型§10.2](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#102-成员撤回点位无需求与原架交出)。
 
-全撤回必须有非空的原visit覆盖成员集合及各有效撤回依据，空查询/缺引用不等于全撤回。正常来源生产资格仍要求原ENTER已应用成功及可靠在位；安全清架独立按公共设计§3.3：ENTER在途/位置未知保留原责任，FAILED/CANCELLED若可靠在本点位、需求NONE且直接责任可交出，也沿唯一原离场链释放，不补认生产到位；原执行责任已终结、无继续执行/更正/未决核对且可靠未进入、无其他受管点位冲突则NOT_ARRIVED，不发虚构离场。WorkLine锁内把覆盖/直接依赖复核、原依据快照和首次离场求值原子登记，与新计划/撤回/取尽并发时不按锁前快照启动。
+全撤回必须有非空原成员集合及各原版本撤回依据，空查询/缺引用不是无需求。AUTO在原公共job作用域提供完整PointDemand(NONE/CONTINUE/UNKNOWN)与DirectHandoff(CLEAR/BLOCKED/UNKNOWN)，由RackDispatch统一离场，不自己建departure_basis表/WAIT链/Transport。全撤回后原冻结求值若仍可能许可该架，保持原身份等待并消费真实响应；晚到READY/NEXT/RETRY不按“已撤回”丢弃，也不据旧许可绕过实际取盘条件或强行退架。正常生产须原ENTER/ROTATE严格成功；原非成功搬运已可靠终结、实际终位与安全条件可确认时，公共NOT_ARRIVED/安全离场仅结束调度责任，不能补认生产到位或成员履约。
 
-同次在位只有一条离场链：后到撤回或取尽事实不能另开根、更换首次依据或重建Transport；合法WAIT续问只接该链前一轮，READY后只恢复原搬离。原链独立恢复若晚于任务明细清理，仍保留原全撤回依据及必要成员/输入身份、WAIT链和原Transport引用，不因归档重建离场或重置清理时间。
+各方向RACK/BIN/PLATE及TASK/roller架流按[模型事务约束](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#7-真相源事务及调度事实)在首SQL前SERIALIZABLE；锁WorkLines→Devices→RackJobs→宿主主体→RackActions，锁后复核集合、原事实及当前授权，40001/锁集合变化整事务新会话最多3次重试。receiver/既有冻结输入不改隔离/身份，事实变更同事务note_facts_changed，不能凭旧快照查空或只发通知证明NONE/CLEAR。
 
-全撤回与新覆盖/可能授权求值的交接须按[模型事务约束](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#7-真相源约束和事务边界)验证：AUTO的inbound架/BIN/盘推进使用首SQL前SERIALIZABLE及实际相关读集合，锁后重读原task/成员/visit，40001整笔重试；receiver/已合并手工隔离不变。不能仅凭较早RR快照中的空集合和WorkLine锁宣布安全。
+同一job只有公共唯一离场链；后到撤回/取尽不能另开根、重建原Transport。当前非MANUAL来源WAIT只按固定到期续问，AUTO不能直接沿MANUAL_位置/任务状态分支或把任意新事实当提前许可；来源扩充须在总计划S2明示，未知始终恢复原身份。独立调度未闭合而任务清理时，仅保留足够AUTO原作用域证明及公共job/action引用，不删公共记录，不新建私有恢复链。
 
 潜在授权依赖按原阶段/冻结来源映射判断，不把已取离盘的历史source.rack_id或未收妥报告一律作为取料门禁。已消费的物料WAIT，其合法后继若可更新source_racks则排除已撤回来源，不仅因旧集合仍含本架永久阻离场；empty_decide WAIT/RETRY等仍可能许可原来源取盘的责任继续保留。旧请求/授权不改写。
 
@@ -931,8 +1019,8 @@ inbound的source_racks是当前可靠可取单层架集合，原盘source属于�
     "target_bin_code": "TARGET-BIN-001",
     "scanned_at": 1793376004900,
     "source_racks": [
-      {"rack_id": "COARSE-RACK-001", "location_code": "STATION_A"},
-      {"rack_id": "COARSE-RACK-002", "location_code": "STATION_B"}
+      {"rack_id": "COARSE-RACK-001", "location_code": "OUT51"},
+      {"rack_id": "COARSE-RACK-002", "location_code": "OUT52"}
     ]
   }
 }
@@ -951,7 +1039,7 @@ HTTP 200 / DECIDED 的 READY（本例为左架最后一个非空料格的最后�
     "result": "READY",
     "source": {
       "rack_id": "COARSE-RACK-001",
-      "location_code": "STATION_A",
+      "location_code": "OUT51",
       "bin_code": "SOURCE-BIN-011",
       "bin_location": "A",
       "cell_id": "SOURCE-BIN-011-1",
@@ -1267,8 +1355,8 @@ READY 同时给出本次逻辑来源及四项完整来源参数，均由 WMS 在
     "barcode": "P032-0561-000HF,Q3000,M0805S106K160CT,D260505,L100R028291,S72052872716100149602",
     "scanned_at": 1793376009900,
     "source_racks": [
-      {"rack_id": "COARSE-RACK-001", "location_code": "STATION_A"},
-      {"rack_id": "COARSE-RACK-002", "location_code": "STATION_B"}
+      {"rack_id": "COARSE-RACK-001", "location_code": "OUT51"},
+      {"rack_id": "COARSE-RACK-002", "location_code": "OUT52"}
     ]
   }
 }
@@ -1300,7 +1388,7 @@ HTTP 200 / DECIDED 正常响应（本例是左架末盘）：
     "source_rack_exhausted": true,
     "next_source_action": {
       "rack_id": "COARSE-RACK-002",
-      "location_code": "STATION_B",
+      "location_code": "OUT52",
       "bin_code": "SOURCE-BIN-021",
       "bin_location": "A",
       "cell_id": "SOURCE-BIN-021-3",
@@ -1355,7 +1443,7 @@ REJECT 完整响应示例：
 }
 ```
 
-与 §4.3.1 的 ACCEPT 为同一请求的互斥示例，不表示同盘可同时收到两个最终决定。REJECT 四个展示的 data 字段均必填，ng_locator 的两个子字段均必填；自动上架 NG 区域角色码固定 STATION_NG，与 STATION_A/STATION_B 同属工作线位置角色，实际位置码由 WORKLINE.position_bindings 动态配置；不发送正常 target、next_source_action、source_rack_exhausted 或 retry_after_ms。
+与 §4.3.1 的 ACCEPT 为同一请求的互斥示例，不表示同盘可同时收到两个最终决定。REJECT 四个展示的 data 字段均必填，ng_locator 的两个子字段均必填；自动上架 NG 区域角色码固定 STATION_NG，设备执行按 §1.2 映射为 STATION_NG / SCAN_NG；它与 WMS/RCS 使用的现场货架位置码分开，不要求另造一个 OUTxx NG 点位；不发送正常 target、next_source_action、source_rack_exhausted 或 retry_after_ms。
 
 | business_exception_code | source_disposition | 业务含义 |
 | --- | --- | --- |
@@ -1997,7 +2085,7 @@ source_rack_exhausted 只允许在 SOURCE_ABSENT 有整架肯定结论时发送 
 
 方向：WES → WMS，`POST /api/v1/wes/decisions`。operation 及 RETRY/WAIT/SOURCE_DONE 联合沿用既有空取合同（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md#122-空取决定请求和响应`），请求继续使用既有字段名；BIN_CELL 来源按料箱解绑后的本稿字段表裁剪，不携带原架号/面；不套用上架的 SOURCE_ABSENT 名称，不增加复检接口、空取 Event 或重试计数字段。本方已确认的同箱/同面异常接续见 §5.9.2。
 
-只有原来源命令及权威设备事实明确证明指定来源无料时才请求。普通 FAILED、PICK_FAILED、actual_qty=0、超时、online/IDLE 均不证明空取；结果未知继续原身份恢复。设备如何承载明确无料及其时间、补报保证属于严格附录交付，不以占位错误码或新造 Result 枚举触发。
+原出库取盘命令的 Result 已有效应用，且顶层 `result=FAILED`、`data.pick_and_put_result=PICK_FAILED`、`data.actual_qty=0` 时，WES 直接按空取处理。原 Result 的 `finish_time` 原值作为 `observed_at`。超时、掉线、结果未知或冲突继续原命令恢复。单独的数量、Status 或原厂错误码 1002 不触发空取。
 
 <a id="outbound-empty-1"></a>
 ##### 4.5.2.1 原来源字段与空取请求
@@ -2008,7 +2096,7 @@ source_rack_exhausted 只允许在 SOURCE_ABSENT 有整架肯定结论时发送 
 | source_locator | 必填本次取盘的来源联合，沿任务、当前箱格或直接取料架储位匹配原执行；不套用最新记录 |
 | source_locator.type=BIN_CELL | 仅 type、bin_code、cell_id；与当前任务及本次原取盘授权关联，不发送 rack_id、rack_face 或 plan_revision |
 | source_locator.type=RACK_SLOT | 沿原 rack_id、rack_face、slot_id，且 data.plan_revision 必填原来源成员的正 int64 版本；不是当前最高版本 |
-| observed_at | 必填非负 int64 UTC 毫秒整数，原权威设备事实明确无料的发生时间，不用请求/接收时间替代 |
+| observed_at | 必填非负 int64 UTC 毫秒整数，原取盘 Result 的 finish_time，不用请求/接收时间替代 |
 
 料箱从货架取出并投入滚筒线后即与货架解绑，BIN 逐盘取料、空取及位置报告均按当前任务、箱码和 Cell 关联。原供箱架号、面及供箱成员版本不参与 BIN 空取准入、请求或 WMS 来源匹配，不维护历史架关联作为生产前提，也不查询或反推箱架绑定。RackSlot 仍直接从在位架储位取盘，沿其原架/面/SLOT 及本接口原成员版本处理。新增请求以本节为准；历史已冻结空取请求继续按创建时合同、原身份、正文及证据履约，不批量删字段、改号或重算摘要。
 
@@ -2187,7 +2275,7 @@ WES合法消费原授权时保存本地盘、原task/arrival或架面到位、�
 
 inbound source_racks=[]仍首问work_plan，不省略/null、不等补架。WMS控制首盘累计业务等待上限，到限返回NO_WORK，重试/新求值不能刷新WMS对本箱原事实的累计等待；WES不加本地超时自动放行或新等待上限接口。material.decide当前盘已取出，仍只能ACCEPT/REJECT/WAIT，不能改为NO_WORK丢盘。有效WAIT期间不取代当前盘、不放箱。
 
-等待由宿主pending与5秒Beat恢复，无独立WAIT调度器。[共用离场](workline-business-api.md#rack-departure-confirmed-wire)的“到期或相关新事实”只适用于其自身，不扩到逐盘WAIT。
+等待由宿主pending与5秒Beat恢复，无独立WAIT调度器。[共用离场](workline-business-api.md#rack-departure-confirmed-wire)的提前续问须按公共来源能力分别判断：#49到期前的位置/任务状态变化分支仅MANUAL_支持，AUTO基线只按原到期，不将任意新事实作为提前许可，也不扩到逐盘WAIT。
 
 <a id="source-continuity"></a>
 ### 5.4 来源变化、执行前复核与原授权延续
@@ -2465,8 +2553,8 @@ WMS 依据自己保存的最终 REJECT/source_disposition 或 SOURCE_ABSENT 决�
     "target_bin_code": "TARGET-BIN-001",
     "scanned_at": 1793376004900,
     "source_racks": [
-      {"rack_id": "COARSE-RACK-001", "location_code": "STATION_A"},
-      {"rack_id": "COARSE-RACK-002", "location_code": "STATION_B"}
+      {"rack_id": "COARSE-RACK-001", "location_code": "OUT51"},
+      {"rack_id": "COARSE-RACK-002", "location_code": "OUT52"}
     ]
   }
 }
@@ -2483,7 +2571,7 @@ WMS 依据自己保存的最终 REJECT/source_disposition 或 SOURCE_ABSENT 决�
     "result": "READY",
     "source": {
       "rack_id": "COARSE-RACK-002",
-      "location_code": "STATION_B",
+      "location_code": "OUT52",
       "bin_code": "SOURCE-BIN-021",
       "bin_location": "A",
       "cell_id": "SOURCE-BIN-021-3",
@@ -2799,7 +2887,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 
 依据为[旧 AUTO 资源声明](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/workline_plugins/automatic-picking/src/automatic_picking/definition.py)、[自动机械臂附录 §3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md#3-%E8%AE%BE%E5%A4%87%E5%88%86%E5%B7%A5)及[本仓库 RackScenarios](../../app/integrations/wms_transport/rack_scenarios.py)。旧附录“typed RACK_ROTATE 只支持 CTU02”的实施限制不适用于本仓库现有 CK04 读写能力；对端合同同步及现场接受仍按[Transport 差异说明](wms-transport.md#仍需确认的合同差异)交付，不重新设计模板或改用 CTU02。
 
-三处逻辑绑定分别取原 WORKLINE 配置，不硬编码 KT16/KT18 或 STATION_A/B，也不凭示例将不同角色合并成同一服务周期。机械臂目标 location_id 与原 TRANSFER_RACK 绑定对应；RackSlot 来源具体定位沿 P03。公共供箱/回流执行只通过 §8 接入，不将生产来源架或物料目标架交给公共投回箱流程。
+三处现场位置分别取原 WORKLINE 配置，不硬编码 KT11/KT14 的 OUTxx，也不将不同角色合并成同一服务周期。机械臂位置按[已确认映射](#auto-ecs-locations)转换：TRANSFER_RACK → STATION_A，RETURN_RACK → STATION_B，两者 location_type 均为 FIVE_LAYER_RACK；不把现场 OUTxx 直接作为 ECS location_id。RackSlot 来源参数仍沿 P03。公共供箱/回流执行只通过 §8 接入，不将生产来源架或物料目标架交给公共投回箱流程。
 
 **正常目标的四层合同映射**
 
@@ -2807,7 +2895,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | --- | --- | --- |
 | 初始目标资源 | `plan_delta.data.target_rack = {rack_id, rack_face}` | AUTO/outbound 首版安排转运接料架及面，业务角色 TRANSFER、工作位 TRANSFER_RACK；不指定单盘储位，不能直接据此创建单盘放盘命令 |
 | 本盘最终授权 | 两类 `material.decide` 的 `ACCEPT.target_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id/rack_layer/rack_column` | WMS 预留本盘唯一目标储位；目标换面/换架按同响应的 `target_preparation`，不固定套用首版旧架面；`slot_id` 为业务储位，整数层/列由 WMS 同次明确提供，不相互推算 |
-| 设备执行 | ARM02 `PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id` 取 TRANSFER_RACK 实际绑定；架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度/直径用本盘原取盘冻结的 JSON 数值（毫米/寸）。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
+| 设备执行 | 货架侧臂（KT11 ARM02 / KT14 ARM04）`PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id=STATION_A`，对应本线左侧 TRANSFER_RACK；现场 OUT61/OUT63 仍用于 WMS/RCS。架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度/直径用本盘原取盘冻结的 JSON 数值（毫米/寸）。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
 | 实际位置报告 | `movement_report.data.to_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id` | 本盘确定放置成功且实际位置与最终授权一致后，报告原业务目标四字段；不报告设备层/列，不用报告 ACK 证明物理成功，不改变原报告匹配与去重规则 |
 
 依据为现有 WMS 自动拣料合同 §8.1、§10.3、§12.4（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md`）、[自动机械臂附录 §3/§4.2.2/§4.3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿已确认的 `params` 信封、`rack_face`、整数层列转设备字符串及尺寸数值规则，不复制旧示例的顶层 source/target、rack_side 或尺寸字符串。
@@ -2829,19 +2917,20 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | 项目 | 已确认边界 |
 | --- | --- |
 | 单层架面向 | 业务计划/逐盘/取消不增加动态 rack_face，源箱仍用 bin_location，左右仍用 location_code；设备 PDF 第 7/37 页的 ONE_LAYER_RACK 必需字段没有 rack_side。固定入位姿态由工作位/搬运模板保证，实际 RCS 姿态按 [设备合同](#ecs)/[单层架搬运](#rack-departure) 落实，共用离场 current_face=null |
-| 左右绑定 | 复用 WORKLINE.position_bindings，区域位置角色码固定 STATION_A（左侧）和 STATION_B（右侧），实际位置码由各工作线动态配置且不得相同，不硬编码 LEFT/RIGHT 示例值。取料臂通过原 device_bindings 绑定，左右是位置，不视为两台设备；WMS 计划只给候选架，逐盘只报可靠在位范围 |
+| 左右绑定 | WORKLINE.position_bindings 的 STATION_A/STATION_B 保存现场位置码：KT11 OUT51/OUT52，KT14 OUT53/OUT54，左右不得相同。ECS 取盘分别映射为 STATION_A/STATION_B + ONE_LAYER_RACK，不直接使用 OUTxx。取料臂为本线货架侧臂（ARM02/ARM04）；左右是位置，不视为两台设备。WMS 计划只给候选架，逐盘只报可靠在位范围 |
 | 计划成员身份 | 复用 task_id + plan_revision + rack_id，同版同架不得重复，跨版形成新成员；成员各自保存取消/完成关联，不覆盖旧成员，不据新版本抹去原物理取尽/未知事实 |
-| 同架仍在同次在途/在位过程 | 仅原过程尚未进入离场链、未取尽且仍可承接新需求时，新版本成员关联原进场Transport/在位记录，不重复叫架、不分配两侧；首次departure_decide意图登记后不再承接新成员，后来同架成员保持未选中，待独立新进场真实到位后关联，不绑旧过程再迁移；复用到位不等于复制授权/成员完成 |
+| 同架仍在同次在途/在位过程 | 仅原公共job仍ACTIVE、未登记原离场链且未取尽并可承接需求时，新版本成员关联原进场/在位及准备动作，不重复叫架、不分配两侧。release_requested只是暂定标记，根尚未登记时须将本job可服务的未绑定新有效成员纳入完整求值，由公共advance的CONTINUE清标后关联；进入RELEASING/原离场根已登记才停止承接，后来成员留未选中，待独立新进场真实到位后关联，不绑旧过程再迁移；复用到位不等于复制授权/成员完成 |
 | 离场后再次进场 | 新进场沿原 RACK_MOVE 创建独立 transport_task_id，已应用成功且架号/位置/必要姿态匹配后建立新的在位关联；旧 Result、取尽、扫码及授权只作用原关联，不按同 rack_id/位置码或最新版本猜匹配 |
 
-绑定结构示意，非完整工作线管理请求；位置码为示例，运行时读取本线配置，不作为软件默认值：
+KT11 现场绑定片段，非完整工作线管理请求；完整配置及独立的 ECS 常量映射见[§1.1～§1.2](#auto-config)，本轮未保存该配置：
 
 ```json
 {
   "position_bindings": {
-    "STATION_A": "STATION_A",
-    "STATION_B": "STATION_B",
-    "STATION_NG": "SORTING-LINE-01-NG"
+    "STATION_A": "OUT51",
+    "STATION_B": "OUT52",
+    "RETURN_RACK": "OUT62",
+    "TRANSFER_RACK": "OUT61"
   }
 }
 ```
@@ -2958,9 +3047,9 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 本节正常取尽仍沿原source_rack_exhausted依据；另一个已确认入口是§3.6“同次在位全部成员有效撤回”。两者都先收口本架直接取料/安全交出依赖，再走以下原离场决定/Transport链；后者不填取尽事实、不等目标报告、不扩充departure报文。部分撤回仍保留其他有效覆盖，不能沿全撤回入口退架。
 
 1. 本架原取料动作明确完成，无未消费的本架授权、仍可能为本架产生授权的未决求值、在途/未知取料或与本架安全交出有关的未决事实。取尽后停止本架新授权消费；若仍存在本架未消费授权或迟到决定重新授权本架，保留原事实并按 [异常处置](#putaway-ng) 明确收口，不静默删除、执行或伪造完成。已排除本架的右侧请求/授权不成为左架门禁。
-2. 使用共用 rack.departure_decide，请求仅含原 workline_code、rack_id、已确认 current_location、current_face，不增加 task_id。
-3. READY 冻结原目的地后创建唯一旧架 RACK_MOVE；实际搬架须由 ECS/RCS 交接互锁确认机械臂、夹具及搬架区域可安全交出。取盘成功不自动等于退出所有搬架区域；可复用已包含安全交出的原完成定义，否则由现场互锁等待，不新增 WES 状态轮询或自判安全。WAIT 仅让该侧等待，未知恢复原请求/任务，不换号再搬。
-4. 原旧架F01 DEPART取得原有效202/RECEIVED或200/DUPLICATE接纳即完成并可安排后继，去库区或不同RACK_POSITION（包括生产线工作位）相同，最终结果/终位仅备查，可失败，不回退、不回占、不重搬。ENTER/ROTATE仍按原匹配结果收口。接纳完成不填写虚假物理终位；新架须以自己的可靠到位更新当前位置，旧回调只记旧过程。
+2. 宿主将真实无需求与安全交出事实交给同owner的RackDispatch；公共组件使用单份rack.departure_decide，wire仍只有原workline_code/rack_id/current_location/current_face，不增加task_id或本地job/action。
+3. 公共服务消费READY、冻结原目的地并登记唯一DEPART/RACK_MOVE；实际搬架须由 ECS/RCS 交接互锁确认机械臂、夹具及搬架区域可安全交出。取盘成功不自动等于退出所有搬架区域；可复用已包含安全交出的原完成定义，否则由现场互锁等待，不新增 WES 状态轮询或自判安全。WAIT 仅让该侧等待，未知恢复原请求/任务，不换号再搬。
+4. 公共服务通过get_submission_acceptance严格核对原owner/caller/cycle/Transport/client、submit operation/message/target及完整frozen，并取得202/RECEIVED或200/DUPLICATE后，原F01 DEPART调度完成并可安排后继，去库区或不同RACK_POSITION（包括生产线工作位）相同，最终结果/终位仅备查，可失败，不回退、不回占、不重搬。ENTER/ROTATE仍按原匹配结果收口。接纳完成不填写虚假物理终位；新架须以自己的可靠到位更新当前位置，旧回调只记旧过程。
 5. 新架有独立 RACK_MOVE 和结果。确认已应用成功、架号、工作位及必要面向匹配后加入可用集合，再参与下一次扫码决定。
 
 盘已可靠取离原架后，目标放盘未完成或成功报告未收妥不阻止该架离场；原目标、历史来源及报告身份保持不变，沿原记录完成交付。单纯目标放盘失败仍由 ECS 处置，不新增失败报告；若料盘是否已完全取离或原架区域是否安全尚不明确，则保留本架物理依赖。报告未决继续按 §5.6/§3.7 约束原箱放行和任务收口，不因架已离场丢失。已有合法另一侧授权可继续执行，实际运动是否并行由共享机械臂/安全区域的 ECS/RCS 互锁决定，不以本侧搬架或报告等待统一阻断另一侧。
@@ -2973,9 +3062,9 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
   "operation": "rack.departure_decide@v1",
   "timestamp": 1793376016000,
   "data": {
-    "workline_code": "SORTING-LINE-01",
+    "workline_code": "KT11",
     "rack_id": "COARSE-RACK-001",
-    "current_location": {"type": "RACK_POSITION", "location_code": "STATION_A"},
+    "current_location": {"type": "RACK_POSITION", "location_code": "OUT51"},
     "current_face": null
   }
 }
@@ -2998,7 +3087,7 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 | 下一计划架面 | WES 动作 | 继续取料的依据 |
 | --- | --- | --- |
 | 同一货架的另一面 | 按该面的原值创建源架换面 Transport，沿既有 `RACK_ROTATE` 合同执行 | 换面已取得匹配的权威成功结果，实际货架返回绑定工作位且面向为下一计划面，再以新身份请求该面的 `return_rack.work_plan` |
-| 另一来源货架 | 请求共用 `rack.departure_decide@v1` 决定旧架去向；`READY` 后创建原离场 Transport，按既有运输准入及物理交接条件编排下一架进场 | 下一架自身的匹配成功结果、实际工作位及计划面已确认，再请求其首盘作业；旧架独立未结搬运继续沿原身份履约 |
+| 另一来源货架 | 请求共用 `rack.departure_decide@v1` 决定旧架去向；`READY` 后创建原离场 Transport，按既有运输准入及物理交接条件编排下一架进场 | 下一架自身的匹配成功结果、实际工作位及计划面已确认，再请求其首盘作业；旧架DEPART严格原接纳后调度已完成，最终结果只按原Transport备查 |
 | 当前已应用计划中没有下一架面 | 当前来源作业暂时耗尽，按离场合同处理旧架，并在本地完成条件成立后请求任务状态确认 | 不再创建来源取盘命令；整单是否结束由 [整单确认规则](#task-completion)中的 WMS 结果决定 |
 
 
@@ -3020,12 +3109,18 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 | `rackslot.material.decide.ACCEPT` 省略 `next_source_action` | 当前盘有确定去向，且当前面本轮不再授权后续取盘 | 当前盘及本面其他已创建单盘均已物理闭合，必需位置上报已获 `RECORDED / DUPLICATE`，无待消费后继授权 |
 
 两种面级终局都必须结清当前面全部原义务：包括已授权或在途单盘、待消费的 NG/空取前序事实、异常续问/WAIT/RETRY 阶段及正常或 NG 必报报告。`WAIT`、请求结果未知、未消费授权、取放结果未知以及尚未确认的位置上报均不构成当前面完成；已取得终局也不能漏掉其他原盘义务。`REJECT` 中未出现后继字段只表达本盘异常决定，不能套用 ACCEPT 的无后继语义；空取和异常分支按各自明确的处理合同闭合。
+尚无面取料终局且NG报告收妥后仍应复用原return_rack.work_plan时，即使盘已物理到NG，原面仍有潜在取料需求；material.decide可能产生同面后继、empty WAIT/RETRY也一样。此类需求或未知覆盖未结清时不能退架/换面。面已有明确取料终局时不重开异常续问，单纯未收妥报告不作物理驻留门槛。
+
 上述是面/业务闭合条件。架位是否继续驻留独立按公共点位需求判断：本点位无其他可承接任务且原架可靠在位、在途取放/已冻结回架分配等直接执行责任可交出时，安排唯一原离场，不等父任务终态或已完成动作的独立报告ACK；报告仍阻原面/任务闭合。若还有合法下一面，只有该换面不影响原直接执行责任、其原生产前置成立时才能换面，新面仍须真实到位。未决求值仍可能授权本架、位置/动作未知均不能当作无需求；单纯任务状态、空查询或ACK不替代这些依据。
 
 <a id="target-preparation"></a>
 #### 6.3.3 本盘目标准备与物理义务
 
 初始物料目标取首版 target_rack，后续精确目标及 ROTATE/REPLACE 取本盘 ACCEPT.target_locator/target_preparation。ROTATE 换同一目标架的面，REPLACE 的旧架去向独立请求共用 departure_decide；模板沿 §6.1，不从物理层数猜角色，不向 ECS 机械臂发送搬架指令。
+
+TRANSFER是否仍需留在本点，由原完整目标授权、待接料/未决决定、未处理计划及当前直接执行事实判断。无其他本点可承接需求且DirectHandoff可清即交公共服务离场，不等task COMPLETED或独立报告ACK；未知未来/漏原输入/一次查空不能判NONE。任何现有目标授权或未知PUT/NG仍保留直接责任；不能以公共job接纳完成替代盘实际放置。
+
+本盘等待其要求的ENTER/ROTATE属于保留需求，不等于已经有机械臂占位；在无依赖旧面/旧位取放且有完整交接证据时，可以准备所需目标，不能把该等待授权自身变成永远阻止准备的条件。反之，另一盘仍有旧面PUT授权、在途/报警/未知命令时，后盘ROTATE/REPLACE不得挪走旧架面；纯历史成功不能替代当前原准备动作及精确面就绪。REPLACE保留原目标授权，原点旧job严格离场接纳后再登记同点新job/ENTER，不凭READY或submit未知提前并存两个目标作业；新架实际就绪前不PUT。事实矩阵及本地接缝见[模型§5.4](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#54-准备交接与异常续问的事实边界)。
 
 来源架面取料结束按 §6.3.2，当前盘目标放置及报告按 §4/§7；目标准备不指挥来源架换面，原目标已就绪不重新问物料资格。新架自己的真实到位才允许其后续作业；旧离场独立履约，任务完成条件仍见 §3.7。
 
@@ -3057,7 +3152,7 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
     },
     "target": {
       "kind": "RACK_POSITION",
-      "location_code": "STATION_A"
+      "location_code": "OUT51"
     }
   }
 }
@@ -3077,7 +3172,7 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
     "rcs_template_id": "F01",
     "source": {
       "kind": "RACK_POSITION",
-      "location_code": "STATION_A"
+      "location_code": "OUT51"
     },
     "target": {
       "kind": "RACK_POSITION",
@@ -3110,7 +3205,7 @@ WMS 业务参数取 §4 对应原授权，实际设备及工作位取 §6.1 的�
 | 回传指令结果 | ECS → WES | `POST {{WES_BASE_URL}}/api/v1/callback/result` |
 | 上报 ECS 主动事件 | ECS → WES | `POST {{WES_BASE_URL}}/api/v1/callback/event` |
 
-以上接口均使用 UTF-8 `application/json`。设备及位置编码取工作线实际绑定；本章 `ARM01`、`ARM02`、`STATION_WORK1`、`STATION_SCAN`、`STATION_A` 为对应正常链的示例值。`timeout=30000` 为示例毫秒值，实际值取指令创建时冻结的工作线配置。
+以上接口均使用 UTF-8 `application/json`。设备编码取工作线实际绑定：本章 ARM01/ARM02 为 KT11 实例，KT14 对应 ARM03/ARM04。ECS location_id/location_type 沿[§1.2 已确认常量映射](#auto-ecs-locations)，与 WMS/RCS 现场位置码分开；扫码平台固定 STATION_SCAN、料箱工位 STATION_WORK1、NG平台 STATION_NG，左右按动作类型映射。`timeout=30000` 为示例毫秒值，实际值取指令创建时冻结的工作线配置。
 
 <a id="ecs-envelope-1"></a>
 #### 7.1.1 指令公共字段
@@ -3156,7 +3251,7 @@ HTTP `200`，响应体为：
 | `result` | `data.pick_and_put_result` | 含义 |
 | --- | --- | --- |
 | `SUCCESS` | `PUT_FINISHED` | 本次取放已完成 |
-| `FAILED` | `PICK_FAILED` | 取料失败，不等于设备已确认空取 |
+| `FAILED` | `PICK_FAILED` | 取料失败，出库按 §4.5.2 的原 Result 组合消费 |
 | `FAILED` | `PUT_FAILED` | 放料失败，不得发送已成功放置的 WMS 位置上报 |
 | `FAILED` | `PUT_FINISHED` | 已取盘并放到扫码台但扫码失败，actual_qty=1；本命令已终结失败，省略barcode/scanned_at，不进入正常物料决定或重做取盘；可恢复报警应按7.1.4保留未结束命令，不先发此终态 |
 
@@ -3211,7 +3306,7 @@ ECS须持久保留原command_code、原盘/参数/冻结目标及实际阶段，
 
 | ECS 字段 | 沿现有 WMS 字段/配置的取值映射 |
 | --- | --- |
-| source.location_id | 原授权来源架所在工作位的 ECS 位置绑定，实例为 STATION_A；不从 bin_location 推断 |
+| source.location_id | 原授权来源架所在现场工作位按 §1.2 映射为左 STATION_A / 右 STATION_B；不直接传 OUTxx，不从 bin_location 推断 |
 | source.location_type | 固定 ONE_LAYER_RACK |
 | source.rack_id | READY.source / next_source_action.rack_id 原值 |
 | source.bin_id | 同一原授权的 bin_code 原值 |
@@ -3222,14 +3317,14 @@ ECS须持久保留原command_code、原盘/参数/冻结目标及实际阶段，
 | source.reel_layer | 同一原授权取盘前已占用层数的原 JSON 整数，包含本盘；实例 1 |
 | source.reel_thickness / reel_diameter | 同一原授权尺寸的原 JSON 数值，单位保持 mm/寸，实例 20/15 |
 | source.reel_totalthickness | 同一原授权取盘前当前总厚度的原 JSON 数值，实例 20；由 WMS 提供，不相乘估算 |
-| target.location_id / location_type | 本线扫码台的 ECS 位置绑定 / 固定 SCAN_PLATFORM，实例 STATION_SCAN |
+| target.location_id / location_type | 固定 STATION_SCAN / SCAN_PLATFORM |
 
 bin_id 与 cell_id 在该实例中均为 A000001568，分别按上述原字段传递；实例相等不定义 cell_id=bin_id 的生成规则，不增加 WMS 字段或要求源箱/料格编码带特定后缀。target 按本节结构仅发送 location_id/location_type，不复制来源料盘字段。数值精度、单位和设备尺寸/层数/深度范围由 WMS 保证，见 §7.7.1；箱型/格位组合由 WMS 保证，不作为 WES 本地组合校验或准入项；后续放盘结构按 §7.3，两段五个数值参数采用统一 JSON 数值类型，其他字段按各自对象结构发送。
 
 <a id="putaway-put-params"></a>
 ### 7.3 inbound：扫码台 → SCAN2 料箱 params
 
-params 如下。source 为扫码台，target 为 SCAN2 对应的 ECS 放盘工位；本例工位码 STATION_WORK1，实际从本线 WORKLINE 对应绑定取值，不因业务点位叫 SCAN2 就改写设备位置码。该结构仅定义 params，不据此推定 device_code 或动作 timeout。
+params 如下。source 为扫码台 STATION_SCAN，target 为 SCAN2 对应的 ECS 放盘工位 STATION_WORK1，沿 §1.2 已确认常量；不因扫码设备为 STATION_SCAN2/STATION_SCAN6 就改写料箱位置码。该结构仅定义 params，device_code 仍取本线料箱侧臂 ARM01/ARM03，动作 timeout 独立取配置。
 
 ```json
 {
@@ -3254,8 +3349,8 @@ params 如下。source 为扫码台，target 为 SCAN2 对应的 ECS 放盘工�
 
 | ECS 字段 | 现有 WMS 字段/配置映射及类型 |
 | --- | --- |
-| source.location_id / location_type | 本线扫码台 ECS 位置绑定 / 固定 SCAN_PLATFORM；本例 STATION_SCAN |
-| target.location_id / location_type | 本线 SCAN2 放盘工位 ECS 位置绑定 / 固定 BIN；本例 STATION_WORK1 |
+| source.location_id / location_type | 固定 STATION_SCAN / SCAN_PLATFORM |
+| target.location_id / location_type | 固定 STATION_WORK1 / BIN，对应 SCAN2 料箱工位 |
 | target.bin_type | 本盘 ACCEPT.target.bin_type 转设备字符串，本例 3 → "3" |
 | target.bin_cell_location | 本盘 ACCEPT.target.cell_index 原 JSON 整数，本例 1，不转字符串或拆 cell_id |
 | target.reel_layer | 本盘 ACCEPT.target.reel_layer 原 JSON 整数，表示放盘前已占用层数，本例 15 |
@@ -3305,7 +3400,7 @@ params 如下。source 为扫码台，target 为 SCAN2 对应的 ECS 放盘工�
 
 | ECS 参数 | 来源及映射 |
 | --- | --- |
-| `source.location_id`、`target.location_id` | 工作线当前工作位、扫码台位置绑定 |
+| `source.location_id`、`target.location_id` | 固定为 STATION_WORK1、STATION_SCAN；对应位置类型分别为 BIN、SCAN_PLATFORM |
 | `source.bin_type` | WMS `READY.bin_type` 的字符串形式，`2`、`3`、`6` 原编号直接转换 |
 | `source.bin_cell_location` | WMS `READY.cell_index` 的原 JSON 整数，范围 `1..7`；不转字符串、不拆解 `cell_id` |
 | `source.reel_layer` | WMS `READY.reel_layer` 的原 JSON 整数 |
@@ -3322,12 +3417,12 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 | `device_code` | 退料单盘取料使用 ARM02 的实际绑定 |
 | `command_code` | 本次单盘取料的新命令身份，按 [ECS 公共字段](#ecs-envelope-1)处理 |
 | `task_type` | `PICK_AND_PUT` |
-| `params.source.location_id` | 当前原来源架的 RETURN_RACK 工作线绑定，不使用 slot_id 或手册示例位置 |
+| `params.source.location_id` | RETURN_RACK 映射到右侧 STATION_B；现场 OUT62/OUT64 仅用于 WMS/RCS，不使用 slot_id |
 | `params.source.location_type` | 已本方确认沿供应商场景5，固定为 FIVE_LAYER_RACK |
 | `params.source.rack_id`、`params.source.rack_face` | 本次 READY 或 next_source_action 的原授权值；rack_face 沿已确认字段原样传递，不复制原文旧 rack_side |
 | `params.source.rack_layer`、`params.source.rack_column` | 本次 READY 或 next_source_action 的整数来源层/列映射为设备字符串，不使用目标层列或拆解 slot_id |
 | `params.source.reel_thickness`、`params.source.reel_diameter` | WMS 在本次 READY 或 next_source_action 中提供的本盘厚度/直径；JSON 数值，单位毫米/寸，不借 BIN、旧盘或下一盘参数 |
-| `params.target.location_id` | 本工作线扫码台绑定，如 `STATION_SCAN` |
+| `params.target.location_id` | 固定 STATION_SCAN |
 | `params.target.location_type` | `SCAN_PLATFORM` |
 
 货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)，沿本系统公共信封、rack_face 及数值类型，不复制原文的顶层 source/target、旧 rack_side 或数字字符串尺寸。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
@@ -3342,7 +3437,7 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 
 本确认明确了来源取盘参数的时序：WMS 在首盘/后继授权时已具备并提供四项所需值。旧参考合同中“到扫码台后才取得实际尺寸”的叙述不再作为本文取盘参数等待条件；本盘取出后的扫码及去向决定仍按原流程进行，不以扫码后数据倒填已创建的取盘命令。
 
-以下为首盘 READY 到 ARM02 请求的字段映射示例；假定本线 RETURN_RACK 的执行位置为 STATION_B，实际位置和设备均取工作线绑定，不据示例自动配置。source 层2/列3来自原 WMS 授权，与 slot_id 文本及后续目标层/列无推算关系：
+以下为 KT11 首盘 READY 到 ARM02 请求的字段映射示例；RETURN_RACK=OUT62 对应右侧 STATION_B，KT14 则为 OUT64、ARM04，ECS 位置常量相同。source 层2/列3来自原 WMS 授权，与 slot_id 文本及后续目标层/列无推算关系：
 
 ```json
 {
@@ -3408,7 +3503,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 
 | ECS 参数 | 来源及映射 |
 | --- | --- |
-| `source.location_id`、`target.location_id` | 扫码台及本次目标货架工作位的实际绑定；不把 `slot_id` 当成 `location_id` |
+| `source.location_id`、`target.location_id` | 固定为 STATION_SCAN、STATION_A；目标为本线左侧 TRANSFER_RACK（OUT61/OUT63），不把现场码或 `slot_id` 当成 ECS `location_id` |
 | `target.location_type` | 正常目标货架固定为 `FIVE_LAYER_RACK` |
 | `target.rack_id`、`target.rack_face` | 本盘最终 `ACCEPT.target_locator` 的原值；面向不做 A/B 转换 |
 | `target.rack_layer`、`target.rack_column` | 本盘最终 `ACCEPT.target_locator` 的整数转字符串；设备货架层为 `"1".."5"`，不猜列数上限 |
@@ -3537,7 +3632,7 @@ WES 将本盘 target 按 §7.3 组装为以下完整 params；设备位置由本
 | 单层架取盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | READY.source 或 next_source_action 同名字段 | 全部由 WMS 给出，下一次取料也必须有独立完整授权 |
 | SCAN2 放盘：bin_type、bin_cell_location | material.decide.target.bin_type / cell_index | 箱型转设备字符串，格位保持 JSON 整数，见 §7.3；不使用来源箱型或后继箱格参数 |
 | SCAN2 放盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | material.decide.target 同名字段 | 由 WMS 分别给出，层数保持 JSON 整数，尺寸/深度保持 JSON 数值；层数/深度为本次放盘前占用，不在请求或完成报告中要求 WES 自报 |
-| 两段动作的 location_id、location_type | 本线已核对的左右架位、扫码台、SCAN2 工作位绑定及动作合同 | WES 按可信配置/映射组装；固定位置不逐盘向 WMS 索要，示例 STATION_A/STATION_WORK1 不作为全场默认值 |
+| 两段动作的 location_id、location_type | §1.2 的本线现场架位到 ECS 常量映射及动作合同 | 左右单层来源为 STATION_A/B + ONE_LAYER_RACK，扫码台为 STATION_SCAN + SCAN_PLATFORM，料箱为 STATION_WORK1 + BIN；固定位置不逐盘向 WMS 索要，不直接传 OUTxx 或扫码设备码 |
 | device_code、command_code、priority、timeout、timestamp | 原设备绑定及统一命令合同 | 由 WES 生成并冻结，与库存/箱格动态参数分别负责 |
 
 BIN 目标响应必须提供本节全部动态参数，不能仅返回 cell_id 或已占用深度；ONE_LAYER_RACK 来源还必须补齐 bin_location。PDF 将 rack_id/bin_id 列为可选追溯字段；本业务单层架取盘 params 发送 rack_id/bin_id/cell_id，按 PDF §7.2 的结构和原授权身份取值，不据 PDF 可选性删减。
@@ -3742,7 +3837,7 @@ WMS 最终 REJECT.ng_locator 指定 STATION_NG 后，复用机器人1的 PICK_AN
 }
 ```
 
-params 两端仅 location_id/location_type，不增加箱型、格位、层数、厚度、直径或占用深度。device_code、location_id 取本线机器人1/扫码台/NG 实际 ECS 绑定；STATION_SCAN/STATION_NG 为本例同名位置，timeout=30000 为配置示例。保留原盘、REJECT 和命令关联，不把 task_id/barcode/前序决定 ID 塞入 ECS 参数。NG 占用、交接及运动互锁归 ECS/PLC，不增加 WES 查询 NG 就绪或自建等待接口。
+params 两端仅 location_id/location_type，不增加箱型、格位、层数、厚度、直径或占用深度。device_code 取本线机器人1（KT11 ARM01 / KT14 ARM03）；扫码平台与 NG 平台固定使用 STATION_SCAN/SCAN_PLATFORM、STATION_NG/SCAN_NG，timeout=30000 为配置示例。保留原盘、REJECT 和命令关联，不把 task_id/barcode/前序决定 ID 塞入 ECS 参数。NG 占用、交接及运动互锁归 ECS/PLC，不增加 WES 查询 NG 就绪或自建等待接口。
 
 ECS → WES，POST /api/v1/callback/result 的成功 Result：
 
@@ -3780,10 +3875,10 @@ NG 不报告的约定适用于本文自动上架业务；其他业务沿各自�
 | --- | --- |
 | WMS WAIT | 保留原盘/作业事实，到期续问；不解释成 NG，见 §5.3 |
 | WMS REJECT | 沿 BIN 的 business_exception_code/source_disposition 或 RackSlot 的本盘关闭语义；不将 REJECT 缺后继当整面完成 |
-| NG 放置 | 去向由原 REJECT.ng_locator 给出；成功且位置确定后沿 movement_report 上报。设备执行映射是 P04 交付依赖，不直接把 NG_ZONE 当 ECS location_type |
+| NG 放置 | KT11 ARM01、KT14 ARM03 执行 `STATION_SCAN/SCAN_PLATFORM → STATION_NG/SCAN_NG`，两端各传 `location_id` 和 `location_type`。原 NG 命令有效应用的 `SUCCESS/1/PUT_FINISHED` 确认放置。报告沿原 REJECT.ng_locator，发生时间取该原 Result.finish_time |
 | BIN CONTINUE、RackSlot 异常后的后继 | P06 已确认，原 NG 成功及本业务 NG 报告收口后按 §5.9.2 复用所属 work_plan，取得完整新授权；CLOSE 不扩大为整箱/整面关闭 |
-| 明确空取 | 只凭原设备权威无料事实触发 §4.5.2；沿旧 empty_decide 的 RETRY/WAIT/SOURCE_DONE，SOURCE_DONE 后按 §5.9.2 合法续问，不从普通失败推断 |
-| 取盘/放盘失败、已到扫码台但扫码失败 | 可恢复故障先沿7.1.4硬件报警/人工处理及原未结束命令恢复；最终FAILED按7.1.3保留，失败不等于空取，未知不强造数量，不重做原取盘或改报成功。该设备能力仍属交付依赖；已确认业务异常续问沿5.9.2，不据普通失败直接触发 |
+| 明确空取 | 按 §4.5.2 消费原取盘的 FAILED/0/PICK_FAILED，沿 empty_decide 的 RETRY/WAIT/SOURCE_DONE。SOURCE_DONE 后按 §5.9.2 合法续问 |
+| 取盘/放盘失败、已到扫码台但扫码失败 | 可恢复故障先沿7.1.4硬件报警/人工处理及原未结束命令恢复；最终 FAILED 按原阶段处理。只有 §4.5.2 的明确取料失败进入空取。未知结果继续原命令恢复，设备恢复能力沿交付依赖验收 |
 | 响应或物理结果未知、HELD、冲突 | 原命令/请求及事实保持，不换身份重做或猜位置，不通过新任务/后继覆盖原义务 |
 
 原厂错误码映射及设备重启补报是交付依赖，见 [交付依赖表](#delivery-dependencies)；它们不改变已确认的原命令关联、扫码字段和结果含义。
@@ -3968,9 +4063,10 @@ WES 按该新命令的完整 barcode/scanned_at、原来源和最新 source_rack
 <a id="roller-seams"></a>
 ## 8 BIN_Roller 的统一接缝
 
-smt_auto只装配一份bin_roller，两个方向共用下面这些方法/事实。组件独立履约四点、五层供箱/回流/FIFO/drain/CTU生命周期，不取得业务码、owner或独立调度入口。业务不另注册SCAN2、不另发MOVE_FORWARD、不复制组件状态表，也不直接读组件/平台内部表替代公开进度。
+宿主显式装配sorting_task、bin_roller、rack_dispatch三个组件。工厂创建一个RackDispatch("smt_auto", capabilities)，同一对象注入BinRoller和两个方向架适配；四点扫码仍唯一由BIN_Roller受理，AUTO不另发公共MOVE_FORWARD，不嵌套组件。BIN_Roller4表保存供回箱生产，RackDispatch2表保存job/action和单份departure，宿主不依赖旧cycle/action内部表布局。
 
-当前公共实现已由手工首宿主消费并收敛为10表，宿主继续使用原ports和具名ID，不依赖合表布局。工作位`positions[].capacity`及原进场/交出事实由公共调度复用，运行额度限定单个任务，同线保持单一进行中任务；无任务drain独立串行；不新增自动额度字段，不以额度证明在位或物理完成。手工准入/完工与私有状态不进入自动生产；拟议Transport更正不改原协议终态；新的公共调度决定已统一CTU03/F01的DEPART有效接纳完成，含库区及不同工作位去向，直接架也适用，原始FAILED仍保留为失败备查。
+当前公共实现已由手工首宿主消费；BIN_Roller为4表、RackDispatch为2表（手工另有5张宿主表），旧10表布局仅为历史快照，宿主继续使用原ports和具名ID，不依赖合表布局。工作位`positions[].capacity`及原进场/交出事实由公共调度复用，运行额度限定单个任务，同线保持单一进行中任务；无任务drain独立串行；不新增自动额度字段，不以额度证明在位或物理完成。手工准入/完工与私有状态不进入自动生产；拟议Transport更正不改原协议终态；新的公共调度决定已统一CTU03/F01的DEPART有效接纳完成，含库区及不同工作位去向，直接架也适用，原始FAILED仍保留为失败备查。
+生产Alembic的RackJob仍只允许MANUAL_RETURN/MANUAL_TRANSFER/ROLLER_ORDINARY/ROLLER_DRAIN。Task 7仅在公共服务及隔离ORM加入AUTO_INBOUND_SOURCE、AUTO_OUTBOUND_RETURN、AUTO_OUTBOUND_TARGET及固定F01/CK04映射、原出处结构/冻结值核验；AUTO没有手工WAIT提前续问。完整方向当前授权/资源/交接适配与S6迁移尚未交付，不能正式接入或通过伪装MANUAL/ROLLER、只声明组件冒充已支持。每线请求额度沿`positions[].capacity`（共享本任务/点位准入，不预准备未来任务）和roller原周期，不另建额度/位置占位或Sender。
 
 公共执行与事务唯一引用[BIN_Roller设计](../superpowers/specs/2026-10-30-bin-roller-capability-design.md)、[公共回流](workline-bin-return-api.md)与[固定接口](../superpowers/plans/2026-10-30-bin-roller-implementation.md#文件责任与固定接口)，本章只定义宿主提供什么、消费什么。
 
@@ -3985,7 +4081,7 @@ smt_auto只装配一份bin_roller，两个方向共用下面这些方法/事实�
 | apply_supply_change(session, change) | 原receiver计划/取消事务内交SupplyChange的work_line_id/task_id/稳定change_id/精确added/withdrawn；change_id关联原受理消息 |
 | SourceFaceRef | 原plan_revision/rack_id/单值rack_face；只由added_bin_source_racks展开，保留数组原序和跨版成员。inbound单层、outbound RackSlot/目标架不进入SupplyChange |
 
-工厂构造BinRoller(context, capabilities, production)放components['bin_roller']；两个read方法使用调用方session，不查库构造第二运行时。具体架号/箱格/逐盘参数来自原计划或决定，不作为静态占位配置。取消后本地在制段仍按原上下文和实际到位继续对应阶段首次合法求值，未决恢复原请求，未开始需求才停止。
+工厂构造BinRoller(context, capabilities, production, rack_dispatch=同一原对象)放components['bin_roller']，公共对象也放components['rack_dispatch']；两个read方法使用调用方session，不查库构造第二运行时。具体架号/箱格/逐盘参数来自原计划或决定，不作为静态占位配置。取消后本地在制段仍按原上下文和实际到位继续对应阶段首次合法求值，未决恢复原请求，未开始需求才停止。
 
 <a id="scan2-admission"></a>
 ### 8.2 SCAN2 唯一委托、方向准入与释放
@@ -4006,9 +4102,15 @@ smt_auto只装配一份bin_roller，两个方向共用下面这些方法/事实�
 生产授权/WAIT/取放/报告归宿主推进。5.6条件成立时保存释放决定，调用release_scan2(session, arrival_id)，保存返回原command_code；只通过get_scan2_release_result读原公开已应用结果。组件提供原放行，不另建发送路径或以ACK/None/命令号补成功。
 
 <a id="roller-progress"></a>
-### 8.3 两组原关联、公开进度与共同恢复边界
+### 8.3 原关联、公共调度与独立报告恢复
 
 原task→五层供箱成员→SupplyProgress，与原task→SCAN2 arrival→逐盘/报告→原释放分别保存，两者不是库存绑定，也不强制逐箱匹配供箱成员。来源/目标生产架及原进场/面另由宿主保留；任务切换不把旧进度、报告、释放或架流挂到新任务。
+
+本地prepare不是发送前的空动作登记：当前公共实现的新ENTER/ROTATE会在调用事务内创建Transport及提交意图。AUTO必须在调用前完成原有效授权、资源、拟议搬运的交接核对，并同事务保存原job/action引用；返回ID不证明可靠接纳/到位。authorized_original_id只用于恢复已有且确有LOCAL_ONLY证据的原动作，不是正常新prepare之后补授权的第二阶段。register幂等返回旧job时仍须核对冻结原出处/资源及原动作用途，不能以非空ID或当前配置覆盖原意图。
+
+公共调度进度用RackDispatch.progress/final_result，RACK_CYCLE原ID已是公共job ID，不能再通过BinRoller.original_record("rack_cycle")读旧表。自动方向RACK只扫本owner的AUTO来源jobs，roller只扫其两类来源，避免重复推进/漏待办。已有movement_report按INBOUND_REPORT/OUTBOUND_REPORT独立候选恢复，不要求公共job仍pending、当前task/方向或当前配置有效；应报尚未登记的成功仍由原生产待办发现，不能把缺报告行当完成。报告不反向创建架/机械臂动作。
+
+独立REPORT在RR只消费已登记原报告；不顺带登记异常work_plan或新的取放/搬运。outbound NG报告消费提交后，原生产待办在SERIALIZABLE事务中重查原阶段，触发消费与唯一下一求值意图一起提交；两事务之间崩溃/丢通知仍可由原NG/报告及未消费阶段恢复，不能清了报告pending就漏掉续问。旧PUT结果尚未消费、应报尚未登记时，原生产候选也须继续发现；停用/删除/改绑不拦旧结果及原事实报告，仍禁止新物理作业。详见[模型§7.1](../superpowers/specs/2026-11-02-smt-auto-data-model-design.md#71-报告消费与后续生产的事务交接)。
 
 | get_supply_progress返回 | 宿主解释 |
 | --- | --- |
@@ -4177,18 +4279,18 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 <a id="delivery"></a>
 ## 10 交付依赖、验收与已确认边界
 
-本文是合同及设计；sorting_task的ST1/ST2已随PR #44合入develop（380aeba），smt_auto正式业务与组合仍未实施、部署或现场通过；人工首宿主及公共后续收敛已随PR #47/064b5c8合入，见[手工当前交付](../testing/smt-manual.md#current-delivery)，本轮未重跑。已完成的软件验收、52项跳过及未验收边界统一见[共享计划§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)。共享任务合同/接收适配/分派按[sorting_task计划ST1～ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md)，宿主状态、方向生产及正式组合按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)，共享交付只验收一份，各宿主仍验证自己的实际接入。软件运行的非eager worker/Beat、原结果唤醒及公共宿主接入另按[总计划G01～G04](../superpowers/plans/2026-10-31-smt-auto-implementation.md#integration-acceptance)验证；只连独占测试资源/对端替身的worker证据与真实WMS/ECS/RCS、现场物理分别记录；ACK、启动、文档或单项Mock不能代替物理完成。
+当前develop代码基线为98008ff，唯一迁移head为smtautofoundation（父smtmanualoprename）；AUTO已有7张foundation表及局部S1宿主修正，S1整体仍未完成。手工/BIN_Roller接入公共调度的#49/7ab5e31历史软件证据见[公共计划](../superpowers/plans/2026-11-03-shared-rack-dispatch-implementation.md#最终验收2026-11-03)。原ST1/ST2数字仍属其历史交付，不能充当当前AUTO证据。AUTO仍须从既有7表保留数据演进至目标11表，完成来源扩充、方向plate/decision_round、生产/归档/报告适配及三组件正式装配；队列领取、prepare/原结果消费和TaskHost原计划重验已有隔离宿主入口，测试专用真实共享receiver与当前S1独立prepare隔离/有界重试已有证据；正式AUTO catalog/runtime、设备/方向完整资源声明与准入及PostgreSQL并发门槛仍待完成，按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)验证；worker/对端/部署/实物分别记证，公共代码合入和ACK不等于AUTO或物理完成。
 
 <a id="delivery-dependencies"></a>
 ### 10.1 一份共同交付清单与方向差异
 
 | 交付物 | 共同要求 | inbound差异 | outbound差异 |
 | --- | --- | --- | --- |
-| 业务/任务合同 | sorting_task单份六操作与可信分派、显式重验/错误/可选guard已随PR #44合入；smt_auto任务/队列/归属/服务/推进仍待宿主实现，旧接口默认不变 | 单层架/接料生产与7天归档、五通知只读guard按9.3落实 | BIN/RackSlot生产、面级终局与目标架；不采用入库归档政策 |
-| BIN_Roller及结果接缝 | B1～B5本地组件/分项验证、B6文档边界、B7共享声明/隔离装配已有；人工首宿主/catalog、组件迁移及10表/额度收敛已随PR #47合入，见[手工验收](../testing/smt-manual.md#current-delivery)；自动宿主组合及对端/现场整体验收仍待交付。两方向只接第8章，不复制公共表/状态机/发送器，不重新执行B7首宿主或公共迁移 | 原五层供箱/arrival/释放及单层架原位置读口 | 原供箱/arrival/释放与RETURN/TRANSFER原位置，RackSlot不套feed_complete |
+| 业务/任务合同 | sorting_task单份六操作与可信分派、显式重验/错误/可选guard已随PR #44合入；smt_auto已有7表及局部任务/归属/计划/取消修正，持久队列领取、prepare/原结果消费及TaskHost原计划重验已有隔离宿主入口，完整AUTO receiver/catalog/runtime、资源准入及服务/推进装配仍待接入，旧接口默认不变 | 单层架/接料生产与7天归档、五通知只读guard按9.3落实 | BIN/RackSlot生产、面级终局与目标架；不采用入库归档政策 |
+| BIN_Roller/RackDispatch及结果接缝 | 历史#49交付手工5表/roller8表/公共2表和原submit接纳，当前roller已收敛4表、公共仍2表；自动从既有7表保留数据演进至目标11表、AUTO来源/模板窄扩充及PointDemand/DirectHandoff真实适配，不重跑公共切换 | 原单层/五层scope及原准备action资格 | RETURN/TRANSFER原授权及目标job/action，报告独立恢复，RackSlot不套feed_complete |
 | WMS实现 | 任务族/严格方向联合、连续版本/精确取消、完整授权/决定、同键唯一未闭合授权、报告去重/入账事务、三分支完成确认及原等待配置 | 最新source_racks续问、仅正常成功报告、SOURCE_ABSENT及箱格/深度由WMS保证 | BIN空取locator仅type/bin_code/cell_id；NG必报收妥后续问、SOURCE_DONE仅闭原Cell/SLOT，四项RackSlot取盘参数完整 |
-| ECS严格附录 | 原命令/Result/完整barcode-scanned_at、数量/阶段、ACK先后/重报、原厂code/msg；7.1.4硬件停机报警、人工处理后原未结束命令恢复，处置期不先报FAILED，仅恢复未完成部分，重启保留原阶段并最终补报；不更正既成FAILED，实际设备证据独立 | 两臂params及FAILED/0/PICK_EMPTY、STATION_NG完整映射与NG不报告；数值/放盘前口径保持 | 明确无料权威载体/observed_at、NG_ZONE→真实ECS位置/执行设备/完整params仍须交付；不猜PICK_EMPTY/错误码或直接用NG_ZONE当location_type |
-| 资源/RCS配置 | 工作线实际设备/位置、模板/地址、超时/首批等待均显式配置，示例不默认；真实到位/面向与物理互锁验证 | STATION_A/B单层架F01、两臂SCAN平台/SCAN2/NG | RETURN/TRANSFER的F01/CK04/F01、供箱CTU；CK04对端支持同步；CTU03/F01 DEPART有效接纳即完成，覆盖库区/生产线等不同工作位，ENTER/ROTATE仍须真实到位 |
+| ECS严格附录 | 原命令/Result/完整barcode-scanned_at、数量/阶段、ACK先后/重报、原厂code/msg；7.1.4硬件停机报警、人工处理后原未结束命令恢复，处置期不先报FAILED，仅恢复未完成部分，重启保留原阶段并最终补报；不更正既成FAILED，实际设备证据独立 | 两臂params及FAILED/0/PICK_EMPTY、STATION_NG完整映射与NG不报告；数值/放盘前口径保持 | 已定原 FAILED/0/PICK_FAILED 及 finish_time。已定本线 BIN_ARM 的扫码台→NG 参数及原成功 Result。供应商核对样本、原命令重报，WMS/现场核对 NG 区域映射及实际放置 |
+| 资源/RCS配置 | KT11/KT14设备、现场点位、三组ECS地址及位置常量已确认，见§1.1～1.2；实际保存/部署、模板、超时、可选首批等待及真实到位/面向/互锁仍须验收 | 左右单层现场位映射STATION_A/B，F01；两臂/扫码台/SCAN2/NG常量 | B退料取、A转运放；RETURN/TRANSFER的F01/CK04/F01、供箱CTU；CK04对端支持同步；DEPART有效接纳不证明物理完成，ENTER/ROTATE仍须真实到位 |
 | 历史与启用 | 原身份/正文/owner/路由/期限/证据保留，迁移单head/旧数据保留；真实发送、迁移执行、部署另按授权 | 清理不删公共/未决恢复依据，最小摘要持续保留 | 不移植旧插件运行时、锁/容量窗口或历史生产数据 |
 
 缺依赖时对应正式注册/严格解析/真实发送和现场验收保持未交付，不能用假组件、空模型、默认值或自动重建动作消除缺口；可独立完成不依赖该交付的文档/隔离验证。完整自动包须满足两个方向及共同装配的适用门槛。
@@ -4215,7 +4317,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A13 | 共同（按方向合同） | prepare 响应丢失，首版计划先到，随后原准备响应可靠保存 | 原准备沿冻结身份恢复，早到计划保存待定事实并返回 503，不创建成员；WMS 原计划重试且校验通过后才应用，不自动激活或新建准备请求 |
 | A14 | 共同（按方向合同） | 本地尚无首版计划且首批等待期限未配置，或存在早到/缺版待处理计划 | 保留 PREPARING，不猜默认期限或按版本 0 关闭；满足原合同显式到期及本地条件时，才用 last_applied_plan_revision=0 确认 |
 | A15 | 共同（按方向合同） | 完成确认尚未收妥时新计划到达，随后收到旧版本 COMPLETED | 保存新计划和原确认事实，复核版本及本地条件，不用旧终局关闭新增工作，不换身份绕过原最终决定；正常及 NG 必报责任继续 |
-| A16 | outbound | 原 NG 已放置成功但报告未收妥；或只收到 SOURCE_DONE/REJECT.CLOSE，原箱/面没有取料终局 | NG 先恢复原报告；SOURCE_DONE/CLOSE 只关闭原 Cell/SLOT。两者均不直接放箱/换面或请求整单完成；满足 §5.9.2 才登记一次异常续问，已有授权/请求时不并发第二份 |
+| A16 | outbound | 原 NG 已放置成功但报告未收妥；或只收到 SOURCE_DONE/REJECT.CLOSE，原箱/面没有取料终局 | NG 先恢复原报告；SOURCE_DONE/CLOSE 只关闭原 Cell/SLOT。两者均不直接放箱/换面或请求整单完成；满足 §5.9.2 才登记一次异常续问，已有授权/请求时不并发第二份；RackSlot尚应原面续问时保留该点需求，不按“NG盘已取离、只剩报告”退架；原面已取料终局时只报不续问 |
 | A17 | outbound | 本箱已有有效 NO_WORK，但其他正常/NG 成功报告尚未确认，或存在待消费授权/异常阶段/RETRY/未知取放 | 保留取料终局及原义务，不调用 release_scan2，不登记正常 completion_confirm；原义务推进后重新核对，不以“无待发请求行”忽略待消费前序事实 |
 | A18 | outbound | 普通盘报告已收妥，但正常 ACCEPT 带有后继，或原异常续问仍 WAIT | 报告只闭合原盘，不产生箱/面终局；有效后继继续，WAIT 保持原时点，不放箱、不结束整单 |
 | A19 | outbound | NG/SOURCE_DONE 事实重复到达时，原箱/面已有正常 ACCEPT 无后继或 NO_WORK，或已有另一有效授权/取料请求 | 不重开终局，不重复领首盘；原前序事实与原义务保留。未终局且原条件后来成立时仍只登记一次合法异常续问 |
@@ -4225,8 +4327,8 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A23 | 共同（按方向合同） | 原完成确认未知/503后重启；或有效 STALE/BUSINESS_IN_PROGRESS 已消费 | 未知只恢复原确认和暂存作业；有效非终局消费后复核原上下文、计划和设备条件，再登记一次原暂存首盘，保持原 scanned_at/arrived_at，不借完成请求身份取料 |
 | A24 | outbound | BIN NG 成功但原 NG 报告未收妥；报告收妥后 CONTINUE | 未收妥时只恢复原报告，不提前新建本异常续问；收妥后原 NG 阶段只消费一次，bin.work_plan 返回完整新参数才取下一盘，允许原 Cell 参与，原其他合法授权不被统一串行 |
 | A25 | outbound | BIN CLOSE 或 RackSlot REJECT/CLOSE 后，新 work_plan 仍返回已关闭 Cell/SLOT | 不把该响应作为合法新授权执行；保留原请求/决定核对，不用旧尺寸补值或改为别的来源，不把关闭单一来源当箱/面完成 |
-| A26 | outbound | RackSlot NG 报告收妥，或原 SLOT 的 SOURCE_DONE 已应用后取得同面其他 SLOT 的 READY | 仅复用原四字段 return_rack.work_plan，原 arrived_at 不刷新；使用新 SLOT 自己的层/列、厚度/直径；不是重开首盘到位，不重问原 REJECT，不自动结束整面 |
-| A27 | outbound | 普通失败/超时/位置未知与原命令报警恢复；最终Result先于ACK/迟到/重复 | 不猜空取或改报成功；按7.1.4沿原命令/设备/盘消费合法原阶段结果，UNKNOWN/HELD无结果不因报警解除清保护。取盘成功不作整盘收口；正常/NG实际放置及必报分别核对，不提前放箱/关单/归档；硬件恢复证据归D3/D4，NG未交付分支仍待D5 |
+| A26 | outbound | RackSlot NG 报告收妥，或原 SLOT 的 SOURCE_DONE 已应用后取得同面其他 SLOT 的 READY | 仅复用原四字段 return_rack.work_plan，原 arrived_at 不刷新；使用新 SLOT 自己的层/列、厚度/直径；不是重开首盘到位，不重问原 REJECT，不自动结束整面；RR报告已消费而SSI续问尚未登记时崩溃，原NG/报告事实与未消费触发仍被发现，一次续问且原面不提前离场 |
+| A27 | outbound | 普通失败/超时/位置未知与原命令报警恢复；最终Result先于ACK/迟到/重复 | 不猜空取或改报成功；按7.1.4沿原命令/设备/盘消费合法原阶段结果，UNKNOWN/HELD无结果不因报警解除清保护。取盘成功不作整盘收口；正常/NG实际放置及必报分别核对，不提前放箱/关单/归档；硬件恢复证据归D3/D4，NG 实机验证归 D5 |
 | A28 | outbound | 料箱已与货架解绑，原取盘明确空取，且没有原供箱架号/面或其记录已变化 | 按原任务、当前箱码/Cell、observed_at 构造合法 empty_decide，source_locator 仅含 type/bin_code/cell_id；不因缺少历史架关联阻塞，不查询箱架绑定，不让旧架信息改变本次来源、RETRY 或 SOURCE_DONE 范围 |
 | A29 | outbound | BIN 已在制，原供箱架换面/离场、原成员撤销或投箱批次归档 | 保持原 task/arrival、当前箱格及有效授权；正常取料、NG/SOURCE_DONE 续问、空取和原报告不因原架/成员变化被拒绝或改挂，取消在制段仍沿 U03 |
 | A30 | outbound | BIN 正常/NG 报告恢复时，原供箱关联缺失或已变化，但实际目标是 TRANSFER 架或 NG 区域 | 仅用原任务、BIN_CELL 来源、barcode、原实际去向和 occurred_at 处理原报告，不查询原供箱架；实际目标架/面作为去向保留，不误删目标字段 |
@@ -4234,7 +4336,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A32 | outbound | 单个 BIN 已完成，但本任务自己的供箱计划成员仍有未决责任 | 本箱不回查原架，可以按本箱条件释放；整单仍按原供箱需求及其公开进度核对，不能因解除 BIN 来源关联就伪造本任务供箱完成或丢弃原义务 |
 | A33 | outbound | 原 empty_decide 返回 RETRY，决定被重复消费、通知丢失或登记新命令后重启 | 仅 WMS 授予原来源一次新取盘；原决定消费与唯一新命令同事务，重复只恢复该新命令，不重发旧失败命令、不自行再次授予 RETRY |
 | A34 | outbound | 原 SOURCE_DONE 重报，或其后同面仍有其他合法需求 | 只结清原 Cell/SLOT；满足 §5.9.2 时一次登记合法异常续问，有既有授权/未决请求时不并发第二份，没有条件时不强行跳转。无移动不报告，不把箱/面或整单认作完成 |
-| A35 | outbound | NG 成功/报告确认或 SOURCE_DONE 消费时外层事务回滚 | 前序消费、原阶段及下一 work_plan 意图一起回滚；成功提交后的重复只恢复原意图，不留下已消费却无请求或同一事实触发两次续问 |
+| A35 | outbound | NG 成功/报告确认或 SOURCE_DONE 消费时外层事务回滚 | RR原报告消费回滚不留下收妥标记，已提交交付事实不回退；SSI中NG/SOURCE_DONE异常触发消费、原阶段及下一work_plan意图同提交/回滚。两事务之间崩溃仍发现未消费触发，重复只恢复唯一原意图；RR不顺带发生产请求，不留下已消费却无请求或同一事实触发两次续问 |
 | A36 | outbound | work_plan 已 NO_WORK，或正常 ACCEPT 已明确无后继后，再收到旧异常确认/补架计划 | 不登记异常续问重开原箱/面；原报告/释放继续收口，新计划只按其有效成员与后续合法到位推进 |
 | A37 | 共同（按方向合同） | 本地段已在制，上游取消后原箱/架才到位，且此前尚未登记该阶段的 WMS 请求 | 沿 U03 以原执行上下文及实际到位继续对应阶段第一次合法求值；未开始需求停止，未决请求恢复原身份，迟到决定不改挂新任务 |
 | A38 | 共同（按方向合同） | 有效任务且可读箱缺 SCAN1/投箱成员；可读无任务无原在制；不可读箱 | 分别验证直接登记原 work_plan、只走原释放、仅保留到位/异常不发虚假请求；均保存原事实。原在制取消到位沿 U03，完成确认未决不按无任务直通 |
@@ -4245,7 +4347,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A43 | outbound | RackSlot 整面撤销、重复撤销或携带 slot_ids | 原 direct_pick_sources 整面选择器只处理对应原计划面，未开始需求停止，原单盘授权/动作及报告继续；重复不扩大范围，首版 AUTO 传 slot_ids 拒绝，不套用逐储位旧计划 |
 | A44 | 共同（按方向合同） | WMS 在执行中因不同业务原因追加合法来源，原动作尚未收口 | WES 按来源/版本合同处理，不因“异常补足”要求另发任务，不自行补料、重授或重建动作；原终态限制、RackSlot 同面一次及未决原义务保持 |
 | A45 | outbound | 计划同时涉及料箱供箱、RackSlot 来源架和物料目标架准备 | 各资源按 §6.1 映射，RackSlot 仍调用 return_rack.work_plan，目标准备仍取本盘 ACCEPT；不误建料箱 Feed/drain，不让公共 feed_complete 关闭逐盘生产面 |
-| A46 | outbound | 三类货架进场/换面/离场及同角色恢复 | 供箱架使用 CTU01/CTU02/CTU03，RETURN/TRANSFER 使用 F01/CK04/F01；同物理层数不改变业务角色，恢复不替换模板/绑定；CTU03/F01的DEPART按原有效接纳完成，包含TRANSFER_RACK直送生产线RACK_POSITION，后到失败仅备查；ENTER/ROTATE仍等原到位结果 |
+| A46 | outbound | 三类货架进场/换面/离场及同角色恢复 | 供箱架使用 CTU01/CTU02/CTU03，RETURN/TRANSFER 使用 F01/CK04/F01；同物理层数不改变业务角色，恢复不替换模板/绑定；CTU03/F01的DEPART按原有效接纳完成，包含TRANSFER_RACK直送生产线RACK_POSITION，后到失败仅备查；ENTER/ROTATE仍等原到位结果；真实prepare新动作已登记Transport提交意图，调用前校验/回滚保护；等待该准备的授权自身不永久阻架，旧面A盘PUT未闭则后盘不得ROTATE/REPLACE。旧job离场严格接纳后才建同点新job，当前准备失败/未决/面已变时不能借历史成功action PUT |
 | A47 | outbound | RackSlot 首盘 READY 含来源层2/列3、厚度15.3毫米、直径7寸，slot_id=A-03；本盘目标为另一层/列 | 首盘 ARM02 来源坐标取 WMS 授权的2/3并映射为字符串，尺寸按原数值及单位传递；不按 SLOT 文本推算。后续 PUT 坐标取本盘 ACCEPT 目标，尺寸仍为本盘原取盘的15.3/7 |
 | A48 | outbound | RackSlot 正常末盘 ACCEPT 明确无后继，但另一原盘仍有 NG/空取前序事实、WAIT/RETRY、未知动作或未确认报告 | 保存本面取料终局，不登记异常续问重开本面；原义务继续收口，未结清不补认面完成/整单确认。按§6.3.2区分需本架参与的直接责任和独立报告；仅独立报告未收妥不永久占架，其他物理/授权未决仍保护原架，不额外要求再取得NO_WORK |
 | A49 | outbound | 后继 next_source_action 提供层4/列2、厚度20毫米、直径13寸，与当前盘参数不同 | 下一盘只按该后继完整七字段创建一次原取盘命令，使用4/2和20/13；当前盘 PUT 仍用自己的原尺寸，不被后继覆盖，不借用 BIN 或前一盘参数 |
@@ -4254,20 +4356,20 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A52 | 共同（按方向合同） | 首盘/后继授权响应丢失、原请求重放或命令登记后重启，WMS 后续另有新授权参数 | 同身份恢复首次完整授权及原命令正文，包含所属合同的完整来源及尺寸参数；不刷新已冻结参数、不按最新授权重新组装。只有独立合法后继才用其自己的值及新动作身份 |
 | A53 | 共同（按方向合同） | 来源授权消费、命令登记后外层事务回滚，或提交后重复推进 | 原消费、来源参数/关联及命令意图同事务恢复；回滚不留下已消费但无命令，提交后的重复只取得原命令，不多取一盘 |
 | A54 | 共同（按方向合同） | 生产委托/原释放登记后外层回滚；提交后重复处理或通知丢失 | 验证接缝原事务中的业务事实、消费及意图原子恢复，公共事务机制引用设计；成功委托不二次进行，重复合法释放返回原 command_code，原业务待办继续可发现，不另建组件发送路径 |
-| A55 | 共同（按方向合同） | 正常任务已完成后原释放结果重复/迟到，或仍有独立公共回流/离场责任，随后新任务到来 | 正常完成前生产报告/释放已按 §3.7.1 核对；旧回调只归原记录，独立责任继续，不清新对象。历史/取消终态若保有未决释放，原 pending 仍保留履约，不据终态补造成功 |
+| A55 | 共同（按方向合同） | 正常任务已完成后原释放结果重复/迟到，或仍有独立公共回流/离场责任，随后新任务到来 | 正常完成前生产报告/释放已按 §3.7.1 核对；旧回调只归原记录，独立责任继续，不清新对象。历史/取消终态若保有未决释放，原 pending 仍保留履约，不据终态补造成功；PUT已提交但报告尚未登记即重启并停用/删除/改绑时，原PLATE仍消费严格原结果并一次登记必报，REPORT按原身份继续；新的物理意图仍受配置门禁约束，清报告pending不隐藏后续未消费异常阶段 |
 | B01 | 共同（按方向合同） | A 盘报告未被 WMS 收妥，同源同码 B 盘；或 A 已入账但响应丢失 | 未收妥由 WMS 返回 WAIT，B 按原等待规则续问；已入账可按 WMS 新授权执行 B，不由 WES 再等 A 确认作业务拦截。A 报告独立原样恢复，不重做取放或用 B 授权代替 A 确认 |
 | B02 | 共同（按方向合同） | 不同业务键的后继盘，前盘报告仍在恢复 | 满足设备交接条件时仍可流水推进，不能将同码唯一性门槛扩大为全工作线串行 |
 | B03 | 共同（按方向合同） | A 原报告已收妥，后续盘已获授权，A 的延迟副本再到达 | 按 A 的报告身份返回原 DUPLICATE；不匹配或闭合后续盘，不重复更新库存 |
 | B04 | 共同（按方向合同） | 新报告无匹配授权、多份匹配授权或目标冲突 | REFERENCE_CONFLICT，不扣账、不闭合其他盘；保留原事实核对，不按条码/最近记录/时间接近猜测 |
 | B05 | 共同（按方向合同） | WMS 报告事务回滚，或已提交但响应丢失；WES 消费确认时崩溃 | 原身份恢复，收据、库存及授权状态保持各自事务原子性；重复处理不重复记账或产生第二条取放命令 |
-| B06 | 共同（按方向合同） | 自动线原在位离场；同visit撤回/取尽重报及WAIT续问竞争 | 原在位/四字段不变；每visit唯一离场根/WAIT链，后到不同依据不改根/原意图，READY只一份原搬离；回滚及归档后恢复不重建。全撤回须非空完整撤回集合；ENTER未决不补认，失败/取消可靠在本点位且NONE/可交出时按公共安全清架，不补认生产成功；不把离场新事实规则扩到逐盘WAIT |
+| B06 | 共同（按方向合同） | 同一公共job撤回/取尽重报、WAIT及离场接纳竞争 | 原PointRef/覆盖依据和公共唯一离场根/WAIT链不重建；AUTO基线WAIT只按原due_at续问，未知/503沿原请求。原F01/CTU03 DEPART去ZONE/不同工作位严格接纳即调度完成，后到失败/同源终位不回退，不证明物理完成；ENTER未决不补认，非成功到位只在NONE/CLEAR下安全退出，不补认生产成功。独立报告不阻退架但继续原pending |
 | I01 | inbound | source_racks=[]及WMS累计等待 | 首次仍work_plan；固定最早时点后新身份/最新集合，WMS到限NO_WORK，WES不本地超时放行。 |
-| I02 | inbound | 左右独立、全撤回安全退架与新增覆盖/潜在授权交错 | 部分/其他版本有效覆盖、旧授权或可能原处取盘责任仍阻该架；非空完整覆盖全撤回且直接依赖闭合才原子记唯一退架依据，不填取尽。inbound三类SERIALIZABLE读/锁交错验证新plan先提交与退架先登记；退架后新成员不挂旧visit，已取离盘目标/报告不误拦来源，另一侧合法授权继续 |
+| I02 | inbound | 左右独立、全撤回安全退架与新增覆盖/潜在授权交错 | 部分/其他版本有效覆盖、旧授权或可能原处取盘及直接物理交接仍阻；非空完整覆盖全撤回且NONE/CLEAR才沿原公共离场，不填取尽。SSI及公共锁序验证新plan与离场根登记交错：仅release_requested可被完整CONTINUE撤销，原根登记后新成员不挂旧job。已取离盘独立目标/报告不误拦来源，另一侧合法授权继续 |
 | I03 | inbound | 单层取盘/SCAN2放盘与占用参数 | ARM02→扫码台→ARM01；WMS给放盘前层数/深度，空格0/0，不加一/相乘估算，不增格位矩阵。 |
 | I04 | inbound | 正常/NG/FAILED报告差异与原命令恢复，含Result先于ACK/迟到/重复 | 处置期不二次发送或补失败；原取盘扫码成功仅进入决定，不误记整盘physical_closure；正常目标明确成功才原报告，NG/FAILED不报。正常必报未闭不记直接收口，不提前放箱/关单/归档；既成FAILED不更正，设备原阶段恢复仍由D3/D4交付，独立合法后盘不被WES全线门禁取消 |
 | I05 | inbound | 明确空取与一次RETRY | 仅FAILED/0/PICK_EMPTY触发；SOURCE_ABSENT只闭原来源，显式true才整架取尽；每RETRY一次新命令，新事实才新决定，未知不绕过。 |
 | I06 | inbound | 接料箱/原需求与整单完成 | NO_WORK/正常无后继只是取料终局；原授权/生产/正常必报/公开原释放收口才确认，不加公共在途/旁路/排空门槛。 |
-| I07 | inbound | 7天保留、只读guard与方向隔离 | 摘要保留原TaskOwnerRef所需冻结字段，工作线改配/明细及原收据清理后仍定位原宿主/方向；终态/直接收口分别计时，未决继续留；清理后最小摘要/固定拒绝，身份漂移优先、不改旧收据；outbound与公共原结果不套此政策。 |
+| I07 | inbound | 7天保留、只读guard与方向隔离 | 摘要保留原TaskOwnerRef冻结字段，工作线改配/明细及收据清理后仍定位原宿主/方向；终态/直接收口分别计时，直接未决继续留。独立公共离场仅在原job/action与rack_retention_basis足以恢复同一Coverage/交接时清业务明细，缺证不清理/返回UNKNOWN；不删公共历史、不重建原链、不刷新摘要/guard时间。身份漂移优先、不改旧收据；outbound与公共原结果不套此政策 |
 | C01 | 共同（按方向合同） | 工作线首次准入、在制停用及恢复启用 | 按9.5拒绝不存在/停用/不支持组合；停用不领取/prepare/新建或发送设备作业命令，新plan不应用且恢复后仍须原消息重试；合法取消、原结果/已发生报告继续，历史确认不恢复物理执行，不解除UNKNOWN/HELD |
 | C02 | 共同（按方向合同） | 原prepare/完成确认结果缺失、无效或响应联合冲突 | 原公开引用/FOUND/VALID及精确HTTP/code均符合才消费ST1响应；允许真正未知备注，已知冲突/null不作有效决定；保留原身份/事实，不补成功或解除首盘暂缓，STALE仍比较原请求版本 |
 | C03 | 共同（按方向合同） | 显式业务503、原归属/归档查询暂不可用及原身份重试 | 只在可信绑定+显式recheck条件下提交原待定输入/503；其他显式Unavailable回滚本次保存点的新收据/写入，不丢外层事实、不删历史成功或形成永久503；系统异常/明确缺失分别沿原规则，条件恢复后原身份再受理 |
@@ -4278,14 +4380,14 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 <a id="confirmed-boundaries"></a>
 ### 10.3 已确认业务与尚待交付项
 
-outbound既有四项业务裁决均已本方确认：P01 首次生产准入、P06 异常续问与空取、P07 盘次关联，以及完成确认未决期间新增首盘暂缓。已确认规则索引见下表；P02 的具体设备故障恢复/补报、P04 的 NG 设备位置参数、P05 的原厂码，以及 WMS/本项目实施均在交付依赖表记录，不因未交付重开业务决定。
+outbound既有四项业务裁决均已本方确认：P01 首次生产准入、P06 异常续问与空取、P07 盘次关联，以及完成确认未决期间新增首盘暂缓。已确认规则索引见下表；P02 的具体设备故障恢复与补报、P04 的 NG 实机验证、P05 的原厂码及 WMS 联调均在交付依赖表记录。
 
 下表保留outbound既有P编号供追溯，不表示另有一套任务合同；inbound既定差异见1/4/5/7/9章。
 
 | 原编号 / 范围 | 本方已确认内容 | 正文位置 |
 | --- | --- | --- |
 | P01（本方已确认关闭） | 三类资源/原计划追加撤销保持；可读箱有有效任务直接 work_plan，不要求 SCAN1/投箱成员；可读无任务且无原在制上下文走原释放，不可读只保留异常；既有在制段沿原 task/arrival 与 U03 | §3.5/§3.6、§8.2、§6.1、§9.5 |
-| P02 已确认业务边界 | 原 Result 携带 barcode/scanned_at 并仅关联原命令；普通失败不推断空取、不重复取盘。具体设备恢复/补报列交付，不作为本轮业务问题 | §7.5.1/§5.2、§7.10.2、交付依赖表 |
+| P02 已确认业务边界 | 原 Result 携带 barcode/scanned_at 并仅关联原命令；明确的原取料失败按 §4.5.2 消费。未知结果沿原命令恢复。设备恢复与补报单列验收 | §7.5.1/§5.2、§7.10.2、交付依赖表 |
 | P06（本方已确认关闭） | NG 成功及原 NG 报告收口后、或明确 SOURCE_DONE 后，复用原 work_plan 取得完整授权；CLOSE/SOURCE_DONE 仅关闭对应 Cell/SLOT，不推定箱/面结束；empty_decide 沿原 RETRY/WAIT/SOURCE_DONE；BIN 解绑后仅按任务/箱格关联，不带原架号/面，RackSlot 保留自身原来源字段 | §4.5.2、§5.9.2 |
 | P07（本方已确认关闭） | WMS 保证同键单一未闭合最终授权，同码 WAIT、报告先去重后匹配、歧义拒绝；WES 不建业务锁，原报告独立恢复 | §5.7/§5.7.1 |
 | 完成确认期间新到位（本方已确认关闭） | 新计划正常应用交付，新增到位保存原关联并暂缓首盘；有效非终局消费后再按条件推进。原授权/报告/公共义务继续，不将有效任务当无任务放行 | §3.7.3 |

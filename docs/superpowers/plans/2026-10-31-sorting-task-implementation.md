@@ -12,6 +12,8 @@
 
 2026-11-02宿主状态补充：完整smt_manual及其BIN_Roller消费已随PR #47/064b5c8合入，见[手工交付](../../testing/smt-manual.md#current-delivery)；smt_auto仍为设计/计划。共享合同已覆盖MANUAL/AUTO分支不等于自动生产已实现。自动S1/S6复用本计划既有合同/receiver/分派，只验证自己的实际受理和共同catalog消费；不重新执行ST1/ST2实施步骤、不抽取手工任务表或另注册六个operation。§11原测试数字保持共享交付时点，本轮没有新增产品测试证据。
 
+2026-11-03后续基线：公共RackDispatch已随[PR #49](https://github.com/kaizhoumasha/maintenance-admin/pull/49)合入develop（7ab5e31），手工/BIN_Roller现显式组合sorting_task、bin_roller、rack_dispatch，同一owner-scoped调度实例供宿主及roller使用；宿主写入锁序按下文1.1补充。AUTO来源/模板及事实适配仍待[smt_auto总计划S2/S6](2026-10-31-smt-auto-implementation.md#common-ports)交付，详见[#49规划复审](../reviews/2026-11-03-smt-auto-pr49-plan-review.md)。ST1/ST2无新增实施步骤，原历史测试数字保持原时点。
+
 ## Global Constraints
 
 - 唯一注册源为 sorting_task；四个 callback 为 issued、queue_changed、plan_delta、cancel，两个 decisions request 为 prepare、completion_confirm，均使用 sorting.task.*@v1。
@@ -83,7 +85,7 @@ callback_operation 仅增加三个可选参数：errors:CallbackErrors|None=None
 
 既有内部读口的待实施签名固定为 `async find_receipt(session:AsyncSession, operation:str, operation_id:str, *, for_update:bool=False) -> CallbackReceipt | None`。只有本接缝显式传for_update=True时加行锁并强制刷新已加载对象；默认False保留既有调用行为。receiver必须在取得该锁后才构造传给recheck的只读original_response，不能复用锁前缓存的响应或资格判断。
 
-固定写入锁序为原CallbackReceipt→WorkLine→实际涉及的Devices（ID顺序）→原业务动作；归属/guard只读查询不先取得宿主写锁，宿主advance不反向锁入站收据。成员/版本/意图和收据更新仍同事务。锁等待/数据库异常沿既有回滚/503路径恢复原身份，不当作可提交待定信息的业务Unavailable；无新资源锁、收据列或重试器。未登记旧接口仍走原路径。
+固定写入锁序先为原CallbackReceipt→WorkLines→实际涉及的Devices（ID顺序），再由宿主按当前公共架调度边界锁RackJobs（ID）→宿主主体（固定类型/PK）→RackActions（ID），锁后复核相关job集合；不涉及公共架的宿主保留自身原有约束。归属/guard只读查询不先取得宿主写锁，宿主advance不反向锁入站收据。sorting_task不获取架锁、不拥有宿主事务；宿主通过公共门面完成事实变化note_facts_changed，成员/版本/意图和收据更新仍同事务。锁等待/数据库异常沿既有回滚/503路径恢复原身份，不当作可提交待定信息的业务Unavailable；无新资源锁表、收据列或共享重试器。未登记旧接口仍走原路径。
 
 <a id="sorting-task-validation"></a>
 ### 1.2 无模式字段的两阶段校验与响应合同

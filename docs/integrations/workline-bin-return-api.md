@@ -467,7 +467,7 @@ NO_BATCH 按 C03 结束当前面服务，剩余候选交给后续架面；原响
 }
 ```
 
-SCAN4 示例使用同线 STATION_SCAN12；KT18 对应 STATION_SCAN15/16。完整映射唯一维护在[人工线配置表](manual-picking-api.md#manual-config)。事件内容派生收据身份不能代替本次回流身份，重复接收不得创建第二轮回流或第二条方向命令。
+SCAN4 示例使用同线 STATION_SCAN12；KT18 对应 STATION_SCAN15/16。完整映射分别维护在[手工KT16/KT18配置表](manual-picking-api.md#manual-config)、[自动KT11/KT14配置表](smt-auto-api.md#auto-config)：自动两线SCAN3/4分别为STATION_SCAN3/4、STATION_SCAN7/8，OUTLET分别为CNV0102、CNV0202；四线滚筒/扫码设备共用ECS服务`{ECS_SHARED_ORIGIN}`，各线设备、事实及FIFO仍独立。机械臂内部STATION_SCAN是扫码平台标识，不替代四点设备或现场交接位。事件内容派生收据身份不能代替本次回流身份，重复接收不得创建第二轮回流或第二条方向命令。
 
 ### 3.2 方向与结果
 
