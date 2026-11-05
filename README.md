@@ -1,6 +1,6 @@
 # enterprise-backend
 
-手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。自动线与粗分后续生产阶段的接入仍在规划中。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
+手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。SMT 自动线已完成开发阶段的隔离验证，正式目录准入和现场联调进入后续交付阶段。粗分后续生产阶段仍在规划中。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
 
 工作位进场额度现由 `positions[].capacity` 配置，运行计数限定本线当前任务；管理字段与切换要求见[人工 API](docs/integrations/manual-picking-api.md#manual-request-limit)，设计和验收范围见[容量设计](docs/superpowers/specs/2026-11-03-workline-position-capacity-design.md)、[实施计划](docs/superpowers/plans/2026-11-03-workline-position-capacity-implementation.md)及[软件验收记录](docs/testing/smt-manual.md#position-capacity)。
 
@@ -82,6 +82,8 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
 | `SMT_MANUAL_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，如 `60000`；从原 prepare 接纳的本地保存时间起计算首版计划等待。首版计划未到且未配置时保持 PREPARING，不发送版本 0 完成确认；配置时长须与 WMS 约定 |
+| `SMT_AUTO_FIRST_PLAN_WAIT_MS` | 隔离验证用的可选正整数毫秒，从原 prepare 首次可靠接纳起计时。留空时继续等待首版计划 |
+| `SMT_AUTO_WORKLINES` | 隔离验证用的 JSON 数组。每项绑定工作线版本、机械臂超时、来源工位及 Transport 调用方。空数组表示当前没有配置授权的自动线 |
 | `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)
@@ -151,7 +153,7 @@ Transport 出站能力已提供 `app.integrations.wms_transport.TransportService
 
 ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。同事件／任务的多角色接入见[角色注册与运行时注入](docs/integrations/ecs-roles.md)：角色由业务常量声明，运行时注入绑定及路由，不依赖设备／工作线管理或 Status。
 
-自动入库的设备参数见[ECS 交互示例](docs/integrations/ECS%20已确认交互示例.md)；自动宿主仍待实施，样例不代表现场验收通过。
+SMT 自动线已在隔离目录验证入库、出库、原箱释放和完成确认。设备参数见 [ECS 交互示例](docs/integrations/ECS%20已确认交互示例.md)，接口与交付边界见 [AUTO API](docs/integrations/smt-auto-api.md) 和 [开发验收记录](docs/testing/smt-auto.md)。
 
 其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
