@@ -67,7 +67,7 @@ Buffer 上下盖各最多有 4 个待分配的空板 Magazine，装料后的载�
 | M2 逐层 | ECS → WES | [同层 GET/PUT](#layer-events) | ARM03 取料与 Buffer 备板并行，物料和匹配载板到位后投料 |
 | M3 结算 | ECS → WES | [额度 Result](#quota-result) | 按原额度更新箱余量和成功量。每个已结清失败层补取一层 |
 | S5 换箱 | WES → ECS | [清箱及余箱移动](#carton-cache) | 空箱由 ARM03 移走。余箱让位时需确认缓存空闲，恢复时需确认取料位可用 |
-| T2 汇总 | WES → WMS | [供料汇总](#supply-report) | 双侧达标，所有额度及在途层结清 |
+| T2 汇总 | WES → WMS | [供料汇总](#supply-report) | 双侧达标，额度、在途层和相关来源动作均已结清 |
 | T3 收尾 | WMS → WES → ECS | [整单完成通知](#task-completed) | WES 转告设备，设备自行补空板及出料 |
 
 ```mermaid
@@ -189,7 +189,7 @@ WES 收到当前工单的原开工通知确认，确认 WMS 已保存绑定后�
 <a id="supply-report"></a>
 ### 3.3 opening_machine.task.supply_report@v1
 
-方向为 WES → WMS，`POST {{WMS_BASE_URL}}/api/v1/wes/facts`。双侧达标且额度及在途层结清后发送。示例中箱耗用和余量均按片计。
+方向为 WES → WMS，`POST {{WMS_BASE_URL}}/api/v1/wes/facts`。双侧达标，额度、在途层和相关来源动作均已结清后发送。示例中箱耗用和余量均按片计。
 
 ```json
 {

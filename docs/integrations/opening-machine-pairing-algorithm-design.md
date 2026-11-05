@@ -259,12 +259,14 @@ def execute_authorized_quota(command):
 
 ## 6. Python 伪代码：整单完成通知
 
-两侧成功量分别达到执行目标且所有额度和层均已结清后，WES 向 WMS 汇总供料结果。WMS 下发整单完成通知，本稿按 WES 转告 ECS、设备自行收尾的路径设计。
+两侧成功量分别达到执行目标，且额度、在途层和相关来源动作均已结清后，WES 向 WMS 汇总供料结果。已经确认位置和数量的余箱随汇总保留。WMS 下发整单完成通知，本稿按 WES 转告 ECS、设备自行收尾的路径设计。
 
 ```python
 def supply_is_complete(s):
     return all(
-        s.good[side] == s.target[side] and not has_unsettled_quota_or_layer(s, side)
+        s.good[side] == s.target[side]
+        and not has_unsettled_quota_or_layer(s, side)
+        and not has_unsettled_source_action(s, side)
         for side in SIDES
     )
 

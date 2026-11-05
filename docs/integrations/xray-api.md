@@ -1,10 +1,10 @@
 # X-Ray 清点、贴标与上架 API 对接文档（资料整理稿）
 
-状态核对：2026-11-05。本文按 [SMT 手工对接文档](manual-picking-api.md)的章节、交互顺序表、完整报文、字段表和验收场景组织，整理已知 X-Ray 物料路线及设备拓扑。资料依据为 [ECS 与 WMS HTTP 通讯协议 V1.2 项目附录](../../../wes_backend/docs/hardware/ECS与WMS_HTTP通讯协议_V1.2_项目附录.md)（2026-11-03 评审稿，简称“项目附录”），其引用 XRAY V3.3、机械臂 V3.4 设备协议；本次未核验这两份厂商原协议。跨仓库链接依赖本地同级 `wes_backend` 目录。
+状态核对：2026-11-05。本文按 [SMT 手工对接文档](manual-picking-api.md)的章节、交互顺序表、完整报文、字段表和验收场景组织，整理已知 X-Ray 物料路线及设备拓扑。资料依据为《ECS 与 WMS HTTP 通讯协议 V1.2 项目附录》（2026-11-03 评审稿，简称“项目附录”，本地资料 `wes_backend/docs/hardware/ECS与WMS_HTTP通讯协议_V1.2_项目附录.md`）。附录引用 XRAY V3.3、机械臂 V3.4 设备协议，两份厂商原协议待核验。
 
 **本文保留项目附录的 WMS ↔ ECS 通信方向和字段，不将其改写为已确认的 WES ↔ WMS 合同。** 本项目若由 WES 承接编排，仍须另行确认 WMS operation、决定/事实的请求响应、原身份映射和回调归属，见 [X01](#xray-pending)。本文不新增 operation、任务发布接口、业务包、配置或设备指令，不表示已经实现、部署、对端签认或现场通过。
 
-资料差异：[wes_backend SRS §3.6.3](../../../wes_backend/docs/architecture/SRS.md#363-x-ray-智能清点与贴标-x-ray-counting--relabeling)仍描述 WES 下发 ZPL，且 §3.6 把退料工作线列为未来交付；项目附录采用固定本地模板与十个标签变量。本文描述项目附录方案，保留该差异为交付依赖，不据此宣布架构基线已经变更。
+资料差异：`wes_backend/docs/architecture/SRS.md` §3.6.3 仍描述 WES 下发 ZPL，且 §3.6 把退料工作线列为未来交付。项目附录采用固定本地模板与十个标签变量，架构基线采用哪种方案仍待确认。
 
 ## 目录
 

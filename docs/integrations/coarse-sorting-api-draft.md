@@ -632,7 +632,7 @@ WAIT 响应（HTTP 200，与 READY 为互斥示例）：
 
 WAIT 的 `retry_after_ms` 为 1～60000 的整数。粗分保存有效 WAIT 及其固定到期点，仅在到期后以新 ID 重新请求旧架去向；其他盘扫码、重复通知或普通扫描不提前续问，也不重置到期点。这是粗分使用共用合同的固定策略，不改变共用合同可允许的其他消费者策略。协议不可用或响应未知仅恢复原请求。READY 是业务离场许可，不是搬离完成；现场门禁与互锁由 RCS/MCS、ECS 负责。
 
-### 3.5 补/换架的 Transport 交互
+### 3.5 补架、换架与仅退架的 Transport 交互
 
 整架搬运通过 `transport.task.submit@v1` 提交，`kind=RACK_MOVE`。WES → WMS → RCS 的提交入口为 `POST /api/v1/wes/transport-requests`；WMS → WES 的结果入口为 `POST /api/v1/wms/events`。协议及原任务结果读取分别见[Transport 合同](wms-transport.md)和[出站结果](outbound-results.md)。
 
@@ -640,13 +640,13 @@ Transport 提交及回调沿用既有合同，不增加 `workline_code`。WES �
 
 Transport 的 `source / target` 表达架级业务来源和目的地；ECS 固定取放位置由 ECS 管理。粗分货架入场和退场均固定 `rcs_template_id=F01`；入场另携带 WMS 原方案 target_face，不增加独立换面任务。现场执行和方向值仍按第 7 节 P14 验收。
 
-旧架搬离、新架补入各有独立的 `transport_task_id` 和提交 `operation_id`，WES 内部保存稳定的 `client_request_id` 及其与本次补/换架的关系；内部调用身份不加入 wire。Transport 提交和回调的 ID 与单盘 `binding_id` 各司其职。
+旧架搬离、新架补入各有独立的 `transport_task_id` 和提交 `operation_id`，WES 内部保存稳定的 `client_request_id` 及其与本次准备作业的关系；内部调用身份不加入 wire。Transport 提交和回调的 ID 与单盘 `binding_id` 各司其职。
 
 <a id="transport-rack-out"></a>
 
 #### 3.5.1 旧架搬离
 
-仅换架路径需要。起点使用原作业保存且经原在位事实核对的工作线架位，终点使用第 3.4 节原 READY 去向：
+换架和仅退架路径均使用此提交。起点使用原作业保存且经原在位事实核对的工作线架位，终点使用第 3.4 节原 READY 去向：
 
 ```json
 {
