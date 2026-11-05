@@ -58,8 +58,8 @@ remaining_draw_allowance[side] = target[side] + ng[side] - drawn[side]
 WES 取得本线执行资格并核对留箱或清线后，在同一事务登记开工及原通知。收到 WMS 对当前工单、工作线和原通知的绑定保存确认后，才允许供箱、恢复缓存箱或取料。未确认时沿原通知恢复，历史确认归原任务。 [开工通知](opening-machine-api.md#task-started)
 
 1. 原指令、当前层或扫码决策未结清，等待原处理，保持来源不变。
-2. 两侧成功量均达标，且额度和在途层结清后，WES 向 WMS 汇总供料结果。余箱可人工清线，或留在原位供同产品下一单复用。
-3. 当前箱已空，等待 ARM03 移走空纸箱及设备确认取料位释放。清箱后的送箱放行由设备联动完成。
+2. 当前箱已空，等待 ARM03 移走空纸箱及设备确认取料位释放。清箱后的送箱放行由设备联动完成。
+3. 两侧成功量均达标，且额度、在途层和相关来源动作均已结清后，WES 向 WMS 汇总供料结果。已确认的余箱可人工清线，或留在原位供同产品下一单复用。
 4. 当前箱仍有料且本侧未完成，继续当前箱。投料 NG 引起的不足也优先从当前箱补取。
 5. 当前箱仍有料但本侧完成，另一侧未完成且缓存为空时，将本箱移入缓存。
 6. 取料位空、缓存箱属于本任务且其侧尚未完成时，先恢复缓存箱。
@@ -117,13 +117,16 @@ def choose_source(s):
     if s.pending:
         return ("WAIT_ORIGINAL",)
 
+    if s.active is not None and s.active.remaining == 0:
+        return ("WAIT_EMPTY_CARTON_REMOVAL", s.active.id)
+
     if all(need(s, side) == 0 for side in SIDES):
-        return ("SUPPLY_DONE",)  # 仍可有余箱，不代表清场。
+        if supply_is_complete(s):
+            return ("SUPPLY_DONE",)
+        return ("WAIT_ORIGINAL",)
 
     if s.active is not None:
         box = s.active
-        if box.remaining == 0:
-            return ("WAIT_EMPTY_CARTON_REMOVAL", box.id)
         if need(s, box.side) > 0:
             other_needs_supply = any(need(s, side) > 0 for side in SIDES if side != box.side)
             if s.cache is not None and box.remaining > need(s, box.side) and other_needs_supply:
@@ -263,6 +266,8 @@ def execute_authorized_quota(command):
 
 ```python
 def supply_is_complete(s):
+    if s.active is not None and s.active.remaining == 0:
+        return False
     return all(
         s.good[side] == s.target[side]
         and not has_unsettled_quota_or_layer(s, side)
