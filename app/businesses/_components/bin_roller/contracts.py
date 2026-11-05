@@ -6,7 +6,7 @@ from app.integrations.ecs_callback import CallbackPayload
 
 
 class ScanCompletedData(CallbackPayload):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     bin_code: str
 

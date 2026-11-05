@@ -356,6 +356,10 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
         pending=True,
     )
     await roller.rack_dispatch.note_facts_changed(ctx.session, job_ids=tuple(j.id for j in jobs))
+    if key == "bin_return" and point == "SCAN4" and row["return_state"] == "READY":
+        from .return_flow import advance_drain
+
+        await advance_drain(roller, ctx.session, ctx.work_line_id)
 
 
 async def create_direction(roller, session, repo, row, point, device_code, command):

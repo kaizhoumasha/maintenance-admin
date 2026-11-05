@@ -42,7 +42,7 @@ class ManualTask(Base):
 
 BIN_COMPLETION_OPERATION = "manual_bin.work_completed@v1"
 RACK_COMPLETION_OPERATIONS = (
-    "outbound.manual_rack.direct_pick_completed@v1",
+    "manual_rack.direct_pick_completed@v1",
     "outbound.return_rack.task_completed@v1",
 )
 
@@ -72,13 +72,13 @@ class ManualInput(Base):
             "NOT NULL AND completed_at IS NOT NULL AND completion_result IS NOT NULL AND "
             "plan_revision IS NULL AND rack_id IS NULL AND rack_face IS NULL AND state "
             "IN ('PENDING','APPLIED','DUPLICATE','REVIEW')) OR (operation IN "
-            "('outbound.manual_rack.direct_pick_completed@v1','outbound.return_rack.task_"
+            "('manual_rack.direct_pick_completed@v1','outbound.return_rack.task_"
             "completed@v1') AND receipt_id IS NOT NULL AND rack_id IS NOT NULL AND "
             "plan_revision IS NOT NULL AND completed_at IS NOT NULL AND bin_code IS NULL "
             "AND arrival_id IS NULL AND completion_result IS NULL AND "
             "original_operation_id IS NULL AND reason IS NULL AND state IN "
             "('PENDING','APPLIED') AND ((operation = "
-            "'outbound.manual_rack.direct_pick_completed@v1' AND rack_face IS NOT NULL) "
+            "'manual_rack.direct_pick_completed@v1' AND rack_face IS NOT NULL) "
             "OR (operation = 'outbound.return_rack.task_completed@v1' AND rack_face IS "
             "NULL)))",
             name="smt_manual_input_shape",

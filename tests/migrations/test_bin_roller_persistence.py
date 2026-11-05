@@ -382,7 +382,7 @@ async def populate(store, source):
             .values(
                 id=101,
                 target="roller-migration",
-                operation="outbound.bin.inbound_batch@v1",
+                operation="bin.inbound_batch@v1",
                 operation_id="in-3",
                 request_raw=b"frozen",
                 delivery_snapshot={"origin": "http://127.0.0.1:1"},

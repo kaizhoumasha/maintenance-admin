@@ -561,7 +561,7 @@ async def test_bound_manual_candidate_recovers_from_original_tail_in_worker(
         await flow.host.advance("RACK_REPORT", report["operation_id"])
         assert (
             await flow.callback(
-                "outbound.manual_rack.direct_pick_completed@v1",
+                "manual_rack.direct_pick_completed@v1",
                 dict(
                     task_id=old,
                     plan_revision=1,

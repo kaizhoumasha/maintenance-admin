@@ -90,7 +90,7 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
             await connection.scalar(
                 text("SELECT version_num FROM enterprise_backend.alembic_version")
             )
-            == "rollerfour"
+            == "smtautofoundation"
         )
 
 

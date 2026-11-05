@@ -441,7 +441,7 @@ async def test_serialization_retries_whole_cycle_in_new_repeatable_read_transact
         sql = [statement for conn, statement, _ in statements if conn is connection]
         assert sql[0] == "SHOW transaction_isolation"
         locked = [statement for statement in sql if "FOR UPDATE" in statement]
-        assert '"work_line"' in locked[0] or ".work_line" in locked[0]
+        assert '"work_line"' in locked[0] or ".work_line" in locked[0] or "work_lines" in locked[0]
         assert '"device"' in locked[1] or ".device" in locked[1]
         assert "business_seam_test_execution" in locked[2]
     row = (await mock_cycle.rows())[0]

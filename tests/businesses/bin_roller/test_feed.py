@@ -217,7 +217,7 @@ async def test_unknown_feed_keeps_original_unresolved_obligation(roller_current)
 async def test_inbound_request_is_strict_three_fields_and_opaque_face(roller_feed):
     from pydantic import ValidationError
 
-    from app.businesses._components.bin_roller.request.outbound_bin_inbound_batch_v1 import (
+    from app.businesses._components.bin_roller.request.bin_inbound_batch_v1 import (
         InboundBatch,
     )
 

@@ -717,14 +717,32 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        progress = await self.roller.get_supply_progress(
+        all_progress = await self.roller.get_supply_progress(
             session, work_line_id=task["work_line_id"], task_id=task["task_id"]
         )
-        if len(progress) != sum(m["kind"] == "BIN" for m in members):
+        active_sources = {
+            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+            for m in members
+            if m["kind"] == "BIN" and m["status"] != "CANCELLED"
+        }
+        cancelled_sources = {
+            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+            for m in members
+            if m["kind"] == "BIN" and m["status"] == "CANCELLED"
+        }
+        progress_sources = {p.source for p in all_progress}
+        if progress_sources != active_sources | cancelled_sources:
+            return False, {}
+        if any(p.pending for p in all_progress if p.source in cancelled_sources):
+            return False, {}
+        progress = tuple(p for p in all_progress if p.source in active_sources)
+        if len(progress) != sum(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members):
             return False, {}
         for member in members:
             if member["status"] == "CANCELLED" and not member["cancelled_operation_id"]:
                 return False, {}
+            if member["status"] == "CANCELLED":
+                continue
             if member["kind"] == "DIRECT":
                 if member["status"] not in {"COMPLETED", "CANCELLED"}:
                     return False, {}
@@ -760,6 +778,23 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
+        if any(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members) and not bins:
+            return False, {}
+        faces = self.roller.repository(task["work_line_id"]).tables["face_work"]
+        if await session.scalar(
+            select(faces.c.id)
+            .where(
+                faces.c.scope_id == task["task_id"],
+                faces.c.purpose == "SUPPLY",
+                faces.c.closed_at.is_(None),
+                or_(
+                    faces.c.current_transport_task_id.is_not(None),
+                    faces.c.phase.in_(("FEED_MOVE", "RETURN_MOVE")),
+                ),
+            )
+            .limit(1)
+        ):
+            return False, {}
         for work in bins:
             if not await self.repository.bin_release_evidence(session, self.roller, work):
                 return False, {}

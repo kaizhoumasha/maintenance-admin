@@ -1,5 +1,6 @@
 """FIFO allocation, independent return facts and the current finite LINE run."""
 
+import logging
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
@@ -10,10 +11,12 @@ from app.integrations.wms_transport import BinMove, HandoffPosition, RackBinSlot
 from app.reliable import ScopeRef
 
 from .feed_flow import face_scope, read_decision, valid_move
-from .request.outbound_bin_return_batch_v1 import DECISION, OPERATION, ReturnBatchRequest
+from .request.bin_return_batch_v1 import DECISION, OPERATION, ReturnBatchRequest
 from .request.workline_return_buffer_drain_rack_decide_v1 import DECISION as DRAIN_DECISION
 from .request.workline_return_buffer_drain_rack_decide_v1 import OPERATION as DRAIN_OPERATION
 from .request.workline_return_buffer_drain_rack_decide_v1 import DrainRequest
+
+logger = logging.getLogger(__name__)
 
 
 async def read_return_manifest(roller, session, face):
@@ -155,7 +158,15 @@ async def advance_return(roller, session, face_id):
         await end_window(roller, session, face)
         return "NO_BATCH"
     moves = decision["moves"]
-    executed = face["return_members"][: len(moves)]
+    members_by_bin = {m["bin_code"]: m for m in face["return_members"]}
+    move_codes = [m["bin_code"] for m in moves]
+    if (
+        len(members_by_bin) != len(face["return_members"])
+        or len(set(move_codes)) != len(move_codes)
+        or any(code not in members_by_bin for code in move_codes)
+    ):
+        return "INVALID_RETURN_MEMBERS"
+    executed = [members_by_bin[m["bin_code"]] for m in moves]
     expected = [
         {
             "container_id": m["bin_code"],
@@ -258,23 +269,28 @@ async def advance_return(roller, session, face_id):
         client_request_id=face["current_client_request_id"],
         caller=job.origin.caller,
     )
-    if (
-        not valid_move(
-            result,
-            owner=repo.owner_domain,
-            task_id=face["current_transport_task_id"],
-            client_id=face["current_client_request_id"],
-            caller=job.origin.caller,
-            cycle_id=job.id,
-        )
-        or not result.frozen
-        or result.frozen.get("moves") != expected
+    valid = valid_move(
+        result,
+        owner=repo.owner_domain,
+        task_id=face["current_transport_task_id"],
+        client_id=face["current_client_request_id"],
+        caller=job.origin.caller,
+        cycle_id=job.id,
+    )
+    if not valid:
+        logger.warning("bin return result identity pending")
+        return "WAITING_FOR_RETURN_RESULT"
+    frozen_moves = (result.frozen or {}).get("moves") if result.frozen else None
+    if not frozen_moves or sorted(frozen_moves, key=lambda move: move["container_id"]) != sorted(
+        expected, key=lambda move: move["container_id"]
     ):
+        logger.warning("bin return frozen moves mismatch")
         return "WAITING_FOR_RETURN_RESULT"
     outcomes = result.outcome.get("results") or ()
     if len(outcomes) != len(executed) or {m["container_id"] for m in outcomes} != {
         m["bin_code"] for m in executed
     }:
+        logger.warning("bin return outcome members mismatch")
         return "INVALID_RETURN_MEMBERS"
     by_code = {m["container_id"]: m for m in outcomes}
     targets = {m["container_id"]: m["target"] for m in expected}
@@ -287,14 +303,16 @@ async def advance_return(roller, session, face_id):
             or row["client_request_id"] != result.client_request_id
             or row["caller"] != asdict(job.origin.caller)
         ):
+            logger.warning("bin return member reference mismatch")
             return "INVALID_RETURN_REFERENCE"
         outcome = by_code[member["bin_code"]]
+        member_facts = (result.member_facts or {}).get(member["bin_code"])
         success = (
             outcome["status"] == "SUCCEEDED"
             and not outcome.get("position_unknown")
             and outcome["final_position"] == targets[member["bin_code"]]
-            and (result.member_facts or {}).get(member["bin_code"], {}).get("TARGET_PLACED")
-            == targets[member["bin_code"]]
+            and member_facts is not None
+            and member_facts.get("TARGET_PLACED") == targets[member["bin_code"]]
         )
         all_success &= success
         if (
@@ -321,6 +339,7 @@ async def advance_return(roller, session, face_id):
             ):
                 await repo.update(session, "bin_return", row["id"], is_current=False)
     if not all_success or result.closure != "CLOSED":
+        logger.warning("bin return outcome not closed")
         return "WAITING_FOR_RETURN_RESULT"
     if face["window_kind"] == "SEGMENT":
         await end_window(roller, session, face)
@@ -369,8 +388,11 @@ async def advance_drain(roller, session, work_line_id):
         successor = await roller.production.read_successor(session, work_line_id=work_line_id)
         candidates = await roller.return_candidates(session, work_line_id=work_line_id)
         faces = repo.tables["face_work"]
+        successor_blocked = successor.state not in {"NONE", "UNKNOWN"} or bool(
+            successor.evidence.get("queued_task_ids")
+        )
         if (
-            successor.state != "NONE"
+            successor_blocked
             or not candidates
             or await session.scalar(
                 select(faces.c.id).where(*repo.scoped(faces), faces.c.closed_at.is_(None)).limit(1)
@@ -480,7 +502,10 @@ async def advance_drain(roller, session, work_line_id):
                     ):
                         await repo.close(session, "face_work", face_id, "WITHDRAWN")
                 else:
+                    await advance_cycle(roller, session, job.id)
                     return job.id
+                if job.pending:
+                    await advance_cycle(roller, session, job.id)
             cursor += 1
             await repo.update(session, "workline_state", candidate_cursor=cursor)
             continue

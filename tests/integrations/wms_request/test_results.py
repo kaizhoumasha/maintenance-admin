@@ -58,6 +58,13 @@ async def test_invalid_original_request_cannot_expose_a_response(sessions, wms, 
     [
         ("DONE", 200, "DECIDED", {"ok": True}, "VALID"),
         ("DONE", 202, "PREPARE_ACCEPTED", {}, "VALID"),
+        (
+            "DONE",
+            202,
+            "PREPARE_ACCEPTED",
+            {"task_id": "PICK-001", "workline_code": "KT16"},
+            "VALID",
+        ),
         ("FAILED", 422, "REJECTED", {"reason_code": "INVALID_DATA"}, "VALID"),
         ("FAILED", 409, "CONFLICT", {"reason_code": "STATE_CONFLICT"}, "VALID"),
         ("SENDING", 503, "UNAVAILABLE", {}, "NONE"),

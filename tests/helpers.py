@@ -1445,9 +1445,9 @@ async def formal_manual_fixture(
             data = state.confirmation
         elif operation == "rack.departure_decide@v1":
             data = getattr(state, "departure_decision", {"result": "WAIT", "retry_after_ms": 60000})
-        elif operation == "outbound.bin.return_batch@v1":
+        elif operation == "bin.return_batch@v1":
             data = getattr(state, "return_decision", {"result": "NO_BATCH"})
-        elif operation == "outbound.bin.inbound_batch@v1":
+        elif operation == "bin.inbound_batch@v1":
             data = getattr(
                 state,
                 "inbound_decision",
