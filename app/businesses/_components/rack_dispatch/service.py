@@ -25,6 +25,7 @@ from app.integrations.wms_transport import (
     TransportTaskResult,
     Zone,
 )
+from app.integrations.wms_transport.types import validate_face
 from app.models import WorkLine, WorkLinePosition
 from app.reliable import ScopeRef
 
@@ -40,6 +41,17 @@ from .contracts import (
     TaskAdmission,
 )
 from .models import RackAction, RackJob
+
+AUTO_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
+TEMPLATES = {
+    "MANUAL_RETURN": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
+    "MANUAL_TRANSFER": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
+    "ROLLER_ORDINARY": {"ENTER": "CTU01", "ROTATE": "CTU02", "DEPART": "CTU03"},
+    "ROLLER_DRAIN": {"ENTER": "CTU01", "ROTATE": "CTU02", "DEPART": "CTU03"},
+    "AUTO_INBOUND_SOURCE": {"ENTER": "F01", "DEPART": "F01"},
+    "AUTO_OUTBOUND_RETURN": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
+    "AUTO_OUTBOUND_TARGET": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
+}
 
 
 def _id():
@@ -198,6 +210,26 @@ class RackDispatch:
         )
         if not all(identity.values()) or not origin.cycle_id:
             raise ValueError("incomplete rack origin")
+        if origin.source_kind not in TEMPLATES:
+            raise ValueError("unsupported rack source")
+        if origin.source_kind in AUTO_SOURCES:
+            if origin.initial_face is not None:
+                validate_face(origin.initial_face)
+            if not (
+                self.owner_domain == "smt_auto"
+                and origin.task_id
+                and origin.workline_code
+                and origin.point
+                and isinstance(origin.caller, TransportCaller)
+                and isinstance(origin.resources, dict)
+                and origin.resources
+                and (
+                    (origin.initial_face is None)
+                    if origin.source_kind == "AUTO_INBOUND_SOURCE"
+                    else origin.initial_face is not None
+                )
+            ):
+                raise ValueError("incomplete AUTO rack origin")
         if scope is not None and scope.owner_domain != self.owner_domain:
             raise ValueError("rack scope owner mismatch")
         values = asdict(origin)
@@ -228,6 +260,10 @@ class RackDispatch:
         ).one()
         if any(getattr(job, key) != value for key, value in tags.items()):
             raise ValueError("original rack scope cannot change")
+        if origin.source_kind in AUTO_SOURCES and any(
+            getattr(job, key) != value for key, value in values.items()
+        ):
+            raise ValueError("original AUTO rack origin cannot change")
         # A drain candidate can acquire its original approved resources exactly once.
         if (
             job.state == "ACTIVE"
@@ -595,6 +631,8 @@ class RackDispatch:
         )
         if not line or not line.is_enabled or line.business_code != self.owner_domain or not config:
             return False
+        if job.source_kind in AUTO_SOURCES and job.workline_code != line.line_code:
+            return False
         drain = job.source_kind == "ROLLER_DRAIN"
         if drain != (job.task_id is None):
             return False
@@ -668,6 +706,15 @@ class RackDispatch:
         job = await self._job(session, job_id, lock=True)
         if not job or job.state == "CLOSED_BY_SCOPE":
             return None
+        if job.source_kind in AUTO_SOURCES and face is not None:
+            try:
+                validate_face(face)
+            except ValueError:
+                return None
+        if job.source_kind in AUTO_SOURCES and (
+            kind not in TEMPLATES[job.source_kind] or (kind == "ENTER" and face != job.initial_face)
+        ):
+            return None
         actions = await self._actions(session, job, lock=True)
         target = _point(job.point)
         original = next((a for a in actions if a.kind == kind and a.source_ref == source_ref), None)
@@ -696,6 +743,7 @@ class RackDispatch:
                 return (
                     last.id
                     if (last.kind, last.target, last.target_face) == (kind, target, face)
+                    and (job.source_kind not in AUTO_SOURCES or last.source_ref == source_ref)
                     else None
                 )
             if kind != "ROTATE" or not applied:
@@ -714,12 +762,7 @@ class RackDispatch:
         return action.id
 
     async def _move(self, session, job, actions, kind, source_ref, target, face):
-        manual = job.source_kind.startswith("MANUAL_")
-        template = {
-            "ENTER": "F01" if manual else "CTU01",
-            "ROTATE": "CK04" if manual else "CTU02",
-            "DEPART": "F01" if manual else "CTU03",
-        }[kind]
+        template = TEMPLATES[job.source_kind][kind]
         source = (
             {"kind": "RACK", "location_code": job.rack_id} if kind == "ENTER" else _point(job.point)
         )
@@ -749,7 +792,25 @@ class RackDispatch:
         actions.append(action)
         return action
 
+    @staticmethod
+    def _auto_move_matches(job, action):
+        return (
+            action.kind in TEMPLATES[job.source_kind]
+            and action.template == TEMPLATES[job.source_kind][action.kind]
+            and action.caller == job.caller
+            and action.source
+            == (
+                {"kind": "RACK", "location_code": job.rack_id}
+                if action.kind == "ENTER"
+                else _point(job.point)
+            )
+            and (action.kind == "DEPART" or action.target == _point(job.point))
+            and (action.kind != "ENTER" or action.target_face == job.initial_face)
+        )
+
     async def _bind_move(self, session, job, action):
+        if job.source_kind in AUTO_SOURCES and not self._auto_move_matches(job, action):
+            raise ValueError("original AUTO rack move mismatch")
         caller = _caller(action)
         args = dict(
             client_request_id=action.client_request_id,
@@ -820,6 +881,19 @@ class RackDispatch:
             or result.kind != ("RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE")
         ):
             return None
+        if job.source_kind in AUTO_SOURCES and (
+            not self._auto_move_matches(job, action)
+            or result.frozen
+            != {
+                "kind": "RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE",
+                "rack_id": job.rack_id,
+                "rcs_template_id": action.template,
+                "source": action.source,
+                "target": action.target,
+                **({"target_face": action.target_face} if action.target_face is not None else {}),
+            }
+        ):
+            return None
         return result
 
     async def final_result(
@@ -841,7 +915,7 @@ class RackDispatch:
             and action.source == {"kind": "RACK", "location_code": job.rack_id}
             and action.target == _point(job.point)
             and action.caller == job.caller
-            and action.template == ("F01" if job.source_kind.startswith("MANUAL_") else "CTU01")
+            and action.template == TEMPLATES[job.source_kind]["ENTER"]
             and result.frozen
             == {
                 "kind": "RACK_MOVE",
@@ -849,7 +923,11 @@ class RackDispatch:
                 "rcs_template_id": action.template,
                 "source": action.source,
                 "target": action.target,
-                "target_face": action.target_face,
+                **(
+                    {}
+                    if job.source_kind in AUTO_SOURCES and action.target_face is None
+                    else {"target_face": action.target_face}
+                ),
             }
         )
 
@@ -1120,6 +1198,7 @@ class RackDispatch:
         handoff: DirectHandoff,
         now_ms: int,
         authorized_original_id: str | None = None,
+        allow_new_departure: bool = True,
     ) -> RackProgress:
         job = await self._job(session, job_id, lock=True)
         if not job:
@@ -1291,7 +1370,8 @@ class RackDispatch:
             else:
                 job.review_reason = "POSITION_CONFLICT"
         elif (
-            clear
+            allow_new_departure
+            and clear
             and known_demand
             and demand.state in ("NONE", "CONTINUE")
             and (none or job.state == "RELEASING")
@@ -1484,7 +1564,7 @@ class RackDispatch:
             or ready.kind != "DEPARTURE_DECIDE"
             or ready.phase != "READY"
             or not ready.decision
-            or action.template != ("F01" if job.source_kind.startswith("MANUAL_") else "CTU03")
+            or action.template != TEMPLATES[job.source_kind]["DEPART"]
             or action.source != _point(job.point)
             or action.target_face is not None
             or action.caller != job.caller

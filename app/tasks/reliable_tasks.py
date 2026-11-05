@@ -18,6 +18,7 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
         cleanup_closed,
         protected_message_ids,
     )
+    from app.businesses.smt_auto.retention import wms_message_references
 
     while True:
         async with factory() as session, session.begin():
@@ -46,7 +47,9 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
             )
             if not ids:
                 return total
-            protected = await protected_message_ids(session, candidate_ids=ids)
+            protected = await protected_message_ids(
+                session, candidate_ids=ids, business_references=wms_message_references
+            )
             total += await delete_terminal(
                 session, now=now, retention_days=days, protected_ids=protected, candidate_ids=ids
             )

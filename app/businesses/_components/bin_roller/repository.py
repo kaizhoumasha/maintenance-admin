@@ -252,6 +252,15 @@ class RollerRepository:
                         face["demand_state"] == "ACTIVE" or await self.supply_started(session, face)
                     ),
                     ids,
+                    withdrawn_before_start=(
+                        face["closed_at"] is not None
+                        and face["close_reason"] == "WITHDRAWN"
+                        and face["demand_state"] == "WITHDRAWN"
+                        and face["feed_operation_id"] is None
+                        and face["preparation_action_id"] is None
+                        and face["feed_cursor"] == 0
+                        and face["current_transport_task_id"] is None
+                    ),
                 )
             )
         return tuple(result)

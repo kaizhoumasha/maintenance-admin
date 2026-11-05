@@ -10,11 +10,19 @@ from app.reliable import ScopeRef
 async def test_active_canonical_and_consumed_forward_anchor_survive_cleanup(
     roller_current, monkeypatch
 ):
+    from sqlalchemy import MetaData
+
     from app.businesses._components.bin_roller import retention
+    from app.businesses.smt_auto.models import TABLES as AUTO_TABLES
     from app.tasks.callback_tasks import run_receipt_cleanup
     from app.tasks.reliable_tasks import run_cleanup
 
     flow = roller_current
+    metadata = MetaData(schema=AUTO_TABLES["task"].schema)
+    for table in AUTO_TABLES.values():
+        table.to_metadata(metadata)
+    async with flow.factory.kw["bind"].begin() as connection:
+        await connection.run_sync(metadata.create_all)
     monkeypatch.setattr(retention, "TABLES", flow.roller.tables)
     await flow.scan("SCAN1", "A000000001-B", timestamp=10)
     original = (await flow.current_rows("bin_passage"))[0]
