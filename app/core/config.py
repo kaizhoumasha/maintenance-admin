@@ -1,7 +1,20 @@
 from functools import lru_cache
+from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PositiveProtocolInt = Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
+
+
+class AutoWorklineSettings(BaseModel):
+    work_line_id: _PositiveProtocolInt
+    work_line_version: _PositiveProtocolInt
+    rack_arm_timeout_ms: _PositiveProtocolInt
+    bin_arm_timeout_ms: _PositiveProtocolInt
+    source_locations: tuple[tuple[str, Literal["STATION_A", "STATION_B"]], ...]
+    transport_workline_id: str = Field(min_length=1)
+    transport_station_id: str | None = None
 
 
 class Settings(BaseSettings):
@@ -23,9 +36,12 @@ class Settings(BaseSettings):
     # Transport 任务创建后超过该时长仍无确定终态就输出卡住告警(暂定 2 小时,按现场 SOP 调整)
     TRANSPORT_STUCK_ALERT_MINUTES: int = Field(default=120, gt=0)
 
+    SMT_AUTO_FIRST_PLAN_WAIT_MS: int | None = Field(default=None, gt=0)
+    SMT_AUTO_WORKLINES: tuple[AutoWorklineSettings, ...] = ()
+
     SMT_MANUAL_FIRST_PLAN_WAIT_MS: int | None = Field(default=None, gt=0)
 
-    @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", mode="before")
+    @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", "SMT_AUTO_FIRST_PLAN_WAIT_MS", mode="before")
     @classmethod
     def _first_plan_wait(cls, value):
         if value is not None and type(value) not in {int, str}:

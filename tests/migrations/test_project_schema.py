@@ -4,6 +4,8 @@ import subprocess
 import sys
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from app.database import create_database_engine
@@ -90,7 +92,7 @@ async def test_upgrade_moves_owned_objects_and_preserves_foreign_tables(schema_d
             await connection.scalar(
                 text("SELECT version_num FROM enterprise_backend.alembic_version")
             )
-            == "smtautofoundation"
+            == ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
         )
 
 
@@ -222,9 +224,6 @@ def test_postgres_offline_sql_requires_online_ownership_checks():
 
 
 def test_migration_chain_applies_capacity_before_four_table_cutover():
-    from alembic.config import Config
-    from alembic.script import ScriptDirectory
-
     scripts = ScriptDirectory.from_config(Config("alembic.ini"))
     heads = scripts.get_heads()
     assert len(heads) == 1, heads

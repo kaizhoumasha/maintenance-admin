@@ -689,11 +689,14 @@ field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信
 <a id="manual-config"></a>
 ### 4.3 KT16 / KT18 现场配置参考
 
-下表来自用户于 **2026-10-30** 提供的现场配置。它是对接参考，**不是本系统已保存的绑定、Status 观察或物理到位证据**；远端数据库只读核对结果见表后说明。
+下表以用户于 **2026-10-30** 提供的现场配置为来源，按 **2026-11-03 本次配置确认**补齐入料/出料设备及 ECS 服务地址。它是配置基线，**不是本系统已保存的绑定、Status 观察或物理到位证据**；历史远端数据库只读核对结果见表后说明。自动线 KT11/KT14 的设备、点位及机械臂映射统一见[自动线配置](smt-auto-api.md#auto-config)。
 
 | 项目 / 逻辑资源 | KT16（手工线） | KT18（手工线） | 用途 |
 | --- | --- | --- | --- |
 | workline_code | KT16 | KT18 | 任务、回流及位置归属 |
+| business_code / task_type | smt_manual / MANUAL | smt_manual / MANUAL | 同一宿主支持 inbound/outbound；旧 run_mode=AUTO 不改变手工业务归属 |
+| 入料设备 | STATION_INPUT3 | STATION_INPUT4 | 关联本线 INLET |
+| 出料设备 | STATION_OUTPUT3 | STATION_OUTPUT4 | 关联本线 OUTLET |
 | SCAN1 | STATION_SCAN9 | STATION_SCAN13 | 人工业务入口 |
 | SCAN2 | STATION_SCAN10 | STATION_SCAN14 | 人工作业位 |
 | SCAN3 | STATION_SCAN11 | STATION_SCAN15 | 公共回流分流 |
@@ -704,7 +707,7 @@ field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信
 | TRANSFER_RACK（RACK_POSITION） | OUT65 | OUT66 | 转运货架工作位；是否由 WES 编排取决于首版计划 |
 | RETURN_RACK（RACK_POSITION） | OUT55 | OUT56 | PDA 直接取料架工作位，禁止作为滚筒退箱架位 |
 
-两线 ECS Status 参考地址均为 [http://10.24.209.26:8080/api/v1/device/status](http://10.24.209.26:8080/api/v1/device/status)。**这是 Status 地址，不是命令 URL，也不能据此声明命令附录或在线即准入。** 本轮未调用该地址，未发送设备命令。
+两线入料、出料及 SCAN1～4 设备共用 ECS 服务 `{ECS_SHARED_ORIGIN}`，与自动线 KT11/KT14 的非机械臂设备使用同一服务。Status 路径为 `/api/v1/device/status`；命令接口按 ECS 合同使用 `/api/v1/device/command`，Status 地址不能直接作为命令 URL。每线关联六个设备，其中 `device_bindings` 的业务角色为 SCAN1～4；入料/出料设备关联不增加额外命令角色。本轮只更新文档，未调用接口或改变现场配置。
 
 RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个现场位置码。[已确认 C04](workline-bin-return-api.md#return-handoff)：SCAN4 MOVE_FORWARD SUCCESS 表示进入下游缓存，不保证已到最终取箱点；CNV0302/CNV0402 是统一交接入口，CTU 与滚筒按冻结 FIFO 自动连续取箱，WES 不逐箱放行。return_candidates.source 可使用该入口，不声明候选已同时停在最终取箱点；实际缓存总容量未确认，不根据旧库数值推断。
 

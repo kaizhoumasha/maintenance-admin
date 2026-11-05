@@ -103,7 +103,7 @@ async def protected_event_ids(session, *, candidate_ids: tuple[int, ...]) -> fro
     return frozenset(protected & candidates)
 
 
-async def _message_references(session, candidates, line_ids=None):
+async def _message_references(session, candidates, line_ids=None, *, business_references=None):
     references = []
     table = TABLES["face_work"]
     query = select(table).where(table.c.closed_at.is_(None))
@@ -177,19 +177,28 @@ async def _message_references(session, candidates, line_ids=None):
                 (line, identity) for code, identity in ids.items() for line in commands[code]
             )
     references.extend(await pending_message_references(session, candidate_ids=tuple(candidates)))
+    if business_references is not None:
+        references.extend(
+            await business_references(session, candidate_ids=tuple(candidates), line_ids=line_ids)
+        )
     return references
 
 
-async def protected_message_ids(session, *, candidate_ids: tuple[int, ...]) -> frozenset[int]:
+async def protected_message_ids(
+    session, *, candidate_ids: tuple[int, ...], business_references=None
+) -> frozenset[int]:
     if not candidate_ids:
         return frozenset()
     candidates = set(candidate_ids)
-    hints = await _message_references(session, candidates)
+    hints = await _message_references(session, candidates, business_references=business_references)
     lines = {line for line, _ in hints}
     await _lock_lines(session, lines)
     # Candidate discovery is only a hint; final protection is reread under the same line locks.
     return frozenset(
-        identity for _, identity in await _message_references(session, candidates, lines)
+        identity
+        for _, identity in await _message_references(
+            session, candidates, lines, business_references=business_references
+        )
     )
 
 

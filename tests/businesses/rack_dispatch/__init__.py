@@ -39,7 +39,7 @@ class TaskGrant:
 
 
 @asynccontextmanager
-async def store(url):
+async def store(url, *, owner="owner"):
     pg = url.startswith("postgres")
     schema = "test_rack_" + uuid7().hex if pg else None
     engine = create_database_engine(
@@ -71,7 +71,7 @@ async def store(url):
                     id=12,
                     line_code="LINE",
                     line_name="LINE",
-                    business_code="owner",
+                    business_code=owner,
                     position_bindings={"RETURN_RACK": "P"},
                 )
             )
@@ -88,15 +88,15 @@ async def store(url):
         yield (
             factory,
             RackDispatch(
-                "owner",
+                owner,
                 Capabilities(
                     None,
                     WmsRequests(
                         outbox,
-                        owner_domain="owner",
-                        contract_consumers=lambda key: frozenset({"owner"}),
+                        owner_domain=owner,
+                        contract_consumers=lambda key: frozenset({owner}),
                     ),
-                    TransportService(outbox, owner_domain="owner"),
+                    TransportService(outbox, owner_domain=owner),
                     factory,
                 ),
                 task_admission=SimpleNamespace(allows_task_entry=allows_task_entry),
@@ -140,7 +140,9 @@ def evidence(job, demand="NONE", handoff="CLEAR", version="1"):
     )
 
 
-async def apply_outcome(session, action, status, point="P", revision=1):
+async def apply_outcome(
+    session, action, status, point="P", revision=1, rack_id="rack", arrival_face=None
+):
     task = await session.scalar(
         select(TransportTask).where(TransportTask.transport_task_id == action.transport_task_id)
     )
@@ -148,11 +150,15 @@ async def apply_outcome(session, action, status, point="P", revision=1):
         transport_task_id=task.transport_task_id,
         kind=task.kind,
         outcome_revision=revision,
-        rack_id="rack",
+        rack_id=rack_id,
         status=status,
         final_position={"kind": "RACK_POSITION", "location_code": point},
         position_unknown=None,
-        arrival_face=None if status == "CANCELLED" else action.target_face or "90",
+        arrival_face=arrival_face
+        if arrival_face is not None
+        else None
+        if status == "CANCELLED"
+        else action.target_face or "90",
         results=None,
         failure_code="RCS_EXECUTION_FAILED" if status == "FAILED" else None,
     )

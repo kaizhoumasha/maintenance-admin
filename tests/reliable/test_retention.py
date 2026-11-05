@@ -22,11 +22,17 @@ async def reference_tables(reference_rig):
 
     from app.businesses._components.bin_roller.models import TABLES
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+    from app.businesses.smt_auto.models import TABLES as AUTO_TABLES
 
     rig = reference_rig
     if rig.engine.dialect.name == "sqlite":
         metadata = MetaData()
-        for table in (*TABLES.values(), RackJob.__table__, RackAction.__table__):
+        for table in (
+            *TABLES.values(),
+            *AUTO_TABLES.values(),
+            RackJob.__table__,
+            RackAction.__table__,
+        ):
             table.to_metadata(metadata, schema=None)
         async with rig.engine.begin() as connection:
             await connection.run_sync(metadata.create_all)

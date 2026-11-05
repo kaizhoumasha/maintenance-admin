@@ -64,7 +64,8 @@ class RackJob(Base):
         ),
         Index("rack_dispatch_job_execution_scope", "scope_owner", "scope_kind", "scope_id"),
         CheckConstraint(
-            "source_kind IN ('MANUAL_RETURN','MANUAL_TRANSFER','ROLLER_ORDINARY','ROLLER_DRAIN')",
+            "source_kind IN ('MANUAL_RETURN','MANUAL_TRANSFER','ROLLER_ORDINARY','ROLLER_DRAIN',"
+            "'AUTO_INBOUND_SOURCE','AUTO_OUTBOUND_RETURN','AUTO_OUTBOUND_TARGET')",
             name="source_kind",
         ),
         CheckConstraint(
