@@ -82,7 +82,7 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 
 ## 4. 实体二：RackPreparation
 
-目标表：`coarse_sorting_rack_preparation`。一行表示**一个工作位的一次明确补架/换架方案及其执行过程**。只有 WMS 给出具体新架方案时才创建；“没有新架，等待”不创建空准备作业。
+目标表：`coarse_sorting_rack_preparation`。一行表示**一个工作位的一次明确补架、换架或仅退架方案及其执行过程**。分配 WAIT 不创建准备作业。
 
 | 字段 | 类型 / 空值 | 含义及约束 |
 | --- | --- | --- |
@@ -91,10 +91,10 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 | `rack_position_code` | Text，非空 | 本次原目标工作位，不随配置改名/改绑变化 |
 | `rack_binding_version` | BigInteger，非空 | 选择工作位时的原版本 |
 | `generation_no` | Integer，非空，≥1 | 同工作线/工作位的准备代次；持有工作线锁后按该位置历史最大值+1登记，不从当前配置或时钟推断 |
-| `mode` | String，非空 | `REPLENISH / REPLACE` |
-| `old_rack_id` | Text，可空 | REPLACE 必填；REPLENISH 必须为空 |
-| `incoming_rack_id` | Text，非空 | WMS 原方案选定的新架；与 old_rack_id 不得相同 |
-| `incoming_target_face` | String(10)，非空 | WMS incoming_rack.target_face 原方向码；严格非空字符串，沿既有 target_face 的1～10字符/无NUL/有效UTF-8约束，创建时冻结 |
+| `mode` | String，非空 | `REPLENISH / REPLACE / DEPART_ONLY` |
+| `old_rack_id` | Text，可空 | REPLACE、DEPART_ONLY 必填；REPLENISH 必须为空 |
+| `incoming_rack_id` | Text，可空 | REPLENISH、REPLACE 必填且与旧架不同；DEPART_ONLY 必须为空 |
+| `incoming_target_face` | String(10)，可空 | DEPART_ONLY 必须为空；REPLENISH、REPLACE 必填 WMS incoming_rack.target_face 原方向码；严格非空字符串，沿既有 target_face 的1～10字符/无NUL/有效UTF-8约束，创建时冻结 |
 | `source_allocation_action_id` | FK → Action，非空 UNIQUE | 首次产生该方案的原分配动作；该动作由某个 Job 拥有，同一源动作不能再生成另一份准备作业 |
 | `predecessor_action_ids` | JSON，非空，初值 [] | 创建时固定的同工作位已知直接前序 Action ID，去重且保留原归属；不以当前全部历史任务代替 |
 | `state` | String(32)，非空 | 第 8 节的架位准备状态 |
@@ -102,19 +102,19 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 | `next_check_at` | UTC 时间，可空 | 仅离场决定 WAIT 的固定到期点 |
 | `current_action_id` | FK → Action，可空 | 当前准备动作，必须由本 Preparation 拥有 |
 | `created_at`、`updated_at` | UTC 时间，非空 | 业务时间 |
-| `ready_at` | UTC 时间，可空 | 原新架补入已应用成功且目标匹配后的本地确认时间；READY 必填 |
+| `ready_at` | UTC 时间，可空 | 原新架补入已应用成功且目标匹配后的本地确认时间；READY 必填；DEPART_ACCEPTED 必须为空 |
 
 不另建“出架表”“入架表”或架位库存表；旧架去向保存于原 DEPARTURE_DECIDE 动作的 READY 决定，出入架任务分别是本 Preparation 的动作记录。
 
-同一 `(work_line_id, rack_position_code)` 建立 `state <> 'READY'` 的部分唯一索引，并建立 `(work_line_id, rack_position_code, generation_no)` 唯一约束。等待原任务恢复结果时仍属于在途，不能创建替代准备作业。锁定原工作线后先查该工作位已有活动 Preparation：
+同一 `(work_line_id, rack_position_code)` 建立 `state NOT IN ('READY', 'DEPART_ACCEPTED')` 的部分唯一索引，并建立 `(work_line_id, rack_position_code, generation_no)` 唯一约束。等待原任务恢复结果时仍属于在途，不能创建替代准备作业。锁定原工作线后先查该工作位已有活动 Preparation：
 
 - 同一 source_allocation_action_id 重入时，冻结的模式、旧/新架、入场方向和工作位必须一致，复用原准备作业；同一源动作方案矛盾则记 PREPARATION_PLAN_CONFLICT，不覆盖方案。
 - 其他盘尚未发送分配或仅持有被新代次取代的迟到决定时，按第6.1节等待现有准备作业，再重新求值，不要求它的旧方案与活动方案相同，也不把旧方案改写成活动方案。新的、代次有效的分配方案只有在无活动准备作业时才能创建下一代。
-- 已 READY 的历史准备作业不妨碍之后的新换架；分配请求登记时冻结本地准备代次，迟到结果按第 6.1 节处理，不能单凭“没有活动作业”重开旧方案。
+- 已 READY 或 DEPART_ACCEPTED 的历史准备作业不占活动名额；分配请求登记时冻结本地准备代次，迟到结果按第 6.1 节处理，不能单凭“没有活动作业”重开旧方案。
 
 ## 5. 实体三：CoarseSortingAction
 
-目标表：`coarse_sorting_action`。记录一次**业务求值或物理动作的稳定身份、原参数和消费依据**。通信重试不增加行；仅明确 WAIT 到期、准备作业就绪等允许的新业务求值增加轮次。该表不承载通用投递状态机。
+目标表：`coarse_sorting_action`。记录一次**业务求值或物理动作的稳定身份、原参数和消费依据**。通信重试不增加行；明确 WAIT 到期或准备作业收口后可登记新业务求值。该表不承载通用投递状态机。
 
 | 字段 | 类型 / 空值 | 含义 |
 | --- | --- | --- |
@@ -124,8 +124,8 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 | `kind` | String，非空 | 下表中的固定动作种类 |
 | `round_no` | Integer，非空，≥1 | 同一所有者、同一种动作的业务轮次；不记录 HTTP 尝试次数 |
 | `predecessor_action_id` | FK → Action，可空 | 本所有者内的直接前序；首验证/首补架可空，链与状态表一致 |
-| `input_preparation_id` | FK → Preparation，可空 | Job 分配请求登记时依赖的已 READY 准备作业；首次分配或只经历普通 WAIT 时可空 |
-| `result_preparation_id` | FK → Preparation，可空 | 本轮决定消费后所等待的共享准备作业；与请求登记前的 READY 依据分别保存 |
+| `input_preparation_id` | FK → Preparation，可空 | Job 分配请求登记时依赖的已收口准备作业（READY 或 DEPART_ACCEPTED）；首次分配或只经历普通 WAIT 时可空 |
+| `result_preparation_id` | FK → Preparation，可空 | 本轮决定消费后所等待的共享准备作业；与请求登记前的准备依据分别保存 |
 | `rack_generation_no` | Integer，可空，≥0 | ALLOCATE_STORAGE 必填：登记原请求时该工作线/工作位的最新准备代次；没有历史准备时为0。其他 kind 为空，不发送给 WMS |
 | `request_data` | JSON，非空 | 通过该 kind 的严格模型校验的原业务输入；不含 HTTP 包络或重新构造的原字节 |
 | `resource_snapshot` | JSON，可空 | ECS 的原设备 ID/code/版本/角色/绑定版本；Transport 的原架、来源/目标、F01模板、入场方向及原 result_policy；不保存可变的当前 Status |
@@ -142,7 +142,7 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 | --- | --- | --- |
 | Job | `VALIDATE_BIND` | 一次验证，round_no=1；operation_id 由动作登记时生成并保留 |
 | Job | `MOVE_FORWARD`、`PUT_TO_BIN`、`MOVE_TO_NG` | 每种最多一条，round_no=1；新动作 call_key 使用动作 id，历史调用保留原键 |
-| Job | `ALLOCATE_STORAGE` | 明确 WAIT 到期或准备作业就绪后，才建立下一轮；每轮独立 operation_id |
+| Job | `ALLOCATE_STORAGE` | 明确 WAIT 到期或准备作业收口后，才建立下一轮；每轮独立 operation_id |
 | Job | `REPORT_COMPLETION` | 一次原完成报告，round_no=1；通信恢复不新增业务报告 |
 | Preparation | `DEPARTURE_DECIDE` | 有效 WAIT 到期后可新一轮；READY 后不重新决定原旧架去向 |
 | Preparation | `MOVE_RACK_OUT`、`MOVE_RACK_IN` | 每种最多一条，round_no=1；原 client_request_id 登记时生成，恢复沿原 task_id，不关心执行方式 |
@@ -182,16 +182,18 @@ erDiagram
 
 这是 WES 自己的物理动作顺序门禁，不判断 WMS 的容量、高度或库存。准备代次只在本地三表中使用，不扩展 WMS wire。
 
-1. 准备登记首轮/下一轮分配动作前，持有工作线锁查询该位置最新 Preparation。存在任何非 READY 准备作业时，不发新的分配请求：Job 关联该作业并进入 AWAITING_RACK。若尚未登记过分配动作，此时 current_action 允许仍指向已完成的 MOVE_FORWARD；已有未决原 WMS 分配时，仍保留 AWAITING_ALLOCATION 和原引用等待合法结果，不能借此转入准备就绪后的新轮次。
+1. 准备登记首轮/下一轮分配动作前，持有工作线锁查询该位置最新 Preparation。存在任何活动准备作业时，不发新的分配请求：Job 关联该作业并进入 AWAITING_RACK。若尚未登记过分配动作，此时 current_action 允许仍指向已完成的 MOVE_FORWARD；已有未决原 WMS 分配时，仍保留 AWAITING_ALLOCATION 和原引用等待合法结果，不能借此转入准备就绪后的新轮次。
 2. 没有活动准备作业时，首轮/合法新轮分配动作保存最新 generation_no（无历史为0）。该数字保存后不改；所有旧准备记录均保留，不能删除后重置代次。
-3. 取得原请求**合法明确结果**后，在工作线锁内重读最新代次。与请求 rack_generation_no 相同且没有活动准备作业，才可据 ALLOCATED 创建 PUT_TO_BIN，或据明确新方案创建下一代 Preparation。位置、当前许可和箱格参数仍须同时合法。
-4. 最新代次已增加，说明该请求发出后发生了新的架位准备。原决定保留为本轮消费依据，但不得用它创建 PUT_TO_BIN 或再开补换架。最新 Preparation 尚在途时等待它；已 READY 时，沿该盘原 binding_id 发新一轮分配并关联该 READY 作业，冻结新代次。这适用于迟到的 ALLOCATED、补架/换架或 WAIT 结果，不按模式/架号相同就假定是新方案。
+3. 取得原请求**合法明确结果**后，在工作线锁内重读最新代次。与请求 rack_generation_no 相同且没有活动准备作业，才可据 ALLOCATED 创建 PUT_TO_BIN，或据明确补架、换架或仅退架决定创建下一代 Preparation。位置、当前许可和箱格参数仍须同时合法。
+4. 最新代次已增加，说明该请求发出后发生了新的架位准备。原决定保留为本轮消费依据，但不得用它创建 PUT_TO_BIN 或再开补换架。最新 Preparation 尚在途时等待它；已 READY 或 DEPART_ACCEPTED 时，沿该盘原 binding_id 发新一轮分配并关联该作业，冻结新代次。这适用于迟到的 ALLOCATED、补架、换架、仅退架或 WAIT 结果，不按模式/架号相同就假定是新方案。
 5. 尚未取得合法原结果（通信未知、缺失或非法）时，不以代次变化为理由换号绕过原请求，保留原动作待恢复/核对。明确结果后才按第4条重新求值。WMS 负责同 binding_id 新求值与原容量预留的一致性，WES 不增加预留释放或高度修正接口。
-6. 已有 Preparation 为 READY 的等待盘恢复时，也必须在工作线锁内查询最新代次。若又有较新活动准备作业，改为等待该作业；若较新作业已 READY，使用最新作业作为本次新求值依据。旧动作的历史 input/result_preparation_id 不覆盖，只更新 Job 当前等待指针及新动作的 input_preparation_id。
+6. 已有 Preparation 收口的等待盘恢复时，也必须在工作线锁内查询最新代次。若又有较新活动准备作业，改为等待该作业；若较新作业已 READY 或 DEPART_ACCEPTED，使用最新作业作为本次新求值依据。旧动作的历史 input/result_preparation_id 不覆盖，只更新 Job 当前等待指针及新动作的 input_preparation_id。
 7. Preparation 从创建起（包括 AWAITING_DEPARTURE）就阻止向该位置创建新的 PUT_TO_BIN。此前已登记的入箱命令保留原目标和身份继续收口，离场动作必须等这些原动作明确完成；不能撤销它们、把它们重定向到新架或把未决当作完成。入箱登记和准备登记都在同一工作线锁内执行，消除“刚核对完就多了一条新入箱”的竞争。
-8. 上述重新求值不授权物理动作。经历准备作业的新 ALLOCATED 还须匹配该次原新架和工作线；仍返回旧架，或同一等待盘的新结果与刚完成的原补架事实矛盾时，保留结果记 RACK_STATE_CONFLICT，不立即再叫架。只需核对本盘相关准备依据，不将历史 READY 当作永久在位库存。
+8. 上述重新求值不授权物理动作。以 READY 为依据的新 ALLOCATED 还须匹配该次原新架和工作线；仍返回旧架，或同一等待盘的新结果与刚完成的原补架事实矛盾时，保留结果记 RACK_STATE_CONFLICT，不立即再叫架。只需核对本盘相关准备依据，不将历史 READY 当作永久在位库存。
 
-input_preparation_id 只来源于本盘实际等待并已就绪的准备作业，不因为该工作位存在任意历史 READY 就默认关联。普通 WAIT 后再次申请时，若代次仍有效，沿用该盘原 input_preparation_id；发生新代次则按上述规则更新到新动作的准备依据。其他盘独立首次申请仍以当前 WMS 决定为准，WES 不拿无关历史 READY 推断当前有架。
+9. 当前工作位最新代次为 DEPART_ACCEPTED 时，WES 可按原绑定重新分配。若新决定仍把原退场架作为在位分配目标或退换对象，保留结果并记 RACK_STATE_CONFLICT，不下发入箱或重复退架。同一旧架若由有效的新补架方案重新入场，仍须完成原 F01 入场并通过新代次校验。
+
+input_preparation_id 只来源于本盘实际等待并已收口的准备作业，不因为该工作位存在任意历史 READY 就默认关联。普通 WAIT 后再次申请时，若代次仍有效，沿用该盘原 input_preparation_id；发生新代次则按上述规则更新到新动作的准备依据。其他盘独立首次申请仍以当前 WMS 决定为准，WES 不拿无关历史 READY 推断当前有架。
 
 ## 7. 单盘状态机与转换
 
@@ -205,8 +207,8 @@ stateDiagram-v2
     AWAITING_MOVE --> AWAITING_ALLOCATION: 原输送明确成功
     AWAITING_MOVE --> AWAITING_RACK: 原输送成功且已有活动准备作业
     AWAITING_ALLOCATION --> AWAITING_ALLOCATION: WAIT 到期重新求值
-    AWAITING_ALLOCATION --> AWAITING_RACK: 明确补换架方案
-    AWAITING_RACK --> AWAITING_ALLOCATION: 关联准备作业就绪
+    AWAITING_ALLOCATION --> AWAITING_RACK: 明确补架、换架或仅退架
+    AWAITING_RACK --> AWAITING_ALLOCATION: 新架明确到位或仅退架调度接纳
     AWAITING_ALLOCATION --> AWAITING_PUT: ALLOCATED
     AWAITING_PUT --> AWAITING_REPORT: 原入箱明确成功
     AWAITING_REPORT --> COMPLETED: 原报告 RECORDED 或 DUPLICATE
@@ -225,7 +227,8 @@ stateDiagram-v2
 | AWAITING_ALLOCATION，WMS WAIT | 原请求合法明确 WAIT | 消费本轮决定，wait_reason=NO_AVAILABLE_RACK，next_check_at 固定为本轮消费时间+5000ms；不创建 Preparation 或搬运 |
 | AWAITING_ALLOCATION，WAIT 到期 | 当前动作确为已消费 WAIT，当前许可有效 | 新轮次/新 operation_id 的分配动作，清除本轮到期点；重复唤醒不能多开轮次 |
 | AWAITING_ALLOCATION，需补架/换架 | 工作线上下文匹配，具体新架方案有效 | 消费本轮决定，复用或创建唯一 Preparation，保存当前及历史关联，进入 AWAITING_RACK |
-| AWAITING_RACK，准备就绪 | 原位置匹配，核对该位置最新代次且没有较新活动准备作业 | 保留原 binding_id，分配动作关联最新 READY 并冻结新代次；从未申请分配时为 round_no=1、前序为原 MOVE_FORWARD，否则为下一轮、前序为上轮分配；进入 AWAITING_ALLOCATION，不重做验证或输送 |
+| AWAITING_ALLOCATION，DEPART_REQUIRED | 原工作线及旧架身份有效，原决定代次有效 | 消费本轮决定，复用或创建唯一 DEPART_ONLY Preparation，保存当前和历史关联，进入 AWAITING_RACK |
+| AWAITING_RACK，准备收口 | 原位置匹配，最新代次为 READY 或 DEPART_ACCEPTED | 保留原 binding_id，分配动作关联该准备作业并冻结新代次；从未申请分配时为 round_no=1、前序为原 MOVE_FORWARD，否则为下一轮、前序为上轮分配；进入 AWAITING_ALLOCATION，不重做验证或输送 |
 | AWAITING_ALLOCATION，ALLOCATED | 原线/原 binding 一致，箱位/箱型及 cell_id 末位合法；原请求准备代次仍有效、无活动准备作业，相关新架匹配 | 消费完整原目标，保存 allocation_action_id，唯一 PUT_TO_BIN，进入 AWAITING_PUT；迟到结果只按第6.1节处理 |
 | AWAITING_PUT，原入箱完成 | 原命令可信 SUCCESS 保证指定箱格已放料；数量及严格附录合法，无待核对项 | 保存 Result、placed_at_ms、原目标及唯一 REPORT_COMPLETION，进入 AWAITING_REPORT；物理出料阶段已结束 |
 | AWAITING_REPORT，报告收妥 | 原报告 HTTP/code 合法 RECORDED/DUPLICATE | 保存收妥依据，COMPLETED、completed_at；此前不阻塞其他盘或原料格 |
@@ -239,28 +242,32 @@ stateDiagram-v2
 
 ### 分配 WAIT 的目标合同
 
-本轮用户确认了“暂无新架则等待、WES 定时再申请”的行为；为使实现无歧义，本设计选择在 storage_allocate 的 HTTP 200 / DECIDED 中增加严格分支 `data={"result":"WAIT","workline_code":"原工作线"}`。不包含架号或目标箱格，不包装通信失败为 WAIT。
+WMS 暂无可执行分配或架位方案时，storage_allocate 的 HTTP 200 / DECIDED 采用严格分支 `data={"result":"WAIT","workline_code":"原工作线"}`。不包含架号或目标箱格，不包装通信失败为 WAIT。
 
 轮询间隔 **5000ms 是本设计选择，待评审**，复用既有 5 秒 Beat，不新建调度器或配置项。原 WAIT 只设置一次到期点；到期后的新业务求值使用新请求身份，而该请求自己的网络恢复保持原身份。未知结果没有获得新求值许可。离场决定继续使用既有 retry_after_ms，不混用两个 WAIT 合同。
 
+旧架无法分配、WMS 核对其他有效分配和预留后确认可进入退场流程、暂无有效新架方案时，storage_allocate 返回 HTTP 200 / DECIDED，`data` 严格为 `{"result":"DEPART_REQUIRED","workline_code":"原工作线","current_rack":{"rack_id":"旧架号"}}`。工作线和架号为非空字符串。去向由共用离场决定返回。接口示例见[先退旧架](../../integrations/coarse-sorting-api-draft.md#wms-depart-required)。
+
 ## 8. 架位准备状态机
 
-补换架方案与空闲退架分别判断：RackPreparation只保存WMS明确给出的REPLENISH/REPLACE方案。原宿主确认本点位没有待服务单盘、仍可能授权本架的分配/在途取放等直接责任，并且原架可靠在位可安全交出时，即沿原公共RackJob申请离场，不等待REPLACE_REQUIRED或incoming_rack，不伪造Preparation/容量/新架。独立的已完成入箱报告继续由原Job推进并约束业务闭合，不单独占住货架；未知分配/位置不等于无需求。后来新盘仍向WMS取得明确分配和必要补架方案。
+RackPreparation 保存和推进 WMS 给出的补架、换架或仅退架决定。空闲退架仍按独立条件判断。原宿主确认本点位没有待服务单盘、仍可能授权本架的分配/在途取放等直接责任，并且原架可靠在位可安全交出时，即沿原公共RackJob申请离场，不等待REPLACE_REQUIRED或incoming_rack，不伪造Preparation/容量/新架。独立的已完成入箱报告继续由原Job推进并约束业务闭合，不单独占住货架；未知分配/位置不等于无需求。后来新盘仍向WMS取得明确分配和必要补架方案。
 
-状态：`AWAITING_DEPARTURE / MOVING_OUT / MOVING_IN / READY`。Job 消费方案时只创建准备记录：REPLENISH 初始 MOVING_IN、REPLACE 初始 AWAITING_DEPARTURE，current_action 暂空。由独立 advance_preparation 登记初始动作；后续转换必须与下一动作引用原子提交，不把丢失指针当作可重新派发。
+状态为 `AWAITING_DEPARTURE / MOVING_OUT / MOVING_IN / READY / DEPART_ACCEPTED`。REPLENISH 初始为 MOVING_IN，REPLACE 和 DEPART_ONLY 初始为 AWAITING_DEPARTURE，current_action 暂空。READY 表示新架明确到位，DEPART_ACCEPTED 表示仅退架的原调度已接纳。由独立 advance_preparation 登记初始动作；后续转换必须与下一动作引用原子提交，不把丢失指针当作可重新派发。
 
 | 当前状态 / 事件 | 必须满足 | 原子更新与后继 |
 | --- | --- | --- |
 | 新补架 | 有明确新架方案，无其他活动准备作业 | 保存方案、前序及新代次，MOVING_IN/current_action空；独立推进在前序满足后登记唯一 MOVE_RACK_IN |
 | 新换架 | 有代次有效的明确旧/新架方案，无其他活动准备作业 | 保存新代次和方案，AWAITING_DEPARTURE；从创建起禁止新入箱，满足旧架交出条件后登记 DEPARTURE_DECIDE |
+| 新仅退架 | 有代次有效的 DEPART_REQUIRED，旧架及工作位有效，无活动准备作业 | 保存旧架和新代次，进入 AWAITING_DEPARTURE，立即建立新入箱门禁；独立推进等原旧架动作收口后请求离场去向 |
 | AWAITING_DEPARTURE，原 WAIT | 合法 WAIT + retry_after_ms | 保存原决定及固定到期点，状态不变；到期后新轮次求离场去向 |
 | AWAITING_DEPARTURE，原 READY | 与旧架直接相关的已创建入箱/搬运无未决，当前许可有效，原工作位匹配 | 保存原目的地，唯一 MOVE_RACK_OUT，进入 MOVING_OUT；未收妥的已完成放料报告继续独立恢复 |
-| MOVING_OUT，原旧架调度完成 | 旧架F01 DEPART的公共动作保存原有效202/RECEIVED或200/DUPLICATE接纳，原合法去向可为ZONE或不同RACK_POSITION（含生产线工作位） | 保存原调度完成依据，登记唯一新架公共ENTER并进入MOVING_IN；原DEPART不等最终回调、不重新请求departure，不伪造物理搬离 |
+| MOVING_OUT，REPLACE 的原旧架调度完成 | 旧架F01 DEPART的公共动作保存原有效202/RECEIVED或200/DUPLICATE接纳，原合法去向可为ZONE或不同RACK_POSITION（含生产线工作位） | 保存原调度完成依据，登记唯一新架公共ENTER并进入MOVING_IN；原DEPART不等最终回调、不重新请求departure，不伪造物理搬离 |
+| MOVING_OUT，DEPART_ONLY 的原旧架调度完成 | 原 F01 DEPART 保存匹配的有效 202/RECEIVED 或 200/DUPLICATE 接纳 | 保存原接纳证据，进入 DEPART_ACCEPTED；等待盘各自重新分配。仍无可执行方案时由 WMS 返回 WAIT，能安排新架补入时返回 REPLENISH_REQUIRED |
 | MOVING_IN，原新架明确到位 | 原 F01 已应用成功、原新架/原目标工作位及原 target_face 匹配，无 pending/UNKNOWN | 保存原版本，READY、ready_at；等待盘随后各自重新分配 |
-| MOVING_OUT/MOVING_IN，尚无所需完成依据 | 旧架离场没有合法接纳，或新架进场未获匹配成功 | 保存原依据和待核对原因，状态不前进、不新建替代任务；已接纳离场的后到失败仅备查，不使MOVING_IN/READY回退 |
+| MOVING_OUT/MOVING_IN，尚无所需完成依据 | 旧架离场没有合法接纳，或新架进场未获匹配成功 | 保存原依据和待核对原因，状态不前进、不新建替代任务；已接纳离场的后到失败仅备查，不使 MOVING_IN、READY 或 DEPART_ACCEPTED 回退 |
 | 原任务完成后收到结果 | 原任务通过合法框架规则应用成功，身份/版本/位置均有效 | 沿上面原成功转换继续，清除等待原因；不核对手工/自动方式，不需要额外恢复确认 |
 
-Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_id 为空；换架首个 DEPARTURE_DECIDE 为空，WAIT 后下一轮指向前一轮，MOVE_RACK_OUT 指向获得 READY 的原决定，MOVE_RACK_IN 指向原 MOVE_RACK_OUT。跨聚合的已知设备/搬运前序由 Preparation.predecessor_action_ids 保留，不塞入只能指向同一所有者的 predecessor_action_id。
+Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_id 为空；换架或仅退架的首个 DEPARTURE_DECIDE 为空，WAIT 后下一轮指向前一轮，MOVE_RACK_OUT 指向获得 READY 的原决定，MOVE_RACK_IN 指向原 MOVE_RACK_OUT。DEPART_ONLY 的动作链止于 MOVE_RACK_OUT。跨聚合的已知设备/搬运前序由 Preparation.predecessor_action_ids 保留，不塞入只能指向同一所有者的 predecessor_action_id。
 
 粗分对 departure WAIT 仅采用到期续问：首次消费时固定 next_check_at，重复消费不重置；其他盘扫码、结果通知或普通扫描不使尚未到期的 WAIT 提前创建新动作。到期后的同一轮新请求登记和清除旧到期点原子提交。共用合同允许的更广续问策略不自动成为粗分的触发条件。
 
@@ -277,7 +284,7 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 - 关联新共享准备作业时：锁原工作线后查找/插入 Preparation，再锁 Job 与其分配动作重读和关联。工作线短锁及活动准备部分唯一约束共同阻止并发创建；该锁不跨外部执行持有，不意味着整线只能处理一盘。
 - 创建 Preparation 时，在同一 SERIALIZABLE 事务查询同工作线/原工作位已登记且尚未明确完成的相关入箱/搬运动作，保存去重的直接 predecessor_action_ids；这是建立门禁时的必要读集合。离场/补入推进按原集合和公开读口检查，分页超过100条仍在同一快照。已保存的充分、不可回退成功依据可用于其原范围；缺失/未知或仅 CLOSED 不等于完成。调用方事务只改业务表和登记原公共 Outbox，不锁写框架命令/任务或直接 settle。
 - 新动作行、原 WMS/ECS/Transport 登记及引用、消费依据、主状态转换同一事务提交；重复任务/通知先按当前 state、action 和唯一键重入，不发第二份外部意图。
-- 事件/结果 outer commit 后仍只唤醒 coarse_sorting；READY 不广播到其他业务，也不逐盘新增发布协议。既有 5 秒 Beat 兜底扫描等待盘；不要求平台发布器反查新业务表。
+- 事件/结果 outer commit 后仍只唤醒 coarse_sorting；READY 和 DEPART_ACCEPTED 不广播到其他业务，也不逐盘新增发布协议。既有 5 秒 Beat 兜底扫描等待盘；不要求平台发布器反查新业务表。
 - 当前绑定变化不能把旧作业迁线或改址。新资源在首次动作登记时从原线可信角色绑定选择并冻结；已存在命令的恢复只读原引用。位置变化不替换原 Transport 目标。
 - evidence_history 不是下一动作授权缓存；每次推进核对必要当前公开结果及全部直接前序，在同一事务保存消费。公共记录清理导致依据缺失且业务没有已保存的充分决定时，保留原动作待核对，不重建请求。
 
@@ -335,11 +342,12 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 | 验证 OK/NG | 分别唯一输送/NG 命令；NG 成功闭合且无 WMS 完成报告 |
 | 输送 ACK/成功 | ACK 不进入分配；原有效 SUCCESS 才进入分配 |
 | 分配多次 WAIT、重启及重复唤醒 | 原轮次/固定到期点保留；到期每轮至多一个新请求；未知不换号 |
-| 两盘同时需要同工作位补换架 | 只形成一个活动 Preparation，动作仍归各自所有者 |
+| 两盘同时需要同工作位补架、换架或仅退架 | 只形成一个活动 Preparation，动作仍归各自所有者 |
 | 旧决定迟到、方案矛盾或配置变化 | 不创建替代准备作业、不覆盖原架位/任务；保留决定待核对 |
 | 请求发出后发生新一代准备作业 | 合法旧决定只保存依据；原请求未知时仍恢复原身份；新准备 READY 后按新代次重新分配 |
 | 搬离登记与旧 ALLOCATED 并发 | 准备创建后不再登记新入箱；已登记入箱先收口；任一串行顺序都不能同时授权搬架和新入箱 |
 | 旧 READY 被下一代准备取代 | 等待盘不使用旧 READY 或旧 ALLOCATED 授权入箱，新动作核对最新代次 |
+| DEPART_REQUIRED 且暂无新架 | 唯一原架退场，已下发入箱先收口；原 F01 DEPART 有效接纳即恢复各盘分配。仍无新架则 WAIT；迟到或重复旧架决定不派第二次退架 |
 | 旧架离场 WAIT/READY | 到期新求值与原网络恢复分开；READY 只生成唯一原旧架搬离 |
 | 搬运 ACK、FAILED、UNKNOWN、错目标或仅 CLOSED | 不宣称到位、不发后继搬运；失败保留原 task_id 等后续有效结果 |
 | 原任务完成 | 只有经合法框架规则应用的原任务成功才恢复，手工/自动方式不影响判定；更正能力未交付时继续等待 |

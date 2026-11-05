@@ -155,6 +155,8 @@ ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial
 
 SMT 自动线已在隔离目录验证入库、出库、原箱释放和完成确认。设备参数见 [ECS 交互示例](docs/integrations/ECS%20已确认交互示例.md)，接口与交付边界见 [AUTO API](docs/integrations/smt-auto-api.md) 和 [开发验收记录](docs/testing/smt-auto.md)。
 
+对接评审资料见 [X-Ray](docs/integrations/xray-api.md)、[开箱机 0.21 设计](docs/integrations/opening-machine-overview-design.md)、[开箱机后续实施计划](docs/superpowers/plans/2026-11-05-opening-machine-wes-implementation.md) 和 [粗分接口草案](docs/integrations/coarse-sorting-api-draft.md)。各文档列出了待确认合同和后续验收。
+
 其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
 
 业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
