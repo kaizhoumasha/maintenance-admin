@@ -97,6 +97,7 @@ def upgrade():
         postgresql_where=sa.text("applied_plan_revision IS NOT NULL"),
         sqlite_where=sa.text("applied_plan_revision IS NOT NULL"),
     )
+    op.create_index("smt_auto_task_input_task_id_idx", "smt_auto_task_input", ["task_id"])
     op.create_table(
         "smt_auto_task_request",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -120,6 +121,7 @@ def upgrade():
         sa.UniqueConstraint("message_id", name="smt_auto_request_message"),
         sa.CheckConstraint("purpose IN ('PREPARE','COMPLETION')", name="smt_auto_request_purpose"),
     )
+    op.create_index("smt_auto_task_request_task_id_idx", "smt_auto_task_request", ["task_id"])
     op.create_table(
         "smt_auto_supply_member",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -214,6 +216,9 @@ def upgrade():
 
 
 def downgrade():
+    op.drop_index("smt_auto_task_request_task_id_idx", table_name="smt_auto_task_request")
+    op.drop_index("smt_auto_input_plan", table_name="smt_auto_task_input")
+    op.drop_index("smt_auto_task_input_task_id_idx", table_name="smt_auto_task_input")
     for name in (
         "smt_auto_outbound_source_member",
         "smt_auto_inbound_source_member",

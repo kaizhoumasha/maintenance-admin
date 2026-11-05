@@ -1,4 +1,5 @@
 import asyncio
+from importlib import import_module
 
 from alembic import context
 from alembic.script import ScriptDirectory
@@ -13,6 +14,7 @@ from app.database import create_database_engine as create_async_engine
 from app.models import Base
 
 load_business_models()
+import_module("app.businesses.smt_auto.models")
 target_metadata = Base.metadata
 url = get_settings().DATABASE_URL
 
