@@ -51,8 +51,8 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
     assert put["device_code"] == flow.output
     assert put["params"] == {
         "barcode": row["payload"]["barcode"],
-        "bin_location": "2",
-        "bin_cell_location": "1",
+        "bin_location": "B",
+        "bin_cell_location": 7,
         "bin_type": "3",
         "reel_totalthickness": 120,
     }
@@ -98,8 +98,9 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         "workline_code": flow.workline,
         "binding_id": "BIND-ORIGINAL",
         "bin_code": "BIN-A002",
-        "bin_location": "2",
+        "bin_location": "B",
         "cell_id": "BIN-A002-1",
+        "cell_index": 7,
         "completed_at": 1234,
     }
     actions = await flow.action_rows(scan_id)
@@ -116,8 +117,12 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
     "decision,reason",
     [
         ({"workline_code": "WRONG"}, "ALLOCATION_WORKLINE_MISMATCH"),
-        ({"cell_id": "BIN-A002-4"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
-        ({"bin_location": "5"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"bin_location": "2"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"bin_location": "E"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"cell_index": 0}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"cell_index": 8}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"cell_index": "7"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
+        ({"cell_index": True}, "ALLOCATION_RECONCILIATION_REQUIRED"),
         ({"cell_id": "BIN\x00A002-1"}, "ALLOCATION_RECONCILIATION_REQUIRED"),
     ],
 )
@@ -130,6 +135,15 @@ async def test_invalid_target_retains_original_allocation(direct, decision, reas
         assert await flow.dispatch() == 0
     assert len(flow.peer.requests) == 2
     assert len(flow.peer.commands) == 1
+
+
+@pytest.mark.parametrize("missing", ["cell_id", "cell_index"])
+async def test_allocation_requires_both_storage_code_and_cell_index(direct, missing):
+    direct.peer.allocate = allocated(direct)
+    del direct.peer.allocate[missing]
+    row = await reach_allocate(direct)
+    assert await direct.service.advance(row["id"]) == "ALLOCATION_RECONCILIATION_REQUIRED"
+    assert await direct.dispatch() == 0
 
 
 async def test_wait_expiry_opens_one_round_for_original_binding(direct):
@@ -211,6 +225,43 @@ async def test_wrong_station_preserves_original_put_for_reconciliation(direct):
     assert await flow.dispatch() == 0
     assert (await flow.rows())[0]["state"] == "AWAITING_PUT"
     assert (await flow.action_rows(row["id"]))[-1]["command_code"] == put["command_code"]
+
+
+@pytest.mark.parametrize("index", [None, 2], ids=["missing", "differs-from-command"])
+async def test_retained_target_must_match_frozen_put_before_reporting(direct, index):
+    direct.peer.allocate = allocated(direct)
+    row = await reach_allocate(direct)
+    put = await dispatch_put(direct, row)
+    allocation, original = (await direct.action_rows(row["id"]))[-2:]
+    evidence = allocation["evidence_history"][-1]
+    target = dict(evidence["data"])
+    if index is None:
+        target.pop("cell_index")
+    else:
+        target["cell_index"] = index
+    async with direct.factory.begin() as session:
+        await session.execute(
+            direct.actions.update()
+            .where(direct.actions.c.id == allocation["id"])
+            .values(evidence_history=[{**evidence, "data": target}])
+        )
+
+    assert (
+        await direct.result(
+            row,
+            command_code=put["command_code"],
+            device_code=direct.output,
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+        )
+    ).status_code == 200
+    direct.rebuild()
+    assert await direct.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    assert await direct.dispatch() == 0
+    assert direct.peer.reports == []
+    actions = await direct.action_rows(row["id"])
+    assert actions[-1]["id"] == original["id"]
+    assert actions[-1]["command_code"] == put["command_code"]
+    assert actions[-1]["evidence_history"][-1]["data"]["result"] == "SUCCESS"
 
 
 async def test_incomplete_put_success_allows_later_valid_original_result(direct):
@@ -444,7 +495,7 @@ async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direc
     second = await reach_allocate(flow, timestamp=1793206799001)
     second_put = await dispatch_put(flow, second)
     assert second_put["params"]["reel_totalthickness"] == 140
-    assert second_put["params"]["bin_cell_location"] == "1"
+    assert second_put["params"]["bin_cell_location"] == 7
     assert first_put["command_code"] != second_put["command_code"]
 
     flow.rebuild()

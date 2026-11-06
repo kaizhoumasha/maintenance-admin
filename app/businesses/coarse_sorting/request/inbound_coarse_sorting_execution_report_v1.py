@@ -6,7 +6,7 @@ from pydantic import Field
 
 from app.integrations.wms_request import RequestPayload
 
-from ..contracts import BinLocation, Reference
+from ..contracts import BinLocation, CellIndex, Reference
 
 
 class ExecutionReport(RequestPayload):
@@ -15,4 +15,5 @@ class ExecutionReport(RequestPayload):
     bin_code: Reference
     bin_location: BinLocation
     cell_id: Reference
+    cell_index: CellIndex
     completed_at: Annotated[int, Field(ge=0, le=2**63 - 1)]

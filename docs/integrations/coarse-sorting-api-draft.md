@@ -342,8 +342,9 @@ WMS 已掌握工作点位的货架在位信息，通过请求的 `workline_code`
     "workline_code": "COARSE-A",
     "rack_id": "RACK-OLD-01",
     "bin_code": "BIN-A002",
-    "bin_location": "2",
+    "bin_location": "B",
     "cell_id": "BIN-A002-1",
+    "cell_index": 2,
     "bin_type": "3",
     "reel_totalthickness": 120
   }
@@ -356,14 +357,15 @@ WMS 已掌握工作点位的货架在位信息，通过请求的 `workline_code`
 | `workline_code`       | 回显本次请求的工作线编码；具体货架工作点位取 WES 保存的该线位置绑定，不下发为 ECS 固定位置参数                               |
 | `rack_id`             | WMS 确认的当前在位架，供 WES 保存本次目标上下文                                                                              |
 | `bin_code`            | 真实目标料箱条码，不等同于设备箱位                                                                                           |
-| `bin_location`        | 目标料箱所在设备箱位，取值为 `"1"`～`"4"`                                                                                |
-| `cell_id`             | WMS 返回的完整料格编码；保存原值用于完成反馈。其最后一个字符为设备格位，例如 `BIN-A002-1` 映射为 `bin_cell_location="1"` |
+| `bin_location` | 料箱在单层货架上的位置，取值为 `A`、`B`、`C`、`D` |
+| `cell_id` | WMS 返回的完整料格储位编码，原样保存并用于完成反馈 |
+| `cell_index` | WMS 直接返回的料箱内格位，JSON 整数 `1`～`7`，与 `cell_id` 成对必填 |
 | `bin_type`            | `"3"` 为三格箱，`"6"` 为六格箱                                                                                           |
 | `reel_totalthickness` | 数值类型；料格内当前已存储物料的总高度，不包含本次待放入物料                                                                 |
 
 例如料格内当前已存储物料的总高度为 120、本盘厚度为 20，响应仍为数值 `120`，不返回 `140`。WES 不自行累加或推导当前物理高度。
 
-格位转换固定为 `bin_cell_location = cell_id[-1]`，结果保持字符串；只取末位，不解析箱号或最后一段。本业务使用单字符数字格位：三格箱为 `"1"`～`"3"`，六格箱为 `"1"`～`"6"`。`cell_id` 为空、末位不是上述数字或超出对应箱型范围时，不创建入箱命令。完整 `cell_id` 不改写，完成反馈仍使用原值。
+WES 将 WMS 返回的 `cell_index` 原值传给 ECS 的 `bin_cell_location`。`cell_id` 是独立的储位编码，例如 `BIN-A002-1` 可对应 `cell_index=2`。WMS 负责箱型与格位组合的可用性。箱位非法、料格字段缺失或格位超出 `1`～`7` 时保留原分配待核对。
 
 WES 保存原目标及参数，用于唯一的入箱命令及后续反馈。同一原请求重放须返回原决定，不重新挑选箱格、货架或搬运方案。WMS 负责容量、并发及目标有效性，ECS 负责设备互锁。
 
@@ -452,8 +454,9 @@ WES 保存决定和补入方案，登记唯一新架补入任务；明确到位�
     "workline_code": "COARSE-A",
     "rack_id": "RACK-NEW-01",
     "bin_code": "BIN-N002",
-    "bin_location": "2",
+    "bin_location": "B",
     "cell_id": "BIN-N002-1",
+    "cell_index": 3,
     "bin_type": "3",
     "reel_totalthickness": 0
   }
@@ -526,8 +529,9 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
     "workline_code": "COARSE-A",
     "binding_id": "BIND-0001",
     "bin_code": "BIN-A002",
-    "bin_location": "2",
+    "bin_location": "B",
     "cell_id": "BIN-A002-1",
+    "cell_index": 2,
     "completed_at": 1793206814000
   }
 }
@@ -537,7 +541,8 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 | ------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `workline_code`                     | 必填非空字符串，沿用原受理及已完成命令关联的工作线编码，与原绑定和目标一致                      |
 | `binding_id`                        | 原验证成功的绑定引用                                                                            |
-| `bin_code / bin_location / cell_id` | 原已完成命令关联的真实目标料箱、设备箱位及完整料格编码；cell_id 使用 WMS 原值，不替换为末位格位 |
+| `bin_code / bin_location` | 原目标料箱条码及其在单层货架上的箱位 |
+| `cell_id / cell_index` | 原分配的完整料格储位编码及料箱内格位，成对回传 WMS |
 | `completed_at`                      | 原 ECS Result 的 `finish_time`，不使用报告发送时间                                            |
 
 目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。失败、未知、超时均不提交本完成接口，也不推导装箱后总高度。
@@ -978,7 +983,7 @@ ACK 仅表示已接纳，WES 继续等待原命令 Result。移动完成后，EC
 }
 ```
 
-ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 command_code + device_code 核对动作完成结果；`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。MOVE_FORWARD 的 Result.data 仅包含 actual_qty，不携带固定位置。当前实现消费后等待箱格分配阶段，尚不调用分配接口。
+ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 command_code + device_code 核对动作完成结果；`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。MOVE_FORWARD 的 Result.data 仅包含 actual_qty，不携带固定位置。正式装配消费后停在待分配。显式隔离装配可按第 3.2 节继续登记原箱格分配请求。
 
 <a id="ecs-put-to-bin"></a>
 
@@ -993,15 +998,15 @@ ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 co
   "task_type": "PUT_TO_BIN",
   "params": {
     "barcode": "P032-0561-000HF,MCL21X106KOQNNNE,Q2000,D2551,LPLCHP5J,SUPRE001251200032D",
-    "bin_location": "2",
-    "bin_cell_location": "1",
+    "bin_location": "B",
+    "bin_cell_location": 2,
     "bin_type": "3",
     "reel_totalthickness": 120
   }
 }
 ```
 
-固定取料位和出料位置由 ECS 管理；箱位、箱型和料格内当前已存储物料的总高度取原 WMS 响应并原样使用，`bin_cell_location` 仅按第 3.2.1 节规则取原 `cell_id` 的末位字符。`bin_code` 和完整 `cell_id` 保存在 WES 原目标记录中用于完成反馈。`reel_totalthickness` 保持数值类型，WES 不计算装箱后高度。
+固定取料位和出料位置由 ECS 管理。箱位、箱型及格内当前总高度沿用原 WMS 响应，`bin_cell_location` 直接使用原 `cell_index` 的 JSON 整数。WES 保存 `bin_code` 和成对的 `cell_id / cell_index` 用于完成反馈。`reel_totalthickness` 保持数值类型，WES 不计算装箱后高度。
 
 <a id="ecs-put-to-bin-result"></a>
 
@@ -1129,7 +1134,7 @@ WES 在受理事务内可靠保存原收据、业务受理和持久待办；业�
 | P05 | WMS / ECS | 暂无新架且旧架可退时先返回 DECIDED/DEPART_REQUIRED，退架调度接纳后重新分配；仍无可执行方案时返回 DECIDED/WAIT。待签认响应字段、等待间隔和方案稳定性 |
 | P06  | ECS             | 三类命令 params.barcode 原样透传及其长度/字符约束，以及命令与当前实物的对应保证                                                                                                                                                                                                                                                                                                                                                                     |
 | P07  | ECS             | 事件重传与同码真实重入如何区分，原 timestamp/正文重报是否稳定                                                                                                                                                                                                                                                                                                                                                                             |
-| P08  | ECS             | 确认第 5 节相对 v3.3 的协议调整：三类命令统一使用 params.barcode 透传原始料盘条码；省略固定位置字段后由 ECS 按设备/动作/A/B 单元确定位置及映射失败语义；reel_totalthickness 从 string 改为 JSON number、当前高度不含本盘的语义及单位/精度。冻结三类命令的严格参数/结果附录、cell_id 末位到设备格位的映射及箱型/格位范围及 SUCCESS 完成范围，尤其 PUT_TO_BIN 的 SUCCESS 是否保证原指定箱格已放料；同时确认扫码测量精度与误差范围；扫码直径按英寸、厚度按毫米及其 WMS 映射已在第 4.1 节明确 |
+| P08  | ECS             | 确认第 5 节相对 v3.3 的协议调整：三类命令统一使用 params.barcode 透传原始料盘条码；省略固定位置字段后由 ECS 按设备/动作/A/B 单元确定位置及映射失败语义；reel_totalthickness 从 string 改为 JSON number、当前高度不含本盘的语义及单位/精度。冻结三类命令的严格参数/结果附录、整数 bin_cell_location 的设备取值、箱型与格位组合，以及 SUCCESS 的完成范围，尤其 PUT_TO_BIN 的 SUCCESS 是否保证原指定箱格已放料；同时确认扫码测量精度与误差范围；扫码直径按英寸、厚度按毫米及其 WMS 映射已在第 4.1 节明确 |
 | P09  | ECS             | 命令持久接纳、同号同载荷去重、同号异载荷拒绝、去重与结果保留窗口、原结果重报、跨重启保证及失败/未知后的核对/纠正规则；期限及状态冲突保护须满足 ECS 合同                                                                                                                                                                                                                                                                                             |
 | P10  | WMS             | 确认按 workline_code + binding_id 对一次正常入箱完成去重、相同目标/完成事实幂等收妥、冲突拒绝的规则；原命令及设备关联仅保存在 WES 内部；RECORDED 的确切内部业务效果                                                                                                                                                                                                                                                                                 |
 | P11  | ECS / WES       | 正式设备角色、工作线与 A/B 执行单元绑定、来源认证，以及设备 → ECS → WES → WMS 上报链路的端点和转发配置                                                                                                                                                                                                                                                                                                                                           |
@@ -1163,7 +1168,7 @@ WES 在受理事务内可靠保存原收据、业务受理和持久待办；业�
 | 多台粗分机及 A/B 执行单元并行                      | 验证、分配/重新分配、离场及完成反馈携带各自原 workline_code；Transport 不发送该字段，WES 内部将原任务关联到正确工作线，按原货架及起终位核对；不跨线串用绑定、目标或命令 |
 | workline_code 缺失、为空或与原绑定/工作点位冲突    | 目标请求校验失败或由 WMS 拒绝，不猜测工作线、不转投另一设备，也不推进后续动作                                                                                           |
 | 工作线架位解析、缺失及配置变更                     | 从数据库位置绑定按出料架位角色取值并保存版本及位置编码；绑定缺失不创建搬运任务；同一作业重试及结果核对沿用保存值，不被后续配置修改覆盖；配置不代替在位/到位事实         |
-| 料格编码到设备格位的映射                           | BIN-A002-1 的末位映射为字符串格位 "1"；三格箱末位 1～3、六格箱末位 1～6；空编码、非法末位或超出箱型范围时不创建入箱命令；完成报告保留完整原 cell_id                     |
+| 单层架箱位与料格定位 | 箱位仅接受 A/B/C/D。WMS 成对返回 cell_id 与 cell_index，ECS 直接使用 cell_index 作为整数 bin_cell_location，完成报告回传原字段对。缺一项或格位非法时保留原分配待核对。 |
 | 粗分仅 F01 入场/退场，入场带原方向                  | 入场冻结 WMS incoming_rack.target_face，普通成功和结果更正均须显式报告与原目标一致的 arrival_face，不区分执行方式；退场 current_face 显式为 null、不增加方向参数，不创建换面任务 |
 | 同一绑定的完成报告重复与冲突                       | workline_code + binding_id 相同且目标/完成事实相同则幂等收妥；目标或完成事实不同则拒绝；不外发 command_code / device_code，WES 仍保留原成功命令关联                     |
 | 技术重试、到位后重新分配及运行中设备绑定变更       | 技术重试保持原编码及完整冻结正文；新分配使用新 operation_id、原 workline_code 和 binding_id；历史完成反馈仍使用原作业工作线，不读当前配置覆盖                           |
