@@ -841,7 +841,12 @@ class CoarseSortingService:
         latest = await self._latest_preparation(session, row["work_line_id"], position)
         if latest and latest["state"] not in ("READY", "DEPART_ACCEPTED"):
             return await save(
-                "AWAITING_RACK", state="AWAITING_RACK", rack_preparation_id=latest["id"], **values
+                "AWAITING_RACK",
+                state="AWAITING_RACK",
+                rack_preparation_id=latest["id"],
+                rack_position_code=position,
+                rack_binding_version=line.version,
+                **values,
             )
         input_preparation = values.pop("input_preparation_id", None)
         if input_preparation is None and action["kind"] == "ALLOCATE_STORAGE":
@@ -1022,6 +1027,59 @@ class CoarseSortingService:
             allocation_action_id=action["id"],
         )
 
+    @staticmethod
+    def _put_identity(action):
+        return {
+            "owner_domain": action["command_owner"],
+            "call_key": action["call_key"],
+            "command_code": action["command_code"],
+            "task_type": "PUT_TO_BIN",
+            "device_code": action["device_code"],
+        }
+
+    @staticmethod
+    def _put_completed(action, result):
+        try:
+            placed = MoveToLocationResult.model_validate(result["data"])
+            snapshot = action["resource_snapshot"]
+            return (
+                action["kind"] == "PUT_TO_BIN"
+                and action["command_owner"] == OWNER.domain
+                and bool(action["call_key"])
+                and result["command_code"] == action["command_code"]
+                and result["device_code"] == action["device_code"]
+                and snapshot["device_code"] == action["device_code"]
+                and snapshot["role"] == "OUTPUT_ARM"
+                and result["result"] == "SUCCESS"
+                and type(result["finish_time"]) is int
+                and result["finish_time"] >= 0
+                and placed.actual_qty == 1
+                and bool(placed.location)
+                and placed.location == snapshot["completion_location"]
+            )
+        except (AttributeError, KeyError, TypeError, ValidationError):
+            return False
+
+    def _saved_put_completed(self, action, job):
+        if (
+            not job
+            or job["id"] != action["job_id"]
+            or job["state"] not in ("AWAITING_REPORT", "COMPLETED")
+            or job["allocation_action_id"] != action["predecessor_action_id"]
+        ):
+            return False
+        for proof in action["evidence_history"]:
+            result = proof.get("data")
+            if (
+                proof.get("applied_put") == self._put_identity(action)
+                and proof.get("command_code") == action["command_code"]
+                and self._put_completed(action, result)
+                and proof.get("digest") == canonical_digest(result)
+                and job["placed_at_ms"] == result["finish_time"]
+            ):
+                return True
+        return False
+
     async def _advance_put(self, session, row, action, actions, save):
         allocation = actions.get(row["allocation_action_id"])
         if (
@@ -1043,6 +1101,15 @@ class CoarseSortingService:
             or command.device_code != action["device_code"]
         ):
             return await save("PUT_RECONCILIATION_REQUIRED")
+        original_call = await self.capabilities.ecs.get_by_call(
+            session, owner=OWNER, call_key=action["call_key"]
+        )
+        if (
+            original_call is None
+            or original_call.command_code != action["command_code"]
+            or command.command_code != action["command_code"]
+        ):
+            return await save("PUT_RECONCILIATION_REQUIRED")
         result = command.result
         if result is None:
             reason = (
@@ -1062,13 +1129,10 @@ class CoarseSortingService:
         ):
             return await save("PUT_RECONCILIATION_REQUIRED")
         try:
-            placed = MoveToLocationResult.model_validate(result["data"])
             decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
             original = PutToBin.model_validate(action["request_data"])
             if (
-                placed.actual_qty != 1
-                or not placed.location
-                or placed.location != action["resource_snapshot"].get("completion_location")
+                not self._put_completed(action, result)
                 or decision.workline_code != row["workline_code"]
                 or decision.bin_location != original.bin_location
                 or decision.cell_id[-1] != original.bin_cell_location
@@ -1086,6 +1150,11 @@ class CoarseSortingService:
             )
         except ValidationError:
             return await save("PUT_RECONCILIATION_REQUIRED")
+        await self._consume(
+            session,
+            action,
+            {**self._ecs_evidence(asdict(command)), "applied_put": self._put_identity(action)},
+        )
         action_id = await self._send_request(
             session, row, action, "REPORT_COMPLETION", REPORT, model
         )
@@ -1343,18 +1412,28 @@ class CoarseSortingService:
             command = await self.capabilities.ecs.get_command(
                 session, owner=OWNER, command_code=put["command_code"]
             )
-            try:
-                placed = MoveToLocationResult.model_validate(command.result["data"])
-                good = (
-                    command.status == "SUCCEEDED"
-                    and not command.needs_reconciliation
-                    and command.device_code == put["device_code"]
-                    and command.result["result"] == "SUCCESS"
-                    and placed.actual_qty == 1
-                    and placed.location == put["resource_snapshot"]["completion_location"]
+            original_call = (
+                await self.capabilities.ecs.get_by_call(
+                    session, owner=OWNER, call_key=put["call_key"]
                 )
-            except (AttributeError, KeyError, TypeError, ValidationError):
-                good = False
+                if put["call_key"]
+                else None
+            )
+            if command is None and original_call is None:
+                good = self._saved_put_completed(
+                    put, next((row for row in host_rows if row["id"] == put["job_id"]), None)
+                )
+            else:
+                good = bool(
+                    command
+                    and original_call
+                    and command.command_code == original_call.command_code == put["command_code"]
+                    and command.task_type == "PUT_TO_BIN"
+                    and command.device_code == put["device_code"]
+                    and command.status == "SUCCEEDED"
+                    and not command.needs_reconciliation
+                    and self._put_completed(put, command.result)
+                )
             clear = clear and good
         allow = not issue and clear and latest and latest["id"] == prep["id"]
         source = next((a for a in local if a["id"] == prep["source_allocation_action_id"]), None)

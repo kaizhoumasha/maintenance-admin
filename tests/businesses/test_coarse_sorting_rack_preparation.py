@@ -11,6 +11,7 @@ from sqlalchemy import delete, select
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import RackPreparation
 from app.integrations.wms_request import WmsRequests
+from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import allocated, deliver_transport_callback, reach_allocate, reach_move
 
 
@@ -611,3 +612,250 @@ async def test_lost_current_entry_reference_is_not_reconstructed(rack):
             .values(current_action_id=None)
         )
     assert await flow.service.advance_preparation(prep) == "PREPARATION_RECONCILIATION_REQUIRED"
+
+
+async def test_fresh_reel_joins_active_preparation_before_first_allocation(rack):
+    flow = rack
+    _, prep = await prepare(flow)
+    fresh = await reach_move(flow, timestamp=1793206799001)
+    await flow.dispatch()
+    assert (await flow.result(fresh)).status_code == 200
+    assert await flow.service.advance(fresh["id"]) == "AWAITING_RACK"
+    assert await flow.service.advance(fresh["id"]) == "AWAITING_RACK"
+    waiting = (await flow.rows())[-1]
+    assert waiting["rack_position_code"] is not None
+    assert waiting["rack_binding_version"] is not None
+    assert not any(a["kind"] == "ALLOCATE_STORAGE" for a in await flow.action_rows(fresh["id"]))
+    await flow.service.advance_preparation(prep)
+    await flow.dispatch()
+    wire = flow.peer.transports[-1]["data"]
+    await deliver_transport_callback(
+        flow.factory,
+        "transport.task.resulted@v1",
+        {
+            "transport_task_id": wire["transport_task_id"],
+            "kind": "RACK_MOVE",
+            "outcome_revision": 1,
+            "rack_id": "NEW",
+            "status": "SUCCEEDED",
+            "final_position": wire["target"],
+            "arrival_face": "90",
+        },
+    )
+    assert await flow.service.advance_preparation(prep) == "READY"
+    assert await flow.service.advance(fresh["id"]) == "AWAITING_ALLOCATION_RESULT"
+    allocation = next(
+        a for a in await flow.action_rows(fresh["id"]) if a["kind"] == "ALLOCATE_STORAGE"
+    )
+    assert allocation["round_no"] == 1 and allocation["input_preparation_id"] == prep
+    assert allocation["request_data"]["binding_id"] == fresh["binding_id"]
+
+
+async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(rack):
+    from app.models import ReliableMessage
+
+    flow = rack
+    row, prep = await prepare(flow, "REPLACE_REQUIRED")
+    source = next(a for a in await flow.action_rows(row["id"]) if a["kind"] == "ALLOCATE_STORAGE")
+    old = flow.now - timedelta(days=100)
+    async with flow.factory.begin() as session:
+        unrelated = ReliableMessage(
+            target="coarse-wms",
+            operation="other.owner.fact",
+            operation_id="unrelated-retention",
+            scope_owner="another_owner",
+            scope_kind="TASK",
+            scope_id="other-task",
+            request_raw=b"{}",
+            status="DONE",
+            attempts=0,
+            next_attempt_at=old,
+            created_at=old,
+            updated_at=old,
+        )
+        session.add(unrelated)
+        await session.flush()
+        unrelated_id = unrelated.id
+
+    async def clean_original(message_id):
+        async with flow.factory.begin() as session:
+            await session.execute(
+                ReliableMessage.__table__.update()
+                .where(ReliableMessage.id == message_id)
+                .values(updated_at=old)
+            )
+        await run_cleanup(flow.factory, 90, now=flow.now, batch=1)
+        async with flow.factory() as session:
+            assert await session.get(ReliableMessage, message_id) is not None
+            assert await session.get(ReliableMessage, unrelated_id) is None
+
+    await clean_original(source["message_id"])
+    flow.peer.departure = {
+        "result": "READY",
+        "rack_destination": {"type": "ZONE", "location_code": "STORE"},
+    }
+    assert await flow.service.advance_preparation(prep) == "AWAITING_DEPARTURE_RESULT"
+    await flow.dispatch()
+    async with flow.factory() as session:
+        public = (
+            await flow.service.rack_dispatch.jobs(
+                session, work_line_id=flow.line_ids[0], source_kinds=("COARSE_WMS_PRESENT",)
+            )
+        )[0]
+    decision = public.actions[-1]
+    await clean_original(decision.message_id)
+    assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_ACCEPTANCE"
+    await flow.dispatch()
+    async with flow.factory() as session:
+        public = await flow.service.rack_dispatch.progress(session, job_id=public.id)
+    departure = public.actions[-1]
+    await clean_original(departure.submit_message_id)
+    assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_RESULT"
+    assert flow.peer.transports[-1]["data"]["transport_task_id"] == departure.transport_task_id
+    assert [a.decision_operation_id for a in public.actions if a.kind == "DEPARTURE_DECIDE"] == [
+        decision.decision_operation_id
+    ]
+
+
+@pytest.mark.parametrize("proof", ["complete", "missing", "unknown", "wrong_call", "wrong_task"])
+async def test_original_saved_put_completion_is_required_when_command_was_removed(rack, proof):
+    from app.models import EcsCommand
+
+    flow = rack
+    flow.peer.allocate = allocated(flow)
+    first = await reach_allocate(flow)
+    second = await second_allocation(
+        flow,
+        {
+            "result": "REPLACE_REQUIRED",
+            "workline_code": flow.workline,
+            "current_rack": {"rack_id": "RACK-1"},
+            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+        },
+    )
+    enable_racks(flow)
+    assert await flow.service.advance(first["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.service.advance(second["id"]) == "AWAITING_RACK"
+    prep = (await flow.rows())[-1]["rack_preparation_id"]
+    put = next(a for a in await flow.action_rows(first["id"]) if a["kind"] == "PUT_TO_BIN")
+    await flow.dispatch()
+    if proof != "unknown":
+        assert (
+            await flow.result(
+                first,
+                command_code=put["command_code"],
+                device_code=flow.output,
+                data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            )
+        ).status_code == 200
+        assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
+    async with flow.factory.begin() as session:
+        await session.execute(
+            delete(EcsCommand).where(EcsCommand.command_code == put["command_code"])
+        )
+        if proof == "missing":
+            await session.execute(
+                flow.actions.update()
+                .where(flow.actions.c.id == put["id"])
+                .values(evidence_history=[])
+            )
+        elif proof in ("wrong_call", "wrong_task"):
+            action = (
+                (await session.execute(select(flow.actions).where(flow.actions.c.id == put["id"])))
+                .mappings()
+                .one()
+            )
+            evidence = [dict(item) for item in action["evidence_history"]]
+            for item in evidence:
+                if "applied_put" in item:
+                    item["applied_put"] = {
+                        **item["applied_put"],
+                        "call_key" if proof == "wrong_call" else "task_type": "different-original",
+                    }
+            await session.execute(
+                flow.actions.update()
+                .where(flow.actions.c.id == put["id"])
+                .values(evidence_history=evidence)
+            )
+    expected = "AWAITING_DEPARTURE_RESULT" if proof == "complete" else "AWAITING_PREDECESSORS"
+    assert await flow.service.advance_preparation(prep) == expected
+    assert not flow.peer.transports
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("task_type", "MOVE_FORWARD"), ("device_code", "OTHER"), ("command_code", "OTHER")],
+)
+async def test_live_put_predecessor_requires_exact_original_command(
+    rack, monkeypatch, field, value
+):
+    flow = rack
+    flow.peer.allocate = allocated(flow)
+    first = await reach_allocate(flow)
+    second = await second_allocation(
+        flow,
+        {
+            "result": "REPLACE_REQUIRED",
+            "workline_code": flow.workline,
+            "current_rack": {"rack_id": "RACK-1"},
+            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+        },
+    )
+    enable_racks(flow)
+    await flow.service.advance(first["id"])
+    await flow.service.advance(second["id"])
+    prep = (await flow.rows())[-1]["rack_preparation_id"]
+    put = next(a for a in await flow.action_rows(first["id"]) if a["kind"] == "PUT_TO_BIN")
+    await flow.dispatch()
+    assert (
+        await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+        )
+    ).status_code == 200
+    read = flow.service.capabilities.ecs.get_command
+
+    async def mismatched(session, **identity):
+        command = await read(session, **identity)
+        return (
+            replace(command, **{field: value})
+            if identity["command_code"] == put["command_code"]
+            else command
+        )
+
+    monkeypatch.setattr(flow.service.capabilities.ecs, "get_command", mismatched)
+    assert await flow.service.advance_preparation(prep) == "AWAITING_PREDECESSORS"
+    assert not flow.peer.transports
+
+
+async def test_unrelated_first_allocation_after_ready_does_not_inherit_old_preparation(rack):
+    flow = rack
+    _, prep = await prepare(flow)
+    await flow.service.advance_preparation(prep)
+    await flow.dispatch()
+    wire = flow.peer.transports[-1]["data"]
+    await deliver_transport_callback(
+        flow.factory,
+        "transport.task.resulted@v1",
+        {
+            "transport_task_id": wire["transport_task_id"],
+            "kind": "RACK_MOVE",
+            "outcome_revision": 1,
+            "rack_id": "NEW",
+            "status": "SUCCEEDED",
+            "final_position": wire["target"],
+            "arrival_face": "90",
+        },
+    )
+    assert await flow.service.advance_preparation(prep) == "READY"
+    fresh = await reach_move(flow, timestamp=1793206799001)
+    await flow.dispatch()
+    assert (await flow.result(fresh)).status_code == 200
+    assert await flow.service.advance(fresh["id"]) == "AWAITING_ALLOCATION_RESULT"
+    allocation = next(
+        a for a in await flow.action_rows(fresh["id"]) if a["kind"] == "ALLOCATE_STORAGE"
+    )
+    assert allocation["round_no"] == 1 and allocation["input_preparation_id"] is None
+    assert allocation["rack_generation_no"] == 1

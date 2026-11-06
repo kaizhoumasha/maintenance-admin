@@ -1755,7 +1755,10 @@ async def pending_message_references(session, *, candidate_ids):
         .join(RackAction, RackAction.job_id == RackJob.id)
         .where(
             RackJob.pending.is_(True),
-            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN")),
+            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN"))
+            | (
+                (RackJob.owner_domain == "coarse_sorting") & RackJob.source_kind.in_(COARSE_SOURCES)
+            ),
             (RackAction.message_id.in_(candidate_ids))
             | (RackAction.submit_message_id.in_(candidate_ids)),
         )

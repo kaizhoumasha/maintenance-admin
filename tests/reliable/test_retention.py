@@ -22,6 +22,11 @@ async def reference_tables(reference_rig):
 
     from app.businesses._components.bin_roller.models import TABLES
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+    from app.businesses.coarse_sorting.models import (
+        CoarseSortingAction,
+        CoarseSortingJob,
+        RackPreparation,
+    )
     from app.businesses.smt_auto.models import TABLES as AUTO_TABLES
 
     rig = reference_rig
@@ -30,6 +35,9 @@ async def reference_tables(reference_rig):
         for table in (
             *TABLES.values(),
             *AUTO_TABLES.values(),
+            CoarseSortingJob.__table__,
+            CoarseSortingAction.__table__,
+            RackPreparation.__table__,
             RackJob.__table__,
             RackAction.__table__,
         ):

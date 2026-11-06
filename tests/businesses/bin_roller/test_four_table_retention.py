@@ -13,13 +13,23 @@ async def test_active_canonical_and_consumed_forward_anchor_survive_cleanup(
     from sqlalchemy import MetaData
 
     from app.businesses._components.bin_roller import retention
+    from app.businesses.coarse_sorting.models import (
+        CoarseSortingAction,
+        CoarseSortingJob,
+        RackPreparation,
+    )
     from app.businesses.smt_auto.models import TABLES as AUTO_TABLES
     from app.tasks.callback_tasks import run_receipt_cleanup
     from app.tasks.reliable_tasks import run_cleanup
 
     flow = roller_current
     metadata = MetaData(schema=AUTO_TABLES["task"].schema)
-    for table in AUTO_TABLES.values():
+    for table in (
+        *AUTO_TABLES.values(),
+        CoarseSortingJob.__table__,
+        CoarseSortingAction.__table__,
+        RackPreparation.__table__,
+    ):
         table.to_metadata(metadata)
     async with flow.factory.kw["bind"].begin() as connection:
         await connection.run_sync(metadata.create_all)
