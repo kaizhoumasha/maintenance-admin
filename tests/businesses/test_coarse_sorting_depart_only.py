@@ -17,11 +17,14 @@ from app.businesses._components.rack_dispatch.contracts import (
     PointRef,
 )
 from app.businesses._components.rack_dispatch.service import RackDispatch
+from app.businesses.coarse_sorting.ecs_command import MoveForward, MoveToNg, PutToBin
 from app.businesses.coarse_sorting.models import RackPreparation
 from app.core.identifiers import uuid7
+from app.integrations.ecs_command import compile_commands
 from app.integrations.wms_transport import TransportCaller, TransportService
 from app.models import TransportTask, WorkLine, WorkLinePosition
 from app.reliable import ScopeRef
+from app.services.device_routes import DeviceRoutes
 from tests.helpers import (
     allocated,
     deliver_transport_callback,
@@ -70,6 +73,147 @@ async def accept_departure(flow, prep, destination="ZONE"):
     assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_ACCEPTANCE"
     await flow.dispatch()
     assert await flow.service.advance_preparation(prep) == "DEPART_ACCEPTED"
+
+
+@pytest.mark.parametrize("mode", ["DEPART_REQUIRED", "REPLACE_REQUIRED"])
+async def test_normal_reel_completes_after_rack_change_while_ng_closes_independently(rack, mode):
+    flow = rack
+    ng_location = "STATION_NG_PLATFORM1"
+    bindings, annexes = compile_commands(MoveForward, MoveToNg, PutToBin)
+    flow.commands.annexes = annexes
+    flow.commands.routes = DeviceRoutes(bindings, annexes=annexes)
+    enable_racks(flow)
+    flow.service = replace(flow.service, ng_locations={flow.workline: ng_location})
+    flow.runtime.services["coarse_sorting"] = flow.service
+    sweep = flow.service.scan_pending
+    flow.runtime.progressions["coarse_sorting"] = sweep
+
+    incoming = {"rack_id": "NEW", "target_face": "90"}
+    flow.peer.allocate = {
+        "result": mode,
+        "workline_code": flow.workline,
+        "current_rack": {"rack_id": "OLD"},
+        **({"incoming_rack": incoming} if mode == "REPLACE_REQUIRED" else {}),
+    }
+    normal = await reach_allocate(flow)
+    assert await flow.service.advance(normal["id"]) == "AWAITING_RACK"
+    prep = (await flow.rows())[0]["rack_preparation_id"]
+    if mode == "DEPART_REQUIRED":
+        await accept_departure(flow, prep)
+        flow.peer.allocate = {"result": "WAIT", "workline_code": flow.workline}
+        assert await flow.service.advance(normal["id"]) == "AWAITING_ALLOCATION_RESULT"
+        assert await flow.dispatch() == 1
+        assert await flow.service.advance(normal["id"]) == "NO_AVAILABLE_RACK"
+        assert await flow.dispatch() == 0
+        assert len(flow.peer.transports) == 1
+        flow.now += timedelta(seconds=6)
+        flow.peer.allocate = {
+            "result": "REPLENISH_REQUIRED",
+            "workline_code": flow.workline,
+            "incoming_rack": incoming,
+        }
+        assert await flow.service.advance(normal["id"]) == "AWAITING_ALLOCATION_RESULT"
+        assert await flow.dispatch() == 1
+        assert await flow.service.advance(normal["id"]) == "AWAITING_RACK"
+        next_prep = (await flow.rows())[0]["rack_preparation_id"]
+        assert next_prep != prep
+        prep = next_prep
+    else:
+        flow.peer.departure = {
+            "result": "READY",
+            "rack_destination": {"type": "ZONE", "location_code": "DEST"},
+        }
+        assert await flow.service.advance_preparation(prep) == "AWAITING_DEPARTURE_RESULT"
+        assert await flow.dispatch() == 1
+        assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_ACCEPTANCE"
+        assert await flow.dispatch() == 1
+
+    assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_RESULT"
+    assert await flow.dispatch() == 1
+    old, new = (wire["data"] for wire in flow.peer.transports)
+    assert (old["rack_id"], new["rack_id"]) == ("OLD", "NEW")
+    assert old["transport_task_id"] != new["transport_task_id"]
+    assert new["target_face"] == "90"
+
+    flow.peer.decision = {"result": "NG", "reason_code": "BARCODE_INVALID"}
+    assert (await flow.post(flow.event(timestamp=1793206799001))).status_code == 200
+    await sweep()
+    assert await flow.dispatch() == 1
+    await sweep()
+    assert await flow.dispatch() == 1
+    forward, ng = map(json.loads, flow.peer.commands)
+    assert (forward["task_type"], ng["task_type"]) == ("MOVE_FORWARD", "MOVE_TO_NG")
+    assert ng["device_code"] == normal["device_code"]
+    assert ng["params"]["barcode"] == forward["params"]["barcode"]
+    assert ng["command_code"] != forward["command_code"]
+    assert [row["state"] for row in await flow.rows()] == ["AWAITING_RACK", "AWAITING_NG"]
+    assert (
+        await flow.result(
+            normal,
+            command_code=ng["command_code"],
+            device_code=ng["device_code"],
+            data={"actual_qty": 1, "location": ng_location},
+        )
+    ).status_code == 200
+    await sweep()
+    waiting, rejected = await flow.rows()
+    assert (waiting["state"], rejected["state"]) == ("AWAITING_RACK", "NG_COMPLETED")
+    assert await flow.dispatch() == 0
+    assert not flow.peer.reports
+
+    await deliver_transport_callback(
+        flow.factory,
+        "transport.task.resulted@v1",
+        {
+            "transport_task_id": new["transport_task_id"],
+            "kind": "RACK_MOVE",
+            "outcome_revision": 1,
+            "rack_id": "NEW",
+            "status": "SUCCEEDED",
+            "final_position": new["target"],
+            "arrival_face": "90",
+        },
+    )
+    assert await flow.service.advance_preparation(prep) == "READY"
+    flow.peer.allocate = allocated(flow, rack_id="NEW")
+    await sweep()
+    assert await flow.dispatch() == 1
+    await sweep()
+    assert await flow.dispatch() == 1
+    put = json.loads(flow.peer.commands[-1])
+    assert put["task_type"] == "PUT_TO_BIN"
+    assert put["params"]["bin_cell_location"] == flow.peer.allocate["cell_index"]
+    assert not flow.peer.reports
+    assert (
+        await flow.result(
+            normal,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance(normal["id"]) == "AWAITING_REPORT_RESULT"
+    assert await flow.dispatch() == 1
+    (report,) = map(json.loads, flow.peer.reports)
+    for field in ("bin_code", "bin_location", "cell_id", "cell_index"):
+        assert report["data"][field] == flow.peer.allocate[field]
+    assert report["data"]["binding_id"] == "BIND-ORIGINAL"
+    assert await flow.service.advance(normal["id"]) == "COMPLETED"
+    allocations = [
+        message
+        for message in map(json.loads, flow.peer.requests)
+        if message["operation"] == "inbound.coarse_sorting.storage_allocate@v1"
+    ]
+    assert len(allocations) == (4 if mode == "DEPART_REQUIRED" else 2)
+    assert len({message["operation_id"] for message in allocations}) == len(allocations)
+    assert all(
+        message["data"] == {"workline_code": flow.workline, "binding_id": "BIND-ORIGINAL"}
+        for message in allocations
+    )
+    assert await flow.service.advance(normal["id"]) == "COMPLETED"
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.commands) == 3
+    assert len(flow.peer.transports) == 2
 
 
 @pytest.mark.parametrize("stopped", [False, True], ids=["active", "closed-by-scope"])

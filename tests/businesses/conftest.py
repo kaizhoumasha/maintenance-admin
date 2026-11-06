@@ -776,13 +776,15 @@ async def coarse_forward(coarse_scan, monkeypatch):
             await sender.aclose()
             async with flow.factory.begin() as session:
                 codes = select(EcsCommand.command_code).where(
-                    EcsCommand.device_code.in_(flow.conveyor_codes)
+                    EcsCommand.device_code.in_([*flow.codes, *flow.conveyor_codes])
                 )
                 await session.execute(
                     delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
                 )
                 await session.execute(
-                    delete(EcsCommand).where(EcsCommand.device_code.in_(flow.conveyor_codes))
+                    delete(EcsCommand).where(
+                        EcsCommand.device_code.in_([*flow.codes, *flow.conveyor_codes])
+                    )
                 )
                 await session.execute(
                     delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
