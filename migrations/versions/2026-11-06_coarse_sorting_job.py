@@ -152,10 +152,12 @@ def _backfill(bind, schema) -> None:
             state = "AWAITING_NG"
         elif row["wait_reason"] == "AWAITING_ALLOCATION_STAGE":
             state = "AWAITING_ALLOCATION"
-        elif row["command_code"] is not None or row["wait_reason"] in {
-            "AWAITING_MOVE_RESULT",
-            "MOVE_RECONCILIATION_REQUIRED",
-        }:
+        elif (
+            row["command_code"] is not None
+            or row["binding_id"] is not None
+            or row["move_result"] is not None
+            or row["wait_reason"] in {"AWAITING_MOVE_RESULT", "MOVE_RECONCILIATION_REQUIRED"}
+        ):
             state = "AWAITING_MOVE"
 
         def insert(

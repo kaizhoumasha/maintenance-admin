@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
@@ -177,8 +177,23 @@ class CoarseSortingService:
         if self.direct_put and row["state"] == "AWAITING_REPORT":
             return await self._advance_report(session, action, save)
 
+        if not row["command_code"] and (
+            row["state"] in {"AWAITING_MOVE", "AWAITING_ALLOCATION"}
+            or row["binding_id"] is not None
+            or row["move_result"] is not None
+        ):
+            return await save("MOVE_RECONCILIATION_REQUIRED", state="AWAITING_MOVE")
         issue, conveyor = await self._configuration_issue(
-            session, row, line, devices, conveyor_code
+            session,
+            row,
+            line,
+            devices,
+            conveyor_code,
+            first_allocation=(
+                self.direct_put
+                and row["command_code"] is not None
+                and row["rack_binding_version"] is None
+            ),
         )
         output = next((d for d in devices if d.device_code == output_code), None)
         if self.direct_put and row["state"] == "AWAITING_ALLOCATION":
@@ -186,14 +201,10 @@ class CoarseSortingService:
                 return await self._advance_allocation(
                     session, row, action, line, output, issue, save
                 )
-            if not row["command_code"]:
-                return await save("MOVE_RECONCILIATION_REQUIRED")
         if issue and not (
             self.direct_put and (row["command_code"] or row["validation_operation_id"])
         ):
             return await save(issue)
-        if row["state"] == "AWAITING_MOVE" and not row["command_code"]:
-            return await save("MOVE_RECONCILIATION_REQUIRED")
         if row["command_code"] is not None:
             command = await self.capabilities.ecs.get_command(
                 session, owner=OWNER, command_code=row["command_code"]
@@ -209,10 +220,21 @@ class CoarseSortingService:
                     await self._consume(session, action, self._ecs_evidence(observed))
                 if self._move_complete(observed, row):
                     if self.direct_put:
-                        if issue or action is None or action["kind"] != "MOVE_FORWARD":
-                            return await save(
-                                issue or "MOVE_RECONCILIATION_REQUIRED", move_result=observed
-                            )
+                        if (
+                            action is None
+                            or action["kind"] != "MOVE_FORWARD"
+                            or action["command_owner"] != OWNER.domain
+                            or action["command_code"] != row["command_code"]
+                            or action["device_code"] != row["conveyor_device_code"]
+                            or action["call_key"] != f"{scan_id}:MOVE_FORWARD"
+                        ):
+                            return await save("MOVE_RECONCILIATION_REQUIRED", move_result=observed)
+                        if issue:
+                            return await save(issue, move_result=observed)
+                        if action["resource_snapshot"] != self._device_snapshot(
+                            conveyor, row["work_line_version"], "CONVEYOR"
+                        ):
+                            return await save("MOVE_RECONCILIATION_REQUIRED", move_result=observed)
                         return await self._allocate(
                             session, row, action, line, output, save, move_result=observed
                         )
@@ -327,7 +349,7 @@ class CoarseSortingService:
             call_key=call_key,
             command_code=command.command_code,
             device_code=conveyor.device_code,
-            resource_snapshot=self._device_snapshot(conveyor, row, "CONVEYOR"),
+            resource_snapshot=self._device_snapshot(conveyor, row["work_line_version"], "CONVEYOR"),
         )
         return await save(
             "AWAITING_MOVE_RESULT",
@@ -338,15 +360,27 @@ class CoarseSortingService:
             command_code=command.command_code,
         )
 
-    async def _configuration_issue(self, session, row, line, devices, conveyor_code):
+    async def _configuration_issue(
+        self, session, row, line, devices, conveyor_code, *, first_allocation=False
+    ):
         device = next((d for d in devices if d.id == row["device_id"]), None)
         conveyor = next((d for d in devices if d.device_code == conveyor_code), None)
+        version = row["rack_binding_version"] or row["work_line_version"]
         if (
             line is None
             or device is None
             or conveyor is None
-            or line.version != row["work_line_version"]
+            or (not first_allocation and line.version != version)
+            or (
+                first_allocation
+                and (
+                    line.version < version
+                    or row["conveyor_device_id"] is None
+                    or row["conveyor_device_version"] is None
+                )
+            )
             or line.line_code != row["workline_code"]
+            or row["device_role"] != "INPUT_ARM"
             or device.version != row["device_version"]
             or device.device_code != row["device_code"]
             or device.work_line_id != line.id
@@ -372,7 +406,8 @@ class CoarseSortingService:
             device_bindings=line.device_bindings,
             position_bindings=line.position_bindings,
         )
-        if binding.revision != row["binding_revision"]:
+        original = replace(binding, work_line_version=row["work_line_version"])
+        if original.revision != row["binding_revision"]:
             return "ORIGINAL_BINDING_CHANGED", None
         if self.direct_put and not line.is_enabled:
             return "WORKLINE_DISABLED", None
@@ -403,13 +438,13 @@ class CoarseSortingService:
         )
 
     @staticmethod
-    def _device_snapshot(device, row, role):
+    def _device_snapshot(device, work_line_version, role):
         return {
             "device_id": device.id,
             "device_code": device.device_code,
             "device_version": device.version,
             "role": role,
-            "work_line_version": row["work_line_version"],
+            "work_line_version": work_line_version,
         }
 
     async def _lock_actions(self, session, row):
@@ -458,6 +493,7 @@ class CoarseSortingService:
 
     async def _consume(self, session, action, evidence):
         history = action["evidence_history"]
+        evidence = {key: value for key, value in evidence.items() if key != "consumed_at"}
         if any(
             {k: v for k, v in prior.items() if k != "consumed_at"} == evidence for prior in history
         ):
@@ -532,20 +568,26 @@ class CoarseSortingService:
             and result.response_code in codes
         )
 
-    @staticmethod
-    def _valid_output(line, output):
-        return (
-            line is not None
-            and output is not None
-            and output.work_line_id == line.id
-            and list(line.device_bindings.values()).count(output.device_code) == 1
-        )
+    def _output_snapshot(self, line, output):
+        if (
+            line is None
+            or output is None
+            or output.work_line_id != line.id
+            or list(line.device_bindings.values()).count(output.device_code) != 1
+            or not (location := self.direct_put_locations.get(line.line_code))
+        ):
+            return None
+        return {
+            **self._device_snapshot(output, line.version, "OUTPUT_ARM"),
+            "completion_location": location,
+        }
 
     async def _allocate(self, session, row, action, line, output, save, **values):
-        if not self._valid_output(line, output) or not self.direct_put_locations.get(
-            row["workline_code"]
-        ):
+        snapshot = self._output_snapshot(line, output)
+        if snapshot is None:
             return await save("OUTPUT_ARM_CONFIGURATION_REQUIRED", **values)
+        if action["kind"] == "ALLOCATE_STORAGE" and action["resource_snapshot"] != snapshot:
+            return await save("ORIGINAL_OUTPUT_ARM_CHANGED", **values)
         position = line.position_bindings.get("OUTPUT_RACK")
         if not position or (row["rack_position_code"] and row["rack_position_code"] != position):
             return await save("ORIGINAL_RACK_POSITION_CHANGED", **values)
@@ -563,6 +605,7 @@ class CoarseSortingService:
             ALLOCATE,
             model,
             rack_generation_no=0,
+            resource_snapshot=snapshot,
             round_no=action["round_no"] + 1 if action["kind"] == "ALLOCATE_STORAGE" else 1,
         )
         return await save(
@@ -615,22 +658,27 @@ class CoarseSortingService:
             return await save("RACK_PREPARATION_STAGE_REQUIRED")
         if issue:
             return await save(issue)
-        location = self.direct_put_locations.get(row["workline_code"])
-        if not self._valid_output(line, output) or not location:
+        snapshot = self._output_snapshot(line, output)
+        if snapshot is None:
             return await save("OUTPUT_ARM_CONFIGURATION_REQUIRED")
+        if snapshot != action["resource_snapshot"]:
+            return await save("ORIGINAL_OUTPUT_ARM_CHANGED")
         if (
             row["rack_position_code"] != line.position_bindings.get("OUTPUT_RACK")
             or row["rack_binding_version"] != line.version
         ):
             return await save("ORIGINAL_RACK_POSITION_CHANGED")
 
-        model = PutToBin(
-            barcode=row["payload"]["barcode"],
-            bin_location=decision.bin_location,
-            bin_cell_location=decision.cell_id[-1],
-            bin_type=decision.bin_type,
-            reel_totalthickness=decision.reel_totalthickness,
-        )
+        try:
+            model = PutToBin(
+                barcode=row["payload"].get("barcode"),
+                bin_location=decision.bin_location,
+                bin_cell_location=decision.cell_id[-1],
+                bin_type=decision.bin_type,
+                reel_totalthickness=decision.reel_totalthickness,
+            )
+        except ValidationError:
+            return await save("PUT_RECONCILIATION_REQUIRED")
         action_id = str(uuid7())
         command = await self.capabilities.ecs.create(
             session,
@@ -651,10 +699,7 @@ class CoarseSortingService:
             call_key=action_id,
             command_code=command.command_code,
             device_code=output.device_code,
-            resource_snapshot={
-                **self._device_snapshot(output, row, "OUTPUT_ARM"),
-                "completion_location": location,
-            },
+            resource_snapshot=snapshot,
         )
         return await save(
             "AWAITING_PUT_RESULT",

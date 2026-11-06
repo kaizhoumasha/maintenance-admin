@@ -123,6 +123,19 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
                     "move_result": None,
                 }
                 sync.execute(legacy.insert().values(**values))
+                sync.execute(
+                    legacy.insert().values(
+                        **{
+                            **values,
+                            "id": "missing-move",
+                            "event_digest": "missing-move-digest",
+                            "validation_operation_id": "missing-move-validation",
+                            "validation_message_id": 8,
+                            "wait_reason": "ORIGINAL_BINDING_CHANGED",
+                            "command_code": None,
+                        }
+                    )
+                )
                 migration["upgrade"]()
                 job = sa.Table(
                     "coarse_sorting_job", sa.MetaData(), schema=schema, autoload_with=sync
@@ -151,6 +164,16 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
                 assert move["call_key"] == "original:MOVE_FORWARD"
                 assert move["evidence_history"] == []
                 assert row["current_action_id"] == move["id"]
+
+                missing = (
+                    sync.execute(sa.select(job).where(job.c.id == "missing-move")).mappings().one()
+                )
+                assert missing["state"] == "AWAITING_MOVE"
+                assert missing["command_code"] is None
+                assert missing["binding_id"] == "B"
+                assert sync.execute(
+                    sa.select(action.c.kind).where(action.c.job_id == missing["id"])
+                ).scalars().all() == ["VALIDATE_BIND"]
 
         await connection.run_sync(check)
         await transaction.rollback()

@@ -12,7 +12,7 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.core.identifiers import uuid7
-from app.models import Device, DeviceRoute, WorkLine
+from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
 
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
@@ -159,6 +159,9 @@ async def direct(coarse_forward, monkeypatch):
                 delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
             )
             await session.execute(delete(EcsCommand).where(EcsCommand.device_code == output))
+            await session.execute(
+                delete(WorkLinePosition).where(WorkLinePosition.work_line_id == flow.line_ids[0])
+            )
             await session.execute(delete(Device).where(Device.device_code == output))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
 
@@ -177,9 +180,11 @@ def allocated(flow, **changes):
     }
 
 
-async def reach_move(flow, *, timestamp=1793206799000):
+async def reach_move(flow, *, timestamp=1793206799000, changes=None):
     assert (
-        await flow.post(flow.event(timestamp=timestamp, changes={"thickness_mm": 20}))
+        await flow.post(
+            flow.event(timestamp=timestamp, changes={"thickness_mm": 20, **(changes or {})})
+        )
     ).status_code == 200
     row = (await flow.rows())[-1]
     assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
@@ -188,8 +193,8 @@ async def reach_move(flow, *, timestamp=1793206799000):
     return (await flow.rows())[-1]
 
 
-async def reach_allocate(flow, *, timestamp=1793206799000):
-    row = await reach_move(flow, timestamp=timestamp)
+async def reach_allocate(flow, *, timestamp=1793206799000, changes=None):
+    row = await reach_move(flow, timestamp=timestamp, changes=changes)
     assert await flow.dispatch() == 1
     assert (await flow.result(row)).status_code == 200
     assert await flow.service.scan_pending() >= 1
@@ -340,6 +345,8 @@ async def test_wait_expiry_opens_one_round_for_original_binding(direct):
 
 
 async def test_unimplemented_departure_preserves_original_decision_without_requery(direct):
+    from app.models import ReliableMessage
+
     flow = direct
     flow.peer.allocate = {
         "result": "DEPART_REQUIRED",
@@ -348,11 +355,20 @@ async def test_unimplemented_departure_preserves_original_decision_without_reque
     }
     scan_id = (await reach_allocate(flow))["id"]
     assert await flow.service.advance(scan_id) == "RACK_PREPARATION_STAGE_REQUIRED"
+    original = (await flow.action_rows(scan_id))[-1]
+    async with flow.factory.begin() as session:
+        await session.execute(
+            delete(ReliableMessage).where(ReliableMessage.id == original["message_id"])
+        )
     flow.now += timedelta(hours=1)
     flow.rebuild()
     assert await flow.service.advance(scan_id) == "RACK_PREPARATION_STAGE_REQUIRED"
     assert await flow.dispatch() == 0
+    for _ in range(2):
+        assert await flow.service.advance(scan_id) == "RACK_PREPARATION_STAGE_REQUIRED"
     action = (await flow.action_rows(scan_id))[-1]
+    assert action["evidence_history"] == original["evidence_history"]
+    assert len(action["evidence_history"]) == 1
     assert action["evidence_history"][0]["data"] == flow.peer.allocate
 
 
@@ -378,15 +394,23 @@ async def test_wrong_station_preserves_original_put_for_reconciliation(direct):
     assert (await flow.action_rows(row["id"]))[-1]["command_code"] == put["command_code"]
 
 
-@pytest.mark.parametrize("keep_saved_move", [True, False])
-async def test_default_stop_and_retained_original_move_after_migration(direct, keep_saved_move):
+@pytest.mark.parametrize("scenario", ["complete", "missing_proof", "source_changed"])
+async def test_default_stop_and_retained_original_move_after_migration(direct, scenario):
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
     from app.models import EcsCommand, EcsResultEvidence, ReliableMessage
+    from app.schemas.workline import WorkLineUpdate
+    from app.services.asset_audit import AssetActor
+    from app.services.workline_service import update_workline
 
     flow = direct
     flow.rebuild(enabled=False)
+    async with flow.factory.begin() as session:
+        line = await session.get(WorkLine, flow.line_ids[0])
+        line.device_bindings = {
+            key: value for key, value in line.device_bindings.items() if key != "OUTPUT_ARM"
+        }
     row = await reach_move(flow)
     assert await flow.dispatch() == 1
     assert (await flow.result(row)).status_code == 200
@@ -415,15 +439,38 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, k
         await session.execute(
             delete(ReliableMessage).where(ReliableMessage.id == row["validation_message_id"])
         )
-        if not keep_saved_move:
+        if scenario == "missing_proof":
             await session.execute(
                 flow.table.update().where(flow.table.c.id == row["id"]).values(move_result=None)
             )
+        if scenario == "source_changed":
+            device = await session.get(Device, row["device_id"])
+            device.version += 1
+    async with flow.factory() as session:
+        line = await session.get(WorkLine, flow.line_ids[0])
+        configured = await update_workline(
+            session,
+            line.id,
+            WorkLineUpdate(
+                line_name=line.line_name,
+                version=line.version,
+                device_bindings={**line.device_bindings, "OUTPUT_ARM": flow.output},
+                positions=[{"position_code": line.position_bindings["OUTPUT_RACK"]}],
+            ),
+            actor=AssetActor(1, "stage1", None, None),
+            definition_lookup=lambda _: composition.DEFINITION,
+        )
+        await session.commit()
+    assert configured.version == row["work_line_version"] + 1
     flow.peer.allocate = allocated(flow)
     flow.rebuild()
-    expected = "AWAITING_ALLOCATION_RESULT" if keep_saved_move else "MOVE_RECONCILIATION_REQUIRED"
+    expected = {
+        "complete": "AWAITING_ALLOCATION_RESULT",
+        "missing_proof": "MOVE_RECONCILIATION_REQUIRED",
+        "source_changed": "ORIGINAL_BINDING_CHANGED",
+    }[scenario]
     assert await flow.service.advance(row["id"]) == expected
-    assert await flow.dispatch() == int(keep_saved_move)
+    assert await flow.dispatch() == int(scenario == "complete")
     retained = (await flow.rows())[0]
     for key in (
         "id",
@@ -431,12 +478,17 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, k
         "validation_operation_id",
         "validation_message_id",
         "command_code",
+        "work_line_version",
+        "binding_revision",
     ):
         assert retained[key] == row[key]
+    if scenario == "complete":
+        assert retained["rack_binding_version"] == configured.version
+        assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
     assert len(flow.peer.commands) == 1
     assert [json.loads(raw)["operation"] for raw in flow.peer.requests] == (
         ["inbound.coarse_sorting.validate_bind@v1", ALLOCATE]
-        if keep_saved_move
+        if scenario == "complete"
         else ["inbound.coarse_sorting.validate_bind@v1"]
     )
 
@@ -579,3 +631,62 @@ async def test_missing_historical_references_hold_when_original_already_started(
     assert await flow.service.advance(scan_id) == expected
     assert await flow.dispatch() == 0
     assert not await flow.action_rows(scan_id)
+
+
+async def test_missing_move_reference_does_not_repeat_a_physically_possible_move(direct):
+    from app.models import EcsCommand, ReliableMessage
+
+    flow = direct
+    row = await reach_move(flow)
+    assert await flow.dispatch() == 1
+    validation, move = await flow.action_rows(row["id"])
+    async with flow.factory.begin() as session:
+        await session.execute(
+            flow.table.update()
+            .where(flow.table.c.id == row["id"])
+            .values(
+                state="AWAITING_VALIDATION",
+                wait_reason="ORIGINAL_BINDING_CHANGED",
+                command_code=None,
+                current_action_id=validation["id"],
+            )
+        )
+        await session.execute(delete(flow.actions).where(flow.actions.c.id == move["id"]))
+        await session.execute(
+            delete(ReliableMessage).where(ReliableMessage.operation_id == row["command_code"])
+        )
+        await session.execute(
+            delete(EcsCommand).where(EcsCommand.command_code == row["command_code"])
+        )
+    for _ in range(2):
+        assert await flow.service.advance(row["id"]) == "MOVE_RECONCILIATION_REQUIRED"
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.commands) == 1
+    assert [a["kind"] for a in await flow.action_rows(row["id"])] == ["VALIDATE_BIND"]
+
+
+async def test_invalid_historical_barcode_preserves_allocated_without_put(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow, changes={"barcode": ""})
+    for _ in range(2):
+        assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+        assert await flow.dispatch() == 0
+    action = (await flow.action_rows(row["id"]))[-1]
+    assert action["kind"] == "ALLOCATE_STORAGE"
+    assert len(action["evidence_history"]) == 1
+    assert action["evidence_history"][0]["data"] == flow.peer.allocate
+
+
+async def test_allocated_does_not_authorize_an_output_device_changed_since_request(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    async with flow.factory.begin() as session:
+        output = await session.scalar(select(Device).where(Device.device_code == flow.output))
+        output.version += 1
+    assert await flow.service.advance(row["id"]) == "ORIGINAL_OUTPUT_ARM_CHANGED"
+    assert await flow.dispatch() == 0
+    action = (await flow.action_rows(row["id"]))[-1]
+    assert action["kind"] == "ALLOCATE_STORAGE"
+    assert action["evidence_history"][0]["data"] == flow.peer.allocate
