@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
@@ -37,16 +37,17 @@ class MoveForward(BaseModel):
     barcode: str
 
 
-class MoveToNgResult(BaseModel):
+class MoveToLocationResult(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     actual_qty: Annotated[int, Field(ge=1, le=1)] | None = None
     location: Reference | None = None
 
     @model_validator(mode="after")
-    def validate_evidence(self) -> Self:
-        # FAILED may omit data; the business requires both fields on SUCCESS.
-        if self.model_fields_set and (self.actual_qty is None or self.location is None):
+    def validate_evidence(self, info: ValidationInfo) -> Self:
+        if (self.model_fields_set or (info.context or {}).get("result") == "SUCCESS") and (
+            self.actual_qty is None or self.location is None
+        ):
             raise ValueError("actual_qty and location must be supplied together")
         return self
 
@@ -56,7 +57,7 @@ class MoveToNgResult(BaseModel):
     device_roles=("INPUT_ARM",),
     annex_id="coarse_sorting.move_to_ng",
     annex_version="1",
-    result=MoveToNgResult,
+    result=MoveToLocationResult,
     error=ErrorDetail,
     timeout_min_ms=1,
     timeout_max_ms=60000,
@@ -64,15 +65,8 @@ class MoveToNgResult(BaseModel):
 class MoveToNg(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
-    barcode: Reference
+    barcode: str
     reason_code: Reference
-
-
-class PutToBinResult(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-    actual_qty: Annotated[int, Field(ge=1, le=1)] | None = None
-    location: Reference | None = None
 
 
 @ecs_command(
@@ -80,7 +74,7 @@ class PutToBinResult(BaseModel):
     device_roles=("OUTPUT_ARM",),
     annex_id="coarse_sorting.put_to_bin",
     annex_version="1",
-    result=PutToBinResult,
+    result=MoveToLocationResult,
     error=ErrorDetail,
     timeout_min_ms=1,
     timeout_max_ms=60000,

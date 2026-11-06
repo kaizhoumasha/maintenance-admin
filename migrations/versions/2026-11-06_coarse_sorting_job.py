@@ -194,6 +194,8 @@ def _backfill(bind, schema) -> None:
             evidence = None
             if (
                 isinstance(saved, dict)
+                and saved.get("availability") == "FOUND"
+                and saved.get("operation") == VALIDATE
                 and saved.get("operation_id") == row["validation_operation_id"]
                 and saved.get("message_id") == row["validation_message_id"]
                 and saved.get("response_state") == "VALID"
@@ -206,6 +208,8 @@ def _backfill(bind, schema) -> None:
                     "timestamp": saved.get("response_timestamp"),
                     "data": saved.get("response_data"),
                 }
+                if state == "AWAITING_NG":
+                    evidence.update(operation=saved["operation"], message_id=saved["message_id"])
             current = insert(
                 "VALIDATE_BIND",
                 {"workline_code": row["workline_code"], **row["payload"]},

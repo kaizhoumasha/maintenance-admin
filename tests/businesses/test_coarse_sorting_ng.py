@@ -96,8 +96,8 @@ async def ng(coarse_forward):
             await session.execute(delete(EcsCommand).where(EcsCommand.device_code.in_(flow.codes)))
 
 
-async def accept_and_validate(flow, *, timestamp=1793206799000):
-    assert (await flow.post(flow.event(timestamp=timestamp))).status_code == 200
+async def accept_and_validate(flow, *, timestamp=1793206799000, changes=None):
+    assert (await flow.post(flow.event(timestamp=timestamp, changes=changes))).status_code == 200
     row = (await flow.rows())[-1]
     assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
     assert await flow.dispatch() == 1
@@ -210,9 +210,15 @@ async def test_rejected_unavailable_or_invalid_validation_creates_no_ng(ng, data
     assert ng.peer.commands == []
 
 
-async def test_historical_ng_missing_original_evidence_is_retained(ng):
+@pytest.mark.parametrize("unproven_action", [False, True])
+async def test_historical_ng_missing_original_evidence_is_retained(ng, unproven_action):
     row = await accept_and_validate(ng)
     assert await ng.service.advance(row["id"]) == "AWAITING_NG_STAGE"
+    history = (await ng.action_rows(row["id"]))[0]["evidence_history"]
+    # Older backfills could have synthesized this projection from an incomplete snapshot.
+    if unproven_action:
+        history[0].pop("operation")
+        history[0].pop("message_id")
     async with ng.factory.begin() as session:
         await session.execute(
             JOB.update()
@@ -222,7 +228,7 @@ async def test_historical_ng_missing_original_evidence_is_retained(ng):
         await session.execute(
             ACTION.update()
             .where(ACTION.c.id == row["current_action_id"])
-            .values(evidence_history=[], last_consumed_at=None)
+            .values(evidence_history=history if unproven_action else [], last_consumed_at=None)
         )
         await session.execute(
             delete(ReliableMessage).where(ReliableMessage.id == row["validation_message_id"])
@@ -232,6 +238,81 @@ async def test_historical_ng_missing_original_evidence_is_retained(ng):
     assert await ng.dispatch() == 0
     assert len(ng.peer.requests) == 1
     assert ng.peer.commands == []
+
+
+@pytest.mark.parametrize(
+    "snapshot_change",
+    [
+        {},
+        {"availability": None},
+        {"availability": "IDENTITY_MISMATCH"},
+        {"operation": None},
+        {"operation": "inbound.other@v1"},
+    ],
+)
+async def test_ng_migration_requires_original_validation_provenance(ng, snapshot_change):
+    engine = ng.factory.kw["bind"]
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL historical schema migration")
+
+    row = await accept_and_validate(ng)
+    assert await ng.service.advance(row["id"]) == "AWAITING_NG_STAGE"
+    saved = (await ng.rows())[0]["validation_response"] | snapshot_change
+    for key in snapshot_change:
+        if snapshot_change[key] is None:
+            saved.pop(key)
+    async with ng.factory.begin() as session:
+        await session.execute(
+            JOB.update()
+            .where(JOB.c.id == row["id"])
+            .values(ng_reason_code=None, validation_response=saved)
+        )
+        await session.execute(
+            delete(ReliableMessage).where(ReliableMessage.id == row["validation_message_id"])
+        )
+
+    first = runpy.run_path(str(NG_MIGRATION.with_name("2026-11-06_coarse_sorting_job.py")))
+    second = runpy.run_path(str(NG_MIGRATION))
+
+    def remigrate(connection):
+        with Operations.context(MigrationContext.configure(connection)):
+            second["downgrade"]()
+            first["downgrade"]()
+            first["upgrade"]()
+            second["upgrade"]()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(remigrate)
+    await engine.dispose()
+
+    validation = (await ng.action_rows(row["id"]))[0]
+    if snapshot_change:
+        assert validation["evidence_history"] == []
+    else:
+        evidence = validation["evidence_history"][0]
+        assert evidence["operation"] == saved["operation"]
+        assert evidence["message_id"] == row["validation_message_id"]
+    ng.assemble(enabled=True)
+    expected = "NG_RECONCILIATION_REQUIRED" if snapshot_change else "AWAITING_NG_RESULT"
+    assert await ng.service.advance(row["id"]) == expected
+    retained = (await ng.rows())[0]
+    assert retained["validation_response"] == saved
+    assert retained["validation_message_id"] == row["validation_message_id"]
+    assert retained["validation_operation_id"] == row["validation_operation_id"]
+    assert [action["kind"] for action in await ng.action_rows(row["id"])] == (
+        ["VALIDATE_BIND"] if snapshot_change else ["VALIDATE_BIND", "MOVE_TO_NG"]
+    )
+    assert await ng.dispatch() == (0 if snapshot_change else 1)
+    assert len(ng.peer.requests) == 1
+
+
+@pytest.mark.parametrize("barcode", [" ", ""])
+async def test_legal_ng_preserves_raw_barcode_rejected_by_wms(ng, barcode):
+    ng.assemble(enabled=True)
+    await accept_and_validate(ng, changes={"barcode": barcode})
+    wire = await dispatch_ng(ng)
+    assert json.loads(ng.peer.requests[0])["data"]["barcode"] == barcode
+    assert wire["params"] == {"barcode": barcode, "reason_code": NG_DECISION["reason_code"]}
 
 
 async def test_ng_validation_retained_until_current_authorization_is_restored(ng):
@@ -275,6 +356,7 @@ async def test_wrong_device_and_malformed_ng_result_cannot_close(ng):
     wire = await dispatch_ng(ng)
     assert (await ng_result(ng, wire, device_code=ng.codes[1])).status_code == 404
     for data in (
+        {},
         {"actual_qty": True, "location": NG_PLATFORM},
         {"actual_qty": 1, "location": NG_PLATFORM, "extra": "not in annex"},
         {"actual_qty": 1},

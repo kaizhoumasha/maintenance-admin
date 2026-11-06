@@ -30,7 +30,7 @@ from .contracts import (
     allocation_decision,
 )
 from .definition import DEFINITION
-from .ecs_command import MoveForward, MoveToNg, MoveToNgResult, PutToBin, PutToBinResult
+from .ecs_command import MoveForward, MoveToLocationResult, MoveToNg, PutToBin
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
@@ -550,12 +550,15 @@ class CoarseSortingService:
 
     @staticmethod
     def _wms_evidence(result):
-        return {
+        evidence = {
             "operation_id": result.operation_id,
             "code": result.response_code,
             "timestamp": result.response_timestamp,
             "data": result.response_data,
         }
+        if result.operation == VALIDATE and result.response_data.get("result") == "NG":
+            evidence.update(operation=result.operation, message_id=result.message_id)
+        return evidence
 
     async def _send_request(self, session, row, predecessor, kind, operation, model, **values):
         operation_id = str(uuid7())
@@ -609,33 +612,49 @@ class CoarseSortingService:
             operation_id=row["validation_operation_id"],
         )
         if self._valid_response(result, "DECIDED"):
-            evidence = self._wms_evidence(result)
-        elif result.availability == "NOT_FOUND":
-            history = action["evidence_history"]
-            if history:
-                evidence = history[-1]
-            else:
-                saved = row["validation_response"]
-                if not (
-                    isinstance(saved, dict)
-                    and saved.get("availability") == "FOUND"
-                    and saved.get("operation") == VALIDATE
-                    and saved.get("operation_id") == row["validation_operation_id"]
-                    and saved.get("message_id") == row["validation_message_id"]
-                    and saved.get("response_state") == "VALID"
-                    and saved.get("http_status") == 200
-                    and saved.get("response_code") == "DECIDED"
-                ):
-                    return await save("NG_RECONCILIATION_REQUIRED")
-                evidence = {
-                    "operation_id": saved["operation_id"],
-                    "code": saved["response_code"],
-                    "timestamp": saved.get("response_timestamp"),
-                    "data": saved.get("response_data"),
-                }
-        else:
+            return await self._register_ng(
+                session,
+                row,
+                action,
+                line,
+                input_arm,
+                self._wms_evidence(result),
+                save,
+                validation_response=asdict(result),
+            )
+        if result.availability != "NOT_FOUND":
+            return await save("NG_RECONCILIATION_REQUIRED")
+        evidence = self._retained_validation_evidence(row, action)
+        if evidence is None:
             return await save("NG_RECONCILIATION_REQUIRED")
         return await self._register_ng(session, row, action, line, input_arm, evidence, save)
+
+    @staticmethod
+    def _retained_validation_evidence(row, action):
+        saved = row["validation_response"]
+        if saved is None:
+            history = action["evidence_history"]
+            return history[-1] if history else None
+        # A backfilled action cannot confer provenance the original snapshot lacks.
+        if not (
+            isinstance(saved, dict)
+            and saved.get("availability") == "FOUND"
+            and saved.get("operation") == VALIDATE
+            and saved.get("operation_id") == row["validation_operation_id"]
+            and saved.get("message_id") == row["validation_message_id"]
+            and saved.get("response_state") == "VALID"
+            and saved.get("http_status") == 200
+            and saved.get("response_code") == "DECIDED"
+        ):
+            return None
+        return {
+            "operation": saved["operation"],
+            "operation_id": saved["operation_id"],
+            "message_id": saved["message_id"],
+            "code": saved["response_code"],
+            "timestamp": saved.get("response_timestamp"),
+            "data": saved.get("response_data"),
+        }
 
     async def _register_ng(self, session, row, action, line, input_arm, evidence, save, **values):
         if (
@@ -645,7 +664,9 @@ class CoarseSortingService:
             or action["operation_id"] != row["validation_operation_id"]
             or action["message_id"] != row["validation_message_id"]
             or action["request_data"] != {"workline_code": row["workline_code"], **row["payload"]}
+            or evidence.get("operation") != action["operation"]
             or evidence.get("operation_id") != action["operation_id"]
+            or evidence.get("message_id") != action["message_id"]
             or evidence.get("code") != "DECIDED"
             or type(evidence.get("timestamp")) is not int
             or row["binding_id"] is not None
@@ -658,11 +679,11 @@ class CoarseSortingService:
             return await save("NG_RECONCILIATION_REQUIRED")
         if decision.result != "NG" or row["ng_reason_code"] not in (None, decision.reason_code):
             return await save("NG_RECONCILIATION_REQUIRED")
-        if action["evidence_history"] and any(
-            entry.get("data") != evidence["data"] for entry in action["evidence_history"]
-        ):
+        history = action["evidence_history"]
+        if any(entry.get("data") != evidence["data"] for entry in history):
             return await save("NG_RECONCILIATION_REQUIRED")
-        await self._consume(session, action, evidence)
+        if not history:
+            await self._consume(session, action, evidence)
         values["ng_reason_code"] = decision.reason_code
 
         issue = await self._ng_configuration_issue(session, row, line, input_arm)
@@ -772,7 +793,7 @@ class CoarseSortingService:
         ):
             return await save("NG_RECONCILIATION_REQUIRED")
         try:
-            completed = MoveToNgResult.model_validate(result.get("data"))
+            completed = MoveToLocationResult.model_validate(result.get("data"))
         except ValidationError:
             return await save("NG_RECONCILIATION_REQUIRED")
         if completed.actual_qty != 1 or completed.location != snapshot["completion_location"]:
@@ -961,7 +982,7 @@ class CoarseSortingService:
         ):
             return await save("PUT_RECONCILIATION_REQUIRED")
         try:
-            placed = PutToBinResult.model_validate(result["data"])
+            placed = MoveToLocationResult.model_validate(result["data"])
             decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
             original = PutToBin.model_validate(action["request_data"])
             if (

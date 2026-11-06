@@ -394,6 +394,18 @@ async def test_wrong_station_preserves_original_put_for_reconciliation(direct):
     assert (await flow.action_rows(row["id"]))[-1]["command_code"] == put["command_code"]
 
 
+async def test_empty_put_success_allows_later_valid_original_result(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    assert (
+        await flow.result(row, command_code=put["command_code"], device_code=flow.output, data={})
+    ).status_code == 400
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
+    await finish_put(flow, row, put)
+
+
 @pytest.mark.parametrize("scenario", ["complete", "missing_proof", "source_changed"])
 async def test_default_stop_and_retained_original_move_after_migration(direct, scenario):
     from alembic.migration import MigrationContext
