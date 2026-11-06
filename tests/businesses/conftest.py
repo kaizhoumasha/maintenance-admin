@@ -613,7 +613,10 @@ async def coarse_forward(coarse_scan, monkeypatch):
         decision_status=200,
         command="ack",
         requests=[],
+        reports=[],
+        report_code="RECORDED",
         commands=[],
+        transports=[],
         started=asyncio.Event(),
         release=asyncio.Event(),
     )
@@ -624,15 +627,53 @@ async def coarse_forward(coarse_scan, monkeypatch):
         raw = await request.body()
         body = json.loads(raw)
         flow.peer.requests.append(raw)
+        decision = (
+            flow.peer.allocate
+            if body["operation"] == "inbound.coarse_sorting.storage_allocate@v1"
+            else getattr(flow.peer, "departure", {})
+            if body["operation"] == "rack.departure_decide@v1"
+            else flow.peer.decision
+        )
         return JSONResponse(
             dict(
                 operation_id=body["operation_id"],
                 code=flow.peer.decision_code,
                 timestamp=1,
-                data=flow.peer.decision,
+                data=decision,
             ),
             status_code=flow.peer.decision_status,
         )
+
+    @peer.post("/api/v1/wes/transport-requests")
+    async def transport(request: Request):
+        body = await request.json()
+        flow.peer.transports.append(body)
+        return JSONResponse(
+            dict(
+                operation_id=body["operation_id"],
+                code=getattr(flow.peer, "transport_code", "RECEIVED"),
+                timestamp=1,
+                data={
+                    "transport_task_id": getattr(
+                        flow.peer, "transport_id", body["data"]["transport_task_id"]
+                    )
+                },
+            ),
+            status_code=getattr(flow.peer, "transport_status", 202),
+        )
+
+    @peer.post("/api/v1/wes/facts")
+    async def report(request: Request):
+        raw = await request.body()
+        flow.peer.reports.append(raw)
+        if flow.peer.report_code is None:
+            return JSONResponse({}, status_code=502)
+        return {
+            "operation_id": json.loads(raw)["operation_id"],
+            "code": flow.peer.report_code,
+            "timestamp": 1,
+            "data": {},
+        }
 
     @peer.post("/api/v1/device/command")
     async def command(request: Request):
@@ -642,6 +683,12 @@ async def coarse_forward(coarse_scan, monkeypatch):
             await flow.peer.release.wait()
         if flow.peer.command == "invalid":
             return {"invalid": True}
+        if flow.peer.command == "full":
+            return JSONResponse(
+                {"code": 429, "message": "CAPACITY_EXCEEDED"},
+                status_code=429,
+                headers={"Retry-After": "1"},
+            )
         return {"code": 200, "message": "ACK"}
 
     async with loopback_app(peer) as origin:
@@ -654,9 +701,15 @@ async def coarse_forward(coarse_scan, monkeypatch):
         bindings, annexes = catalog.validate_business_contracts()
         targets = {
             "coarse-wms": TargetConfig("coarse-wms", origin, "wms-decisions"),
+            "coarse-facts": TargetConfig(
+                "coarse-facts", origin, "wms-facts", retry_base_s=60, retry_cap_s=60
+            ),
             "ecs-local": TargetConfig("ecs-local", None, "ecs-command", address_mode="SNAPSHOT"),
         }
-        adapters = {**ADAPTERS, "ecs-command": EcsCommandAdapter()}
+        from app.integrations.wms_transport import ADAPTERS as TRANSPORT_ADAPTERS
+
+        targets["coarse-transport"] = TargetConfig("coarse-transport", origin, "wms-transport")
+        adapters = {**ADAPTERS, **TRANSPORT_ADAPTERS, "ecs-command": EcsCommandAdapter()}
         commands = EcsCommands(None, "ecs-local", DeviceRoutes(bindings, annexes=annexes), annexes)
         lifecycle = EcsLifecycle(commands)
         outbox = Outbox(targets, adapters, lifecycles={"ecs-command": lifecycle})
@@ -678,7 +731,10 @@ async def coarse_forward(coarse_scan, monkeypatch):
             store,
             targets,
             adapters,
-            {"coarse-wms": AsyncHttpClient(HttpClientConfig(origin, "coarse-wms"))},
+            {
+                name: AsyncHttpClient(HttpClientConfig(origin, name))
+                for name in ("coarse-wms", "coarse-facts", "coarse-transport")
+            },
             provider=DynamicClients(factory=simulator_client_factory([origin])),
         )
         flow.sender, flow.store = sender, store
@@ -731,3 +787,239 @@ async def coarse_forward(coarse_scan, monkeypatch):
                 await session.execute(
                     delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
                 )
+
+
+@pytest.fixture
+async def direct(coarse_forward, monkeypatch):
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from app.businesses.coarse_sorting import composition
+    from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
+
+    ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
+    REPORT = "inbound.coarse_sorting.execution_report@v1"
+    from app.integrations.ecs_command.declaration import compile_commands
+    from app.integrations.registration import registration_source
+    from app.integrations.wms_request import operation
+    from app.main import app
+    from app.models import EcsCommand, EcsResultEvidence
+    from app.services.device_routes import DeviceRoutes
+
+    flow = coarse_forward
+    flow.peer.allocate = {}
+    output = f"OUTPUT_{uuid7().hex}"
+    route_id = str(uuid7())
+    async with flow.factory.begin() as session:
+        session.add(
+            DeviceRoute(
+                id=route_id,
+                device_code=output,
+                ecs_origin=flow.outbox.targets["coarse-wms"].base_url,
+            )
+        )
+        await session.flush()
+        line = await session.get(WorkLine, flow.line_ids[0])
+        session.add(
+            Device(
+                device_code=output,
+                display_name=output,
+                work_line_id=line.id,
+                current_route_id=route_id,
+            )
+        )
+        line.device_bindings = {**line.device_bindings, "OUTPUT_ARM": output}
+        flow.workline = line.line_code
+        session.add(
+            WorkLinePosition(
+                work_line_id=line.id,
+                position_code=line.position_bindings["OUTPUT_RACK"],
+                capacity=1,
+            )
+        )
+    flow.output = output
+    flow.now = datetime.now(UTC)
+    flow.output_locations = {flow.workline: "STATION_OUTPUT1"}
+    old_rebuild = flow.rebuild
+
+    from app.businesses.coarse_sorting.ecs_command import MoveForward, PutToBin
+    from app.businesses.coarse_sorting.models import CoarseSortingAction, CoarseSortingJob
+    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_execution_report_v1 import (
+        ExecutionReport,
+    )
+    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_storage_allocate_v1 import (
+        StorageAllocate,
+    )
+    from app.integrations.wms_request import WmsRequests
+
+    registered = dict(operation.operations())
+    for name, endpoint, model in (
+        (ALLOCATE, operation.Endpoint.DECISIONS, StorageAllocate),
+        (REPORT, operation.Endpoint.FACTS, ExecutionReport),
+    ):
+        registered[name] = operation.Registered(
+            name, endpoint, model, None, None, registration_source(model)
+        )
+    monkeypatch.setattr(operation, "_registry", registered)
+    bindings, annexes = compile_commands(MoveForward, PutToBin)
+    flow.commands.annexes = annexes
+    flow.commands.routes = DeviceRoutes(bindings, annexes=annexes)
+    flow.table = CoarseSortingJob.__table__
+    flow.actions = CoarseSortingAction.__table__
+
+    async def rows():
+        async with flow.factory() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(flow.table)
+                        .where(flow.table.c.work_line_id == flow.line_ids[0])
+                        .order_by(flow.table.c.id)
+                    )
+                ).mappings()
+            )
+
+    async def actions(scan_id):
+        async with flow.factory() as session:
+            return list(
+                (
+                    await session.execute(
+                        select(flow.actions)
+                        .where(flow.actions.c.job_id == scan_id)
+                        .order_by(flow.actions.c.created_at, flow.actions.c.id)
+                    )
+                ).mappings()
+            )
+
+    def rebuild(*, enabled=True):
+        old_rebuild()
+        capabilities = flow.service.capabilities
+        original_consumer = capabilities.wms.contract_consumers
+        wms = WmsRequests(
+            flow.outbox,
+            owner_domain="coarse_sorting",
+            contract_consumers=lambda key: (
+                frozenset({"coarse_sorting"})
+                if key[1] in {ALLOCATE, REPORT}
+                else original_consumer(key)
+            ),
+        )
+        flow.service = (
+            composition.build_direct_put_service(
+                replace(capabilities, wms=wms),
+                output_locations=flow.output_locations,
+                clock=lambda: flow.now,
+            )
+            if enabled
+            else composition.build_service(capabilities)
+        )
+        flow.runtime.services["coarse_sorting"] = flow.service
+        flow.runtime.progressions["coarse_sorting"] = flow.service.scan_pending
+        monkeypatch.setattr(app.state, "business_runtime", flow.runtime)
+
+    flow.rows, flow.action_rows, flow.rebuild = rows, actions, rebuild
+    rebuild()
+
+    try:
+        yield flow
+    finally:
+        async with flow.factory.begin() as session:
+            jobs = select(flow.table.c.id).where(flow.table.c.work_line_id == flow.line_ids[0])
+            await session.execute(
+                flow.table.update()
+                .where(flow.table.c.id.in_(jobs))
+                .values(
+                    current_action_id=None,
+                    allocation_action_id=None,
+                    state="AWAITING_VALIDATION",
+                    completed_at=None,
+                )
+            )
+            await session.execute(delete(flow.actions).where(flow.actions.c.job_id.in_(jobs)))
+            await session.execute(delete(flow.table).where(flow.table.c.id.in_(jobs)))
+            codes = select(EcsCommand.command_code).where(EcsCommand.device_code == output)
+            await session.execute(
+                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+            )
+            await session.execute(delete(EcsCommand).where(EcsCommand.device_code == output))
+            await session.execute(
+                delete(WorkLinePosition).where(WorkLinePosition.work_line_id == flow.line_ids[0])
+            )
+            await session.execute(delete(Device).where(Device.device_code == output))
+            await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
+
+
+@pytest.fixture
+async def rack(direct, monkeypatch):
+    from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
+        OPERATION,
+        DepartureRequest,
+    )
+    from app.businesses.coarse_sorting.models import RackPreparation
+    from app.integrations.registration import registration_source
+    from app.integrations.wms_request import operation
+
+    monkeypatch.setattr(
+        operation,
+        "_registry",
+        {
+            **operation.operations(),
+            OPERATION: operation.Registered(
+                OPERATION,
+                operation.Endpoint.DECISIONS,
+                DepartureRequest,
+                None,
+                None,
+                registration_source(DepartureRequest),
+            ),
+        },
+    )
+    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+    from app.models import TransportTask
+
+    flow = direct
+    try:
+        yield flow
+    finally:
+        async with flow.factory.begin() as session:
+            prep_ids = select(RackPreparation.id).where(
+                RackPreparation.work_line_id.in_(flow.line_ids)
+            )
+            await session.execute(
+                flow.table.update()
+                .where(flow.table.c.work_line_id.in_(flow.line_ids))
+                .values(rack_preparation_id=None)
+            )
+            await session.execute(
+                flow.actions.update()
+                .where(
+                    flow.actions.c.input_preparation_id.in_(prep_ids)
+                    | flow.actions.c.result_preparation_id.in_(prep_ids)
+                )
+                .values(input_preparation_id=None, result_preparation_id=None)
+            )
+            await session.execute(
+                RackPreparation.__table__.update()
+                .where(RackPreparation.work_line_id.in_(flow.line_ids))
+                .values(current_action_id=None)
+            )
+            for action in await session.scalars(
+                select(flow.actions.c.id)
+                .where(flow.actions.c.preparation_id.in_(prep_ids))
+                .order_by(flow.actions.c.created_at.desc(), flow.actions.c.id.desc())
+            ):
+                await session.execute(delete(flow.actions).where(flow.actions.c.id == action))
+            await session.execute(
+                delete(RackPreparation).where(RackPreparation.work_line_id.in_(flow.line_ids))
+            )
+            rack_ids = select(RackJob.id).where(RackJob.work_line_id.in_(flow.line_ids))
+            for identity in await session.scalars(
+                select(RackAction.id)
+                .where(RackAction.job_id.in_(rack_ids))
+                .order_by(RackAction.ordinal.desc())
+            ):
+                await session.execute(delete(RackAction).where(RackAction.id == identity))
+            await session.execute(delete(RackJob).where(RackJob.work_line_id.in_(flow.line_ids)))
+            await session.execute(
+                delete(TransportTask).where(TransportTask.owner_domain == "coarse_sorting")
+            )

@@ -7,7 +7,7 @@ from typing import Literal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.strict_json import json_object
+from app.core.strict_json import canonical_digest, json_object
 from app.integrations.wms_envelope import RESPONSE_COLUMNS, outgoing_message, stored_response
 from app.models import ReliableMessage, TransportTask
 
@@ -55,6 +55,7 @@ class TransportTaskResult:
     frozen: dict | None = None
     outcome: dict | None = None
     outcome_revision: int | None = None
+    arrival_face_reported: bool = False
     position_observation: dict | None = None
     member_facts: dict | None = None
     has_pending_outcome: bool = False
@@ -351,6 +352,13 @@ def project(
         outcome=deepcopy(outcome),
         position_observation=deepcopy(observation),
         outcome_revision=task["applied_outcome_revision"],
+        arrival_face_reported=bool(
+            outcome
+            and outcome.get("arrival_face")
+            and isinstance(task.get("outcome_digests"), dict)
+            and task["outcome_digests"].get(str(task["applied_outcome_revision"]))
+            == canonical_digest(outcome)
+        ),
         member_facts=deepcopy(facts or {}),
         has_pending_outcome=pending is not None,
         pending_revision=pending["revision"] if pending else None,

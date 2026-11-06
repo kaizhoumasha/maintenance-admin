@@ -108,6 +108,9 @@ load_local_modules(environment=ENVIRONMENT)
 definition = catalog.get_definition('coarse_sorting')
 required = {role.role_key for role in definition.device_roles if role.required}
 assert required == {'INPUT_ARM','CONVEYOR'}
+assert not any(b.task_type in {'PUT_TO_BIN', 'MOVE_TO_NG'} for b in bindings)
+assert lookup('inbound.coarse_sorting.storage_allocate@v1') is None
+assert lookup('inbound.coarse_sorting.execution_report@v1') is None
 binding = next(b for b in bindings if b.device_role == 'CONVEYOR' and b.task_type == 'MOVE_FORWARD')
 assert (binding.annex_id, binding.annex_version) == ('coarse_sorting.move_forward','2')
 annex = annexes[('coarse_sorting.move_forward','2')]
@@ -122,3 +125,16 @@ assert 'app.core.database' not in sys.modules
         [sys.executable, "-c", code], env=os.environ.copy(), capture_output=True, text=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_candidate_put_rejects_cell_outside_bin_type():
+    from app.businesses.coarse_sorting.ecs_command import PutToBin
+
+    with pytest.raises(ValidationError, match="outside the bin type"):
+        PutToBin(
+            barcode="RAW-1",
+            bin_location="2",
+            bin_type="3",
+            bin_cell_location="4",
+            reel_totalthickness=120,
+        )

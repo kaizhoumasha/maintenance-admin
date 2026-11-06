@@ -378,8 +378,16 @@ async def s5_roller(direction_host, monkeypatch):
     else:
         importlib.import_module(name)
     source = events.lookup("SCAN2", "SCAN_COMPLETED").registration_source
+    from app.businesses.coarse_sorting.models import (
+        CoarseSortingAction,
+        CoarseSortingJob,
+        RackPreparation,
+    )
+
     metadata = MetaData(schema=Base.metadata.schema)
     tables = {key: table.to_metadata(metadata) for key, table in ROLLER_TABLES.items()}
+    for model in (CoarseSortingJob, CoarseSortingAction, RackPreparation):
+        model.__table__.to_metadata(metadata)
     for model in (CallbackReceipt, EcsCommand, EcsResultEvidence, EcsSendEvidence):
         model.__table__.to_metadata(metadata)
     async with host.factory.kw["bind"].begin() as connection:

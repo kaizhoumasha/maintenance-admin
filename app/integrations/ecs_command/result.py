@@ -90,7 +90,7 @@ async def receive_ecs_result(
     if models is None:
         raise RuntimeError("original ECS annex unavailable")
     try:
-        models.result_model.model_validate(envelope.data)
+        models.result_model.model_validate(envelope.data, context={"result": envelope.result})
     except ValidationError as error:
         return invalid(error, models.result_model, "data")
     if envelope.error_detail is not None:

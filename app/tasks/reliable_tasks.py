@@ -18,7 +18,14 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
         cleanup_closed,
         protected_message_ids,
     )
-    from app.businesses.smt_auto.retention import wms_message_references
+    from app.businesses.coarse_sorting.retention import wms_message_references as coarse_references
+    from app.businesses.smt_auto.retention import wms_message_references as auto_references
+
+    async def wms_message_references(session, **scope):
+        return (
+            *await auto_references(session, **scope),
+            *await coarse_references(session, **scope),
+        )
 
     while True:
         async with factory() as session, session.begin():

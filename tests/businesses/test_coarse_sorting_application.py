@@ -303,10 +303,21 @@ async def test_schema_downgrade_preserves_accepted_scan(configured_scan):
     delivered = await e.client.post(url, json=e.body, headers=e.headers)
     digest = delivered.json()["digest"]
     original = (await e.client.get(url + "/" + digest, headers=e.headers)).json()["business"]
+    job_migration = runpy.run_path(
+        str(SCAN_MIGRATION.with_name("2026-11-06_coarse_sorting_job.py"))
+    )
     migration = runpy.run_path(str(SCAN_MIGRATION))
+
+    ng_migration = runpy.run_path(str(SCAN_MIGRATION.with_name("2026-11-06_coarse_sorting_ng.py")))
+    rack_migration = runpy.run_path(
+        str(SCAN_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py"))
+    )
 
     def downgrade(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            rack_migration["downgrade"]()
+            ng_migration["downgrade"]()
+            job_migration["downgrade"]()
             migration["downgrade"]()
 
     with pytest.raises(CommandError, match="coarse scan records exist"):

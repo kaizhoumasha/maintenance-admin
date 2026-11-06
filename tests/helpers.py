@@ -1314,8 +1314,14 @@ def coarse_sorting_scan_table(name):
     from app.database import SCHEMA
 
     table = CoarseSortingScan.__table__.to_metadata(MetaData(schema=SCHEMA), name=name)
-    for constraint in table.constraints:
-        constraint.name = None
+    for constraint in tuple(table.constraints):
+        if constraint in table.foreign_key_constraints:
+            table.constraints.remove(constraint)
+            table.foreign_keys.difference_update(constraint.elements)
+        else:
+            constraint.name = None
+    for index in table.indexes:
+        index.name = f"{name[-32:]}_{index.columns.keys()[0]}_idx"
     return table
 
 
@@ -2605,3 +2611,64 @@ def fixture_supply_order(tables, *, owner):
         return tuple(SourceFaceRef(r["plan_revision"], r["rack_id"], r["rack_face"]) for r in rows)
 
     return read
+
+
+def allocated(flow, **changes):
+    return {
+        "result": "ALLOCATED",
+        "workline_code": flow.workline,
+        "rack_id": "RACK-1",
+        "bin_code": "BIN-A002",
+        "bin_location": "2",
+        "cell_id": "BIN-A002-1",
+        "bin_type": "3",
+        "reel_totalthickness": 120,
+        **changes,
+    }
+
+
+async def reach_move(flow, *, timestamp=1793206799000, changes=None):
+    assert (
+        await flow.post(
+            flow.event(timestamp=timestamp, changes={"thickness_mm": 20, **(changes or {})})
+        )
+    ).status_code == 200
+    row = (await flow.rows())[-1]
+    assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
+    assert await flow.dispatch() == 1
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+    return (await flow.rows())[-1]
+
+
+async def reach_allocate(flow, *, timestamp=1793206799000, changes=None):
+    row = await reach_move(flow, timestamp=timestamp, changes=changes)
+    assert await flow.dispatch() == 1
+    assert (await flow.result(row)).status_code == 200
+    assert await flow.service.scan_pending() >= 1
+    assert await flow.dispatch() == 1, "applied original MOVE_FORWARD must enqueue storage_allocate"
+    assert (
+        json.loads(flow.peer.requests[-1])["operation"]
+        == "inbound.coarse_sorting.storage_allocate@v1"
+    )
+    return row
+
+
+def enable_racks(flow):
+    from dataclasses import replace
+
+    from app.businesses.coarse_sorting import composition
+    from app.integrations.wms_request import WmsRequests
+
+    original = flow.service.capabilities.wms.contract_consumers
+    wms = WmsRequests(
+        flow.outbox,
+        owner_domain="coarse_sorting",
+        contract_consumers=lambda key: (
+            frozenset({"coarse_sorting"}) if key[1] == "rack.departure_decide@v1" else original(key)
+        ),
+    )
+    flow.service = composition.build_rack_service(
+        replace(flow.service.capabilities, wms=wms),
+        output_locations=flow.output_locations,
+        clock=lambda: flow.now,
+    )

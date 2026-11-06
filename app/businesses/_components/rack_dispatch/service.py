@@ -43,7 +43,10 @@ from .contracts import (
 from .models import RackAction, RackJob
 
 AUTO_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
+COARSE_SOURCES = ("COARSE_INCOMING", "COARSE_WMS_PRESENT")
 TEMPLATES = {
+    "COARSE_INCOMING": {"ENTER": "F01", "DEPART": "F01"},
+    "COARSE_WMS_PRESENT": {"DEPART": "F01"},
     "MANUAL_RETURN": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
     "MANUAL_TRANSFER": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
     "ROLLER_ORDINARY": {"ENTER": "CTU01", "ROTATE": "CTU02", "DEPART": "CTU03"},
@@ -212,6 +215,22 @@ class RackDispatch:
             raise ValueError("incomplete rack origin")
         if origin.source_kind not in TEMPLATES:
             raise ValueError("unsupported rack source")
+        if origin.source_kind in COARSE_SOURCES:
+            if not (
+                self.owner_domain == "coarse_sorting"
+                and origin.workline_code
+                and origin.point
+                and isinstance(origin.caller, TransportCaller)
+                and isinstance(origin.resources, dict)
+                and origin.resources
+                and origin.caller == TransportCaller(origin.workline_code, origin.point)
+                and origin.task_id is None
+            ):
+                raise ValueError("incomplete coarse rack origin")
+            if origin.source_kind == "COARSE_INCOMING":
+                validate_face(origin.initial_face)
+            elif origin.initial_face is not None:
+                raise ValueError("WMS presence cannot infer a face")
         if origin.source_kind in AUTO_SOURCES:
             if origin.initial_face is not None:
                 validate_face(origin.initial_face)
@@ -260,7 +279,7 @@ class RackDispatch:
         ).one()
         if any(getattr(job, key) != value for key, value in tags.items()):
             raise ValueError("original rack scope cannot change")
-        if origin.source_kind in AUTO_SOURCES and any(
+        if origin.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and any(
             getattr(job, key) != value for key, value in values.items()
         ):
             raise ValueError("original AUTO rack origin cannot change")
@@ -597,6 +616,27 @@ class RackDispatch:
             for a in actions
         )
 
+    @staticmethod
+    async def has_conflicting_responsibility(
+        session: AsyncSession, *, point: str, rack_id: str, exclude_job_id: str | None = None
+    ) -> bool:
+        query = (
+            select(RackJob, RackAction)
+            .outerjoin(
+                RackAction,
+                (RackAction.job_id == RackJob.id)
+                & (RackAction.owner_domain == RackJob.owner_domain),
+            )
+            .where(RackJob.pending, or_(RackJob.point == point, RackJob.rack_id == rack_id))
+            .execution_options(populate_existing=True)
+        )
+        if exclude_job_id is not None:
+            query = query.where(RackJob.id != exclude_job_id)
+        return any(
+            RackDispatch.has_external_responsibility(job, (action,) if action is not None else ())
+            for job, action in await session.execute(query)
+        )
+
     async def admission_jobs(self, session, *, work_line_id):
         """All owners' original jobs; callers acquire this set before host/action locks."""
         return tuple(
@@ -633,6 +673,22 @@ class RackDispatch:
             return False
         if job.source_kind in AUTO_SOURCES and job.workline_code != line.line_code:
             return False
+        if job.source_kind in COARSE_SOURCES:
+            if job.source_kind != "COARSE_INCOMING" or line.line_code != job.workline_code:
+                return False
+            others = await session.scalars(
+                select(RackJob).where(
+                    RackJob.pending,
+                    RackJob.id != job.id,
+                    or_(RackJob.point == job.point, RackJob.rack_id == job.rack_id),
+                )
+            )
+            return not any(
+                other.id != job.id
+                and other.pending
+                and (other.point == job.point or other.rack_id == job.rack_id)
+                for other in others
+            )
         drain = job.source_kind == "ROLLER_DRAIN"
         if drain != (job.task_id is None):
             return False
@@ -706,12 +762,14 @@ class RackDispatch:
         job = await self._job(session, job_id, lock=True)
         if not job or job.state == "CLOSED_BY_SCOPE":
             return None
-        if job.source_kind in AUTO_SOURCES and face is not None:
+        if kind not in TEMPLATES[job.source_kind]:
+            return None
+        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and face is not None:
             try:
                 validate_face(face)
             except ValueError:
                 return None
-        if job.source_kind in AUTO_SOURCES and (
+        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and (
             kind not in TEMPLATES[job.source_kind] or (kind == "ENTER" and face != job.initial_face)
         ):
             return None
@@ -809,7 +867,9 @@ class RackDispatch:
         )
 
     async def _bind_move(self, session, job, action):
-        if job.source_kind in AUTO_SOURCES and not self._auto_move_matches(job, action):
+        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and not self._auto_move_matches(
+            job, action
+        ):
             raise ValueError("original AUTO rack move mismatch")
         caller = _caller(action)
         args = dict(
@@ -881,7 +941,7 @@ class RackDispatch:
             or result.kind != ("RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE")
         ):
             return None
-        if job.source_kind in AUTO_SOURCES and (
+        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and (
             not self._auto_move_matches(job, action)
             or result.frozen
             != {
@@ -925,7 +985,8 @@ class RackDispatch:
                 "target": action.target,
                 **(
                     {}
-                    if job.source_kind in AUTO_SOURCES and action.target_face is None
+                    if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES)
+                    and action.target_face is None
                     else {"target_face": action.target_face}
                 ),
             }
@@ -1189,6 +1250,40 @@ class RackDispatch:
         job.review_reason = reason or ("POSITION_CONFLICT" if external else None)
         return reason is None
 
+    async def _coarse_presence(self, session, job):
+        proof = (job.resources or {}).get("wms_presence")
+        if job.source_kind != "COARSE_WMS_PRESENT" or not isinstance(proof, dict):
+            return False
+        if (
+            proof.get("operation") != "inbound.coarse_sorting.storage_allocate@v1"
+            or proof.get("source_ref") != job.source_ref
+            or proof.get("point") != job.point
+        ):
+            return False
+        if await self.has_conflicting_responsibility(
+            session, point=job.point, rack_id=job.rack_id, exclude_job_id=job.id
+        ):
+            return False
+        result = await self.capabilities.wms.get_result(
+            session,
+            message_id=proof.get("message_id"),
+            operation=proof["operation"],
+            operation_id=proof.get("operation_id"),
+        )
+        data = result.response_data or {}
+        return (
+            result.availability == "FOUND"
+            and result.response_state == "VALID"
+            and (result.http_status, result.response_code) == (200, "DECIDED")
+            and result.operation == proof["operation"]
+            and result.operation_id == proof.get("operation_id")
+            and result.message_id == proof.get("message_id")
+            and data == proof.get("decision")
+            and data.get("workline_code") == job.workline_code
+            and data.get("result") in ("REPLACE_REQUIRED", "DEPART_REQUIRED")
+            and data.get("current_rack") == {"rack_id": job.rack_id}
+        )
+
     async def advance(
         self,
         session: AsyncSession,
@@ -1226,6 +1321,29 @@ class RackDispatch:
             return _snapshot(job, actions)
         if original and original.kind == "DEPART" and not unbound:
             await self._accept(session, job, actions, now_ms)
+            return _snapshot(job, actions)
+        if job.source_kind == "COARSE_WMS_PRESENT":
+            if not await self._coarse_presence(session, job):
+                job.review_reason = "WMS_PRESENCE_UNPROVED"
+                return _snapshot(job, actions)
+            if job.review_reason == "WMS_PRESENCE_UNPROVED":
+                job.review_reason = None
+            if (
+                actions
+                and actions[-1].kind == "DEPARTURE_DECIDE"
+                and not await self._consume_decision(session, job, actions[-1], now_ms)
+            ):
+                return _snapshot(job, actions)
+            if (
+                allow_new_departure
+                and _at_point(demand, job)
+                and demand.state == "NONE"
+                and _at_point(handoff, job)
+                and handoff.state == "CLEAR"
+                and not await self.has_position_conflict(session, point=job.point)
+            ):
+                await self._departure(session, job, actions, demand, handoff, now_ms)
+                await session.flush()
             return _snapshot(job, actions)
         predecessors = actions[:-1] if unbound else actions
         position = (
@@ -1351,6 +1469,10 @@ class RackDispatch:
                 and not managed
                 and move.kind == "ENTER"
                 and move.outcome["status"] in ("FAILED", "CANCELLED")
+                # Coarse ENTER still owns the original failed move while awaiting resolution.
+                and not (
+                    job.source_kind == "COARSE_INCOMING" and move.outcome["status"] == "FAILED"
+                )
                 and known_demand
                 and demand.state in ("CONTINUE", "NONE")
                 and clear
@@ -1450,17 +1572,20 @@ class RackDispatch:
             DepartureRequest,
         )
 
-        last = actions[-1]
-        predecessor = actions[-2] if last.kind == "DEPART" else last
-        previous = predecessor if predecessor.kind == "DEPARTURE_DECIDE" else None
-        position = next(a for a in actions if a.id == job.position_action_id)
+        last = actions[-1] if actions else None
+        predecessor = actions[-2] if last and last.kind == "DEPART" else last
+        previous = predecessor if predecessor and predecessor.kind == "DEPARTURE_DECIDE" else None
+        position = next((a for a in actions if a.id == job.position_action_id), None)
         # JSON-normalized original facts also allow a stable comparison after a database round trip.
         basis = _json(
             dict(
                 demand=asdict(demand),
                 handoff=asdict(handoff),
-                position_action_id=position.id,
-                outcome_revision=position.outcome_revision,
+                position_action_id=position.id if position else None,
+                outcome_revision=position.outcome_revision if position else None,
+                wms_presence=job.resources.get("wms_presence")
+                if job.source_kind == "COARSE_WMS_PRESENT"
+                else None,
                 position=job.actual_position,
                 face=job.actual_face,
             )
@@ -1516,7 +1641,7 @@ class RackDispatch:
             workline_code=job.workline_code,
             rack_id=job.rack_id,
             current_location={"type": "RACK_POSITION", "location_code": job.point},
-            current_face=job.actual_face,
+            current_face=None if job.source_kind in COARSE_SOURCES else job.actual_face,
         )
         op_id = _id()
         message = await self.capabilities.wms.send(
@@ -1532,14 +1657,14 @@ class RackDispatch:
             job_id=job.id,
             owner_domain=job.owner_domain,
             work_line_id=job.work_line_id,
-            ordinal=last.ordinal + 1,
+            ordinal=last.ordinal + 1 if last else 1,
             kind="DEPARTURE_DECIDE",
-            source_ref=previous.id if previous else position.id,
+            source_ref=previous.id if previous else position.id if position else job.source_ref,
             phase="REGISTERED",
             previous_action_id=previous.id if previous else None,
             previous_decision_phase="WAIT" if previous else None,
             caller=job.caller,
-            source=job.actual_position,
+            source=_point(job.point),
             operation=OPERATION,
             decision_operation_id=op_id,
             message_id=message.message_id,
@@ -1651,7 +1776,10 @@ async def pending_message_references(session, *, candidate_ids):
         .join(RackAction, RackAction.job_id == RackJob.id)
         .where(
             RackJob.pending.is_(True),
-            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN")),
+            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN"))
+            | (
+                (RackJob.owner_domain == "coarse_sorting") & RackJob.source_kind.in_(COARSE_SOURCES)
+            ),
             (RackAction.message_id.in_(candidate_ids))
             | (RackAction.submit_message_id.in_(candidate_ids)),
         )
