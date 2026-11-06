@@ -11,7 +11,6 @@ from app.businesses._components.sorting_task.service import SortingTask
 from app.core.clock import unix_ms
 from app.diagnostics import log_exception
 from app.integrations.ecs_command import CommandOwner
-from app.integrations.wms_transport import TransportCaller
 from app.models import WorkLine
 
 from .archive import RETENTION_MS, Archive
@@ -111,10 +110,9 @@ class SmtAutoService(AutoTaskService):
         }
         self.rack_flows = {}
         for line in worklines:
-            caller = TransportCaller(line.transport_workline_id, line.transport_station_id)
             self.rack_flows[line.work_line_id] = (
-                SourceFlow(self.inbound, caller=caller),
-                OutboundRacks(self.outbound, caller=caller),
+                SourceFlow(self.inbound, station_id=line.transport_station_id),
+                OutboundRacks(self.outbound, station_id=line.transport_station_id),
             )
 
     async def allows_task_entry(self, session, *, work_line_id, task_id):

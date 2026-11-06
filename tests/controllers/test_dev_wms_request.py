@@ -49,7 +49,7 @@ async def test_the_catalog_describes_every_registered_operation(client, admin):
         registered = operations()[item["name"]]
         assert item["endpoint"] == registered.endpoint.value
         assert item["example"] == registered.example
-        assert item["payload_schema"]["properties"]
+        assert item["payload_schema"] == registered.data_model.model_json_schema()
 
 
 @pytest.mark.parametrize("operation", sorted(operations()))

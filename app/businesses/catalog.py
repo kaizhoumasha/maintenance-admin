@@ -125,9 +125,10 @@ def command_is_allowed(business_code: str, role: str, model: type, task_type: st
 def entries() -> tuple[ModuleType, ...]:
     """Explicit business compositions shared by API, worker and model loading."""
     from .coarse_sorting import composition as coarse_sorting
+    from .smt_auto import composition as smt_auto
     from .smt_manual import composition as smt_manual
 
-    return (coarse_sorting, smt_manual)
+    return (coarse_sorting, smt_manual, smt_auto)
 
 
 def definitions() -> tuple[BusinessDefinition, ...]:

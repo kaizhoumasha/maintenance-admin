@@ -63,8 +63,9 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
         assert row["source_file"].endswith(".py")
         assert row["module"]
         if key[0] == "wms_request":
-            assert row["endpoint"] == requests.lookup(key[1]).endpoint.value
-            assert row["payload_schema"]["properties"]
+            registered = requests.lookup(key[1])
+            assert row["endpoint"] == registered.endpoint.value
+            assert row["payload_schema"] == registered.data_model.model_json_schema()
     for kind, name in [
         ("wms_callback", "example.echo@v1"),
         ("wms_request", "example.fact.demo@v1"),

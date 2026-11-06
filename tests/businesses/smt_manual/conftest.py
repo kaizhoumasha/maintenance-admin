@@ -1080,12 +1080,13 @@ async def manual_supply(manual_racks, manual_completion_tools):
 @pytest.fixture
 async def native_manual_sessions(manual_sessions):
     from app.businesses._components.bin_roller.models import TABLES as ROLLER
+    from app.businesses.smt_auto.models import AutoTask
     from app.businesses.smt_manual.models import TABLES
     from app.database import SCHEMA
     from app.models import AuditLog
 
     metadata = MetaData(schema=SCHEMA)
-    for table in (*TABLES.values(), *ROLLER.values(), AuditLog.__table__):
+    for table in (*TABLES.values(), *ROLLER.values(), AuditLog.__table__, AutoTask.__table__):
         table.to_metadata(metadata)
     engine = manual_sessions.kw["bind"]
     async with engine.begin() as connection:

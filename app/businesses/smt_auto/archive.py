@@ -13,7 +13,6 @@ from app.businesses._components.rack_dispatch.contracts import (
 from app.core.strict_json import canonical_digest
 from app.integrations.wms_callback import CallbackResponse
 
-from .locking import lock_line
 from .models import (
     AutoBinWork,
     AutoInboundDecisionRound,
@@ -185,6 +184,8 @@ class Archive:
         self.racks = racks
 
     async def clean(self, session, *, task_id, now_ms):
+        from .locking import lock_line
+
         task = await session.get(AutoTask, task_id)
         if task is None or task.business_type != "inbound" or task.status not in _TERMINAL:
             return False
