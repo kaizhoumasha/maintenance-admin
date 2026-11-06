@@ -362,6 +362,15 @@ async def test_wrong_device_and_malformed_ng_result_cannot_close(ng):
         {"actual_qty": 1},
     ):
         assert (await ng_result(ng, wire, data=data)).status_code == 400
+    assert (
+        await ng_result(
+            ng,
+            wire,
+            result="FAILED",
+            data={"actual_qty": 1},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+    ).status_code == 400
     assert await ng.service.advance(row["id"]) == "AWAITING_NG_RESULT"
     assert (await ng_result(ng, wire)).status_code == 200
     assert await ng.service.advance(row["id"]) == "NG_COMPLETED"

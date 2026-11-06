@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.core.identifiers import uuid7
+from app.integrations.ecs_command import CommandOwner
 from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
 
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
@@ -394,16 +395,60 @@ async def test_wrong_station_preserves_original_put_for_reconciliation(direct):
     assert (await flow.action_rows(row["id"]))[-1]["command_code"] == put["command_code"]
 
 
-async def test_empty_put_success_allows_later_valid_original_result(direct):
+async def test_incomplete_put_success_allows_later_valid_original_result(direct):
     flow = direct
     flow.peer.allocate = allocated(flow)
     row = await reach_allocate(flow)
     put = await dispatch_put(flow, row)
-    assert (
-        await flow.result(row, command_code=put["command_code"], device_code=flow.output, data={})
-    ).status_code == 400
+    for data in ({}, {"actual_qty": 1}, {"location": "STATION_OUTPUT1"}):
+        assert (
+            await flow.result(
+                row, command_code=put["command_code"], device_code=flow.output, data=data
+            )
+        ).status_code == 400
     assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
     await finish_put(flow, row, put)
+
+
+@pytest.mark.parametrize("data", [{"actual_qty": 1}, {"location": "STATION_OUTPUT1"}])
+async def test_partial_put_failure_settles_original_after_unknown_ack(direct, data):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    flow.peer.command = "invalid"
+    put = await dispatch_put(flow, row)
+    assert (
+        await flow.result(
+            row,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data=data,
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    actions = await flow.action_rows(row["id"])
+    action = actions[-1]
+    assert [entry["kind"] for entry in actions] == [
+        "VALIDATE_BIND",
+        "MOVE_FORWARD",
+        "ALLOCATE_STORAGE",
+        "PUT_TO_BIN",
+    ]
+    assert action["command_code"] == put["command_code"]
+    assert action["evidence_history"][0]["data"]["data"] == data
+    held = (await flow.rows())[0]
+    assert held["current_action_id"] == action["id"]
+    assert held["state"] == "AWAITING_PUT"
+    async with flow.factory() as session:
+        command = await flow.commands.get_by_call(
+            session, owner=CommandOwner("coarse_sorting"), call_key=action["call_key"]
+        )
+    assert (command.status, command.delivery_status) == ("FAILED", "DONE")
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.commands) == 2
+    assert flow.peer.reports == []
 
 
 @pytest.mark.parametrize("scenario", ["complete", "missing_proof", "source_changed"])

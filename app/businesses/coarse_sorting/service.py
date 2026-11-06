@@ -30,7 +30,7 @@ from .contracts import (
     allocation_decision,
 )
 from .definition import DEFINITION
-from .ecs_command import MoveForward, MoveToLocationResult, MoveToNg, PutToBin
+from .ecs_command import MoveForward, MoveToLocationResult, MoveToNg, MoveToNgResult, PutToBin
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
@@ -793,7 +793,7 @@ class CoarseSortingService:
         ):
             return await save("NG_RECONCILIATION_REQUIRED")
         try:
-            completed = MoveToLocationResult.model_validate(result.get("data"))
+            completed = MoveToNgResult.model_validate(result.get("data"))
         except ValidationError:
             return await save("NG_RECONCILIATION_REQUIRED")
         if completed.actual_qty != 1 or completed.location != snapshot["completion_location"]:

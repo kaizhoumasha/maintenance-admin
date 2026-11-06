@@ -44,10 +44,18 @@ class MoveToLocationResult(BaseModel):
     location: Reference | None = None
 
     @model_validator(mode="after")
-    def validate_evidence(self, info: ValidationInfo) -> Self:
-        if (self.model_fields_set or (info.context or {}).get("result") == "SUCCESS") and (
+    def validate_success(self, info: ValidationInfo) -> Self:
+        if (info.context or {}).get("result") == "SUCCESS" and (
             self.actual_qty is None or self.location is None
         ):
+            raise ValueError("actual_qty and location must be supplied together")
+        return self
+
+
+class MoveToNgResult(MoveToLocationResult):
+    @model_validator(mode="after")
+    def validate_evidence_pair(self) -> Self:
+        if self.model_fields_set and (self.actual_qty is None or self.location is None):
             raise ValueError("actual_qty and location must be supplied together")
         return self
 
@@ -57,7 +65,7 @@ class MoveToLocationResult(BaseModel):
     device_roles=("INPUT_ARM",),
     annex_id="coarse_sorting.move_to_ng",
     annex_version="1",
-    result=MoveToLocationResult,
+    result=MoveToNgResult,
     error=ErrorDetail,
     timeout_min_ms=1,
     timeout_max_ms=60000,
