@@ -419,11 +419,16 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
     engine = flow.factory.kw["bind"]
     if engine.dialect.name == "postgresql":
         migration = runpy.run_path(str(JOB_MIGRATION))
+        ng_migration = runpy.run_path(
+            str(JOB_MIGRATION.with_name("2026-11-06_coarse_sorting_ng.py"))
+        )
 
         def remigrate(connection):
             with Operations.context(MigrationContext.configure(connection)):
+                ng_migration["downgrade"]()
                 migration["downgrade"]()
                 migration["upgrade"]()
+                ng_migration["upgrade"]()
 
         async with engine.begin() as connection:
             await connection.run_sync(remigrate)

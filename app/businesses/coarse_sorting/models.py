@@ -25,6 +25,7 @@ JOB_STATES = (
     "AWAITING_REPORT",
     "AWAITING_NG",
     "COMPLETED",
+    "NG_COMPLETED",
 )
 ACTION_KINDS = (
     "VALIDATE_BIND",
@@ -32,6 +33,7 @@ ACTION_KINDS = (
     "ALLOCATE_STORAGE",
     "PUT_TO_BIN",
     "REPORT_COMPLETION",
+    "MOVE_TO_NG",
 )
 
 
@@ -51,7 +53,16 @@ class CoarseSortingJob(Base):
             "state NOT IN ('AWAITING_REPORT', 'COMPLETED') OR placed_at_ms IS NOT NULL",
             name="placement",
         ),
-        CheckConstraint("(state = 'COMPLETED') = (completed_at IS NOT NULL)", name="completion"),
+        CheckConstraint(
+            "(state IN ('COMPLETED', 'NG_COMPLETED')) = (completed_at IS NOT NULL)",
+            name="completion",
+        ),
+        CheckConstraint(
+            "(ng_reason_code IS NULL OR binding_id IS NULL) "
+            "AND (state <> 'NG_COMPLETED' "
+            "OR (ng_reason_code IS NOT NULL AND current_action_id IS NOT NULL))",
+            name="ng",
+        ),
         Index("coarse_sorting_job_state_id_idx", "state", "id"),
         Index("coarse_sorting_job_line_state_idx", "work_line_id", "state"),
     )
@@ -77,6 +88,7 @@ class CoarseSortingJob(Base):
     validation_message_id: Mapped[int | None]
     validation_response: Mapped[dict | None] = mapped_column(JSON)
     binding_id: Mapped[str | None]
+    ng_reason_code: Mapped[str | None]
     conveyor_device_id: Mapped[int | None]
     conveyor_device_code: Mapped[str | None]
     conveyor_device_version: Mapped[int | None]
@@ -119,7 +131,7 @@ class CoarseSortingAction(Base):
             "AND operation IS NOT NULL AND operation_id IS NOT NULL AND message_id IS NOT NULL "
             "AND command_owner IS NULL AND call_key IS NULL "
             "AND command_code IS NULL AND device_code IS NULL) OR "
-            "((kind IN ('MOVE_FORWARD', 'PUT_TO_BIN')) "
+            "((kind IN ('MOVE_FORWARD', 'PUT_TO_BIN', 'MOVE_TO_NG')) "
             "AND operation IS NULL AND operation_id IS NULL AND message_id IS NULL "
             "AND command_owner IS NOT NULL AND call_key IS NOT NULL "
             "AND command_code IS NOT NULL AND device_code IS NOT NULL "

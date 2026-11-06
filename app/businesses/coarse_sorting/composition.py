@@ -37,3 +37,15 @@ def build_direct_put_service(capabilities, *, output_locations, clock):
         ),
         clock=clock,
     )
+
+
+def build_ng_service(capabilities, *, ng_locations):
+    """Explicit candidate assembly using trusted per-line NG destinations."""
+    from dataclasses import replace
+
+    from pydantic import TypeAdapter
+
+    from .contracts import Reference
+
+    locations = TypeAdapter(dict[str, Reference]).validate_python(dict(ng_locations), strict=True)
+    return replace(build_service(capabilities), ng_locations=locations)

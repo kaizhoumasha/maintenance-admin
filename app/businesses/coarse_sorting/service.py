@@ -30,12 +30,11 @@ from .contracts import (
     allocation_decision,
 )
 from .definition import DEFINITION
-from .ecs_command import MoveForward, PutToBin, PutToBinResult
+from .ecs_command import MoveForward, MoveToNg, MoveToNgResult, PutToBin, PutToBinResult
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
 VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
-NEXT_STAGES = ("AWAITING_NG_STAGE", "AWAITING_ALLOCATION_STAGE")
 DIRECT_PUT_STATES = ("AWAITING_ALLOCATION", "AWAITING_PUT", "AWAITING_REPORT")
 WAIT_INTERVAL = timedelta(milliseconds=5000)
 
@@ -55,6 +54,7 @@ class CoarseSortingService:
     action_table: Table | None = None
     direct_put_contracts: DirectPutContracts | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    ng_locations: Mapping[str, str] | None = None
 
     @property
     def direct_put(self) -> bool:
@@ -117,7 +117,7 @@ class CoarseSortingService:
                         await session.connection(
                             execution_options={
                                 "isolation_level": "SERIALIZABLE"
-                                if self.direct_put
+                                if self.direct_put or self.ng_locations is not None
                                 else "REPEATABLE READ"
                             }
                         )
@@ -166,12 +166,24 @@ class CoarseSortingService:
                 )
             return reason
 
-        if not row["pending"] or row["wait_reason"] == "AWAITING_NG_STAGE":
+        if not row["pending"]:
+            return row["wait_reason"]
+        known_ng = (
+            row["state"] == "AWAITING_NG"
+            or row["wait_reason"] == "AWAITING_NG_STAGE"
+            or row["ng_reason_code"] is not None
+        )
+        if known_ng and self.ng_locations is None:
             return row["wait_reason"]
         if not self.direct_put and row["state"] in DIRECT_PUT_STATES:
             return row["wait_reason"]
         actions = await self._lock_actions(session, row)
         action = actions.get(row["current_action_id"])
+        input_arm = next((d for d in devices if d.id == row["device_id"]), None)
+        if known_ng:
+            if action and action["kind"] == "MOVE_TO_NG":
+                return await self._advance_ng_result(session, row, action, save)
+            return await self._resume_ng_validation(session, row, action, line, input_arm, save)
         if self.direct_put and row["state"] == "AWAITING_PUT":
             return await self._advance_put(session, row, action, actions, save)
         if self.direct_put and row["state"] == "AWAITING_REPORT":
@@ -202,7 +214,12 @@ class CoarseSortingService:
                     session, row, action, line, output, issue, save
                 )
         if issue and not (
-            self.direct_put and (row["command_code"] or row["validation_operation_id"])
+            (self.direct_put and (row["command_code"] or row["validation_operation_id"]))
+            or (
+                self.ng_locations is not None
+                and row["command_code"] is None
+                and row["validation_operation_id"] is not None
+            )
         ):
             return await save(issue)
         if row["command_code"] is not None:
@@ -301,32 +318,37 @@ class CoarseSortingService:
             operation=VALIDATE,
             operation_id=row["validation_operation_id"],
         )
-        if not (
-            result.availability == "FOUND"
-            and result.response_state == "VALID"
-            and result.http_status == 200
-            and result.response_code == "DECIDED"
-        ):
-            reason = (
-                "AWAITING_VALIDATION_RESULT"
-                if result.availability == "FOUND"
-                and not result.delivery_terminal
-                and not result.delivery_uncertain
-                else "VALIDATION_RECONCILIATION_REQUIRED"
-            )
-            return await save(reason)
+        if not self._valid_response(result, "DECIDED"):
+            return await save(self._request_wait_reason(result, "VALIDATION"))
         try:
             decision = ValidateBindDecision.model_validate(result.response_data)
         except ValidationError:
             return await save(
                 "VALIDATION_RECONCILIATION_REQUIRED", validation_response=asdict(result)
             )
+        if decision.result == "NG":
+            evidence = self._wms_evidence(result)
+            if self.ng_locations is not None:
+                return await self._register_ng(
+                    session,
+                    row,
+                    action,
+                    line,
+                    input_arm,
+                    evidence,
+                    save,
+                    validation_response=asdict(result),
+                )
+            if action and action["kind"] == "VALIDATE_BIND":
+                await self._consume(session, action, evidence)
+            return await save(
+                "AWAITING_NG_STAGE",
+                state="AWAITING_NG",
+                validation_response=asdict(result),
+                ng_reason_code=decision.reason_code,
+            )
         if action and action["kind"] == "VALIDATE_BIND":
             await self._consume(session, action, self._wms_evidence(result))
-        if decision.result == "NG":
-            return await save(
-                "AWAITING_NG_STAGE", state="AWAITING_NG", validation_response=asdict(result)
-            )
         if issue:
             return await save(issue, validation_response=asdict(result))
         model = MoveForward(barcode=row["payload"]["barcode"])
@@ -366,9 +388,9 @@ class CoarseSortingService:
         device = next((d for d in devices if d.id == row["device_id"]), None)
         conveyor = next((d for d in devices if d.device_code == conveyor_code), None)
         version = row["rack_binding_version"] or row["work_line_version"]
+        binding = self._input_binding(row, line, device)
         if (
-            line is None
-            or device is None
+            binding is None
             or conveyor is None
             or (not first_allocation and line.version != version)
             or (
@@ -379,13 +401,7 @@ class CoarseSortingService:
                     or row["conveyor_device_version"] is None
                 )
             )
-            or line.line_code != row["workline_code"]
-            or row["device_role"] != "INPUT_ARM"
-            or device.version != row["device_version"]
-            or device.device_code != row["device_code"]
-            or device.work_line_id != line.id
             or conveyor.work_line_id != line.id
-            or line.device_bindings.get("INPUT_ARM") != device.device_code
             or line.device_bindings.get("CONVEYOR") != conveyor.device_code
             or (
                 row["conveyor_device_id"] is not None
@@ -396,6 +412,26 @@ class CoarseSortingService:
             )
         ):
             return "ORIGINAL_BINDING_CHANGED", None
+        if self.direct_put and not line.is_enabled:
+            return "WORKLINE_DISABLED", None
+        issue = await business_configuration_issue(
+            session, binding, "coarse_sorting", definition_lookup=lambda _: DEFINITION
+        )
+        return issue, conveyor
+
+    @staticmethod
+    def _input_binding(row, line, device):
+        if (
+            line is None
+            or device is None
+            or line.line_code != row["workline_code"]
+            or row["device_role"] != "INPUT_ARM"
+            or device.version != row["device_version"]
+            or device.device_code != row["device_code"]
+            or device.work_line_id != line.id
+            or line.device_bindings.get("INPUT_ARM") != device.device_code
+        ):
+            return None
         binding = DeviceBinding(
             device_id=device.id,
             device_code=device.device_code,
@@ -408,13 +444,8 @@ class CoarseSortingService:
         )
         original = replace(binding, work_line_version=row["work_line_version"])
         if original.revision != row["binding_revision"]:
-            return "ORIGINAL_BINDING_CHANGED", None
-        if self.direct_put and not line.is_enabled:
-            return "WORKLINE_DISABLED", None
-        issue = await business_configuration_issue(
-            session, binding, "coarse_sorting", definition_lookup=lambda _: DEFINITION
-        )
-        return issue, conveyor
+            return None
+        return binding
 
     @staticmethod
     def _move_complete(command, row):
@@ -566,6 +597,188 @@ class CoarseSortingService:
             and result.response_state == "VALID"
             and result.http_status == 200
             and result.response_code in codes
+        )
+
+    async def _resume_ng_validation(self, session, row, action, line, input_arm, save):
+        if not action or action["kind"] != "VALIDATE_BIND" or not row["validation_message_id"]:
+            return await save("NG_RECONCILIATION_REQUIRED")
+        result = await self.capabilities.wms.get_result(
+            session,
+            message_id=row["validation_message_id"],
+            operation=VALIDATE,
+            operation_id=row["validation_operation_id"],
+        )
+        if self._valid_response(result, "DECIDED"):
+            evidence = self._wms_evidence(result)
+        elif result.availability == "NOT_FOUND":
+            history = action["evidence_history"]
+            if history:
+                evidence = history[-1]
+            else:
+                saved = row["validation_response"]
+                if not (
+                    isinstance(saved, dict)
+                    and saved.get("availability") == "FOUND"
+                    and saved.get("operation") == VALIDATE
+                    and saved.get("operation_id") == row["validation_operation_id"]
+                    and saved.get("message_id") == row["validation_message_id"]
+                    and saved.get("response_state") == "VALID"
+                    and saved.get("http_status") == 200
+                    and saved.get("response_code") == "DECIDED"
+                ):
+                    return await save("NG_RECONCILIATION_REQUIRED")
+                evidence = {
+                    "operation_id": saved["operation_id"],
+                    "code": saved["response_code"],
+                    "timestamp": saved.get("response_timestamp"),
+                    "data": saved.get("response_data"),
+                }
+        else:
+            return await save("NG_RECONCILIATION_REQUIRED")
+        return await self._register_ng(session, row, action, line, input_arm, evidence, save)
+
+    async def _register_ng(self, session, row, action, line, input_arm, evidence, save, **values):
+        if (
+            not action
+            or action["kind"] != "VALIDATE_BIND"
+            or action["operation"] != VALIDATE
+            or action["operation_id"] != row["validation_operation_id"]
+            or action["message_id"] != row["validation_message_id"]
+            or action["request_data"] != {"workline_code": row["workline_code"], **row["payload"]}
+            or evidence.get("operation_id") != action["operation_id"]
+            or evidence.get("code") != "DECIDED"
+            or type(evidence.get("timestamp")) is not int
+            or row["binding_id"] is not None
+            or row["command_code"] is not None
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        try:
+            decision = ValidateBindDecision.model_validate(evidence.get("data"))
+        except ValidationError:
+            return await save("NG_RECONCILIATION_REQUIRED")
+        if decision.result != "NG" or row["ng_reason_code"] not in (None, decision.reason_code):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        if action["evidence_history"] and any(
+            entry.get("data") != evidence["data"] for entry in action["evidence_history"]
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        await self._consume(session, action, evidence)
+        values["ng_reason_code"] = decision.reason_code
+
+        issue = await self._ng_configuration_issue(session, row, line, input_arm)
+        if issue:
+            return await save(issue, **values)
+        location = self.ng_locations.get(line.line_code)
+        if not location:
+            return await save("NG_PLATFORM_CONFIGURATION_REQUIRED", **values)
+        try:
+            model = MoveToNg(barcode=row["payload"]["barcode"], reason_code=decision.reason_code)
+        except ValidationError:
+            return await save("NG_RECONCILIATION_REQUIRED", **values)
+        action_id = str(uuid7())
+        command = await self.capabilities.ecs.create(
+            session,
+            owner=OWNER,
+            call_key=action_id,
+            device_code=input_arm.device_code,
+            timeout_ms=30000,
+            command=model,
+        )
+        await self._insert_action(
+            session,
+            row,
+            "MOVE_TO_NG",
+            model.model_dump(),
+            predecessor=action,
+            action_id=action_id,
+            command_owner=OWNER.domain,
+            call_key=action_id,
+            command_code=command.command_code,
+            device_code=input_arm.device_code,
+            resource_snapshot={
+                **self._device_snapshot(input_arm, line.version, "INPUT_ARM"),
+                "completion_location": location,
+            },
+        )
+        return await save(
+            "AWAITING_NG_RESULT", state="AWAITING_NG", current_action_id=action_id, **values
+        )
+
+    async def _ng_configuration_issue(self, session, row, line, input_arm):
+        binding = self._input_binding(row, line, input_arm)
+        if (
+            binding is None
+            or binding.work_line_version != row["work_line_version"]
+            or list(binding.device_bindings.values()).count(binding.device_code) != 1
+        ):
+            return "ORIGINAL_BINDING_CHANGED"
+        if not line.is_enabled:
+            return "WORKLINE_DISABLED"
+        return await business_configuration_issue(
+            session,
+            binding,
+            OWNER.domain,
+            definition_lookup=lambda _: DEFINITION,
+            required_device_roles=("INPUT_ARM",),
+            required_position_slots=(),
+        )
+
+    async def _advance_ng_result(self, session, row, action, save):
+        if (
+            row["state"] != "AWAITING_NG"
+            or not row["ng_reason_code"]
+            or action["command_owner"] != OWNER.domain
+            or action["call_key"] != action["id"]
+            or action["device_code"] != row["device_code"]
+            or action["request_data"]
+            != {
+                "barcode": row["payload"]["barcode"],
+                "reason_code": row["ng_reason_code"],
+            }
+            or not isinstance(snapshot := action["resource_snapshot"], dict)
+            or not snapshot.get("completion_location")
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        command = await self.capabilities.ecs.get_by_call(
+            session, owner=OWNER, call_key=action["call_key"]
+        )
+        if (
+            command is None
+            or command.command_code != action["command_code"]
+            or command.task_type != "MOVE_TO_NG"
+            or command.device_code != action["device_code"]
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        result = command.result
+        if result is None:
+            if not command.needs_reconciliation and command.status in {
+                "QUEUED",
+                "DISPATCHING",
+                "WAITING_RESULT",
+            }:
+                return await save("AWAITING_NG_RESULT")
+            return await save("NG_RECONCILIATION_REQUIRED")
+        if (
+            result.get("command_code") != action["command_code"]
+            or result.get("device_code") != action["device_code"]
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        await self._consume(session, action, self._ecs_evidence(asdict(command)))
+        if (
+            command.status != "SUCCEEDED"
+            or command.delivery_status != "DONE"
+            or command.needs_reconciliation
+            or result.get("result") != "SUCCESS"
+        ):
+            return await save("NG_RECONCILIATION_REQUIRED")
+        try:
+            completed = MoveToNgResult.model_validate(result.get("data"))
+        except ValidationError:
+            return await save("NG_RECONCILIATION_REQUIRED")
+        if completed.actual_qty != 1 or completed.location != snapshot["completion_location"]:
+            return await save("NG_RECONCILIATION_REQUIRED")
+        return await save(
+            "NG_COMPLETED", state="NG_COMPLETED", pending=False, completed_at=self.clock()
         )
 
     def _output_snapshot(self, line, output):
@@ -796,13 +1009,17 @@ class CoarseSortingService:
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
-        pending = select(table.c.id).where(
-            table.c.pending.is_(True),
-            table.c.wait_reason != "AWAITING_NG_STAGE",
-        )
+        pending = select(table.c.id).where(table.c.pending.is_(True))
+        if self.ng_locations is None:
+            pending = pending.where(
+                table.c.state != "AWAITING_NG",
+                table.c.wait_reason != "AWAITING_NG_STAGE",
+                table.c.ng_reason_code.is_(None),
+            )
         if not self.direct_put:
             pending = pending.where(
-                table.c.wait_reason.not_in(NEXT_STAGES), table.c.state.not_in(DIRECT_PUT_STATES)
+                table.c.wait_reason != "AWAITING_ALLOCATION_STAGE",
+                table.c.state.not_in(DIRECT_PUT_STATES),
             )
         async with self.capabilities.session_factory() as session:
             upper_id = await session.scalar(pending.order_by(table.c.id.desc()).limit(1))
@@ -862,5 +1079,6 @@ async def read_scan(session, digest: str) -> dict | None:
             "placed_at_ms",
             "updated_at",
             "completed_at",
+            "ng_reason_code",
         }
     }

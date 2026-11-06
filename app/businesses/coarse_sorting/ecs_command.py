@@ -1,4 +1,4 @@
-"""The original conveyor move and its versioned completion evidence."""
+"""Coarse sorting commands and their versioned completion evidence."""
 
 from typing import Annotated, Literal, Self
 
@@ -35,6 +35,37 @@ class MoveForward(BaseModel):
     )
 
     barcode: str
+
+
+class MoveToNgResult(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    actual_qty: Annotated[int, Field(ge=1, le=1)] | None = None
+    location: Reference | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> Self:
+        # FAILED may omit data; the business requires both fields on SUCCESS.
+        if self.model_fields_set and (self.actual_qty is None or self.location is None):
+            raise ValueError("actual_qty and location must be supplied together")
+        return self
+
+
+@ecs_command(
+    "MOVE_TO_NG",
+    device_roles=("INPUT_ARM",),
+    annex_id="coarse_sorting.move_to_ng",
+    annex_version="1",
+    result=MoveToNgResult,
+    error=ErrorDetail,
+    timeout_min_ms=1,
+    timeout_max_ms=60000,
+)
+class MoveToNg(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    barcode: Reference
+    reason_code: Reference
 
 
 class PutToBinResult(BaseModel):
