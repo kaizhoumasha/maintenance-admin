@@ -49,3 +49,18 @@ def build_ng_service(capabilities, *, ng_locations):
 
     locations = TypeAdapter(dict[str, Reference]).validate_python(dict(ng_locations), strict=True)
     return replace(build_service(capabilities), ng_locations=locations)
+
+
+def build_rack_service(capabilities, *, output_locations, clock):
+    """Candidate rack contracts are enabled only by explicit trusted assembly."""
+    from dataclasses import replace
+
+    from app.businesses._components.rack_dispatch.service import RackDispatch
+
+    from .models import RackPreparation
+
+    return replace(
+        build_direct_put_service(capabilities, output_locations=output_locations, clock=clock),
+        preparation_table=RackPreparation.__table__,
+        rack_dispatch=RackDispatch("coarse_sorting", capabilities),
+    )

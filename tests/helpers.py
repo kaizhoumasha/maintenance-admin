@@ -2611,3 +2611,43 @@ def fixture_supply_order(tables, *, owner):
         return tuple(SourceFaceRef(r["plan_revision"], r["rack_id"], r["rack_face"]) for r in rows)
 
     return read
+
+
+def allocated(flow, **changes):
+    return {
+        "result": "ALLOCATED",
+        "workline_code": flow.workline,
+        "rack_id": "RACK-1",
+        "bin_code": "BIN-A002",
+        "bin_location": "2",
+        "cell_id": "BIN-A002-1",
+        "bin_type": "3",
+        "reel_totalthickness": 120,
+        **changes,
+    }
+
+
+async def reach_move(flow, *, timestamp=1793206799000, changes=None):
+    assert (
+        await flow.post(
+            flow.event(timestamp=timestamp, changes={"thickness_mm": 20, **(changes or {})})
+        )
+    ).status_code == 200
+    row = (await flow.rows())[-1]
+    assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
+    assert await flow.dispatch() == 1
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+    return (await flow.rows())[-1]
+
+
+async def reach_allocate(flow, *, timestamp=1793206799000, changes=None):
+    row = await reach_move(flow, timestamp=timestamp, changes=changes)
+    assert await flow.dispatch() == 1
+    assert (await flow.result(row)).status_code == 200
+    assert await flow.service.scan_pending() >= 1
+    assert await flow.dispatch() == 1, "applied original MOVE_FORWARD must enqueue storage_allocate"
+    assert (
+        json.loads(flow.peer.requests[-1])["operation"]
+        == "inbound.coarse_sorting.storage_allocate@v1"
+    )
+    return row

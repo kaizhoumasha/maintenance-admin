@@ -274,12 +274,16 @@ async def test_ng_migration_requires_original_validation_provenance(ng, snapshot
     first = runpy.run_path(str(NG_MIGRATION.with_name("2026-11-06_coarse_sorting_job.py")))
     second = runpy.run_path(str(NG_MIGRATION))
 
+    third = runpy.run_path(str(NG_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py")))
+
     def remigrate(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            third["downgrade"]()
             second["downgrade"]()
             first["downgrade"]()
             first["upgrade"]()
             second["upgrade"]()
+            third["upgrade"]()
 
     async with engine.begin() as connection:
         await connection.run_sync(remigrate)

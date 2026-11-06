@@ -90,7 +90,11 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
             schema = "enterprise_backend"
             assert sa.inspect(sync).has_table("coarse_sorting_job", schema=schema)
             migration = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_sorting_job.py"))
+            second = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_sorting_ng.py"))
+            third = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_rack_preparation.py"))
             with Operations.context(MigrationContext.configure(sync)):
+                third["downgrade"]()
+                second["downgrade"]()
                 migration["downgrade"]()
                 legacy = sa.Table(
                     "coarse_sorting_scan", sa.MetaData(), schema=schema, autoload_with=sync

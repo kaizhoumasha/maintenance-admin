@@ -3,7 +3,6 @@
 import asyncio
 import json
 import runpy
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,197 +10,15 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
-from app.core.identifiers import uuid7
 from app.integrations.ecs_command import CommandOwner
-from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
+from app.models import Device, WorkLine
+from tests.helpers import allocated, reach_allocate, reach_move
 
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
 JOB_MIGRATION = (
     Path(__file__).resolve().parents[2] / "migrations/versions/2026-11-06_coarse_sorting_job.py"
 )
-
-
-@pytest.fixture
-async def direct(coarse_forward, monkeypatch):
-    from app.integrations.ecs_command.declaration import compile_commands
-    from app.integrations.registration import registration_source
-    from app.integrations.wms_request import operation
-    from app.main import app
-    from app.models import EcsCommand, EcsResultEvidence
-    from app.services.device_routes import DeviceRoutes
-
-    flow = coarse_forward
-    flow.peer.allocate = {}
-    output = f"OUTPUT_{uuid7().hex}"
-    route_id = str(uuid7())
-    async with flow.factory.begin() as session:
-        session.add(
-            DeviceRoute(
-                id=route_id,
-                device_code=output,
-                ecs_origin=flow.outbox.targets["coarse-wms"].base_url,
-            )
-        )
-        await session.flush()
-        line = await session.get(WorkLine, flow.line_ids[0])
-        session.add(
-            Device(
-                device_code=output,
-                display_name=output,
-                work_line_id=line.id,
-                current_route_id=route_id,
-            )
-        )
-        line.device_bindings = {**line.device_bindings, "OUTPUT_ARM": output}
-        flow.workline = line.line_code
-    flow.output = output
-    flow.now = datetime.now(UTC)
-    flow.output_locations = {flow.workline: "STATION_OUTPUT1"}
-    old_rebuild = flow.rebuild
-
-    from app.businesses.coarse_sorting.ecs_command import MoveForward, PutToBin
-    from app.businesses.coarse_sorting.models import CoarseSortingAction, CoarseSortingJob
-    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_execution_report_v1 import (
-        ExecutionReport,
-    )
-    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_storage_allocate_v1 import (
-        StorageAllocate,
-    )
-    from app.integrations.wms_request import WmsRequests
-
-    registered = dict(operation.operations())
-    for name, endpoint, model in (
-        (ALLOCATE, operation.Endpoint.DECISIONS, StorageAllocate),
-        (REPORT, operation.Endpoint.FACTS, ExecutionReport),
-    ):
-        registered[name] = operation.Registered(
-            name, endpoint, model, None, None, registration_source(model)
-        )
-    monkeypatch.setattr(operation, "_registry", registered)
-    bindings, annexes = compile_commands(MoveForward, PutToBin)
-    flow.commands.annexes = annexes
-    flow.commands.routes = DeviceRoutes(bindings, annexes=annexes)
-    flow.table = CoarseSortingJob.__table__
-    flow.actions = CoarseSortingAction.__table__
-
-    async def rows():
-        async with flow.factory() as session:
-            return list(
-                (
-                    await session.execute(
-                        select(flow.table)
-                        .where(flow.table.c.work_line_id == flow.line_ids[0])
-                        .order_by(flow.table.c.id)
-                    )
-                ).mappings()
-            )
-
-    async def actions(scan_id):
-        async with flow.factory() as session:
-            return list(
-                (
-                    await session.execute(
-                        select(flow.actions)
-                        .where(flow.actions.c.job_id == scan_id)
-                        .order_by(flow.actions.c.created_at, flow.actions.c.id)
-                    )
-                ).mappings()
-            )
-
-    def rebuild(*, enabled=True):
-        old_rebuild()
-        capabilities = flow.service.capabilities
-        original_consumer = capabilities.wms.contract_consumers
-        wms = WmsRequests(
-            flow.outbox,
-            owner_domain="coarse_sorting",
-            contract_consumers=lambda key: (
-                frozenset({"coarse_sorting"})
-                if key[1] in {ALLOCATE, REPORT}
-                else original_consumer(key)
-            ),
-        )
-        flow.service = (
-            composition.build_direct_put_service(
-                replace(capabilities, wms=wms),
-                output_locations=flow.output_locations,
-                clock=lambda: flow.now,
-            )
-            if enabled
-            else composition.build_service(capabilities)
-        )
-        flow.runtime.services["coarse_sorting"] = flow.service
-        flow.runtime.progressions["coarse_sorting"] = flow.service.scan_pending
-        monkeypatch.setattr(app.state, "business_runtime", flow.runtime)
-
-    flow.rows, flow.action_rows, flow.rebuild = rows, actions, rebuild
-    rebuild()
-
-    try:
-        yield flow
-    finally:
-        async with flow.factory.begin() as session:
-            jobs = select(flow.table.c.id).where(flow.table.c.work_line_id == flow.line_ids[0])
-            await session.execute(
-                flow.table.update()
-                .where(flow.table.c.id.in_(jobs))
-                .values(
-                    current_action_id=None,
-                    allocation_action_id=None,
-                    state="AWAITING_VALIDATION",
-                    completed_at=None,
-                )
-            )
-            await session.execute(delete(flow.actions).where(flow.actions.c.job_id.in_(jobs)))
-            await session.execute(delete(flow.table).where(flow.table.c.id.in_(jobs)))
-            codes = select(EcsCommand.command_code).where(EcsCommand.device_code == output)
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
-            )
-            await session.execute(delete(EcsCommand).where(EcsCommand.device_code == output))
-            await session.execute(
-                delete(WorkLinePosition).where(WorkLinePosition.work_line_id == flow.line_ids[0])
-            )
-            await session.execute(delete(Device).where(Device.device_code == output))
-            await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
-
-
-def allocated(flow, **changes):
-    return {
-        "result": "ALLOCATED",
-        "workline_code": flow.workline,
-        "rack_id": "RACK-1",
-        "bin_code": "BIN-A002",
-        "bin_location": "2",
-        "cell_id": "BIN-A002-1",
-        "bin_type": "3",
-        "reel_totalthickness": 120,
-        **changes,
-    }
-
-
-async def reach_move(flow, *, timestamp=1793206799000, changes=None):
-    assert (
-        await flow.post(
-            flow.event(timestamp=timestamp, changes={"thickness_mm": 20, **(changes or {})})
-        )
-    ).status_code == 200
-    row = (await flow.rows())[-1]
-    assert await flow.service.advance(row["id"]) == "AWAITING_VALIDATION_RESULT"
-    assert await flow.dispatch() == 1
-    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
-    return (await flow.rows())[-1]
-
-
-async def reach_allocate(flow, *, timestamp=1793206799000, changes=None):
-    row = await reach_move(flow, timestamp=timestamp, changes=changes)
-    assert await flow.dispatch() == 1
-    assert (await flow.result(row)).status_code == 200
-    assert await flow.service.scan_pending() >= 1
-    assert await flow.dispatch() == 1, "applied original MOVE_FORWARD must enqueue storage_allocate"
-    assert json.loads(flow.peer.requests[-1])["operation"] == ALLOCATE
-    return row
 
 
 async def dispatch_put(flow, row):
@@ -480,12 +297,18 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
             str(JOB_MIGRATION.with_name("2026-11-06_coarse_sorting_ng.py"))
         )
 
+        rack_migration = runpy.run_path(
+            str(JOB_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py"))
+        )
+
         def remigrate(connection):
             with Operations.context(MigrationContext.configure(connection)):
+                rack_migration["downgrade"]()
                 ng_migration["downgrade"]()
                 migration["downgrade"]()
                 migration["upgrade"]()
                 ng_migration["upgrade"]()
+                rack_migration["upgrade"]()
 
         async with engine.begin() as connection:
             await connection.run_sync(remigrate)
