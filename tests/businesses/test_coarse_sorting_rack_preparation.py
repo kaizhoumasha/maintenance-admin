@@ -10,9 +10,14 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import RackPreparation
-from app.integrations.wms_request import WmsRequests
 from app.tasks.reliable_tasks import run_cleanup
-from tests.helpers import allocated, deliver_transport_callback, reach_allocate, reach_move
+from tests.helpers import (
+    allocated,
+    deliver_transport_callback,
+    enable_racks,
+    reach_allocate,
+    reach_move,
+)
 
 
 async def test_two_reels_share_one_active_preparation(rack):
@@ -71,97 +76,6 @@ async def test_replenish_requires_original_applied_arrival(rack):
     assert len(actions) == 2
     assert actions[1]["operation_id"] != actions[0]["operation_id"]
     assert actions[1]["input_preparation_id"] == prep
-
-
-def enable_racks(flow):
-    original = flow.service.capabilities.wms.contract_consumers
-    wms = WmsRequests(
-        flow.outbox,
-        owner_domain="coarse_sorting",
-        contract_consumers=lambda key: (
-            frozenset({"coarse_sorting"}) if key[1] == "rack.departure_decide@v1" else original(key)
-        ),
-    )
-    flow.service = composition.build_rack_service(
-        replace(flow.service.capabilities, wms=wms),
-        output_locations=flow.output_locations,
-        clock=lambda: flow.now,
-    )
-
-
-@pytest.fixture
-async def rack(direct, monkeypatch):
-    from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
-        OPERATION,
-        DepartureRequest,
-    )
-    from app.integrations.registration import registration_source
-    from app.integrations.wms_request import operation
-
-    monkeypatch.setattr(
-        operation,
-        "_registry",
-        {
-            **operation.operations(),
-            OPERATION: operation.Registered(
-                OPERATION,
-                operation.Endpoint.DECISIONS,
-                DepartureRequest,
-                None,
-                None,
-                registration_source(DepartureRequest),
-            ),
-        },
-    )
-    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
-    from app.models import TransportTask
-
-    flow = direct
-    try:
-        yield flow
-    finally:
-        async with flow.factory.begin() as session:
-            prep_ids = select(RackPreparation.id).where(
-                RackPreparation.work_line_id.in_(flow.line_ids)
-            )
-            await session.execute(
-                flow.table.update()
-                .where(flow.table.c.work_line_id.in_(flow.line_ids))
-                .values(rack_preparation_id=None)
-            )
-            await session.execute(
-                flow.actions.update()
-                .where(
-                    flow.actions.c.input_preparation_id.in_(prep_ids)
-                    | flow.actions.c.result_preparation_id.in_(prep_ids)
-                )
-                .values(input_preparation_id=None, result_preparation_id=None)
-            )
-            await session.execute(
-                RackPreparation.__table__.update()
-                .where(RackPreparation.work_line_id.in_(flow.line_ids))
-                .values(current_action_id=None)
-            )
-            for action in await session.scalars(
-                select(flow.actions.c.id)
-                .where(flow.actions.c.preparation_id.in_(prep_ids))
-                .order_by(flow.actions.c.created_at.desc(), flow.actions.c.id.desc())
-            ):
-                await session.execute(delete(flow.actions).where(flow.actions.c.id == action))
-            await session.execute(
-                delete(RackPreparation).where(RackPreparation.work_line_id.in_(flow.line_ids))
-            )
-            rack_ids = select(RackJob.id).where(RackJob.work_line_id.in_(flow.line_ids))
-            for identity in await session.scalars(
-                select(RackAction.id)
-                .where(RackAction.job_id.in_(rack_ids))
-                .order_by(RackAction.ordinal.desc())
-            ):
-                await session.execute(delete(RackAction).where(RackAction.id == identity))
-            await session.execute(delete(RackJob).where(RackJob.work_line_id.in_(flow.line_ids)))
-            await session.execute(
-                delete(TransportTask).where(TransportTask.owner_domain == "coarse_sorting")
-            )
 
 
 async def prepare(flow, mode="REPLENISH_REQUIRED"):
@@ -270,17 +184,22 @@ async def second_allocation(flow, decision):
     return row
 
 
-async def test_new_put_and_replacement_cannot_both_get_conflicting_authority(rack):
+@pytest.mark.parametrize("mode", ["REPLACE_REQUIRED", "DEPART_REQUIRED"])
+async def test_new_put_and_departure_cannot_both_get_conflicting_authority(rack, mode):
     flow = rack
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
     second = await second_allocation(
         flow,
         {
-            "result": "REPLACE_REQUIRED",
+            "result": mode,
             "workline_code": flow.workline,
             "current_rack": {"rack_id": "RACK-1"},
-            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+            **(
+                {"incoming_rack": {"rack_id": "NEW", "target_face": "90"}}
+                if mode == "REPLACE_REQUIRED"
+                else {}
+            ),
         },
     )
     enable_racks(flow)
@@ -518,24 +437,6 @@ async def test_default_formal_assembly_cannot_advance_candidate_preparation(rack
     assert await formal.scan_pending() == 0
     assert await formal.advance_preparation(prep) == "RACK_PREPARATION_STAGE_REQUIRED"
     assert await flow.dispatch() == 0
-
-
-async def test_depart_only_decision_stays_parked_without_requery_or_physical_action(rack):
-    flow = rack
-    flow.peer.allocate = {
-        "result": "DEPART_REQUIRED",
-        "workline_code": flow.workline,
-        "current_rack": {"rack_id": "OLD"},
-    }
-    row = await reach_allocate(flow)
-    enable_racks(flow)
-    for _ in range(2):
-        assert await flow.service.advance(row["id"]) == "RACK_PREPARATION_STAGE_REQUIRED"
-    assert await flow.dispatch() == 0
-    assert not flow.peer.transports
-    assert (
-        len([a for a in await flow.action_rows(row["id"]) if a["kind"] == "ALLOCATE_STORAGE"]) == 1
-    )
 
 
 @pytest.mark.parametrize("exhaust", [False, True])

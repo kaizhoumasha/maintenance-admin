@@ -651,11 +651,15 @@ async def coarse_forward(coarse_scan, monkeypatch):
         return JSONResponse(
             dict(
                 operation_id=body["operation_id"],
-                code="RECEIVED",
+                code=getattr(flow.peer, "transport_code", "RECEIVED"),
                 timestamp=1,
-                data={"transport_task_id": body["data"]["transport_task_id"]},
+                data={
+                    "transport_task_id": getattr(
+                        flow.peer, "transport_id", body["data"]["transport_task_id"]
+                    )
+                },
             ),
-            status_code=202,
+            status_code=getattr(flow.peer, "transport_status", 202),
         )
 
     @peer.post("/api/v1/wes/facts")
@@ -943,3 +947,79 @@ async def direct(coarse_forward, monkeypatch):
             )
             await session.execute(delete(Device).where(Device.device_code == output))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
+
+
+@pytest.fixture
+async def rack(direct, monkeypatch):
+    from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
+        OPERATION,
+        DepartureRequest,
+    )
+    from app.businesses.coarse_sorting.models import RackPreparation
+    from app.integrations.registration import registration_source
+    from app.integrations.wms_request import operation
+
+    monkeypatch.setattr(
+        operation,
+        "_registry",
+        {
+            **operation.operations(),
+            OPERATION: operation.Registered(
+                OPERATION,
+                operation.Endpoint.DECISIONS,
+                DepartureRequest,
+                None,
+                None,
+                registration_source(DepartureRequest),
+            ),
+        },
+    )
+    from app.businesses._components.rack_dispatch.models import RackAction, RackJob
+    from app.models import TransportTask
+
+    flow = direct
+    try:
+        yield flow
+    finally:
+        async with flow.factory.begin() as session:
+            prep_ids = select(RackPreparation.id).where(
+                RackPreparation.work_line_id.in_(flow.line_ids)
+            )
+            await session.execute(
+                flow.table.update()
+                .where(flow.table.c.work_line_id.in_(flow.line_ids))
+                .values(rack_preparation_id=None)
+            )
+            await session.execute(
+                flow.actions.update()
+                .where(
+                    flow.actions.c.input_preparation_id.in_(prep_ids)
+                    | flow.actions.c.result_preparation_id.in_(prep_ids)
+                )
+                .values(input_preparation_id=None, result_preparation_id=None)
+            )
+            await session.execute(
+                RackPreparation.__table__.update()
+                .where(RackPreparation.work_line_id.in_(flow.line_ids))
+                .values(current_action_id=None)
+            )
+            for action in await session.scalars(
+                select(flow.actions.c.id)
+                .where(flow.actions.c.preparation_id.in_(prep_ids))
+                .order_by(flow.actions.c.created_at.desc(), flow.actions.c.id.desc())
+            ):
+                await session.execute(delete(flow.actions).where(flow.actions.c.id == action))
+            await session.execute(
+                delete(RackPreparation).where(RackPreparation.work_line_id.in_(flow.line_ids))
+            )
+            rack_ids = select(RackJob.id).where(RackJob.work_line_id.in_(flow.line_ids))
+            for identity in await session.scalars(
+                select(RackAction.id)
+                .where(RackAction.job_id.in_(rack_ids))
+                .order_by(RackAction.ordinal.desc())
+            ):
+                await session.execute(delete(RackAction).where(RackAction.id == identity))
+            await session.execute(delete(RackJob).where(RackJob.work_line_id.in_(flow.line_ids)))
+            await session.execute(
+                delete(TransportTask).where(TransportTask.owner_domain == "coarse_sorting")
+            )

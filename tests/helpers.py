@@ -2651,3 +2651,24 @@ async def reach_allocate(flow, *, timestamp=1793206799000, changes=None):
         == "inbound.coarse_sorting.storage_allocate@v1"
     )
     return row
+
+
+def enable_racks(flow):
+    from dataclasses import replace
+
+    from app.businesses.coarse_sorting import composition
+    from app.integrations.wms_request import WmsRequests
+
+    original = flow.service.capabilities.wms.contract_consumers
+    wms = WmsRequests(
+        flow.outbox,
+        owner_domain="coarse_sorting",
+        contract_consumers=lambda key: (
+            frozenset({"coarse_sorting"}) if key[1] == "rack.departure_decide@v1" else original(key)
+        ),
+    )
+    flow.service = composition.build_rack_service(
+        replace(flow.service.capabilities, wms=wms),
+        output_locations=flow.output_locations,
+        clock=lambda: flow.now,
+    )

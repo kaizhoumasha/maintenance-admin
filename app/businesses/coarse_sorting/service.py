@@ -25,6 +25,7 @@ from .contracts import (
     ALLOCATE,
     REPORT,
     Allocated,
+    Depart,
     Replace,
     Replenish,
     ScanCompletedData,
@@ -937,6 +938,13 @@ class CoarseSortingService:
                     rack_preparation_id=latest["id"],
                     next_check_at=None,
                 )
+            rack = getattr(decision, "rack_id", None) or getattr(
+                getattr(decision, "current_rack", None), "rack_id", None
+            )
+            if latest and latest["state"] == "DEPART_ACCEPTED" and rack == latest["old_rack_id"]:
+                return await save("RACK_STATE_CONFLICT")
+            if rack and await self._rack_departure_conflict(session, row, rack, latest):
+                return await save("RACK_STATE_CONFLICT")
             if action.get("input_preparation_id"):
                 basis = (
                     (
@@ -949,9 +957,6 @@ class CoarseSortingService:
                     .mappings()
                     .one()
                 )
-                rack = getattr(decision, "rack_id", None) or getattr(
-                    getattr(decision, "current_rack", None), "rack_id", None
-                )
                 if (
                     basis["state"] == "READY"
                     and (
@@ -960,7 +965,7 @@ class CoarseSortingService:
                     )
                 ) or (basis["state"] == "DEPART_ACCEPTED" and rack == basis["old_rack_id"]):
                     return await save("RACK_STATE_CONFLICT")
-            if isinstance(decision, (Replenish, Replace)):
+            if isinstance(decision, (Replenish, Replace, Depart)):
                 if issue:
                     return await save(issue)
                 if (
@@ -1213,8 +1218,8 @@ class CoarseSortingService:
 
     async def _create_preparation(self, session, row, action, decision, latest, save):
         old = getattr(getattr(decision, "current_rack", None), "rack_id", None)
-        incoming = decision.incoming_rack
-        if incoming.rack_id == old:
+        incoming = getattr(decision, "incoming_rack", None)
+        if incoming and incoming.rack_id == old:
             return await save("PREPARATION_PLAN_CONFLICT")
         # Read the whole point's responsibility set in the same serializable snapshot.
         jobs, actions = self.scan_table, self.action_table
@@ -1240,10 +1245,10 @@ class CoarseSortingService:
                 rack_position_code=row["rack_position_code"],
                 rack_binding_version=row["rack_binding_version"],
                 generation_no=(latest["generation_no"] if latest else 0) + 1,
-                mode="REPLACE" if old else "REPLENISH",
+                mode="DEPART_ONLY" if incoming is None else "REPLACE" if old else "REPLENISH",
                 old_rack_id=old,
-                incoming_rack_id=incoming.rack_id,
-                incoming_target_face=incoming.target_face,
+                incoming_rack_id=incoming.rack_id if incoming else None,
+                incoming_target_face=incoming.target_face if incoming else None,
                 source_allocation_action_id=action["id"],
                 predecessor_action_ids=predecessors,
                 state="AWAITING_DEPARTURE" if old else "MOVING_IN",
@@ -1289,6 +1294,30 @@ class CoarseSortingService:
             except DBAPIError as error:
                 if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
                     raise
+
+    async def _original_put_complete(self, session, put, job):
+        command = await self.capabilities.ecs.get_command(
+            session, owner=OWNER, command_code=put["command_code"]
+        )
+        original_call = (
+            await self.capabilities.ecs.get_by_call(session, owner=OWNER, call_key=put["call_key"])
+            if put["call_key"]
+            else None
+        )
+        if command is None and original_call is None:
+            good = self._saved_put_completed(put, job)
+        else:
+            good = bool(
+                command
+                and original_call
+                and command.command_code == original_call.command_code == put["command_code"]
+                and command.task_type == "PUT_TO_BIN"
+                and command.device_code == put["device_code"]
+                and command.status == "SUCCEEDED"
+                and not command.needs_reconciliation
+                and self._put_completed(put, command.result)
+            )
+        return good
 
     async def _advance_preparation(self, session, preparation_id):
         from app.businesses._components.rack_dispatch.contracts import (
@@ -1409,31 +1438,9 @@ class CoarseSortingService:
         for put in {
             a["id"]: a for a in [*point_puts, *local] if a["kind"] == "PUT_TO_BIN"
         }.values():
-            command = await self.capabilities.ecs.get_command(
-                session, owner=OWNER, command_code=put["command_code"]
+            good = await self._original_put_complete(
+                session, put, next((row for row in host_rows if row["id"] == put["job_id"]), None)
             )
-            original_call = (
-                await self.capabilities.ecs.get_by_call(
-                    session, owner=OWNER, call_key=put["call_key"]
-                )
-                if put["call_key"]
-                else None
-            )
-            if command is None and original_call is None:
-                good = self._saved_put_completed(
-                    put, next((row for row in host_rows if row["id"] == put["job_id"]), None)
-                )
-            else:
-                good = bool(
-                    command
-                    and original_call
-                    and command.command_code == original_call.command_code == put["command_code"]
-                    and command.task_type == "PUT_TO_BIN"
-                    and command.device_code == put["device_code"]
-                    and command.status == "SUCCEEDED"
-                    and not command.needs_reconciliation
-                    and self._put_completed(put, command.result)
-                )
             clear = clear and good
         allow = not issue and clear and latest and latest["id"] == prep["id"]
         source = next((a for a in local if a["id"] == prep["source_allocation_action_id"]), None)
@@ -1456,10 +1463,12 @@ class CoarseSortingService:
         try:
             plan = allocation_decision.validate_python(source["evidence_history"][-1]["data"])
             valid_plan = (
-                isinstance(plan, (Replenish, Replace))
+                isinstance(plan, (Replenish, Replace, Depart))
                 and plan.workline_code == prep["workline_code"]
-                and plan.incoming_rack.rack_id == prep["incoming_rack_id"]
-                and plan.incoming_rack.target_face == prep["incoming_target_face"]
+                and getattr(getattr(plan, "incoming_rack", None), "rack_id", None)
+                == prep["incoming_rack_id"]
+                and getattr(getattr(plan, "incoming_rack", None), "target_face", None)
+                == prep["incoming_target_face"]
                 and getattr(getattr(plan, "current_rack", None), "rack_id", None)
                 == prep["old_rack_id"]
             )
@@ -1608,6 +1617,10 @@ class CoarseSortingService:
                 current_action_id=current["id"],
             )
         if public.closure_reason == "DEPARTURE_ACK" and not public.pending:
+            if prep["mode"] == "DEPART_ONLY":
+                return await save(
+                    "DEPART_ACCEPTED", state="DEPART_ACCEPTED", current_action_id=current["id"]
+                )
             if not allow:
                 return await save(
                     "ORIGINAL_RACK_CONFIGURATION_CHANGED" if issue else "AWAITING_PREDECESSORS",
@@ -1711,6 +1724,218 @@ class CoarseSortingService:
             predecessor = current
         return predecessor
 
+    async def _rack_departure_conflict(self, session, row, rack_id, latest):
+        public_jobs = await self.rack_dispatch.jobs(
+            session,
+            work_line_id=row["work_line_id"],
+            source_kinds=("COARSE_INCOMING", "COARSE_WMS_PRESENT"),
+        )
+        same_rack = [
+            j
+            for j in public_jobs
+            if j.origin.point == row["rack_position_code"] and j.origin.rack_id == rack_id
+        ]
+        departed = [j for j in same_rack if any(a.kind == "DEPARTURE_DECIDE" for a in j.actions)]
+        if not departed:
+            return False
+        if latest and latest["state"] == "READY" and latest["incoming_rack_id"] == rack_id:
+            current = next(
+                (
+                    j
+                    for j in same_rack
+                    if j.pending
+                    and j not in departed
+                    and j.origin.source_kind == "COARSE_INCOMING"
+                    and j.origin.source_ref == latest["id"]
+                ),
+                None,
+            )
+            if current:
+                enter = next((a for a in current.actions if a.kind == "ENTER"), None)
+                result = (
+                    await self.rack_dispatch.final_result(
+                        session, job_id=current.id, action_id=enter.id
+                    )
+                    if enter
+                    else None
+                )
+                if (
+                    enter
+                    and enter.phase == "APPLIED"
+                    and result
+                    and result.closure == "CLOSED"
+                    and not result.has_pending_outcome
+                    and result.arrival_face_reported
+                    and result.outcome
+                    and result.outcome["status"] == "SUCCEEDED"
+                    and result.outcome["rack_id"] == rack_id
+                    and result.outcome["final_position"]
+                    == {"kind": "RACK_POSITION", "location_code": row["rack_position_code"]}
+                    and result.outcome["arrival_face"] == latest["incoming_target_face"]
+                ):
+                    return False
+        return True
+
+    async def advance_idle_rack(self, rack_job_id: str) -> str:
+        if self.rack_dispatch is None:
+            return "RACK_PREPARATION_STAGE_REQUIRED"
+        for attempt in range(3):
+            try:
+                async with self.capabilities.session_factory() as session, session.begin():
+                    if session.get_bind().dialect.name == "postgresql":
+                        await session.connection(
+                            execution_options={"isolation_level": "SERIALIZABLE"}
+                        )
+                    return await self._advance_idle_rack(session, rack_job_id)
+            except DBAPIError as error:
+                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+                    raise
+
+    async def _advance_idle_rack(self, session, rack_job_id):
+        from app.businesses._components.rack_dispatch.contracts import (
+            Coverage,
+            DirectHandoff,
+            FactRef,
+            PointDemand,
+            PointRef,
+        )
+
+        dispatch = self.rack_dispatch
+        public = await dispatch.progress(session, job_id=rack_job_id)
+        if not public or public.origin.source_kind not in ("COARSE_INCOMING", "COARSE_WMS_PRESENT"):
+            return "NOT_FOUND"
+        line_id = public.origin.work_line_id
+        line = await session.scalar(
+            select(WorkLine).where(WorkLine.id == line_id).with_for_update()
+        )
+        devices = list(
+            await session.scalars(
+                select(Device)
+                .where(Device.work_line_id == line_id)
+                .order_by(Device.id)
+                .with_for_update()
+            )
+        )
+        await self._lock_point(session, line_id)
+        public = await dispatch.progress(session, job_id=rack_job_id)
+        if not public.pending:
+            return public.closure_reason or public.state
+        jobs, actions, preparations = self.scan_table, self.action_table, self.preparation_table
+        hosts = list(
+            (
+                await session.execute(
+                    select(jobs)
+                    .where(jobs.c.work_line_id == line_id)
+                    .order_by(jobs.c.id)
+                    .with_for_update()
+                )
+            ).mappings()
+        )
+        local = list(
+            (
+                await session.execute(
+                    select(actions)
+                    .where(
+                        or_(
+                            actions.c.job_id.in_([row["id"] for row in hosts]),
+                            actions.c.rack_job_id == rack_job_id,
+                        )
+                    )
+                    .order_by(actions.c.id)
+                    .with_for_update()
+                )
+            ).mappings()
+        )
+        point = public.origin.point
+        latest = await self._latest_preparation(session, line_id, point)
+        related = {a["preparation_id"] for a in local if a["rack_job_id"] == rack_job_id}
+        if (
+            latest
+            and latest["id"] in related
+            and latest["state"] not in ("READY", "DEPART_ACCEPTED")
+        ):
+            return "AWAITING_PREPARATION"
+        origin_preparation = (
+            (
+                await session.execute(
+                    select(preparations)
+                    .where(
+                        preparations.c.id.in_(related),
+                        preparations.c.work_line_id == line_id,
+                        preparations.c.rack_position_code == point,
+                    )
+                    .order_by(preparations.c.generation_no.desc())
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        output = next(
+            (
+                d
+                for d in devices
+                if line and d.device_code == line.device_bindings.get("OUTPUT_ARM")
+            ),
+            None,
+        )
+        source = next(
+            (
+                a
+                for a in local
+                if origin_preparation
+                and a["id"] == origin_preparation["source_allocation_action_id"]
+            ),
+            None,
+        )
+        issue = (
+            not origin_preparation
+            or not line
+            or not line.is_enabled
+            or line.business_code != "coarse_sorting"
+            or line.line_code != public.origin.workline_code
+            or line.position_bindings.get("OUTPUT_RACK") != point
+            or line.version != origin_preparation["rack_binding_version"]
+            or not source
+            or source["resource_snapshot"] != self._output_snapshot(line, output)
+        )
+        clear, demand = True, "NONE"
+        for host in hosts:
+            if host["rack_position_code"] not in (None, point) or host["state"] == "NG_COMPLETED":
+                continue
+            puts = [a for a in local if a["job_id"] == host["id"] and a["kind"] == "PUT_TO_BIN"]
+            if host["state"] in ("AWAITING_PUT", "AWAITING_REPORT", "COMPLETED"):
+                complete = bool(puts) and all(
+                    [
+                        host["allocation_action_id"] == put["predecessor_action_id"]
+                        and await self._original_put_complete(session, put, host)
+                        for put in puts
+                    ]
+                )
+                if not complete:
+                    clear, demand = False, "UNKNOWN"
+            elif host["state"] != "AWAITING_NG":
+                demand = "UNKNOWN"
+        started = any(a.kind == "DEPARTURE_DECIDE" for a in public.actions)
+        coverage = Coverage(
+            "coarse_idle",
+            ("coarse_sorting", str(line_id), public.id, public.origin.rack_id, point),
+            FactRef("rack_job", (public.id,), (str(public.facts_revision),)),
+            tuple(
+                FactRef("job", (r["id"],), (r["state"], str(r["current_action_id"]))) for r in hosts
+            ),
+        )
+        ref = PointRef("coarse_sorting", line_id, public.id, public.origin.rack_id, point)
+        advanced = await dispatch.advance(
+            session,
+            job_id=public.id,
+            demand=PointDemand(ref, "NONE" if started else demand, (coverage,)),
+            handoff=DirectHandoff(ref, "CLEAR" if clear else "BLOCKED", (coverage,)),
+            now_ms=int(self.clock().timestamp() * 1000),
+            allow_new_departure=not issue,
+        )
+        return advanced.closure_reason or advanced.review_reason or advanced.state
+
     async def scan_pending(self, *, limit=100) -> int:
         """Bound this sweep to existing pending IDs; new work gets its own wakeup."""
         if type(limit) is not int or limit < 1:
@@ -1738,10 +1963,17 @@ class CoarseSortingService:
                     self.advance_preparation,
                 )
             )
+            scans.append((None, None, self.advance_idle_rack))
         cursors = []
         async with self.capabilities.session_factory() as session:
             for subject, query, advance in scans:
-                upper = await session.scalar(query.order_by(subject.c.id.desc()).limit(1))
+                upper = (
+                    await self.rack_dispatch.pending_upper_id(
+                        session, source_kinds=("COARSE_INCOMING", "COARSE_WMS_PRESENT")
+                    )
+                    if subject is None
+                    else await session.scalar(query.order_by(subject.c.id.desc()).limit(1))
+                )
                 if upper is not None:
                     cursors.append([subject, query, advance, "", upper])
         total = 0
@@ -1749,11 +1981,21 @@ class CoarseSortingService:
             for cursor in list(cursors):
                 subject, query, advance, last_id, upper = cursor
                 async with self.capabilities.session_factory() as session:
-                    ids = list(
-                        await session.scalars(
-                            query.where(subject.c.id > last_id, subject.c.id <= upper)
-                            .order_by(subject.c.id)
-                            .limit(limit)
+                    ids = (
+                        await self.rack_dispatch.pending_ids(
+                            session,
+                            source_kinds=("COARSE_INCOMING", "COARSE_WMS_PRESENT"),
+                            after_id=last_id,
+                            upper_id=upper,
+                            limit=limit,
+                        )
+                        if subject is None
+                        else list(
+                            await session.scalars(
+                                query.where(subject.c.id > last_id, subject.c.id <= upper)
+                                .order_by(subject.c.id)
+                                .limit(limit)
+                            )
                         )
                     )
                 if not ids:
