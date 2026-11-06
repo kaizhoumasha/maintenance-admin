@@ -10,7 +10,7 @@
 
 **设计依据** [接口草案](../../integrations/coarse-sorting-api-draft.md) · [状态机设计](../specs/2026-11-02-coarse-sorting-data-model-design.md) · [公共货架调度](../specs/2026-11-02-shared-rack-dispatch-design.md)
 
-**状态** 本计划基于 `develop` 的 `da4f5bd` 评审，四阶段已完成隔离实现和独立评审。正式目录仍只启用扫码、WMS 验证和首个 `MOVE_FORWARD` / Result。复选框记录本地交付，启用前置另列。
+**状态** 本计划基于 `develop` 的 `da4f5bd` 评审，四阶段已完成隔离实现和独立评审。正式目录仍只启用扫码、WMS 验证和首个 `MOVE_FORWARD` / Result。四阶段复选框记录项目内 WES 开发及本地验收。对端签认和现场验收由联调阶段负责。
 
 ## 全局约束
 
@@ -21,9 +21,9 @@
 - 架位策略只登记 F01 进场和退场。旧架原 F01 DEPART 的有效提交接纳完成 WES 调度，允许合法后继。新架必须按原任务、架号、点位和方向确认实际到位才可用于分配和放料。
 - 测试使用模拟对端和独立数据库。正式注册沿用签认后的严格合同。当前装配未启用的合法业务分支保存原决定及待处理原因，无物理后继，也不按 `WAIT` 重求值。相应阶段启用后，按原身份及当前工作位事实复核原决定。示例字段及测试通过不代表现场已启用。
 
-## 评审边界与阶段门槛
+## 联调阶段验收边界
 
-| 边界 | 阶段 | 进入真实联调前的证据 |
+| 边界 | 对应开发阶段 | 联调阶段需取得的证据 |
 | --- | --- | --- |
 | B1 进料背压与原盘身份 | 1、2 | ECS 明确出料抓取位占用、实际缓存满位及恢复规则，并能在同码双盘时按原盘执行 |
 | B2 预留退出与真实高度 | 1 验证高度及反馈，3、4 验证旧预留退出 | WMS 确认同格可再次分配的高度依据、未使用旧目标的预留退出及仍有效预留对退架的限制 |
@@ -44,7 +44,7 @@
 - [x] 演进 `CoarseSortingScan` 为 Job，并引入单盘 Action 及原动作引用。使 `CoarseSortingService.advance(scan_id)` 和 `scan_pending()` 识别原待分配记录，保持 NG 停点，补换架和仅退架阶段再引入准备作业关联。
 - [x] 接入 `storage_allocate@v1`、`OUTPUT_ARM`、`PUT_TO_BIN` 及 `execution_report@v1`。固定原工作线、绑定、目标架、箱位、完整格号和 WMS 返回的当前高度。对合法 `WAIT` 保存一次到期点，按设计的 5000 ms 提案验证到期只登记一个新轮次，正式间隔以对端确认为准。响应未知时保持原请求。阶段未覆盖的架位决定按全局约束留证。
 - [x] 覆盖错线、错箱格、错设备和 ACK 提前到达。只有原命令明确成功且能证明指定箱格已放料才登记报告。模拟报告响应丢失、原结果迟到、设备重新在线、配置改绑及重启，断言物理入箱至多一次，成功后只恢复同一报告。在模拟报文中用 120 mm 加 20 mm 的两盘同格场景核对 WMS 高度透传，并验证满位及同码双盘时原命令身份保留。对端未证明安全退出时，保留未知入箱的原占位及预留。
-- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_direct_put.py tests/businesses/test_coarse_sorting_migration.py tests/businesses/test_coarse_sorting_forward.py -q -ra`。使用独立 PostgreSQL 验证迁移、重复推进和原身份保留。真实启用前核对 WMS 分配/反馈、ECS 入箱和 B1、B2、B4 的本阶段证据。
+- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_direct_put.py tests/businesses/test_coarse_sorting_migration.py tests/businesses/test_coarse_sorting_forward.py -q -ra`。使用独立 PostgreSQL 验证迁移、重复推进和原身份保留。
 
 ## 阶段 2 NG 搬运
 
@@ -55,7 +55,7 @@
 - [x] 通过原业务 NG 决定和历史待 NG 记录验证原原因保留。WMS 协议拒绝、通信未知及不合法结果产生零条 NG 命令。
 - [x] 为 `INPUT_ARM` 装配严格命令和结果合同。用原作业、原原因、原工作线和首次登记时核验的设备冻结一个动作。原可信成功闭合 NG，出站计数中正常输送、分配、入箱和报告均为零，也不另报 NG 结果。
 - [x] 注入同码双盘、错设备或错 NG 目的地、满位、迟到成功及失败/未知。隔离测试核对原盘、设备、冻结工位及重复唤醒的命令数量。失败或未知时保留原占位责任。
-- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_ng.py tests/businesses/test_coarse_sorting_wakeups.py -q -ra`。真实启用前确认原 NG 原因、实物对应、目标平台与成功证据，完成 B1、B4 的本阶段核对。
+- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_ng.py tests/businesses/test_coarse_sorting_wakeups.py -q -ra`。
 
 ## 阶段 3 补架与换架
 
@@ -67,7 +67,7 @@
 - [x] 粗分装配 RackDispatch 的单一共用离场合同与粗分 F01 来源策略。实现 `advance_preparation(preparation_id)` 并接入业务待办。准备记录保存方案、代次和前序，搬架动作引用原公共 RackJob/RackAction。 `rack.departure_decide@v1` 的合法 WAIT 按原到期点续问，原响应未知保持原请求。
 - [x] 新架到位须匹配原架、工作位、方向及已应用成功结果。隔离验证覆盖明确错向、仅接纳和新架到位后 WMS 返回旧架。通过模拟 Transport 公开读口的更正结果验证同一原 ENTER 恢复。旧架仍在位时的实物互锁留待现场验收。更正能力交付前保留原失败任务待核对。普通进场成功若可能缺省方向，确认其 SUCCESS 是否明确保证原目标面，否则不能凭补齐字段授予生产资格。
 - [x] 原准备就绪后，各盘沿原 `binding_id`、新 `operation_id` 重新分配；迟到旧目标只留证。旧预留实际结清留待 B2 验收。测试已放料待反馈不阻塞安全交接，未知入箱仍阻止退架。
-- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_rack_preparation.py tests/businesses/rack_dispatch -q -ra`。在独立 PostgreSQL 验证交叉授权、回滚和并发去重。真实启用前完成 B2、B3、B4 核对及 Transport 原任务更正联调。
+- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_rack_preparation.py tests/businesses/rack_dispatch -q -ra`。在独立 PostgreSQL 验证交叉授权、回滚和并发去重。
 
 ## 阶段 4 仅退架
 
@@ -79,7 +79,7 @@
 - [x] 以原有效 202/`RECEIVED` 或 200/`DUPLICATE` 进入 `DEPART_ACCEPTED`，覆盖库区及不同工作位去向。分别验证接纳缺失、合法接纳后无最终回调和接纳后迟到失败。接纳缺失保持原动作；接纳后的调度保留，WMS/RCS/ECS 按 B3 处置物理占位。
 - [x] 各等待盘沿原 `workline_code`、`binding_id` 分别登记一轮新分配。仍无新架走明确 `WAIT`，有新架走阶段 3 的 `REPLENISH_REQUIRED`。仅退架的原动作链止于 DEPART，迟到决定留证，仍把旧架当作可分配或可再退场的决定记 `RACK_STATE_CONFLICT`，零重复退架、零旧架放料。
 - [x] 按状态机 §8 验证空闲退架的独立触发。原宿主确认无本架有效需求、无未决直接动作且可安全交出时，沿原公共 RackJob 离场。尚未知的需求或占位继续核对，已放料的独立报告继续恢复。
-- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_depart_only.py tests/businesses/test_coarse_sorting_rack_preparation.py -q -ra`。真实启用前核对 B2、B3 和 `DEPART_REQUIRED` 报文，覆盖退架接纳后仍无可分配新架的真实等待。
+- [x] 运行 `rtk uv run pytest tests/businesses/test_coarse_sorting_depart_only.py tests/businesses/test_coarse_sorting_rack_preparation.py -q -ra`。
 
 ## 阶段验收记录
 
@@ -94,8 +94,10 @@
 
 Ruff、格式及差异检查通过。仅退架已有并发、原接纳、迟到结果、重分配和空闲退架回归。错误工作线、额外新架字段和原旧架来源冲突由现有合同及授权检查处理，尚无逐项专用负向用例。
 
-## 正式启用前置
+## 联调与正式启用前置
 
-- [ ] 完成 B1–B4 对端签认和现场验收，包括实物对应及背压、箱格预留及高度、旧架仍在位时的物理互锁、安全处置及责任退出。
-- [ ] 独立交付并联调 Transport 原任务结果更正。当前隔离测试覆盖粗分消费更正后的公开结果。联调须覆盖已启用更正策略的原 ENTER 返回终态 `FAILED`、报告架位于明确外部位置、随后更正为 `SUCCESS` 的场景，核对共享调度持续保有原责任，原作业位置与粗分准备状态依据同一更正结果推进。缺少合法原结果时继续保留原任务及责任。
-- [ ] 协调数据库、API 和 worker 升级，并按已签认合同启用相应阶段。
+以下事项按归属分别跟踪。相应流程在启用前须满足这些条件。
+
+- 联调阶段完成 B1–B4 对端签认与现场验收。按对应阶段核对 WMS 分配及反馈、ECS 入箱及 NG 成功证据、`DEPART_REQUIRED` 报文，以及退架接纳后仍无新架的等待。
+- 独立开发交付 Transport 原任务结果更正。项目内隔离测试已覆盖粗分消费更正后的公开结果。联调阶段须覆盖已启用更正策略的原 ENTER 返回终态 `FAILED`、报告架位于明确外部位置、随后更正为 `SUCCESS` 的场景，核对共享调度持续保有原责任，原作业位置与粗分准备状态依据同一更正结果推进。缺少合法原结果时继续保留原任务及责任。
+- 启用阶段协调数据库、API 和 worker 升级，按已签认合同启用相应流程。
