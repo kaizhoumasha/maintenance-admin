@@ -13,8 +13,19 @@ PROGRESSION = "scan_pending"
 
 
 def build_service(capabilities):
-    from .models import CoarseSortingScan
+    from .models import CoarseSortingAction, CoarseSortingJob
     from .request.inbound_coarse_sorting_validate_bind_v1 import ValidateBind
     from .service import CoarseSortingService
 
-    return CoarseSortingService(CoarseSortingScan.__table__, capabilities, ValidateBind)
+    return CoarseSortingService(
+        CoarseSortingJob.__table__, capabilities, ValidateBind, CoarseSortingAction.__table__
+    )
+
+
+def build_direct_put_service(capabilities, *, output_locations, clock):
+    """Explicit assembly seam for candidate contracts outside the deployed catalog."""
+    from dataclasses import replace
+
+    return replace(
+        build_service(capabilities), direct_put_locations=dict(output_locations), clock=clock
+    )

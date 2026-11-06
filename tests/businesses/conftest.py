@@ -613,6 +613,8 @@ async def coarse_forward(coarse_scan, monkeypatch):
         decision_status=200,
         command="ack",
         requests=[],
+        reports=[],
+        report_code="RECORDED",
         commands=[],
         started=asyncio.Event(),
         release=asyncio.Event(),
@@ -624,15 +626,33 @@ async def coarse_forward(coarse_scan, monkeypatch):
         raw = await request.body()
         body = json.loads(raw)
         flow.peer.requests.append(raw)
+        decision = (
+            flow.peer.allocate
+            if body["operation"] == "inbound.coarse_sorting.storage_allocate@v1"
+            else flow.peer.decision
+        )
         return JSONResponse(
             dict(
                 operation_id=body["operation_id"],
                 code=flow.peer.decision_code,
                 timestamp=1,
-                data=flow.peer.decision,
+                data=decision,
             ),
             status_code=flow.peer.decision_status,
         )
+
+    @peer.post("/api/v1/wes/facts")
+    async def report(request: Request):
+        raw = await request.body()
+        flow.peer.reports.append(raw)
+        if flow.peer.report_code is None:
+            return JSONResponse({}, status_code=502)
+        return {
+            "operation_id": json.loads(raw)["operation_id"],
+            "code": flow.peer.report_code,
+            "timestamp": 1,
+            "data": {},
+        }
 
     @peer.post("/api/v1/device/command")
     async def command(request: Request):
@@ -642,6 +662,12 @@ async def coarse_forward(coarse_scan, monkeypatch):
             await flow.peer.release.wait()
         if flow.peer.command == "invalid":
             return {"invalid": True}
+        if flow.peer.command == "full":
+            return JSONResponse(
+                {"code": 429, "message": "CAPACITY_EXCEEDED"},
+                status_code=429,
+                headers={"Retry-After": "1"},
+            )
         return {"code": 200, "message": "ACK"}
 
     async with loopback_app(peer) as origin:
@@ -654,6 +680,9 @@ async def coarse_forward(coarse_scan, monkeypatch):
         bindings, annexes = catalog.validate_business_contracts()
         targets = {
             "coarse-wms": TargetConfig("coarse-wms", origin, "wms-decisions"),
+            "coarse-facts": TargetConfig(
+                "coarse-facts", origin, "wms-facts", retry_base_s=60, retry_cap_s=60
+            ),
             "ecs-local": TargetConfig("ecs-local", None, "ecs-command", address_mode="SNAPSHOT"),
         }
         adapters = {**ADAPTERS, "ecs-command": EcsCommandAdapter()}
@@ -678,7 +707,10 @@ async def coarse_forward(coarse_scan, monkeypatch):
             store,
             targets,
             adapters,
-            {"coarse-wms": AsyncHttpClient(HttpClientConfig(origin, "coarse-wms"))},
+            {
+                name: AsyncHttpClient(HttpClientConfig(origin, name))
+                for name in ("coarse-wms", "coarse-facts")
+            },
             provider=DynamicClients(factory=simulator_client_factory([origin])),
         )
         flow.sender, flow.store = sender, store

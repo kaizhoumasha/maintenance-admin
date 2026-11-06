@@ -8,6 +8,7 @@ DEFINITION = BusinessDefinition(
     device_roles=(
         DeviceRole(role_key="INPUT_ARM", display_name="入料机械臂"),
         DeviceRole(role_key="CONVEYOR", display_name="输送线"),
+        DeviceRole(role_key="OUTPUT_ARM", display_name="出料机械臂", required=False),
     ),
     position_slots=(
         PositionSlot(

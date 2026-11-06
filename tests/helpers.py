@@ -1314,8 +1314,14 @@ def coarse_sorting_scan_table(name):
     from app.database import SCHEMA
 
     table = CoarseSortingScan.__table__.to_metadata(MetaData(schema=SCHEMA), name=name)
-    for constraint in table.constraints:
-        constraint.name = None
+    for constraint in tuple(table.constraints):
+        if constraint in table.foreign_key_constraints:
+            table.constraints.remove(constraint)
+            table.foreign_keys.difference_update(constraint.elements)
+        else:
+            constraint.name = None
+    for index in table.indexes:
+        index.name = f"{name[-32:]}_{index.columns.keys()[0]}_idx"
     return table
 
 

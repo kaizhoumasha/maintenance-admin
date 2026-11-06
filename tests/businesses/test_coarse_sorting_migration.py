@@ -79,3 +79,78 @@ def test_forward_migration_preserves_scans_and_guards_evidence(evidence):
                     assert connection.execute(sa.select(restored)).mappings().one() == values
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_job_migration_preserves_original_scan_and_action_identity(pg_sessions):
+    engine = pg_sessions.kw["bind"]
+    async with engine.connect() as connection, connection.begin() as transaction:
+
+        def check(sync):
+            schema = "enterprise_backend"
+            assert sa.inspect(sync).has_table("coarse_sorting_job", schema=schema)
+            migration = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_sorting_job.py"))
+            with Operations.context(MigrationContext.configure(sync)):
+                migration["downgrade"]()
+                legacy = sa.Table(
+                    "coarse_sorting_scan", sa.MetaData(), schema=schema, autoload_with=sync
+                )
+                values = {
+                    "id": "original",
+                    "event_digest": "original-digest",
+                    "receipt_id": 91,
+                    "work_line_id": 1,
+                    "workline_code": "COARSE-A",
+                    "device_id": 1,
+                    "device_code": "SCAN-A",
+                    "device_role": "INPUT_ARM",
+                    "device_version": 1,
+                    "work_line_version": 1,
+                    "binding_revision": "original",
+                    "timestamp": 1,
+                    "payload": {"barcode": "raw", "reel_diameter": 7, "reel_thickness": 20},
+                    "received_at": datetime(2026, 10, 29),
+                    "pending": True,
+                    "wait_reason": "AWAITING_ALLOCATION_STAGE",
+                    "validation_operation_id": "original-validation-id",
+                    "validation_message_id": 7,
+                    "validation_response": {"response_data": {"result": "OK", "binding_id": "B"}},
+                    "binding_id": "B",
+                    "conveyor_device_id": 2,
+                    "conveyor_device_code": "CONVEYOR",
+                    "conveyor_device_version": 1,
+                    "command_code": "original-command",
+                    "move_result": None,
+                }
+                sync.execute(legacy.insert().values(**values))
+                migration["upgrade"]()
+                job = sa.Table(
+                    "coarse_sorting_job", sa.MetaData(), schema=schema, autoload_with=sync
+                )
+                action = sa.Table(
+                    "coarse_sorting_action", sa.MetaData(), schema=schema, autoload_with=sync
+                )
+                row = sync.execute(sa.select(job).where(job.c.id == "original")).mappings().one()
+                assert row["event_digest"] == "original-digest"
+                assert row["payload"] == values["payload"]
+                assert row["binding_id"] == "B"
+                assert row["state"] == "AWAITING_ALLOCATION"
+                assert row["move_result"] is None
+                actions = {
+                    record["kind"]: record
+                    for record in sync.execute(
+                        sa.select(action).where(action.c.job_id == "original")
+                    ).mappings()
+                }
+                validation = actions["VALIDATE_BIND"]
+                assert validation["operation_id"] == "original-validation-id"
+                assert validation["message_id"] == 7
+                move = actions["MOVE_FORWARD"]
+                assert move["predecessor_action_id"] == validation["id"]
+                assert move["command_code"] == "original-command"
+                assert move["call_key"] == "original:MOVE_FORWARD"
+                assert move["evidence_history"] == []
+                assert row["current_action_id"] == move["id"]
+
+        await connection.run_sync(check)
+        await transaction.rollback()

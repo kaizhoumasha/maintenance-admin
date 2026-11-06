@@ -1,8 +1,9 @@
 """Accept scan facts and advance their original validation and conveyor command."""
 
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
 from sqlalchemy import Table, or_, select
@@ -10,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.businesses.runtime import Capabilities, require_runtime
 from app.core.identifiers import uuid7
+from app.core.strict_json import canonical_digest
 from app.diagnostics import log_exception
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.registry import EcsEventContext
@@ -20,12 +22,29 @@ from app.services.workline_service import business_configuration_issue, read_wor
 
 from .contracts import ScanCompletedData, ValidateBindDecision
 from .definition import DEFINITION
-from .ecs_command import MoveForward
+from .ecs_command import MoveForward, PutToBin, PutToBinResult
+from .request.inbound_coarse_sorting_execution_report_v1 import (
+    OPERATION as REPORT,
+)
+from .request.inbound_coarse_sorting_execution_report_v1 import (
+    ExecutionReport,
+)
+from .request.inbound_coarse_sorting_storage_allocate_v1 import (
+    OPERATION as ALLOCATE,
+)
+from .request.inbound_coarse_sorting_storage_allocate_v1 import (
+    Allocated,
+    StorageAllocate,
+    Wait,
+    allocation_decision,
+)
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
 VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 NEXT_STAGES = ("AWAITING_NG_STAGE", "AWAITING_ALLOCATION_STAGE")
+DIRECT_PUT_STATES = ("AWAITING_ALLOCATION", "AWAITING_PUT", "AWAITING_REPORT")
+WAIT_INTERVAL = timedelta(milliseconds=5000)
 
 
 @dataclass(frozen=True)
@@ -33,6 +52,13 @@ class CoarseSortingService:
     scan_table: Table
     capabilities: Capabilities
     validate_bind: type[RequestPayload]
+    action_table: Table | None = None
+    direct_put_locations: Mapping[str, str] | None = None
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+
+    @property
+    def direct_put(self) -> bool:
+        return self.direct_put_locations is not None
 
     async def accept_scan(self, ctx: EcsEventContext, payload: ScanCompletedData) -> None:
         table = self.scan_table
@@ -89,7 +115,11 @@ class CoarseSortingService:
                 async with self.capabilities.session_factory() as session, session.begin():
                     if session.get_bind().dialect.name == "postgresql":
                         await session.connection(
-                            execution_options={"isolation_level": "REPEATABLE READ"}
+                            execution_options={
+                                "isolation_level": "SERIALIZABLE"
+                                if self.direct_put
+                                else "REPEATABLE READ"
+                            }
                         )
                     return await self._advance(session, scan_id)
             except DBAPIError as error:
@@ -108,6 +138,7 @@ class CoarseSortingService:
         conveyor_code = located["conveyor_device_code"] or (
             line.device_bindings.get("CONVEYOR") if line else None
         )
+        output_code = line.device_bindings.get("OUTPUT_ARM") if line and self.direct_put else None
         devices = list(
             await session.scalars(
                 select(Device)
@@ -116,6 +147,7 @@ class CoarseSortingService:
                         Device.id == located["device_id"],
                         Device.id == located["conveyor_device_id"],
                         Device.device_code == conveyor_code,
+                        Device.device_code == output_code if output_code else False,
                     )
                 )
                 .order_by(Device.id)
@@ -125,74 +157,72 @@ class CoarseSortingService:
         row = (await session.execute(query.with_for_update())).mappings().one()
 
         async def save(reason, **values):
-            await session.execute(
-                table.update().where(table.c.id == scan_id).values(wait_reason=reason, **values)
-            )
+            values = {key: value for key, value in values.items() if row[key] != value}
+            if values or row["wait_reason"] != reason:
+                await session.execute(
+                    table.update()
+                    .where(table.c.id == scan_id)
+                    .values(wait_reason=reason, updated_at=self.clock(), **values)
+                )
             return reason
 
-        if not row["pending"] or row["wait_reason"] in NEXT_STAGES:
+        if not row["pending"] or row["wait_reason"] == "AWAITING_NG_STAGE":
             return row["wait_reason"]
-        device = next((d for d in devices if d.id == row["device_id"]), None)
-        conveyor = next((d for d in devices if d.device_code == conveyor_code), None)
-        if (
-            line is None
-            or device is None
-            or conveyor is None
-            or line.version != row["work_line_version"]
-            or line.line_code != row["workline_code"]
-            or device.version != row["device_version"]
-            or device.device_code != row["device_code"]
-            or device.work_line_id != line.id
-            or conveyor.work_line_id != line.id
-            or line.device_bindings.get("INPUT_ARM") != device.device_code
-            or line.device_bindings.get("CONVEYOR") != conveyor.device_code
-            or (
-                row["conveyor_device_id"] is not None
-                and (
-                    conveyor.id != row["conveyor_device_id"]
-                    or conveyor.version != row["conveyor_device_version"]
+        if not self.direct_put and row["state"] in DIRECT_PUT_STATES:
+            return row["wait_reason"]
+        actions = await self._lock_actions(session, row)
+        action = actions.get(row["current_action_id"])
+        if self.direct_put and row["state"] == "AWAITING_PUT":
+            return await self._advance_put(session, row, action, actions, save)
+        if self.direct_put and row["state"] == "AWAITING_REPORT":
+            return await self._advance_report(session, action, save)
+
+        issue, conveyor = await self._configuration_issue(
+            session, row, line, devices, conveyor_code
+        )
+        output = next((d for d in devices if d.device_code == output_code), None)
+        if self.direct_put and row["state"] == "AWAITING_ALLOCATION":
+            if action and action["kind"] == "ALLOCATE_STORAGE":
+                return await self._advance_allocation(
+                    session, row, action, line, output, issue, save
                 )
-            )
+            if not row["command_code"]:
+                return await save("MOVE_RECONCILIATION_REQUIRED")
+        if issue and not (
+            self.direct_put and (row["command_code"] or row["validation_operation_id"])
         ):
-            return await save("ORIGINAL_BINDING_CHANGED")
-        binding = DeviceBinding(
-            device_id=device.id,
-            device_code=device.device_code,
-            device_version=device.version,
-            work_line_id=line.id,
-            work_line_version=line.version,
-            device_role="INPUT_ARM",
-            device_bindings=line.device_bindings,
-            position_bindings=line.position_bindings,
-        )
-        if binding.revision != row["binding_revision"]:
-            return await save("ORIGINAL_BINDING_CHANGED")
-        issue = await business_configuration_issue(
-            session, binding, "coarse_sorting", definition_lookup=lambda _: DEFINITION
-        )
-        if issue:
             return await save(issue)
+        if row["state"] == "AWAITING_MOVE" and not row["command_code"]:
+            return await save("MOVE_RECONCILIATION_REQUIRED")
         if row["command_code"] is not None:
             command = await self.capabilities.ecs.get_command(
                 session, owner=OWNER, command_code=row["command_code"]
             )
-            if command is None:
+            observed = asdict(command) if command else None
+            if observed is None and self.direct_put and row["state"] == "AWAITING_ALLOCATION":
+                observed = row["move_result"]
+            if observed is None:
                 return await save("MOVE_RECONCILIATION_REQUIRED")
-            result = command.result
+            result = observed.get("result")
             if result is not None:
-                data = result.get("data", {})
-                complete = (
-                    command.status == "SUCCEEDED"
-                    and not command.needs_reconciliation
-                    and result.get("result") == "SUCCESS"
-                    and type(data.get("actual_qty")) is int
-                    and data["actual_qty"] == 1
-                )
-                return await save(
-                    "AWAITING_ALLOCATION_STAGE" if complete else "MOVE_RECONCILIATION_REQUIRED",
-                    move_result=asdict(command),
-                )
-            if command.needs_reconciliation or command.status in {
+                if action and action["kind"] == "MOVE_FORWARD":
+                    await self._consume(session, action, self._ecs_evidence(observed))
+                if self._move_complete(observed, row):
+                    if self.direct_put:
+                        if issue or action is None or action["kind"] != "MOVE_FORWARD":
+                            return await save(
+                                issue or "MOVE_RECONCILIATION_REQUIRED", move_result=observed
+                            )
+                        return await self._allocate(
+                            session, row, action, line, output, save, move_result=observed
+                        )
+                    return await save(
+                        "AWAITING_ALLOCATION_STAGE",
+                        state="AWAITING_ALLOCATION",
+                        move_result=observed,
+                    )
+                return await save("MOVE_RECONCILIATION_REQUIRED", move_result=observed)
+            if observed["needs_reconciliation"] or observed["status"] in {
                 "RECONCILING",
                 "REJECTED",
                 "EXPIRED",
@@ -201,26 +231,48 @@ class CoarseSortingService:
                 return await save("MOVE_RECONCILIATION_REQUIRED")
             return await save("AWAITING_MOVE_RESULT")
         if row["validation_operation_id"] is None:
+            if row["wait_reason"] in {
+                "AWAITING_VALIDATION_RESULT",
+                "VALIDATION_RECONCILIATION_REQUIRED",
+            } or any(
+                row[key] is not None
+                for key in (
+                    "validation_message_id",
+                    "validation_response",
+                    "binding_id",
+                    "current_action_id",
+                )
+            ):
+                return await save("VALIDATION_RECONCILIATION_REQUIRED")
             payload = row["payload"]
             operation_id = str(uuid7())
-            reference = await self.capabilities.wms.send(
+            model = self.validate_bind(
+                workline_code=row["workline_code"],
+                barcode=payload["barcode"],
+                reel_diameter=payload["reel_diameter"],
+                reel_thickness=payload["reel_thickness"],
+            )
+            reference = await self.capabilities.wms.send(session, model, operation_id=operation_id)
+            action_id = await self._insert_action(
                 session,
-                self.validate_bind(
-                    workline_code=row["workline_code"],
-                    barcode=payload["barcode"],
-                    reel_diameter=payload["reel_diameter"],
-                    reel_thickness=payload["reel_thickness"],
-                ),
+                row,
+                "VALIDATE_BIND",
+                model.model_dump(),
+                operation=VALIDATE,
                 operation_id=operation_id,
+                message_id=reference.message_id,
             )
             return await save(
                 "AWAITING_VALIDATION_RESULT",
+                current_action_id=action_id,
                 validation_operation_id=operation_id,
                 validation_message_id=reference.message_id,
                 conveyor_device_id=conveyor.id,
                 conveyor_device_code=conveyor.device_code,
                 conveyor_device_version=conveyor.version,
             )
+        if row["validation_message_id"] is None:
+            return await save("VALIDATION_RECONCILIATION_REQUIRED")
         result = await self.capabilities.wms.get_result(
             session,
             message_id=row["validation_message_id"],
@@ -247,22 +299,452 @@ class CoarseSortingService:
             return await save(
                 "VALIDATION_RECONCILIATION_REQUIRED", validation_response=asdict(result)
             )
+        if action and action["kind"] == "VALIDATE_BIND":
+            await self._consume(session, action, self._wms_evidence(result))
         if decision.result == "NG":
-            return await save("AWAITING_NG_STAGE", validation_response=asdict(result))
+            return await save(
+                "AWAITING_NG_STAGE", state="AWAITING_NG", validation_response=asdict(result)
+            )
+        if issue:
+            return await save(issue, validation_response=asdict(result))
+        model = MoveForward(barcode=row["payload"]["barcode"])
+        call_key = f"{scan_id}:MOVE_FORWARD"
         command = await self.capabilities.ecs.create(
             session,
             owner=OWNER,
-            call_key=f"{scan_id}:MOVE_FORWARD",
+            call_key=call_key,
             device_code=conveyor.device_code,
             timeout_ms=30000,
-            command=MoveForward(barcode=row["payload"]["barcode"]),
+            command=model,
+        )
+        action_id = await self._insert_action(
+            session,
+            row,
+            "MOVE_FORWARD",
+            model.model_dump(),
+            predecessor=action,
+            command_owner=OWNER.domain,
+            call_key=call_key,
+            command_code=command.command_code,
+            device_code=conveyor.device_code,
+            resource_snapshot=self._device_snapshot(conveyor, row, "CONVEYOR"),
         )
         return await save(
             "AWAITING_MOVE_RESULT",
+            state="AWAITING_MOVE",
+            current_action_id=action_id,
             validation_response=asdict(result),
             binding_id=decision.binding_id,
             command_code=command.command_code,
         )
+
+    async def _configuration_issue(self, session, row, line, devices, conveyor_code):
+        device = next((d for d in devices if d.id == row["device_id"]), None)
+        conveyor = next((d for d in devices if d.device_code == conveyor_code), None)
+        if (
+            line is None
+            or device is None
+            or conveyor is None
+            or line.version != row["work_line_version"]
+            or line.line_code != row["workline_code"]
+            or device.version != row["device_version"]
+            or device.device_code != row["device_code"]
+            or device.work_line_id != line.id
+            or conveyor.work_line_id != line.id
+            or line.device_bindings.get("INPUT_ARM") != device.device_code
+            or line.device_bindings.get("CONVEYOR") != conveyor.device_code
+            or (
+                row["conveyor_device_id"] is not None
+                and (
+                    conveyor.id != row["conveyor_device_id"]
+                    or conveyor.version != row["conveyor_device_version"]
+                )
+            )
+        ):
+            return "ORIGINAL_BINDING_CHANGED", None
+        binding = DeviceBinding(
+            device_id=device.id,
+            device_code=device.device_code,
+            device_version=device.version,
+            work_line_id=line.id,
+            work_line_version=line.version,
+            device_role="INPUT_ARM",
+            device_bindings=line.device_bindings,
+            position_bindings=line.position_bindings,
+        )
+        if binding.revision != row["binding_revision"]:
+            return "ORIGINAL_BINDING_CHANGED", None
+        if self.direct_put and not line.is_enabled:
+            return "WORKLINE_DISABLED", None
+        issue = await business_configuration_issue(
+            session, binding, "coarse_sorting", definition_lookup=lambda _: DEFINITION
+        )
+        return issue, conveyor
+
+    @staticmethod
+    def _move_complete(command, row):
+        if not command or not isinstance(result := command.get("result"), dict):
+            return False
+        data = result.get("data")
+        return (
+            command.get("command_code") == row["command_code"]
+            and command.get("task_type") == "MOVE_FORWARD"
+            and command.get("device_code") == row["conveyor_device_code"]
+            and command.get("status") == "SUCCEEDED"
+            and command.get("needs_reconciliation") is False
+            and result.get("command_code") == row["command_code"]
+            and result.get("device_code") == row["conveyor_device_code"]
+            and result.get("result") == "SUCCESS"
+            and type(result.get("finish_time")) is int
+            and 0 <= result["finish_time"] <= 2**63 - 1
+            and isinstance(data, dict)
+            and type(data.get("actual_qty")) is int
+            and data["actual_qty"] == 1
+        )
+
+    @staticmethod
+    def _device_snapshot(device, row, role):
+        return {
+            "device_id": device.id,
+            "device_code": device.device_code,
+            "device_version": device.version,
+            "role": role,
+            "work_line_version": row["work_line_version"],
+        }
+
+    async def _lock_actions(self, session, row):
+        table = self.action_table
+        if table is None or row["current_action_id"] is None:
+            return {}
+        ids = [row["current_action_id"], row["allocation_action_id"]]
+        result = await session.execute(
+            select(table)
+            .where(table.c.job_id == row["id"], table.c.id.in_(ids))
+            .order_by(table.c.id)
+            .with_for_update()
+        )
+        return {action["id"]: action for action in result.mappings()}
+
+    async def _insert_action(
+        self,
+        session,
+        row,
+        kind,
+        request_data,
+        *,
+        predecessor=None,
+        action_id=None,
+        round_no=1,
+        **references,
+    ):
+        table = self.action_table
+        if table is None:
+            return None
+        action_id = action_id or str(uuid7())
+        await session.execute(
+            table.insert().values(
+                id=action_id,
+                job_id=row["id"],
+                kind=kind,
+                round_no=round_no,
+                predecessor_action_id=predecessor["id"] if predecessor else None,
+                request_data=request_data,
+                evidence_history=[],
+                created_at=self.clock(),
+                **references,
+            )
+        )
+        return action_id
+
+    async def _consume(self, session, action, evidence):
+        history = action["evidence_history"]
+        if any(
+            {k: v for k, v in prior.items() if k != "consumed_at"} == evidence for prior in history
+        ):
+            return
+        now = self.clock()
+        table = self.action_table
+        await session.execute(
+            table.update()
+            .where(table.c.id == action["id"])
+            .values(
+                evidence_history=[*history, {**evidence, "consumed_at": now.isoformat()}],
+                last_consumed_at=now,
+            )
+        )
+
+    @staticmethod
+    def _ecs_evidence(command):
+        return {
+            "command_code": command["command_code"],
+            "digest": canonical_digest(command["result"]),
+            "data": command["result"],
+        }
+
+    @staticmethod
+    def _wms_evidence(result):
+        return {
+            "operation_id": result.operation_id,
+            "code": result.response_code,
+            "timestamp": result.response_timestamp,
+            "data": result.response_data,
+        }
+
+    async def _send_request(self, session, row, predecessor, kind, operation, model, **values):
+        operation_id = str(uuid7())
+        reference = await self.capabilities.wms.send(session, model, operation_id=operation_id)
+        return await self._insert_action(
+            session,
+            row,
+            kind,
+            model.model_dump(),
+            predecessor=predecessor,
+            operation=operation,
+            operation_id=operation_id,
+            message_id=reference.message_id,
+            **values,
+        )
+
+    async def _read_request(self, session, action):
+        return await self.capabilities.wms.get_result(
+            session,
+            message_id=action["message_id"],
+            operation=action["operation"],
+            operation_id=action["operation_id"],
+        )
+
+    @staticmethod
+    def _request_wait_reason(result, phase):
+        if (
+            result.availability == "FOUND"
+            and not result.delivery_terminal
+            and not result.delivery_uncertain
+        ):
+            return f"AWAITING_{phase}_RESULT"
+        return f"{phase}_RECONCILIATION_REQUIRED"
+
+    @staticmethod
+    def _valid_response(result, *codes):
+        return (
+            result.availability == "FOUND"
+            and result.response_state == "VALID"
+            and result.http_status == 200
+            and result.response_code in codes
+        )
+
+    @staticmethod
+    def _valid_output(line, output):
+        return (
+            line is not None
+            and output is not None
+            and output.work_line_id == line.id
+            and list(line.device_bindings.values()).count(output.device_code) == 1
+        )
+
+    async def _allocate(self, session, row, action, line, output, save, **values):
+        if not self._valid_output(line, output) or not self.direct_put_locations.get(
+            row["workline_code"]
+        ):
+            return await save("OUTPUT_ARM_CONFIGURATION_REQUIRED", **values)
+        position = line.position_bindings.get("OUTPUT_RACK")
+        if not position or (row["rack_position_code"] and row["rack_position_code"] != position):
+            return await save("ORIGINAL_RACK_POSITION_CHANGED", **values)
+        try:
+            model = StorageAllocate(
+                workline_code=row["workline_code"], binding_id=row["binding_id"]
+            )
+        except ValidationError:
+            return await save("ALLOCATION_RECONCILIATION_REQUIRED", **values)
+        action_id = await self._send_request(
+            session,
+            row,
+            action,
+            "ALLOCATE_STORAGE",
+            ALLOCATE,
+            model,
+            rack_generation_no=0,
+            round_no=action["round_no"] + 1 if action["kind"] == "ALLOCATE_STORAGE" else 1,
+        )
+        return await save(
+            "AWAITING_ALLOCATION_RESULT",
+            state="AWAITING_ALLOCATION",
+            current_action_id=action_id,
+            rack_position_code=position,
+            rack_binding_version=line.version,
+            next_check_at=None,
+            **values,
+        )
+
+    async def _advance_allocation(self, session, row, action, line, output, issue, save):
+        if action["operation"] != ALLOCATE or action["request_data"] != {
+            "workline_code": row["workline_code"],
+            "binding_id": row["binding_id"],
+        }:
+            return await save("ALLOCATION_RECONCILIATION_REQUIRED")
+        if row["next_check_at"] is not None:
+            # SQLite returns naive UTC timestamps from DateTime(timezone=True).
+            due = row["next_check_at"].replace(tzinfo=UTC)
+            if self.clock() < due:
+                return "NO_AVAILABLE_RACK"
+            if (
+                not action["evidence_history"]
+                or action["evidence_history"][-1]["data"].get("result") != "WAIT"
+            ):
+                return await save("ALLOCATION_RECONCILIATION_REQUIRED")
+            if issue:
+                return await save(issue)
+            return await self._allocate(session, row, action, line, output, save)
+        result = await self._read_request(session, action)
+        if not self._valid_response(result, "DECIDED"):
+            if result.availability == "NOT_FOUND" and action["evidence_history"]:
+                evidence = action["evidence_history"][-1]
+            else:
+                return await save(self._request_wait_reason(result, "ALLOCATION"))
+        else:
+            evidence = self._wms_evidence(result)
+        try:
+            decision = allocation_decision.validate_python(evidence["data"])
+        except ValidationError:
+            return await save("ALLOCATION_RECONCILIATION_REQUIRED")
+        await self._consume(session, action, evidence)
+        if decision.workline_code != row["workline_code"]:
+            return await save("ALLOCATION_WORKLINE_MISMATCH")
+        if isinstance(decision, Wait):
+            return await save("NO_AVAILABLE_RACK", next_check_at=self.clock() + WAIT_INTERVAL)
+        if not isinstance(decision, Allocated):
+            return await save("RACK_PREPARATION_STAGE_REQUIRED")
+        if issue:
+            return await save(issue)
+        location = self.direct_put_locations.get(row["workline_code"])
+        if not self._valid_output(line, output) or not location:
+            return await save("OUTPUT_ARM_CONFIGURATION_REQUIRED")
+        if (
+            row["rack_position_code"] != line.position_bindings.get("OUTPUT_RACK")
+            or row["rack_binding_version"] != line.version
+        ):
+            return await save("ORIGINAL_RACK_POSITION_CHANGED")
+
+        model = PutToBin(
+            barcode=row["payload"]["barcode"],
+            bin_location=decision.bin_location,
+            bin_cell_location=decision.cell_id[-1],
+            bin_type=decision.bin_type,
+            reel_totalthickness=decision.reel_totalthickness,
+        )
+        action_id = str(uuid7())
+        command = await self.capabilities.ecs.create(
+            session,
+            owner=OWNER,
+            call_key=action_id,
+            device_code=output.device_code,
+            timeout_ms=30000,
+            command=model,
+        )
+        await self._insert_action(
+            session,
+            row,
+            "PUT_TO_BIN",
+            model.model_dump(),
+            predecessor=action,
+            action_id=action_id,
+            command_owner=OWNER.domain,
+            call_key=action_id,
+            command_code=command.command_code,
+            device_code=output.device_code,
+            resource_snapshot={
+                **self._device_snapshot(output, row, "OUTPUT_ARM"),
+                "completion_location": location,
+            },
+        )
+        return await save(
+            "AWAITING_PUT_RESULT",
+            state="AWAITING_PUT",
+            current_action_id=action_id,
+            allocation_action_id=action["id"],
+        )
+
+    async def _advance_put(self, session, row, action, actions, save):
+        allocation = actions.get(row["allocation_action_id"])
+        if (
+            not action
+            or action["kind"] != "PUT_TO_BIN"
+            or action["command_owner"] != OWNER.domain
+            or not allocation
+            or allocation["kind"] != "ALLOCATE_STORAGE"
+            or action["predecessor_action_id"] != allocation["id"]
+            or not allocation["evidence_history"]
+        ):
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        command = await self.capabilities.ecs.get_command(
+            session, owner=OWNER, command_code=action["command_code"]
+        )
+        if (
+            command is None
+            or command.task_type != "PUT_TO_BIN"
+            or command.device_code != action["device_code"]
+        ):
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        result = command.result
+        if result is None:
+            reason = (
+                "AWAITING_PUT_RESULT"
+                if not command.needs_reconciliation
+                and command.status in {"QUEUED", "DISPATCHING", "WAITING_RESULT"}
+                else "PUT_RECONCILIATION_REQUIRED"
+            )
+            return await save(reason)
+        await self._consume(session, action, self._ecs_evidence(asdict(command)))
+        if (
+            command.status != "SUCCEEDED"
+            or command.needs_reconciliation
+            or result["result"] != "SUCCESS"
+            or result["command_code"] != action["command_code"]
+            or result["device_code"] != action["device_code"]
+        ):
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        try:
+            placed = PutToBinResult.model_validate(result["data"])
+            decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
+            original = PutToBin.model_validate(action["request_data"])
+            if (
+                placed.actual_qty != 1
+                or not placed.location
+                or placed.location != action["resource_snapshot"].get("completion_location")
+                or decision.workline_code != row["workline_code"]
+                or decision.bin_location != original.bin_location
+                or decision.cell_id[-1] != original.bin_cell_location
+                or decision.bin_type != original.bin_type
+                or decision.reel_totalthickness != original.reel_totalthickness
+            ):
+                return await save("PUT_RECONCILIATION_REQUIRED")
+            model = ExecutionReport(
+                workline_code=row["workline_code"],
+                binding_id=row["binding_id"],
+                bin_code=decision.bin_code,
+                bin_location=decision.bin_location,
+                cell_id=decision.cell_id,
+                completed_at=result["finish_time"],
+            )
+        except ValidationError:
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        action_id = await self._send_request(
+            session, row, action, "REPORT_COMPLETION", REPORT, model
+        )
+        return await save(
+            "AWAITING_REPORT_RESULT",
+            state="AWAITING_REPORT",
+            current_action_id=action_id,
+            placed_at_ms=model.completed_at,
+        )
+
+    async def _advance_report(self, session, action, save):
+        if not action or action["kind"] != "REPORT_COMPLETION" or action["operation"] != REPORT:
+            return await save("REPORT_RECONCILIATION_REQUIRED")
+        result = await self._read_request(session, action)
+        if not self._valid_response(result, "RECORDED", "DUPLICATE") or result.response_data != {}:
+            return await save(self._request_wait_reason(result, "REPORT"))
+        await self._consume(session, action, self._wms_evidence(result))
+        return await save("COMPLETED", state="COMPLETED", pending=False, completed_at=self.clock())
 
     async def scan_pending(self, *, limit=100) -> int:
         """Bound this sweep to existing pending IDs; new work gets its own wakeup."""
@@ -270,8 +752,13 @@ class CoarseSortingService:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
         pending = select(table.c.id).where(
-            table.c.pending.is_(True), table.c.wait_reason.not_in(NEXT_STAGES)
+            table.c.pending.is_(True),
+            table.c.wait_reason != "AWAITING_NG_STAGE",
         )
+        if not self.direct_put:
+            pending = pending.where(
+                table.c.wait_reason.not_in(NEXT_STAGES), table.c.state.not_in(DIRECT_PUT_STATES)
+            )
         async with self.capabilities.session_factory() as session:
             upper_id = await session.scalar(pending.order_by(table.c.id.desc()).limit(1))
         if upper_id is None:
@@ -314,4 +801,21 @@ async def read_scan(session, digest: str) -> dict | None:
         .mappings()
         .one_or_none()
     )
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    return {
+        key: value
+        for key, value in row.items()
+        if key
+        not in {
+            "state",
+            "next_check_at",
+            "rack_position_code",
+            "rack_binding_version",
+            "current_action_id",
+            "allocation_action_id",
+            "placed_at_ms",
+            "updated_at",
+            "completed_at",
+        }
+    }
