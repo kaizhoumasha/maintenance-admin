@@ -87,9 +87,9 @@ local 通过 `configure_local_ecs(routes=DeviceRoutes(...))` 装配，集成层 
 
 `GET /api/v1/businesses`供工作线表单读取已部署业务的编码、名称、初始触发说明和设备角色／位置声明（key、display_name、required）。要求管理员及`asset:workline:read`，不返回工厂、模型或源码路径；它与local集成注册目录用途不同。
 
-新建工作线必须传入已部署的`business_code`，例如先从业务选项选择编码，再以`{"line_code":"L1","line_name":"一线","business_code":"<所选编码>"}`创建。旧创建请求缺少此字段会失败。当前 coarse_sorting 声明 INPUT_ARM、CONVEYOR 两个必需设备角色和 OUTPUT_RACK（出料单层货架位）一个必需位置槽，覆盖扫码、验证与首个输送结果阶段，不表示完整粗分流程已实现。
+新建工作线必须传入已部署的`business_code`，例如先从业务选项选择编码，再以`{"line_code":"L1","line_name":"一线","business_code":"<所选编码>"}`创建。旧创建请求缺少此字段会失败。当前 coarse_sorting 声明 INPUT_ARM、CONVEYOR 两个必需设备角色、可选设备角色 OUTPUT_ARM 和必需位置槽 OUTPUT_RACK（出料单层货架位）。正式目录只启用扫码、验证与首个输送结果阶段。
 
-粗分工作线不配置输送线入口、出口或面向。先创建工作线并配置 `position_bindings={"OUTPUT_RACK":"CLN01"}`，将已登记设备分配到该线，再通过 PUT 写入 `device_bindings={"INPUT_ARM":"RS-INPUT-ARM-01","CONVEYOR":"RS-CONVEYOR-01"}`。RS02 对应 CLN02 及编号 02 的设备。每次更新使用最新查询返回的 version；下料机械臂可归属工作线，本阶段尚未声明或执行其业务命令。
+粗分工作线不配置输送线入口、出口或面向。先创建工作线并配置 `position_bindings={"OUTPUT_RACK":"CLN01"}`，将已登记设备分配到该线，再通过 PUT 写入 `device_bindings={"INPUT_ARM":"RS-INPUT-ARM-01","CONVEYOR":"RS-CONVEYOR-01"}`。RS02 对应 CLN02 及编号 02 的设备。每次更新使用最新查询返回的 version。出料机械臂可绑定到可选角色 OUTPUT_ARM，PUT_TO_BIN 只在粗分隔离装配中启用。
 
 迁移后的已有工作线保留`business_code: null`，仍可读取和维护。管理员可在原PUT入口首次明确选择已部署业务；已选后同值更新允许，换值或显式清空返回409。更新省略`business_code`保持原选择。列表支持该字段的`eq`、`in`、`is_null`和`not_null`过滤，选择与绑定共用原version和事务审计。
 

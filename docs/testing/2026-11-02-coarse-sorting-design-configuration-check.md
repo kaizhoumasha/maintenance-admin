@@ -50,7 +50,7 @@
 
 位置绑定只保存工作位编码。入场 target_face 由各自 WMS incoming_rack 返回，不从 CLN01/CLN02、设备后缀或工作位配置猜测。尚未取得 WMS 原架号、方向和方案时，不具备创建实际 F01 的条件。
 
-当前仓库首阶段仅声明 INPUT_ARM/CONVEYOR 与 MOVE_FORWARD。完整设计中的 OUTPUT_ARM、PUT_TO_BIN、MOVE_TO_NG、分配/报告及 F01/更正尚需对应阶段实施；Status 声明设备支持这些命令不等于 WES 已装配并实现它们。
+2026-11-02 核对时，仓库首阶段仅声明 INPUT_ARM/CONVEYOR 与 MOVE_FORWARD。完整设计中的 OUTPUT_ARM、PUT_TO_BIN、MOVE_TO_NG、分配/报告及 F01/更正当时尚需分阶段实施。当前 WES 交付状态见[分阶段实施计划](../superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md)，本记录保留当时的只读观察。
 
 ## 4. 用此配置逐场景推演
 

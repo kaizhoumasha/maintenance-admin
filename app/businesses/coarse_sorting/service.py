@@ -1005,7 +1005,7 @@ class CoarseSortingService:
             model = PutToBin(
                 barcode=row["payload"].get("barcode"),
                 bin_location=decision.bin_location,
-                bin_cell_location=decision.cell_id[-1],
+                bin_cell_location=decision.cell_index,
                 bin_type=decision.bin_type,
                 reel_totalthickness=decision.reel_totalthickness,
             )
@@ -1148,7 +1148,7 @@ class CoarseSortingService:
                 not self._put_completed(action, result)
                 or decision.workline_code != row["workline_code"]
                 or decision.bin_location != original.bin_location
-                or decision.cell_id[-1] != original.bin_cell_location
+                or decision.cell_index != original.bin_cell_location
                 or decision.bin_type != original.bin_type
                 or decision.reel_totalthickness != original.reel_totalthickness
             ):
@@ -1159,6 +1159,7 @@ class CoarseSortingService:
                 bin_code=decision.bin_code,
                 bin_location=decision.bin_location,
                 cell_id=decision.cell_id,
+                cell_index=decision.cell_index,
                 completed_at=result["finish_time"],
             )
         except ValidationError:

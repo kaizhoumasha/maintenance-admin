@@ -71,7 +71,7 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 | `received_at`、`updated_at` | UTC 时间，非空 | 接收及最近一次业务变更时间 |
 | `completed_at` | UTC 时间，可空 | 正常报告收妥或 NG 搬运明确成功后的本地闭合时间 |
 
-`scan_facts` 保留当前 payload 的三项业务事实格式，不存额外位置、箱码或设备 result。分配目标不再复制成另一份可改 JSON：通过 `allocation_action_id` 读取该动作保存的完整决定，包含原 rack_id、bin_code、bin_location、cell_id、bin_type、reel_totalthickness。入箱动作再次冻结自己实际使用的参数，报告沿原入箱目标形成。
+`scan_facts` 保留当前 payload 的三项业务事实格式，不存额外位置、箱码或设备 result。分配目标不再复制成另一份可改 JSON：通过 `allocation_action_id` 读取该动作保存的完整决定，包含原 rack_id、bin_code、bin_location、cell_id、cell_index、bin_type、reel_totalthickness。bin_location 是单层架箱位 A/B/C/D。WMS 成对提供料格储位编码 cell_id 和整数格位 cell_index（1～7）。入箱动作冻结原 cell_index 为 ECS bin_cell_location，完成报告携带原字段对。历史候选记录缺少该字段对时保留原动作及证据待核对。
 
 约束与索引：
 
@@ -231,7 +231,7 @@ stateDiagram-v2
 | AWAITING_ALLOCATION，需补架/换架 | 工作线上下文匹配，具体新架方案有效 | 消费本轮决定，复用或创建唯一 Preparation，保存当前及历史关联，进入 AWAITING_RACK |
 | AWAITING_ALLOCATION，DEPART_REQUIRED | 原工作线及旧架身份有效，原决定代次有效 | 消费本轮决定，复用或创建唯一 DEPART_ONLY Preparation，保存当前和历史关联，进入 AWAITING_RACK |
 | AWAITING_RACK，准备收口 | 原位置匹配，最新代次为 READY 或 DEPART_ACCEPTED | 保留原 binding_id，分配动作关联该准备作业并冻结新代次；从未申请分配时为 round_no=1、前序为原 MOVE_FORWARD，否则为下一轮、前序为上轮分配；进入 AWAITING_ALLOCATION，不重做验证或输送 |
-| AWAITING_ALLOCATION，ALLOCATED | 原线/原 binding 一致，箱位/箱型及 cell_id 末位合法；原请求准备代次仍有效、无活动准备作业，相关新架匹配 | 消费完整原目标，保存 allocation_action_id，唯一 PUT_TO_BIN，进入 AWAITING_PUT；迟到结果只按第6.1节处理 |
+| AWAITING_ALLOCATION，ALLOCATED | 原线/原 binding 一致，箱位、箱型及成对的 cell_id/cell_index 合法；原请求准备代次仍有效、无活动准备作业，相关新架匹配 | 消费完整原目标，保存 allocation_action_id，唯一 PUT_TO_BIN，进入 AWAITING_PUT；迟到结果只按第6.1节处理 |
 | AWAITING_PUT，原入箱完成 | 原命令可信 SUCCESS 保证指定箱格已放料；数量及严格附录合法，无待核对项 | 保存 Result、placed_at_ms、原目标及唯一 REPORT_COMPLETION，进入 AWAITING_REPORT；物理出料阶段已结束 |
 | AWAITING_REPORT，报告收妥 | 原报告 HTTP/code 合法 RECORDED/DUPLICATE | 保存收妥依据，COMPLETED、completed_at；此前不阻塞其他盘或原料格 |
 | AWAITING_NG，原 NG 搬运完成 | 原命令及原设备的可信成功结果、严格附录合法 | 保存结果，NG_COMPLETED、completed_at；不创建正常报告或 NG 报告 |

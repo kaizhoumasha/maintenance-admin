@@ -1,13 +1,13 @@
 """Coarse sorting commands and their versioned completion evidence."""
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
-from .contracts import BinLocation, BinType, ReelHeight, Reference
+from .contracts import BinLocation, BinType, CellIndex, ReelHeight, Reference
 
 
 class MoveForwardResult(BaseModel):
@@ -92,12 +92,6 @@ class PutToBin(BaseModel):
 
     barcode: Annotated[str, Field(min_length=1)]
     bin_location: BinLocation
-    bin_cell_location: Literal["1", "2", "3", "4", "5", "6"]
+    bin_cell_location: CellIndex
     bin_type: BinType
     reel_totalthickness: ReelHeight
-
-    @model_validator(mode="after")
-    def validate_cell(self) -> Self:
-        if int(self.bin_cell_location) > int(self.bin_type):
-            raise ValueError("bin_cell_location is outside the bin type")
-        return self

@@ -127,14 +127,16 @@ assert 'app.core.database' not in sys.modules
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_candidate_put_rejects_cell_outside_bin_type():
+@pytest.mark.parametrize("location", ["A", "B", "C", "D"])
+def test_candidate_put_accepts_rack_bin_locations_and_original_index(location):
     from app.businesses.coarse_sorting.ecs_command import PutToBin
 
-    with pytest.raises(ValidationError, match="outside the bin type"):
-        PutToBin(
-            barcode="RAW-1",
-            bin_location="2",
-            bin_type="3",
-            bin_cell_location="4",
-            reel_totalthickness=120,
-        )
+    command = PutToBin(
+        barcode="RAW-1",
+        bin_location=location,
+        bin_type="3",
+        bin_cell_location=7,
+        reel_totalthickness=120,
+    )
+    assert command.bin_location == location
+    assert command.bin_cell_location == 7
