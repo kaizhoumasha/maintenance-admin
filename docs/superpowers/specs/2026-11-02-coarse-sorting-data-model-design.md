@@ -1,10 +1,12 @@
 # 粗分机实体与状态机设计
 
-**2026-11-03 实施状态。** 公共服务已供手工和 BIN_Roller 使用。本宿主后续需在原事务提供原来源、点位需求和可交接事实，绑定原 job/action，生产只认原 ENTER/ROTATE 已应用成功且位置、面向相符。此处为后续接入合同，粗分分配、上架、NG 及 Transport 更正仍待实施和现场验证。
+**2026-11-06 实施状态。** 直分入箱、NG、补换架和仅退架已实现并通过显式隔离装配验证。正式目录仍只启用扫码、WMS 验证和首个 `MOVE_FORWARD` / Result。B1–B4 签认及现场验收、Transport 原任务结果更正仍是正式启用前置。
 
 > 2026-11-02 新目标决定：[公共货架调度设计](2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，此处保留 11 月 2 日的设计和验收边界。
 
-状态：2026-11-02，**设计草案，尚未实施**。用户已同意“两项业务实体、一张业务动作记录表”的方案，本轮细化字段、关联和状态转换；不修改应用代码、ORM、迁移或部署配置，不升级数据库、不提交。本文件中的新类型、表、状态和 WAIT 响应均为目标设计，不能据此宣称现有接口已经支持。
+验证基线为代码提交 `f533b50`。三组本地全量回归 6332 项通过、138 项按条件跳过、零失败，含原身份保留、并发门禁、证据留存和跨业务在途进架保护。迁移唯一头为 `coarserackstage3`。各阶段结果与启用前置见[验收记录](../plans/2026-11-06-coarse-sorting-staged-implementation.md#阶段验收记录)。
+
+2026-11-06 流程评审补充[四项推进边界](#coarse-review-state-gates)。实施分为[直分入箱、NG、补换架和仅退架](../plans/2026-11-06-coarse-sorting-staged-implementation.md)四阶段。
 
 ## 1. 已确认范围与方案
 
@@ -30,7 +32,7 @@ SCAN_COMPLETED 是 ECS 主动上报的业务事件，不是需要独立监控运
 
 只有 `CoarseSortingJob`、`RackPreparation` 是推进聚合；`CoarseSortingAction` 是聚合拥有的动作依据，没有自己的扫描器、Sender 或独立流程。使用枚举和业务方法即可，不引入状态机库或通用工作流引擎。
 
-依据：[当前接口草案](../../integrations/coarse-sorting-api-draft.md)、[现有粗分模型](../../../app/businesses/coarse_sorting/models.py)、[现有推进服务](../../../app/businesses/coarse_sorting/service.py)、[业务事务配方](../../integrations/business-transaction-recipes.md)、[公开结果读口](../../integrations/outbound-results.md)。本轮确认的业务增量以本文件为准；现有已实施范围仍止于扫码、验证及首个输送 Result。
+依据：[当前接口草案](../../integrations/coarse-sorting-api-draft.md)、[现有粗分模型](../../../app/businesses/coarse_sorting/models.py)、[现有推进服务](../../../app/businesses/coarse_sorting/service.py)、[业务事务配方](../../integrations/business-transaction-recipes.md)、[公开结果读口](../../integrations/outbound-results.md)。本轮确认的业务增量以本文件为准；正式目录启用范围仍止于扫码、验证及首个输送 Result。
 
 ## 2. 类型与持久化原则
 
@@ -273,7 +275,7 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 
 旧架可交出仅保护WES已知、直接关联该架且尚未按各自完成规则收口的设备/搬运动作；离场的接纳完成不免除发起前这些条件；不计算 WMS 库存、容量或高度。已明确成功的入箱动作可以保留报告未收妥义务而不锁住料格。新得到的旧架目标不得用于另一盘、另一架或另一工作位。
 
-入场普通成功沿现有 Transport 对 arrival_face 的规范化合同读取，必须与原 target_face 一致；显式报告不一致方向不能就绪。结果更正按独立更正设计要求显式回传同一 arrival_face，不以目标方向补造更正证据。入场目标方向和旧架离场 current_face 各属原请求上下文；后者继续按共用合同显式 null，不用新架方向推导旧架当前面。
+入场普通成功须由原结果显式报告与原 `target_face` 一致的 `arrival_face`。方向缺失、为 null、空白或不一致时，粗分准备保留核对。Transport 通用规范化补齐的方向不能使粗分就绪。若供应方允许省略方向，正式启用前须确认成功结果对原目标方向的保证并统一合同。结果更正按独立更正设计要求显式回传同一 arrival_face，不以目标方向补造更正证据。入场目标方向和旧架离场 current_face 各属原请求上下文；后者继续按共用合同显式 null，不用新架方向推导旧架当前面。
 
 ## 9. 推进职责、锁序与幂等
 
@@ -294,7 +296,7 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 
 本设计采用仓库已有的窄隔离提升方式：**所有**可能登记新 PUT、创建准备或授予出入架动作的 Job/Preparation 推进事务统一 SERIALIZABLE，并在同一事务实际读取“同位置活动准备集合”和“同位置已知未完成动作集合”再写入。仅加行锁、只提升其中一个分支、扫描会话升隔离或仅在内层 helper 升隔离均不满足要求；缺少读集合也不能仅凭隔离级别宣称安全。序列化冲突必须从新事务完整重读并重试，不使用失败事务的 DTO/空集合。
 
-这是完整设计的新增局部选择，不在本轮修改现有 RR 代码，也不增加运行时协调表或通过更新工作线配置版本来假装刷新快照。依据：[PostgreSQL 事务隔离说明](https://www.postgresql.org/docs/current/transaction-iso.html)。并发场景留待后续真实 PostgreSQL 验证，不能用文档推演或 SQLite 代替。
+隔离装配已用真实 PostgreSQL 验证交叉授权、并发去重及 `40001` 新事务重试和耗尽。正式首段继续使用既有 RR 事务。[PostgreSQL 事务隔离说明](https://www.postgresql.org/docs/current/transaction-iso.html)
 
 ### 9.2 原结果消费与新动作授权分开
 
@@ -306,13 +308,13 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 
 ## 10. 原代码与目标模型的演进边界
 
-现有 `CoarseSortingScan` 演进为 Job；首阶段只承载一盘作业的事实继续保留，不把每个步骤拆表。目标将原 payload 改名 scan_facts、timestamp 改名 event_timestamp，并将离散验证/命令引用移入 Action。实际表名变更、列迁移、回填及外键建立在实施计划中统一完成，不能凭改名丢失数据。
+现有 `CoarseSortingScan` 演进为 Job；首阶段只承载一盘作业的事实继续保留，不把每个步骤拆表。目标将原 payload 改名 scan_facts、timestamp 改名 event_timestamp，并将离散验证/命令引用移入 Action。当前迁移已变更表名并回填原动作引用，Job 继续保留原 `payload` 和 `timestamp` 列兼容历史投影。
 
 已有验证/移动引用使用**原 operation_id/message_id、owner/call_key/command_code**生成历史动作关联；call_key 沿用现有 `{原扫码id}:MOVE_FORWARD`，不能用新动作 id 重发。历史无原结果的记录保留等待/核对，不能为满足目标约束捏造证据。当前 AWAITING_VALIDATION_STAGE/RESULT、AWAITING_MOVE_RESULT 等映射到新状态，原等待原因单独保留。
 
-本轮不写迁移、不清理旧数据、不修改已实施生产目录或 `.env`。三表完成并不代表完整业务已可发真实命令；后续仍须严格命令合同、配置和供应商/现场验收。
+当前迁移将原扫码表演进为 Job，并增建 Action 和 RackPreparation，保留原身份和历史证据。旧二进制仍读取原扫码表名，应用迁移时需协调数据库、API 和 worker。正式目录的后续阶段启用仍须满足严格合同及验收前置。
 
-完整业务资源声明目标为 INPUT_ARM（SCAN_COMPLETED、MOVE_TO_NG）、CONVEYOR（MOVE_FORWARD）、OUTPUT_ARM（PUT_TO_BIN）及唯一 OUTPUT_RACK 位置槽；新增角色/严格命令和模型装配须随完整阶段交付。target_face 只由 WMS incoming_rack 提供，不因此增加位置方向配置。当前首阶段仅声明 INPUT_ARM/CONVEYOR 的代码不在本轮修改；资源补齐及版本核对不得默默重写旧 Job.acceptance_binding。
+完整业务资源声明目标为 INPUT_ARM（SCAN_COMPLETED、MOVE_TO_NG）、CONVEYOR（MOVE_FORWARD）、OUTPUT_ARM（PUT_TO_BIN）及唯一 OUTPUT_RACK 位置槽；新增角色/严格命令和模型装配须随完整阶段交付。target_face 只由 WMS incoming_rack 提供，不因此增加位置方向配置。正式目录仍沿用原命令，`OUTPUT_ARM` 为可选角色。资源补齐和版本核对保留旧 Job.acceptance_binding。
 
 ## 11. 已发现的框架接缝与实施前门槛
 
@@ -326,15 +328,26 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 
 ### 11.2 共用离场合同唯一注册
 
-`rack.departure_decide@v1` 已有单一严格模型，位于 BIN_Roller 的 request 模块；该组件还带有其自己的设备、角色和业务能力。粗分不能为得到离场合同而整包挂载 BIN_Roller，也不能在粗分重复注册同名模型。
+`rack.departure_decide@v1` 的单一严格模型现由 [RackDispatch 装配](../../../app/businesses/_components/rack_dispatch/composition.py)登记，手工和 AUTO 已消费该组件。粗分隔离装配已复用共用合同和粗分 F01 来源策略，正式装配仍保持首段范围。
 
-后续合同装配应将既有离场声明抽到一个只声明该共用请求合同的静态组件，再由原消费者和粗分通过现有 COMPONENTS 显式消费同一源模型。该静态组件没有业务身份、资源、状态表、任务或运行时方法；所需的纯合同声明装配若当前校验尚不支持，也必须先补齐装配设计。实体和状态机不因此增加第四张表，本轮不修改注册源码。
+隔离装配由 `build_rack_service` 显式注入原 owner 的 RackDispatch，隔离用例提供候选消费者。后续正式启用时须通过 `COMPONENTS` 声明并校验正式消费者。共用合同模型和公共调度身份沿用现有实现。`RackPreparation` 保存跨旧/新架方案、等待盘和代次。粗分动作引用原公共 RackJob/RackAction，搬运及离场请求的状态由公共调度维护。
 
-2026-11-02按已合入手工/BIN_Roller复核：当前`catalog.contract_consumers`及`WmsRequests.send`核对原绑定业务的显式消费关系，仅import模型或另列原组件模块路径不能使粗分获得权限。`ComponentDefinition`允许空资源/空required_methods，但`runtime.build_runtime`仍要求每个声明key都有非空运行时对象，组件也不支持嵌套。故上段是**尚待独立交付的装配变更**，不能用占位对象、挂整包BIN_Roller或绕过consumer校验来宣称已可复用。
+实施时保持手工、AUTO 和 BIN_Roller 的已登记合同、历史 `business_key`、owner 和消息字节。粗分的 F01 进退场策略及工作位门禁随宿主接入验证。
 
-将来提取须在同一改动中协调原BIN_Roller、已合入smt_manual及届时真实存在的自动消费者：operation/model/规范化和历史business_key/owner/消息字节保持，登记只一份，各真实业务的显式消费关系和组件映射同步验证；不把旧出站请求改成新owner，不重建其未决请求。该提取不要求把手工/自动任务表或生产状态抽为共享能力，也不是当前smt_auto计划的新增前置；粗分完整流程须先完成自身这项合同装配验收。
+<a id="coarse-review-state-gates"></a>
 
-## 12. 设计验收场景（仅定义，不编写或运行测试）
+### 11.3 流程评审待确认的四项推进边界
+
+编号与[接口草案 §7.1](../../integrations/coarse-sorting-api-draft.md#coarse-review-boundaries)一致。以下说明原状态何时保留、何时允许推进。对端证据来源和恢复入口待确认，表内约束不新增协议字段、自动恢复分支或已签认状态。
+
+| 编号 | 等待时的实物或责任 | 推进条件 |
+| --- | --- | --- |
+| B1 进料背压与原盘身份 | `AWAITING_ALLOCATION`、`AWAITING_RACK` 期间原盘可能仍占出料抓取位。独立 Job 可以并行等待。 | ECS 确认实际工位与缓存的接纳、满位和恢复语义。同码不同 Job 仍须关联各自原盘，状态推进或重复唤醒不授权占用同一实物位置。 |
+| B2 预留退出与真实高度 | `AWAITING_PUT` 保留原分配和预留。代次失效的 `ALLOCATED` 只留证。已放料未报妥时仍有原报告义务。 | 原入箱成功进入 `AWAITING_REPORT`，独立恢复原报告。WMS 仅凭可信当前高度重新分配同格，确认旧预留已使用或可安全退出后才释放。原预留未知时保持原请求核对；WES 不补算高度、不本地锁格、不推定释放。 |
+| B3 退架接纳与物理换架交接 | `DEPART_ACCEPTED` 仅记录原 F01 有效接纳。旧架仍在位时，物理占位和后继互锁由 WMS/RCS/ECS 管理。 | 原接纳允许合法后继，后到失败不回退或重发。新架 `READY` 仍须有原任务已应用成功及匹配的架、点位、方向。若随后分配仍返回旧架或与到位事实矛盾，保留 `RACK_STATE_CONFLICT`，待可信在位信息修正及原决定结清后按确认规则恢复，不重叫架。 |
+| B4 占位异常的恢复与责任退出 | `AWAITING_PUT`、`AWAITING_NG`、`MOVING_IN` 的失败、超时、未知保留原状态、动作引用和相应直接责任。 | 原成功事实支持原报告、NG 闭合或进场就绪。证实原执行责任终止且实物已安全处置后，方可按确认规则解除原占位或预留。仍未知则继续待核对。ECS 原结果恢复与 F01 进场更正独立，均不以设备在线或超时代替证据。 |
+
+## 12. 设计验收场景
 
 | 场景 | 必须观察到的结果 |
 | --- | --- |
@@ -355,13 +368,17 @@ Preparation 动作链固定：补架首个 MOVE_RACK_IN 的 predecessor_action_i
 | F01入场方向 | incoming_rack 必填 target_face，准备与动作冻结同一原值；新等待盘方案比对包含方向，错误/缺失不能补默认 |
 | 原任务完成时方向不符 | 保留原失败/原任务，不能用其他方向的成功更正使 Preparation 就绪 |
 | 入箱成功但报告未收妥 | 原报告可独立重试；其他盘及原料格不被 WES 额外锁定 |
+| 原盘占出料位、后一盘到达且缓存已满，或两盘同码 | ECS 阻止冲突进料或错取，按确认的工位事实恢复；两盘保持独立原身份（B1） |
+| 报告未收妥时再次请求同格，或旧 `ALLOCATED` 因代次失效未使用 | WMS 只用可信当前高度再次分配同格，按合同结清未使用预留；旧决定不授权入箱（B2） |
+| 旧架接纳后仍在原位，或新架已到而 WMS 仍返回旧架 | 后继调度可登记，物理互锁阻止冲突进场；旧架决定只留证待核对，不放料或重复叫架（B3） |
+| 入箱、NG 或进场失败后，原动作事实迟到或实物仍未知 | 明确成功沿原身份推进；确认终止及安全处置才交出责任；其余保留原状态和动作（B4） |
 | 并发推进、40001、提交结果未知和回滚 | 不提交半份动作/消费/状态，不换已提交外部身份 |
 | 事务快照先于另一事务建准备/登记入箱 | 两个完整推进同用SERIALIZABLE并读取相互依赖集合；不能同时提交互相漏读的搬架/新入箱授权；40001新事务整组恢复 |
 | 原命令已成功后配置改绑/禁用或工作线删除 | 仍可消费原事实、保存放料并报告原目标；不因此授予新设备/搬运或新分配求值 |
 | F01创建/恢复规则或公共动作引用丢失 | CTU03/F01 DEPART必须验证原ACK才接纳完成，不按ZONE/RACK_POSITION分支，不需更正；进场按已冻结policy和结果核对；不假定从未派发或新建替代动作 |
 | 原公共收据/消息清理 | 业务原身份和已保存必要依据仍在；缺失证据不默认为成功 |
 
-本轮文档检查只核对关联、状态/字段一致性、来源链接及范围；上述场景留给后续经批准的实施与隔离验证，不作为已通过的测试证据。
+上表为验收场景。隔离软件结果见[阶段验收记录](../plans/2026-11-06-coarse-sorting-staged-implementation.md#阶段验收记录)。实物互锁、对端预留和原任务更正联调仍待验证。
 
 ## 13. 设计独立检查
 
