@@ -1,6 +1,6 @@
 # SMT 自动上架与拣料 API 对接文档
 
-**当前工作区状态（2026-11-05）**　见[SMT AUTO 实施与验收](../testing/smt-auto.md)。入库、出库正常流、共同原释放/完成确认及实际宿主已接入隔离装配，代码迁移 head 为 `smtautosources`。出库空取和 NG 已按本方确认的规则接入隔离装配，ECS/WMS 联调和实机验收待完成。下文任务记录中的状态与测试数字保留当时范围。
+**当前代码状态（2026-11-05）**　见[SMT AUTO 实施与验收](../testing/smt-auto.md)。AUTO 已接入 API、worker 和 Beat 共用的正式目录，代码迁移 head 为 `smtautosources`。ECS/WMS 联调和实机验收待完成。下文任务记录中的状态与测试数字保留当时范围。
 
 历史实现快照（Task 12 后、后续迁移前）：2026-11-05，develop 基线 `98008ff`；原 AUTO S1 foundation 的7表及 `smtautofoundation` 是历史基线。本工作区 ORM 已有11张AUTO表及原成员/输入/首目标的 typed job/action 引用；增量迁移链为 `smtautofoundation` → `smtautorackfacts` → `smtautofirstplan` → `smtautosourcearrival` → `smtautofirstdeadline` → 唯一代码 head `smtautobarcode`；Task 10/11增补原首问/终局、原到位时间和期限typed字段，保留既有表/身份/数据，有证据时拒绝有损降级。迁移未应用，既有部署未改变；手工宿主5表、BIN_Roller 4表、RackDispatch 2表保持。**S1/S2整体未完成，AUTO未正式注册/装配或现场验收**；PR #49 表数及 `sharedrackdispatch` 仅为历史快照。
 
@@ -8,7 +8,7 @@ Task 8历史有界进展（2026-11-05，未提交）：在Task 7公共三类AUTO
 
 Task 9历史有界进展（2026-11-05，未提交）：真实 AUTO `RollerPorts` 已提供当前/后继任务、原计划顺序供给面及 SCAN2 原到箱关联；当前 PREPARING/EXECUTING 保留原任务身份，有效性核对恰好一条原PREPARE关联、精确 `sorting.task.prepare@v1` operation及原已消费 PREPARE_ACCEPTED、启用及宿主/编码，revision 0不被排除。错误operation或多条PREPARE关联保留原无效任务，后继为 `CHECKING`，SCAN2冻结原方向并保持 `CONTEXT_NOT_READY`/nonpending。SCAN2冻结原arrival/line/device/bin/scanned_at/task/方向，重放先返原关联，不随取消或配置变化改绑。宿主注入实际 `BinRoller` 时，规范已应用计划及实际供给成员撤回以原输入change_id、精确版本成员引用，在同一调用方事务交付公共 `apply_supply_change`；重复、别名确认及已撤回不重复交付。未注入时没有供给交付，也不证明以后自动补送。聚焦适配器 **15 passed**，AUTO/BIN_Roller/RackDispatch/迁移有界组合 **668 passed / 384 skipped**；证据来自Task 9实施报告，独立有界复审PASS，本次文档同步未重跑。SQLite证据不证明PostgreSQL锁/SSI；未完成全S2验收。S5仍须权威原在制查询、无任务旁路门禁、原释放决定/命令/结果消费、方向首次WMS work_plan及原完成确认恢复；`NO_TASK`/pending只保留关联，不授权旁路或证明释放，历史COMPLETION请求仍保守保持 `CONFIRMATION_PENDING`，`CONTEXT_NOT_READY`不自动激活。S6实际组件注入、唯一正式runtime装配/catalog激活及完整receiver路径仍未实施；11张AUTO表及代码head不变，迁移未应用，无真实WMS/ECS、部署或现场验收。 以下Task 10/11状态取代本段当时的S5待实现/代码head及事务缺口描述；历史测试数字不变。
 
-Task 12当前有界进展（2026-11-05，未提交）：正常 inbound I2 已贯通原 READY/NEXT 授权→原架侧取盘→实际原 SUCCESS/1/PUT_FINISHED 及完整 barcode/scanned_at→`putaway.material.decide@v1`→当前 ACCEPT 的原 BIN 侧放盘→实际原成功 Result→`putaway.material.movement_report@v1`→严格原公开报告收妥→TaskFlow 原 BIN 释放及实际 roller MOVE_FORWARD Result。无效 NEXT 不阻合法当前 PUT/报告，也不能伪装无后继或闭箱；有效 NEXT 创建独立下一盘。非空物理/报告闭合须实际注入可选 normal-inbound 证明读者，重读原公开命令及报告身份/状态/数据；裸 JSON、时间戳或 ACK 不足，未注入仍保守阻塞。正常正例保留独立活跃来源责任，task 仍为 EXECUTING，不证明来源离场或整单完成。
+Task 12历史有界进展（2026-11-05，未提交）：正常 inbound I2 已贯通原 READY/NEXT 授权→原架侧取盘→实际原 SUCCESS/1/PUT_FINISHED 及完整 barcode/scanned_at→`putaway.material.decide@v1`→当前 ACCEPT 的原 BIN 侧放盘→实际原成功 Result→`putaway.material.movement_report@v1`→严格原公开报告收妥→TaskFlow 原 BIN 释放及实际 roller MOVE_FORWARD Result。无效 NEXT 不阻合法当前 PUT/报告，也不能伪装无后继或闭箱；有效 NEXT 创建独立下一盘。非空物理/报告闭合须实际注入可选 normal-inbound 证明读者，重读原公开命令及报告身份/状态/数据；裸 JSON、时间戳或 ACK 不足，未注入仍保守阻塞。正常正例保留独立活跃来源责任，task 仍为 EXECUTING，不证明来源离场或整单完成。
 
 原来源取尽修正已按原已消费 MATERIAL_DECIDE 的公开严格 ACCEPT/source_rack_exhausted、原盘/任务/请求/目标及原 RackDispatch job/action/到位资源证明派生，立即排除后续 work_plan/material_decide 的 source_racks、新取盘准入及迟到原 READY 消费；重启/重放仍保留原身份，回滚不遗留消费事实，同码新 job 不继承旧到位取尽。当前已合法授权的 PUT/报告继续；取尽后的 PointDemand NONE 不等于 DirectHandoff CLEAR，不制造撤回、离场或释放证明。原始空目标占用 0/0、完整 Unicode 条码最多1000 code point 保持；新增双向 barcode 扩容迁移 `smtautobarcode` 接 `smtautofirstdeadline`，降级先核对两表并拒绝有损收窄，仍11表、迁移未应用。
 
@@ -3205,7 +3205,7 @@ WMS 业务参数取 §4 对应原授权，实际设备及工作位取 §6.1 的�
 | 回传指令结果 | ECS → WES | `POST {{WES_BASE_URL}}/api/v1/callback/result` |
 | 上报 ECS 主动事件 | ECS → WES | `POST {{WES_BASE_URL}}/api/v1/callback/event` |
 
-以上接口均使用 UTF-8 `application/json`。设备编码取工作线实际绑定：本章 ARM01/ARM02 为 KT11 实例，KT14 对应 ARM03/ARM04。ECS location_id/location_type 沿[§1.2 已确认常量映射](#auto-ecs-locations)，与 WMS/RCS 现场位置码分开；扫码平台固定 STATION_SCAN、料箱工位 STATION_WORK1、NG平台 STATION_NG，左右按动作类型映射。`timeout=30000` 为示例毫秒值，实际值取指令创建时冻结的工作线配置。
+以上接口均使用 UTF-8 `application/json`。设备编码取工作线实际绑定：本章 ARM01/ARM02 为 KT11 实例，KT14 对应 ARM03/ARM04。ECS location_id/location_type 沿[§1.2 已确认常量映射](#auto-ecs-locations)，与 WMS/RCS 现场位置码分开；扫码平台固定 STATION_SCAN、料箱工位 STATION_WORK1、NG平台 STATION_NG，左右按动作类型映射。`timeout=30000` 为示例毫秒值。每臂配置单独生效，未配置的机械臂发送 `timeout: 0`，表示不设设备执行超时。发出的值随原命令冻结。
 
 <a id="ecs-envelope-1"></a>
 #### 7.1.1 指令公共字段
@@ -3216,7 +3216,7 @@ WMS 业务参数取 §4 对应原授权，实际设备及工作位取 §6.1 的�
 | `command_code` | string | 是 | WES 生成的本次设备命令身份；与 WMS `operation_id` 分别标识各自请求 |
 | `task_type` | string | 是 | 设备动作类型，按本章对应步骤提供 |
 | `priority` | integer | 是 | 固定为 `1` |
-| `timeout` | integer | 是 | 期望完成时间，毫秒；超时不代表物理失败 |
+| `timeout` | integer | 是 | 正数为期望完成时间（毫秒），`0` 表示不设设备执行超时；超时不代表物理失败 |
 | `timestamp` | integer | 是 | 指令创建时间，UTC Unix 毫秒 |
 | `params` | object | 是 | 设备业务参数；机械臂的 `source`、`target` 放在此对象内 |
 

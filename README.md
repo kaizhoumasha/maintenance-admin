@@ -1,6 +1,6 @@
 # enterprise-backend
 
-手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。SMT 自动线已完成开发阶段的隔离验证，正式目录准入和现场联调进入后续交付阶段。粗分后续生产阶段仍在规划中。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
+手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。SMT 自动线已接入 API、worker 和 Beat 共用的正式目录，现场联调与实机验收单独进行。粗分后续生产阶段仍在规划中。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
 
 工作位进场额度现由 `positions[].capacity` 配置，运行计数限定本线当前任务；管理字段与切换要求见[人工 API](docs/integrations/manual-picking-api.md#manual-request-limit)，设计和验收范围见[容量设计](docs/superpowers/specs/2026-11-03-workline-position-capacity-design.md)、[实施计划](docs/superpowers/plans/2026-11-03-workline-position-capacity-implementation.md)及[软件验收记录](docs/testing/smt-manual.md#position-capacity)。
 
@@ -82,8 +82,8 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
 | `SMT_MANUAL_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，如 `60000`；从原 prepare 接纳的本地保存时间起计算首版计划等待。首版计划未到且未配置时保持 PREPARING，不发送版本 0 完成确认；配置时长须与 WMS 约定 |
-| `SMT_AUTO_FIRST_PLAN_WAIT_MS` | 隔离验证用的可选正整数毫秒，从原 prepare 首次可靠接纳起计时。留空时继续等待首版计划 |
-| `SMT_AUTO_WORKLINES` | 隔离验证用的 JSON 数组。每项绑定工作线版本、机械臂超时、来源工位及 Transport 调用方。空数组表示当前没有配置授权的自动线 |
+| `SMT_AUTO_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，从原 prepare 首次可靠接纳起计时。留空时继续等待首版计划 |
+| `SMT_AUTO_WORKLINES` | 站点运行配置的 JSON 数组。每项提供工作线 ID、版本和来源工位映射。两臂超时可分别配置，省略时发送 `timeout: 0`。Transport 调用方取数据库工作线 ID。空数组表示当前没有配置自动线 |
 | `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)

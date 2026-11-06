@@ -1,6 +1,6 @@
 # SMT AUTO ECS 剩余交付实施计划
 
-**阶段状态**　`feature/smt-auto-s1` 开发阶段已收尾。出库空取、NG 和复审修复已通过隔离回归。供应商实报文、对端联调和实机签收转入后续交付验收阶段。正式目录准入、部署和现场启用沿后续交付流程处理。
+**阶段状态**　`feature/smt-auto-s1` 开发阶段已收尾。出库空取、NG 和复审修复已通过隔离回归。AUTO 已接入正式运行目录。供应商实报文、对端联调、实机签收和现场启用按下文验收。
 
 **架构**　沿用 AUTO 宿主、原命令、公开结果读取、可靠交付与现有待办入口。机械臂动作由 ECS 执行，进架、换面、离场继续走 RackDispatch 和 WMS/RCS；业务只消费归属明确的原始结果。
 
@@ -10,7 +10,7 @@
 
 ## 基线与签认范围
 
-分支 `feature/smt-auto-s1` 的入库和正常出库已通过隔离回归。KT11（本地 ID 16）与 KT14（17）均已保存，版本 1，停用，五层架容量 1 为本地默认。数据库在 `smtautofoundation`，代码 head 为 `smtautosources`。正式 catalog 当前只有粗分和 SMT 手工。[既有软件与两线专项证据](../../testing/smt-auto.md)
+历史开发基线为 `feature/smt-auto-s1`，入库和正常出库已通过隔离回归。KT11（本地 ID 16）与 KT14（17）均已保存，版本 1，停用，五层架容量 1 为本地默认。数据库在 `smtautofoundation`，代码 head 为 `smtautosources`。当时正式 catalog 只有粗分和 SMT 手工。[既有软件与两线专项证据](../../testing/smt-auto.md)
 
 | 供应商说明书证据 | 收尾要求 |
 | --- | --- |
@@ -61,7 +61,7 @@
 **可与合同签认并行。** 采用隔离 PostgreSQL/Redis、已保存的 KT11/KT14 配置和受控对端地址。实际本地库迁移、外部命令及现场启用各沿单独的操作授权执行。
 
 - [ ] 从 `smtautofoundation` 升级副本到唯一 `smtautosources`，核对两线 ID、版本、停启状态、设备、路由、点位、容量与原公共历史。验证有新证据时受保护降级在改表前拒绝。记录升级前后与恢复演练证据。
-- [ ] 填写 `SMT_AUTO_WORKLINES` 的本地线 ID/版本、显式两臂超时、单层 OUTxx→STATION_A/B 映射和 Transport 调用方 ID，逐线核对左侧绑定到 STATION_A、右侧绑定到 STATION_B；首版等待仅采用已确认值。测试配置版本错误或缺失阻止新动作，旧原 Result 仍可消费。使用实际 API、worker、Beat 和正式组合代码，在隔离 catalog 中核对绑定、提交后唤醒、重启恢复及手工线回归。
+- [ ] 填写 `SMT_AUTO_WORKLINES` 的本地线 ID、版本和单层 OUTxx→STATION_A/B 映射。启线前核对运行配置与数据库版本一致，左侧绑定到 STATION_A，右侧绑定到 STATION_B。每臂可选配执行超时，省略时发送 `timeout: 0`。Transport 调用方取数据库工作线 ID。首版等待仅采用已确认值。测试配置版本错误或缺失阻止新动作，旧原 Result 仍可消费。使用实际 API、worker、Beat 和正式组合代码，在隔离 catalog 中核对绑定、提交后唤醒、重启恢复及手工线回归。
 - [ ] 运行 `rtk uv run pytest -q tests/tasks/test_smt_auto_worker.py tests/migrations/test_smt_auto_state.py tests/migrations/test_smt_auto_rack_sources.py`，显式配置测试 PostgreSQL、Redis 和独立迁移库。把本地已保存配置与历史隔离配置分开记入验收记录。
 
 ## 4. 正式准入和两线验收
