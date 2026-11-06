@@ -1182,7 +1182,7 @@ class CoarseSortingService:
     async def _lock_point(self, session, work_line_id):
         jobs = await self.rack_dispatch.admission_jobs(session, work_line_id=work_line_id)
         ids = tuple(job.id for job in jobs)
-        await self.rack_dispatch.lock_jobs(session, job_ids=ids)
+        await self.rack_dispatch.lock_admission_jobs(session, job_ids=ids)
         table = self.preparation_table
         await session.execute(
             select(table)

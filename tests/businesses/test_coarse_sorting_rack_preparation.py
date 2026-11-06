@@ -620,7 +620,7 @@ async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(r
 
 @pytest.mark.parametrize("proof", ["complete", "missing", "unknown", "wrong_call", "wrong_task"])
 async def test_original_saved_put_completion_is_required_when_command_was_removed(rack, proof):
-    from app.models import EcsCommand
+    from app.models import EcsCommand, EcsResultEvidence
 
     flow = rack
     flow.peer.allocate = allocated(flow)
@@ -651,6 +651,9 @@ async def test_original_saved_put_completion_is_required_when_command_was_remove
         ).status_code == 200
         assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
     async with flow.factory.begin() as session:
+        await session.execute(
+            delete(EcsResultEvidence).where(EcsResultEvidence.command_code == put["command_code"])
+        )
         await session.execute(
             delete(EcsCommand).where(EcsCommand.command_code == put["command_code"])
         )

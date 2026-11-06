@@ -2,12 +2,26 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 
+from app.businesses._components.rack_dispatch.contracts import (
+    Coverage,
+    DirectHandoff,
+    FactRef,
+    JobOrigin,
+    PointDemand,
+    PointRef,
+)
+from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses.coarse_sorting.models import RackPreparation
+from app.core.identifiers import uuid7
+from app.integrations.wms_transport import TransportCaller, TransportService
+from app.models import WorkLine
+from app.reliable import ScopeRef
 from tests.helpers import (
     allocated,
     deliver_transport_callback,
@@ -58,6 +72,98 @@ async def accept_departure(flow, prep, destination="ZONE"):
     assert await flow.service.advance_preparation(prep) == "DEPART_ACCEPTED"
 
 
+@pytest.mark.parametrize("stopped", [False, True], ids=["active", "closed-by-scope"])
+async def test_wms_presence_waits_for_another_owners_original_entry(rack, stopped):
+    _, prep = await depart_only(rack)
+    line_id = rack.line_ids[0]
+    scope = ScopeRef("smt_manual", "LINE", str(line_id))
+    other = RackDispatch(
+        scope.owner_domain,
+        replace(
+            rack.service.capabilities,
+            transport=TransportService(rack.outbox, owner_domain=scope.owner_domain),
+        ),
+    )
+    async with rack.factory.begin() as session:
+        line = await session.get(WorkLine, line_id)
+        point = line.position_bindings["OUTPUT_RACK"]
+        line.business_code = scope.owner_domain
+        await session.flush()
+        job_id = await other.register(
+            session,
+            JobOrigin(
+                "ROLLER_DRAIN",
+                "other-entry",
+                line_id,
+                "OTHER",
+                None,
+                line.line_code,
+                point,
+                "90",
+                TransportCaller(line.line_code, point),
+                str(uuid7()),
+                {"positions": {"OUTPUT_RACK": point}},
+            ),
+            scope=scope,
+        )
+        assert await other.prepare(
+            session, job_id=job_id, kind="ENTER", source_ref="other-entry", face="90"
+        )
+        line.business_code = "coarse_sorting"
+
+    rack.peer.transport_status, rack.peer.transport_code = 409, "CONFLICT"
+    rack.peer.departure = {
+        "result": "READY",
+        "rack_destination": {"type": "ZONE", "location_code": "DEST"},
+    }
+    before = len(rack.peer.requests)
+    if not stopped:
+        assert await rack.service.advance_preparation(prep) == "WMS_PRESENCE_UNPROVED"
+    assert await rack.dispatch() == 1
+    async with rack.factory.begin() as session:
+        if stopped:
+            await rack.outbox.stop_scope(session, scope, reason="LINE_STOPPED")
+            await other.close_scope(session, scope, reason="LINE_STOPPED")
+        original = await other.progress(session, job_id=job_id)
+        assert original.state == ("CLOSED_BY_SCOPE" if stopped else "ACTIVE")
+        assert original.pending and original.actual_position is None
+        assert original.position_action_id is None
+        assert (
+            original.actions[0].transport_task_id
+            == rack.peer.transports[0]["data"]["transport_task_id"]
+        )
+
+    assert await rack.service.advance_preparation(prep) == "WMS_PRESENCE_UNPROVED"
+    assert await rack.dispatch() == 0
+    assert len(rack.peer.requests) == before
+    assert len(rack.peer.transports) == 1
+    async with rack.factory() as session:
+        (adoption,) = await rack.service.rack_dispatch.jobs(
+            session, work_line_id=line_id, source_kinds=("COARSE_WMS_PRESENT",)
+        )
+        assert not adoption.actions
+
+    ref = PointRef(scope.owner_domain, line_id, job_id, "OTHER", point)
+    coverage = Coverage(
+        "line",
+        (scope.owner_domain, str(line_id), job_id, "OTHER", point),
+        FactRef("scope", (scope.scope_id,), ("1",)),
+        (),
+    )
+    async with rack.factory.begin() as session:
+        released = await other.advance(
+            session,
+            job_id=job_id,
+            demand=PointDemand(ref, "NONE", (coverage,)),
+            handoff=DirectHandoff(ref, "CLEAR", (coverage,)),
+            now_ms=1,
+        )
+        assert not released.pending and released.actions == original.actions
+    rack.peer.transport_status, rack.peer.transport_code = 202, "RECEIVED"
+    await accept_departure(rack, prep)
+    assert [item["data"]["rack_id"] for item in rack.peer.transports] == ["OTHER", "OLD"]
+
+
 @pytest.mark.parametrize("destination", ["ZONE", "RACK_POSITION"])
 @pytest.mark.parametrize("status,code", [(202, "RECEIVED"), (200, "DUPLICATE")])
 async def test_only_depart_acceptance_ends_chain_and_reallocates_each_original_binding(
@@ -84,7 +190,10 @@ async def test_only_depart_acceptance_ends_chain_and_reallocates_each_original_b
                 )
             ).mappings()
         )
-    assert [a["kind"] for a in actions] == ["DEPARTURE_DECIDE", "MOVE_RACK_OUT"]
+    assert len(actions) == 2
+    by_kind = {action["kind"]: action for action in actions}
+    assert by_kind.keys() == {"DEPARTURE_DECIDE", "MOVE_RACK_OUT"}
+    assert by_kind["MOVE_RACK_OUT"]["predecessor_action_id"] == by_kind["DEPARTURE_DECIDE"]["id"]
     for item in (row, second):
         assert await flow.service.advance(item["id"]) == "AWAITING_ALLOCATION_RESULT"
         action = [a for a in await flow.action_rows(item["id"]) if a["kind"] == "ALLOCATE_STORAGE"][

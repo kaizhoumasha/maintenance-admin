@@ -1247,7 +1247,12 @@ class RackDispatch:
             )
         )
         for other in conflicts:
-            if self.has_external_responsibility(other, await self._actions(session, other)):
+            actions = await session.scalars(
+                select(RackAction)
+                .where(RackAction.job_id == other.id, RackAction.owner_domain == other.owner_domain)
+                .execution_options(populate_existing=True)
+            )
+            if self.has_external_responsibility(other, actions):
                 return False
         result = await self.capabilities.wms.get_result(
             session,
@@ -1311,6 +1316,8 @@ class RackDispatch:
             if not await self._coarse_presence(session, job):
                 job.review_reason = "WMS_PRESENCE_UNPROVED"
                 return _snapshot(job, actions)
+            if job.review_reason == "WMS_PRESENCE_UNPROVED":
+                job.review_reason = None
             if (
                 actions
                 and actions[-1].kind == "DEPARTURE_DECIDE"
