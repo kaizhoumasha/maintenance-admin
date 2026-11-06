@@ -73,7 +73,7 @@ ENTER/ROTATE只认原严格已应用成功及精确point/face；DEPART/RACK_MOVE
 <a id="auto-config"></a>
 ### 1.1 KT11 / KT14 已确认配置
 
-来源：**2026-11-03 用户在本次配置核对中确认**的设备、现场点位、ECS 地址、机械臂分工及左右布局。两线目标宿主均为 `smt_auto`，任务 `task_type=AUTO`，内部支持 `inbound/outbound`；手工线配置见[KT16/KT18](manual-picking-api.md#manual-config)。本节只记录配置基线，不表示已写入系统、AUTO 已实施/注册/部署或设备已通过现场验收。
+来源：**2026-11-03 用户在本次配置核对中确认**的设备、现场点位、ECS 地址、机械臂分工及左右布局。两线目标宿主均为 `smt_auto`，任务 `task_type=AUTO`，内部支持 `inbound/outbound`；手工线配置见[KT16/KT18](manual-picking-api.md#manual-config)。本节记录配置基线，实际写入、部署和现场验收以交付记录为准。
 
 | 设备 / 逻辑角色 | KT11 | KT14 | 用途 |
 | --- | --- | --- | --- |
@@ -403,14 +403,14 @@ flowchart TB
 
 本章与smt_manual共用[sorting_task计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：[ST1](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st1)交付任务模型、任务响应合同及必要receiver适配；[ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st2)交付可信原归属、按原模式/方向调用严格分支校验及单份注册/薄分派。具体归属见[共享计划唯一分工](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)。自动宿主只核对准入/实际连续版本/成员及状态，任务表、队列、原输入及prepare/完成确认推进由总计划S1/S5实现；方向资源、逐盘接口、机械臂/生产架流、完成资格和入库归档政策仍归smt_auto。共享组件只提供合同与分派，不承接这些业务状态。
 
-共享验收先由ST1用隔离operation验证公共接缝、旧默认及收据重验保护，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；不反向要求ST1依赖这些正式入口。首个真实宿主可独立接入，但其前置共享合同须完整包含MANUAL/AUTO四分支并遵守[发布后冻结规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，无需等待另一宿主生产流程；共享部分已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；自动宿主与正式组合仍待实施/验证；人工首宿主及公共后续收敛已随PR #47/064b5c8合入，既有软件证据见[手工统一验收](../testing/smt-manual.md#current-delivery)，本轮未重跑。
+共享验收先由ST1用隔离operation验证公共接缝、旧默认及收据重验保护，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；不反向要求ST1依赖这些正式入口。首个真实宿主可独立接入，但其前置共享合同须完整包含MANUAL/AUTO四分支并遵守[发布后冻结规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，无需等待另一宿主生产流程；共享部分已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；自动宿主已接入正式运行目录，现场联调另行验收；人工首宿主及公共后续收敛已随PR #47/064b5c8合入，既有软件证据见[手工统一验收](../testing/smt-manual.md#current-delivery)，本轮未重跑。
 
 <a id="task-envelope"></a>
 ### 3.1 任务命名、字段与原归属
 
 新增任务统一 `sorting.task.*@v1`：issued、queue_changed、prepare、plan_delta、cancel、completion_confirm。只有 issued 必填 task_type/business_type/workline_code；其余操作按原 task_id 解析冻结模式、方向和业务，不额外发送选择器或业务码。首次 issued 先由工作线可信配置确定宿主并校验消费者关系，已有任务/终态摘要重报先读原归属，不能因当前工作线改配而转给新业务；缺失/歧义不广播、不猜测。 WMS负责task_id在sorting_task显式消费者范围唯一；接收方拒绝可见歧义，原归属读口不提供跨宿主任务表的全局数据库唯一约束。
 
-新 WMS 请求本地 business_key=business:smt_auto，Transport owner_domain=smt_auto，新 ECS 意图使用 CommandOwner("smt_auto")。inbound/outbound 与组件都不是独立 owner；不改历史冻结请求或回填历史 null。任务号及业务编码遵循[字段规则](#field-rules)，工作线启停见[准入规则](#workline-admission)。
+新 WMS 请求本地 business_key=business:smt_auto，Transport owner_domain=smt_auto，新 ECS 意图使用 CommandOwner("smt_auto")。新搬运的本地 `caller.workline_id` 取数据库工作线 ID 的字符串，原搬运继续使用冻结的调用方。inbound/outbound 与组件都不是独立 owner；不改历史冻结请求或回填历史 null。任务号及业务编码遵循[字段规则](#field-rules)，工作线启停见[准入规则](#workline-admission)。
 
 <a id="task-issued"></a>
 ### 3.2 sorting.task.issued@v1
@@ -4279,21 +4279,21 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 <a id="delivery"></a>
 ## 10 交付依赖、验收与已确认边界
 
-当前develop代码基线为98008ff，唯一迁移head为smtautofoundation（父smtmanualoprename）；AUTO已有7张foundation表及局部S1宿主修正，S1整体仍未完成。手工/BIN_Roller接入公共调度的#49/7ab5e31历史软件证据见[公共计划](../superpowers/plans/2026-11-03-shared-rack-dispatch-implementation.md#最终验收2026-11-03)。原ST1/ST2数字仍属其历史交付，不能充当当前AUTO证据。AUTO仍须从既有7表保留数据演进至目标11表，完成来源扩充、方向plate/decision_round、生产/归档/报告适配及三组件正式装配；队列领取、prepare/原结果消费和TaskHost原计划重验已有隔离宿主入口，测试专用真实共享receiver与当前S1独立prepare隔离/有界重试已有证据；正式AUTO catalog/runtime、设备/方向完整资源声明与准入及PostgreSQL并发门槛仍待完成，按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)验证；worker/对端/部署/实物分别记证，公共代码合入和ACK不等于AUTO或物理完成。
+以下为历史交付基线。develop 在 `98008ff` 时的迁移 head 为 `smtautofoundation`，当时 AUTO 有 7 张 foundation 表及局部 S1 宿主修正。当前软件与现场验收进度见[SMT AUTO 实施与验收](../testing/smt-auto.md)。手工/BIN_Roller接入公共调度的#49/7ab5e31历史软件证据见[公共计划](../superpowers/plans/2026-11-03-shared-rack-dispatch-implementation.md#最终验收2026-11-03)。原ST1/ST2数字仍属其历史交付，不能充当当前AUTO证据。当时的交付计划要求 AUTO 从既有 7 表保留数据演进至目标 11 表，完成来源扩充、方向plate/decision_round、生产/归档/报告适配及三组件正式装配；队列领取、prepare/原结果消费和TaskHost原计划重验已有隔离宿主入口，测试专用真实共享receiver与当前S1独立prepare隔离/有界重试已有证据；正式AUTO catalog/runtime、设备/方向完整资源声明与准入及PostgreSQL并发门槛仍待完成，按[smt_auto总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)验证；worker/对端/部署/实物分别记证，公共代码合入和ACK不等于AUTO或物理完成。
 
 <a id="delivery-dependencies"></a>
 ### 10.1 一份共同交付清单与方向差异
 
 | 交付物 | 共同要求 | inbound差异 | outbound差异 |
 | --- | --- | --- | --- |
-| 业务/任务合同 | sorting_task单份六操作与可信分派、显式重验/错误/可选guard已随PR #44合入；smt_auto已有7表及局部任务/归属/计划/取消修正，持久队列领取、prepare/原结果消费及TaskHost原计划重验已有隔离宿主入口，完整AUTO receiver/catalog/runtime、资源准入及服务/推进装配仍待接入，旧接口默认不变 | 单层架/接料生产与7天归档、五通知只读guard按9.3落实 | BIN/RackSlot生产、面级终局与目标架；不采用入库归档政策 |
+| 业务/任务合同 | sorting_task单份六操作与可信分派、显式重验/错误/可选guard已随PR #44合入；smt_auto 的共享任务接收、资源准入和推进服务已接入正式运行目录，工作线启用和对端验收另行核对 | 单层架/接料生产与7天归档、五通知只读guard按9.3落实 | BIN/RackSlot生产、面级终局与目标架；不采用入库归档政策 |
 | BIN_Roller/RackDispatch及结果接缝 | 历史#49交付手工5表/roller8表/公共2表和原submit接纳，当前roller已收敛4表、公共仍2表；自动从既有7表保留数据演进至目标11表、AUTO来源/模板窄扩充及PointDemand/DirectHandoff真实适配，不重跑公共切换 | 原单层/五层scope及原准备action资格 | RETURN/TRANSFER原授权及目标job/action，报告独立恢复，RackSlot不套feed_complete |
 | WMS实现 | 任务族/严格方向联合、连续版本/精确取消、完整授权/决定、同键唯一未闭合授权、报告去重/入账事务、三分支完成确认及原等待配置 | 最新source_racks续问、仅正常成功报告、SOURCE_ABSENT及箱格/深度由WMS保证 | BIN空取locator仅type/bin_code/cell_id；NG必报收妥后续问、SOURCE_DONE仅闭原Cell/SLOT，四项RackSlot取盘参数完整 |
 | ECS严格附录 | 原命令/Result/完整barcode-scanned_at、数量/阶段、ACK先后/重报、原厂code/msg；7.1.4硬件停机报警、人工处理后原未结束命令恢复，处置期不先报FAILED，仅恢复未完成部分，重启保留原阶段并最终补报；不更正既成FAILED，实际设备证据独立 | 两臂params及FAILED/0/PICK_EMPTY、STATION_NG完整映射与NG不报告；数值/放盘前口径保持 | 已定原 FAILED/0/PICK_FAILED 及 finish_time。已定本线 BIN_ARM 的扫码台→NG 参数及原成功 Result。供应商核对样本、原命令重报，WMS/现场核对 NG 区域映射及实际放置 |
 | 资源/RCS配置 | KT11/KT14设备、现场点位、三组ECS地址及位置常量已确认，见§1.1～1.2；实际保存/部署、模板、超时、可选首批等待及真实到位/面向/互锁仍须验收 | 左右单层现场位映射STATION_A/B，F01；两臂/扫码台/SCAN2/NG常量 | B退料取、A转运放；RETURN/TRANSFER的F01/CK04/F01、供箱CTU；CK04对端支持同步；DEPART有效接纳不证明物理完成，ENTER/ROTATE仍须真实到位 |
 | 历史与启用 | 原身份/正文/owner/路由/期限/证据保留，迁移单head/旧数据保留；真实发送、迁移执行、部署另按授权 | 清理不删公共/未决恢复依据，最小摘要持续保留 | 不移植旧插件运行时、锁/容量窗口或历史生产数据 |
 
-缺依赖时对应正式注册/严格解析/真实发送和现场验收保持未交付，不能用假组件、空模型、默认值或自动重建动作消除缺口；可独立完成不依赖该交付的文档/隔离验证。完整自动包须满足两个方向及共同装配的适用门槛。
+缺少对端或现场证据时，相应真实发送和实机验收保持待确认，不能用假组件、空模型、默认值或自动重建动作消除缺口；可独立完成不依赖该交付的文档/隔离验证。完整自动包须满足两个方向及共同装配的适用门槛。
 
 <a id="acceptance"></a>
 ### 10.2 统一验收矩阵：共同规则一次覆盖，方向差异明确标记
