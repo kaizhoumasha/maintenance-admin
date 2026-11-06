@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.businesses._components.rack_dispatch.contracts import (
     Coverage,
@@ -20,7 +20,7 @@ from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses.coarse_sorting.models import RackPreparation
 from app.core.identifiers import uuid7
 from app.integrations.wms_transport import TransportCaller, TransportService
-from app.models import WorkLine
+from app.models import TransportTask, WorkLine, WorkLinePosition
 from app.reliable import ScopeRef
 from tests.helpers import (
     allocated,
@@ -162,6 +162,118 @@ async def test_wms_presence_waits_for_another_owners_original_entry(rack, stoppe
     rack.peer.transport_status, rack.peer.transport_code = 202, "RECEIVED"
     await accept_departure(rack, prep)
     assert [item["data"]["rack_id"] for item in rack.peer.transports] == ["OTHER", "OLD"]
+
+
+@pytest.mark.parametrize("shared_preparation", [False, True], ids=["direct", "rack"])
+async def test_allocation_waits_for_another_worklines_original_move_of_same_rack(
+    rack, shared_preparation
+):
+    if shared_preparation:
+        enable_racks(rack)
+    line_id = rack.line_ids[1]
+    scope = ScopeRef("smt_manual", "LINE", str(line_id))
+    other = RackDispatch(
+        scope.owner_domain,
+        replace(
+            rack.service.capabilities,
+            transport=TransportService(rack.outbox, owner_domain=scope.owner_domain),
+        ),
+    )
+    rack_id = "SAME-RACK"
+    async with rack.factory.begin() as session:
+        line = await session.get(WorkLine, line_id)
+        point = line.position_bindings["OUTPUT_RACK"]
+        line.business_code = scope.owner_domain
+        session.add(WorkLinePosition(work_line_id=line.id, position_code=point, capacity=1))
+        await session.flush()
+        job_id = await other.register(
+            session,
+            JobOrigin(
+                "ROLLER_DRAIN",
+                "other-entry",
+                line_id,
+                rack_id,
+                None,
+                line.line_code,
+                point,
+                "90",
+                TransportCaller(line.line_code, point),
+                str(uuid7()),
+                {"positions": {"OUTPUT_RACK": point}},
+            ),
+            scope=scope,
+        )
+        assert await other.prepare(
+            session, job_id=job_id, kind="ENTER", source_ref="other-entry", face="90"
+        )
+
+        registered = await other.progress(session, job_id=job_id)
+        task_id = registered.actions[0].transport_task_id
+
+    try:
+        assert await rack.dispatch() == 1
+        wire = rack.peer.transports[-1]["data"]
+        rack.peer.allocate = allocated(rack, rack_id=rack_id)
+        row = await reach_allocate(rack)
+        original = (await rack.action_rows(row["id"]))[-1]
+        assert await rack.service.advance(row["id"]) == "RACK_STATE_CONFLICT"
+        assert await rack.dispatch() == 0
+        assert [item["kind"] for item in await rack.action_rows(row["id"])] == [
+            "VALIDATE_BIND",
+            "MOVE_FORWARD",
+            "ALLOCATE_STORAGE",
+        ]
+        assert (await rack.rows())[0]["current_action_id"] == original["id"]
+
+        ref = PointRef(scope.owner_domain, line_id, job_id, rack_id, point)
+        coverage = Coverage(
+            "line",
+            (scope.owner_domain, str(line_id), job_id, rack_id, point),
+            FactRef("scope", (scope.scope_id,), ("1",)),
+            (),
+        )
+        await deliver_transport_callback(
+            rack.factory,
+            "transport.task.resulted@v1",
+            {
+                "transport_task_id": wire["transport_task_id"],
+                "kind": "RACK_MOVE",
+                "outcome_revision": 1,
+                "rack_id": rack_id,
+                "status": "FAILED",
+                "final_position": {"kind": "RACK_POSITION", "location_code": "EXTERNAL-UNMANAGED"},
+                "failure_code": "RCS_EXECUTION_FAILED",
+            },
+        )
+        async with rack.factory.begin() as session:
+            pending = await other.progress(session, job_id=job_id)
+            assert (
+                pending.pending
+                and pending.actions[0].transport_task_id == wire["transport_task_id"]
+            )
+            released = await other.advance(
+                session,
+                job_id=job_id,
+                demand=PointDemand(ref, "NONE", (coverage,)),
+                handoff=DirectHandoff(ref, "CLEAR", (coverage,)),
+                now_ms=1,
+            )
+            assert not released.pending and released.closure_reason == "NOT_ARRIVED"
+        assert await rack.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
+        assert await rack.dispatch() == 1
+        assert json.loads(rack.peer.commands[-1])["task_type"] == "PUT_TO_BIN"
+        assert (await rack.action_rows(row["id"]))[-1]["predecessor_action_id"] == original["id"]
+    finally:
+        async with rack.factory.begin() as session:
+            await session.execute(
+                delete(TransportTask).where(
+                    TransportTask.owner_domain == scope.owner_domain,
+                    TransportTask.transport_task_id == task_id,
+                )
+            )
+            await session.execute(
+                delete(WorkLinePosition).where(WorkLinePosition.work_line_id == line_id)
+            )
 
 
 @pytest.mark.parametrize("destination", ["ZONE", "RACK_POSITION"])

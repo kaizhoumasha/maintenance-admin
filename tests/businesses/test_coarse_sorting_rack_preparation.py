@@ -304,12 +304,23 @@ async def test_failed_registration_rolls_back_preparation_reference_and_outbox(r
     assert len(flow.peer.transports) == 1
 
 
-async def test_applied_original_correction_resumes_same_entry_via_public_readers(rack, monkeypatch):
+@pytest.mark.parametrize("external", [False, True], ids=["unknown", "known-external"])
+async def test_applied_original_correction_resumes_same_entry_via_public_readers(
+    rack, monkeypatch, external
+):
     flow = rack
     _, prep = await prepare(flow)
     await flow.service.advance_preparation(prep)
     await flow.dispatch()
     wire = flow.peer.transports[-1]["data"]
+    failure = (
+        {
+            "final_position": {"kind": "RACK_POSITION", "location_code": "EXTERNAL-UNMANAGED"},
+            "failure_code": "RCS_EXECUTION_FAILED",
+        }
+        if external
+        else {"position_unknown": True, "failure_code": "POSITION_UNKNOWN"}
+    )
     await deliver_transport_callback(
         flow.factory,
         "transport.task.resulted@v1",
@@ -319,11 +330,15 @@ async def test_applied_original_correction_resumes_same_entry_via_public_readers
             "outcome_revision": 1,
             "rack_id": "NEW",
             "status": "FAILED",
-            "position_unknown": True,
-            "failure_code": "POSITION_UNKNOWN",
+            **failure,
         },
     )
     assert await flow.service.advance_preparation(prep) == "RACK_RECONCILIATION_REQUIRED"
+    async with flow.factory() as session:
+        shared = await flow.service.rack_dispatch.progress(session, job_id=prep)
+    assert shared.pending
+    assert shared.actions[0].transport_task_id == wire["transport_task_id"]
+    assert shared.actions[0].outcome_revision == 1
     port = flow.service.capabilities.transport
     read, predecessors = port.get_result, port.list_unclosed_predecessors
     identities = []
@@ -353,6 +368,7 @@ async def test_applied_original_correction_resumes_same_entry_via_public_readers
         result = await predecessors(session, **scope)
         return replace(
             result,
+            complete=True,
             items=tuple(
                 replace(item, closure="CLOSED", task_closure="CLOSED", outcome_revision=2)
                 for item in result.items
@@ -361,8 +377,16 @@ async def test_applied_original_correction_resumes_same_entry_via_public_readers
 
     # The independently scoped Transport correction is represented only at its public boundary.
     monkeypatch.setattr(port, "get_result", corrected)
+    assert await flow.service.advance_preparation(prep) == "RACK_RECONCILIATION_REQUIRED"
     monkeypatch.setattr(port, "list_unclosed_predecessors", corrected_predecessors)
-    assert await flow.service.advance_preparation(prep) == "READY"
+    state = await flow.service.advance_preparation(prep)
+    async with flow.factory() as session:
+        shared = await flow.service.rack_dispatch.progress(session, job_id=prep)
+    assert state == "READY", shared.review_reason
+    assert shared.pending and shared.actual_position == wire["target"]
+    assert shared.actual_face == "90"
+    assert shared.position_action_id == shared.actions[0].id
+    assert shared.actions[0].outcome_revision == 2
     assert set(identities) == {wire["transport_task_id"]}
     assert await flow.dispatch() == 0
     assert len(flow.peer.transports) == 1

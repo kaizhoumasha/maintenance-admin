@@ -616,6 +616,27 @@ class RackDispatch:
             for a in actions
         )
 
+    @staticmethod
+    async def has_conflicting_responsibility(
+        session: AsyncSession, *, point: str, rack_id: str, exclude_job_id: str | None = None
+    ) -> bool:
+        query = (
+            select(RackJob, RackAction)
+            .outerjoin(
+                RackAction,
+                (RackAction.job_id == RackJob.id)
+                & (RackAction.owner_domain == RackJob.owner_domain),
+            )
+            .where(RackJob.pending, or_(RackJob.point == point, RackJob.rack_id == rack_id))
+            .execution_options(populate_existing=True)
+        )
+        if exclude_job_id is not None:
+            query = query.where(RackJob.id != exclude_job_id)
+        return any(
+            RackDispatch.has_external_responsibility(job, (action,) if action is not None else ())
+            for job, action in await session.execute(query)
+        )
+
     async def admission_jobs(self, session, *, work_line_id):
         """All owners' original jobs; callers acquire this set before host/action locks."""
         return tuple(
@@ -1239,21 +1260,10 @@ class RackDispatch:
             or proof.get("point") != job.point
         ):
             return False
-        conflicts = await session.scalars(
-            select(RackJob).where(
-                RackJob.pending,
-                RackJob.id != job.id,
-                or_(RackJob.point == job.point, RackJob.rack_id == job.rack_id),
-            )
-        )
-        for other in conflicts:
-            actions = await session.scalars(
-                select(RackAction)
-                .where(RackAction.job_id == other.id, RackAction.owner_domain == other.owner_domain)
-                .execution_options(populate_existing=True)
-            )
-            if self.has_external_responsibility(other, actions):
-                return False
+        if await self.has_conflicting_responsibility(
+            session, point=job.point, rack_id=job.rack_id, exclude_job_id=job.id
+        ):
+            return False
         result = await self.capabilities.wms.get_result(
             session,
             message_id=proof.get("message_id"),
@@ -1459,6 +1469,10 @@ class RackDispatch:
                 and not managed
                 and move.kind == "ENTER"
                 and move.outcome["status"] in ("FAILED", "CANCELLED")
+                # Coarse ENTER still owns the original failed move while awaiting resolution.
+                and not (
+                    job.source_kind == "COARSE_INCOMING" and move.outcome["status"] == "FAILED"
+                )
                 and known_demand
                 and demand.state in ("CONTINUE", "NONE")
                 and clear

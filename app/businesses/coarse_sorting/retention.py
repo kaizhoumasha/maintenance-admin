@@ -1,4 +1,4 @@
-"""Original allocation evidence retained by pending coarse responsibilities."""
+"""Original WMS evidence retained by pending coarse responsibilities."""
 
 from sqlalchemy import select, union_all
 
@@ -11,7 +11,9 @@ async def wms_message_references(session, *, candidate_ids, line_ids=None):
         select(job.work_line_id, action.message_id)
         .join(action, action.job_id == job.id)
         .where(
-            job.pending, action.kind == "ALLOCATE_STORAGE", action.message_id.in_(candidate_ids)
+            job.pending,
+            action.kind.in_(("ALLOCATE_STORAGE", "REPORT_COMPLETION")),
+            action.message_id.in_(candidate_ids),
         ),
         select(prep.work_line_id, action.message_id)
         .join(action, action.id == prep.source_allocation_action_id)

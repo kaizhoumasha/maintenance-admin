@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from app.businesses.coarse_sorting import composition
 from app.integrations.ecs_command import CommandOwner
 from app.models import Device, WorkLine
+from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import allocated, reach_allocate, reach_move
 
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
@@ -406,6 +407,23 @@ async def test_full_station_keeps_the_second_same_barcode_on_original_move(direc
     assert flow.peer.commands[-1] == full_move
     assert (await flow.result(second)).status_code == 200
     assert await flow.service.advance(second["id"]) == "AWAITING_ALLOCATION_RESULT"
+
+
+async def test_original_report_survives_cleanup_until_consumed(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    await finish_put(flow, row, put)
+    flow.peer.report_code = "RECORDED"
+    assert await flow.dispatch() == 1
+
+    cleanup_time = datetime.now(UTC) + timedelta(days=91)
+    await run_cleanup(flow.factory, 90, now=cleanup_time)
+
+    assert await flow.service.advance(row["id"]) == "COMPLETED"
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.reports) == 1
 
 
 async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direct):

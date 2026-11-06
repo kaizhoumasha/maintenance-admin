@@ -926,6 +926,7 @@ class CoarseSortingService:
         await self._consume(session, action, evidence)
         if decision.workline_code != row["workline_code"]:
             return await save("ALLOCATION_WORKLINE_MISMATCH")
+        latest = None
         if self.preparation_table is not None:
             latest = await self._latest_preparation(
                 session, row["work_line_id"], row["rack_position_code"]
@@ -943,7 +944,11 @@ class CoarseSortingService:
             )
             if latest and latest["state"] == "DEPART_ACCEPTED" and rack == latest["old_rack_id"]:
                 return await save("RACK_STATE_CONFLICT")
-            if rack and await self._rack_departure_conflict(session, row, rack, latest):
+            if (
+                rack
+                and not isinstance(decision, Allocated)
+                and await self._rack_conflict(session, row, rack, latest)
+            ):
                 return await save("RACK_STATE_CONFLICT")
             if action.get("input_preparation_id"):
                 basis = (
@@ -992,6 +997,9 @@ class CoarseSortingService:
             or row["rack_binding_version"] != line.version
         ):
             return await save("ORIGINAL_RACK_POSITION_CHANGED")
+
+        if await self._rack_conflict(session, row, decision.rack_id, latest, check_shared=True):
+            return await save("RACK_STATE_CONFLICT")
 
         try:
             model = PutToBin(
@@ -1592,20 +1600,8 @@ class CoarseSortingService:
                         "arrival_face_reported": result.arrival_face_reported,
                     },
                 )
-            if (
-                result
-                and clear
-                and result.availability == "FOUND"
-                and result.closure == "CLOSED"
-                and not result.has_pending_outcome
-                and result.arrival_face_reported
-                and original.phase == "APPLIED"
-                and result.outcome
-                and result.outcome["status"] == "SUCCEEDED"
-                and result.outcome["rack_id"] == rack_id
-                and result.outcome["final_position"]
-                == {"kind": "RACK_POSITION", "location_code": prep["rack_position_code"]}
-                and result.outcome["arrival_face"] == prep["incoming_target_face"]
+            if clear and self._original_arrival_matches(
+                public, original, result, prep["incoming_target_face"]
             ):
                 return await save(
                     "READY", state="READY", current_action_id=current["id"], ready_at=self.clock()
@@ -1724,57 +1720,75 @@ class CoarseSortingService:
             predecessor = current
         return predecessor
 
-    async def _rack_departure_conflict(self, session, row, rack_id, latest):
-        public_jobs = await self.rack_dispatch.jobs(
-            session,
-            work_line_id=row["work_line_id"],
-            source_kinds=("COARSE_INCOMING", "COARSE_WMS_PRESENT"),
+    @staticmethod
+    def _original_arrival_matches(public, original, result, target_face):
+        return (
+            public.pending
+            and public.review_reason is None
+            and original.kind == "ENTER"
+            and original.phase == "APPLIED"
+            and public.position_action_id == original.id
+            and result is not None
+            and result.availability == "FOUND"
+            and result.closure == "CLOSED"
+            and not result.has_pending_outcome
+            and result.arrival_face_reported
+            and original.outcome_revision == result.outcome_revision
+            and original.outcome == result.outcome
+            and result.outcome is not None
+            and result.outcome["status"] == "SUCCEEDED"
+            and result.outcome["rack_id"] == public.origin.rack_id
+            and result.outcome["final_position"]
+            == public.actual_position
+            == {"kind": "RACK_POSITION", "location_code": public.origin.point}
+            and result.outcome["arrival_face"] == public.actual_face == target_face
         )
-        same_rack = [
-            j
-            for j in public_jobs
-            if j.origin.point == row["rack_position_code"] and j.origin.rack_id == rack_id
-        ]
-        departed = [j for j in same_rack if any(a.kind == "DEPARTURE_DECIDE" for a in j.actions)]
-        if not departed:
-            return False
-        if latest and latest["state"] == "READY" and latest["incoming_rack_id"] == rack_id:
-            current = next(
-                (
-                    j
-                    for j in same_rack
-                    if j.pending
-                    and j not in departed
-                    and j.origin.source_kind == "COARSE_INCOMING"
-                    and j.origin.source_ref == latest["id"]
-                ),
-                None,
+
+    async def _rack_conflict(self, session, row, rack_id, latest, *, check_shared=False):
+        point = row["rack_position_code"]
+        current_id = None
+        if self.rack_dispatch is not None:
+            public_jobs = await self.rack_dispatch.jobs(
+                session,
+                work_line_id=row["work_line_id"],
+                source_kinds=("COARSE_INCOMING", "COARSE_WMS_PRESENT"),
             )
-            if current:
-                enter = next((a for a in current.actions if a.kind == "ENTER"), None)
-                result = (
-                    await self.rack_dispatch.final_result(
-                        session, job_id=current.id, action_id=enter.id
-                    )
-                    if enter
-                    else None
+            same_rack = [
+                j for j in public_jobs if j.origin.point == point and j.origin.rack_id == rack_id
+            ]
+            departed = {
+                j.id for j in same_rack if any(a.kind == "DEPARTURE_DECIDE" for a in j.actions)
+            }
+            if latest and latest["state"] == "READY" and latest["incoming_rack_id"] == rack_id:
+                current = next(
+                    (
+                        j
+                        for j in same_rack
+                        if j.pending
+                        and j.id not in departed
+                        and j.origin.source_kind == "COARSE_INCOMING"
+                        and j.origin.source_ref == latest["id"]
+                    ),
+                    None,
                 )
-                if (
-                    enter
-                    and enter.phase == "APPLIED"
-                    and result
-                    and result.closure == "CLOSED"
-                    and not result.has_pending_outcome
-                    and result.arrival_face_reported
-                    and result.outcome
-                    and result.outcome["status"] == "SUCCEEDED"
-                    and result.outcome["rack_id"] == rack_id
-                    and result.outcome["final_position"]
-                    == {"kind": "RACK_POSITION", "location_code": row["rack_position_code"]}
-                    and result.outcome["arrival_face"] == latest["incoming_target_face"]
+                if current is None:
+                    return True
+                enter = next((a for a in current.actions if a.kind == "ENTER"), None)
+                if enter is None:
+                    return True
+                result = await self.rack_dispatch.final_result(
+                    session, job_id=current.id, action_id=enter.id
+                )
+                if not self._original_arrival_matches(
+                    current, enter, result, latest["incoming_target_face"]
                 ):
-                    return False
-        return True
+                    return True
+                current_id = current.id
+            elif departed:
+                return True
+        return check_shared and await RackDispatch.has_conflicting_responsibility(
+            session, point=point, rack_id=rack_id, exclude_job_id=current_id
+        )
 
     async def advance_idle_rack(self, rack_job_id: str) -> str:
         if self.rack_dispatch is None:
