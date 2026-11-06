@@ -1,4 +1,4 @@
-"""Actual AUTO assembly for isolated validation before formal catalog admission."""
+"""SMT AUTO business composition."""
 
 from app.businesses._components.bin_roller.composition import COMPONENT as BIN_ROLLER
 from app.businesses._components.rack_dispatch.composition import COMPONENT as RACK_DISPATCH

@@ -5,16 +5,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PositiveProtocolInt = Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
+_ArmTimeout = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
 
 
 class AutoWorklineSettings(BaseModel):
     work_line_id: _PositiveProtocolInt
     work_line_version: _PositiveProtocolInt
-    rack_arm_timeout_ms: _PositiveProtocolInt
-    bin_arm_timeout_ms: _PositiveProtocolInt
+    rack_arm_timeout_ms: _ArmTimeout = 0
+    bin_arm_timeout_ms: _ArmTimeout = 0
     source_locations: tuple[tuple[str, Literal["STATION_A", "STATION_B"]], ...]
-    transport_workline_id: str = Field(min_length=1)
-    transport_station_id: str | None = None
+    transport_station_id: Annotated[str, Field(min_length=1, pattern=r"^[^\x00]+$")] | None = None
 
 
 class Settings(BaseSettings):

@@ -85,7 +85,7 @@ class ArmResult(Data):
     annex_version="1",
     result=ArmResult,
     error=ErrorDetail,
-    timeout_min_ms=1,
+    timeout_min_ms=0,
     timeout_max_ms=2**63 - 1,
 )
 class PickAndPut(Data):

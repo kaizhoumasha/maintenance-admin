@@ -43,15 +43,15 @@ class PhysicalSettings:
 
     def __post_init__(self):
         if any(
-            type(value) is not int or not 1 <= value <= 2**63 - 1
-            for value in (
-                self.work_line_id,
-                self.work_line_version,
-                self.rack_arm_timeout_ms,
-                self.bin_arm_timeout_ms,
+            type(value) is not int or not minimum <= value <= 2**63 - 1
+            for value, minimum in (
+                (self.work_line_id, 1),
+                (self.work_line_version, 1),
+                (self.rack_arm_timeout_ms, 0),
+                (self.bin_arm_timeout_ms, 0),
             )
         ):
-            raise ValueError("explicit positive physical configuration required")
+            raise ValueError("invalid AUTO physical configuration")
         if len(dict(self.source_locations)) != len(self.source_locations) or any(
             station not in ("STATION_A", "STATION_B") for _, station in self.source_locations
         ):

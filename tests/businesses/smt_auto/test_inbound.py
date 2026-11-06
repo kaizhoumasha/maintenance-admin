@@ -17,6 +17,7 @@ from app.businesses.smt_auto.models import (
     AutoTaskInput,
 )
 from app.businesses.smt_auto.rack_ports import AutoRackPorts, RackAuthorization
+from app.core.config import AutoWorklineSettings
 from app.http_client import DeliveryState, HttpResult
 from app.integrations.ecs_command import compile_commands
 from app.integrations.ecs_command.result import receive_ecs_result
@@ -30,8 +31,13 @@ from app.services.device_bindings import resolve_binding
 from tests.businesses.rack_dispatch import apply_outcome, origin
 
 
+@pytest.fixture
+def arm_timeouts():
+    return {"rack_arm_timeout_ms": 30001, "bin_arm_timeout_ms": 30002}
+
+
 @pytest.fixture(params=[("ARM02", "ARM01"), ("ARM04", "ARM03")])
-async def inbound_host(s5_roller, request, monkeypatch):
+async def inbound_host(s5_roller, request, monkeypatch, arm_timeouts):
     host = s5_roller
     rack_arm, bin_arm = request.param[:2]
     for name in (
@@ -176,12 +182,24 @@ async def inbound_host(s5_roller, request, monkeypatch):
             assert action
     work = await host.scan()
     host.work_id = work.id
+    line_settings = AutoWorklineSettings(
+        work_line_id=1,
+        work_line_version=1,
+        source_locations=(("P", "STATION_A"), ("Q", "STATION_B")),
+        **arm_timeouts,
+    )
     host.inbound = Inbound(
         host.requests,
         ecs,
         host.dispatch,
         host.roller,
-        settings=PhysicalSettings(1, 1, 30001, 30002, (("P", "STATION_A"), ("Q", "STATION_B"))),
+        settings=PhysicalSettings(
+            line_settings.work_line_id,
+            line_settings.work_line_version,
+            line_settings.rack_arm_timeout_ms,
+            line_settings.bin_arm_timeout_ms,
+            line_settings.source_locations,
+        ),
     )
     host.ecs = ecs
 
@@ -245,10 +263,16 @@ async def inbound_host(s5_roller, request, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "next_invalid,put_failed", [(False, False), (True, False), ("VALID", False), (False, True)]
+    "next_invalid,put_failed,arm_timeouts",
+    [
+        (False, False, {}),
+        (True, False, {"rack_arm_timeout_ms": 30001}),
+        ("VALID", False, {"bin_arm_timeout_ms": 30002}),
+        (False, True, {"rack_arm_timeout_ms": 30001, "bin_arm_timeout_ms": 30002}),
+    ],
 )
 async def test_one_normal_plate_original_public_physical_report_chain(
-    inbound_host, next_invalid, put_failed
+    inbound_host, next_invalid, put_failed, arm_timeouts
 ):
     host = inbound_host
     source = dict(
@@ -281,6 +305,10 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         await host.inbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=40)
         assert plate.pick_command_code
         pick_code = plate.pick_command_code
+        command = await session.get(EcsCommand, pick_code)
+        assert json.loads(command.request_raw)["timeout"] == arm_timeouts.get(
+            "rack_arm_timeout_ms", 0
+        )
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200
     async with host.factory.begin() as session:
         plate = await host.inbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
@@ -309,6 +337,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         put_code = plate.put_command_code
         command = await session.get(EcsCommand, put_code)
         raw = json.loads(command.request_raw)
+        assert raw["timeout"] == arm_timeouts.get("bin_arm_timeout_ms", 0)
         assert raw["params"]["target"]["reel_layer"] == 0
         assert raw["params"]["target"]["reel_totalthickness"] == 0
         assert raw["params"]["target"]["bin_type"] == "3"
@@ -1239,7 +1268,6 @@ async def test_exhausted_source_handoff_does_not_wait_for_independent_put_report
 
 async def test_same_rack_new_plan_member_reuses_original_admission(ready_inbound):
     from app.businesses.smt_auto.source_flow import SourceFlow
-    from app.integrations.wms_transport import TransportCaller
 
     host = ready_inbound
     async with host.factory.begin() as session:
@@ -1267,7 +1295,7 @@ async def test_same_rack_new_plan_member_reuses_original_admission(ready_inbound
         )
         session.add(member)
         await session.flush()
-        flow = SourceFlow(host.inbound, caller=TransportCaller("caller", "station"))
+        flow = SourceFlow(host.inbound, station_id="station")
         await flow.advance(session, task_id="t", now_ms=50)
         assert member.rack_job_id == original.rack_job_id
         assert member.preparation_action_id == original.preparation_action_id
@@ -1324,7 +1352,7 @@ async def test_source_candidates_prepare_left_then_right_without_claiming_arriva
     from app.integrations.wms_transport import TransportCaller
 
     host = inbound_host
-    flow = SourceFlow(host.inbound, caller=TransportCaller("caller", "station"))
+    flow = SourceFlow(host.inbound, station_id="station")
     async with host.factory.begin() as session:
         await flow.advance(session, task_id="t", now_ms=40)
         members = list(
@@ -1335,6 +1363,7 @@ async def test_source_candidates_prepare_left_then_right_without_claiming_arriva
         assert all(m.rack_job_id and m.preparation_action_id for m in members)
         jobs = [await host.dispatch.progress(session, job_id=m.rack_job_id) for m in members]
         assert [j.origin.point for j in jobs] == ["P", "Q"]
+        assert all(j.origin.caller == TransportCaller("1", "station") for j in jobs)
         assert all(len(j.actions) == 1 and j.actions[0].kind == "ENTER" for j in jobs)
         task = await session.get(AutoTask, "t")
         bindings = await host.work_plans._lock_line(session, 1)

@@ -26,7 +26,8 @@ assert host.repository.tables is TABLES
 assert host.components['bin_roller'].tables is roller_tables
 assert set(host.components) == {'sorting_task', 'bin_roller', 'rack_dispatch'}
 assert host.components['bin_roller'].rack_dispatch is host.components['rack_dispatch']
-assert catalog.contract_consumers(('wms_request','rack.departure_decide@v1',None)) == {'smt_manual'}
+departure = ('wms_request', 'rack.departure_decide@v1', None)
+assert catalog.contract_consumers(departure) == {'smt_manual', 'smt_auto'}
 assert host.components['sorting_task'].production is host
 assert host.components['bin_roller'].context.domain == 'smt_manual'
 assert host.capabilities.wms.owner_domain == 'smt_manual'
@@ -34,14 +35,14 @@ assert host.capabilities.transport.owner_domain == 'smt_manual'
 entry = next(e for e in catalog.entries() if e.DEFINITION.code == 'smt_manual')
 assert entry.COMMANDS == ()
 assert entry.PROGRESSION == 'scan_pending'
-assert 'smt_auto' not in runtime.services
+assert runtime.progressions['smt_auto'].__self__ is runtime.services['smt_auto']
 for name in ('issued', 'queue_changed', 'plan_delta', 'cancel'):
     key = ('wms_callback', f'sorting.task.{name}@v1', None)
-    assert catalog.contract_consumers(key) == {'smt_manual'}
+    assert catalog.contract_consumers(key) == {'smt_manual', 'smt_auto'}
     assert catalog.input_target('smt_manual', key).component_key == 'sorting_task'
 for name in ('prepare', 'completion_confirm'):
     key = ('wms_request', f'sorting.task.{name}@v1', None)
-    assert catalog.contract_consumers(key) == {'smt_manual'}
+    assert catalog.contract_consumers(key) == {'smt_manual', 'smt_auto'}
 for point in ('SCAN1', 'SCAN2', 'SCAN3', 'SCAN4'):
     key = ('ecs_event', 'SCAN_COMPLETED', point)
     assert catalog.input_target('smt_manual', key).component_key == 'bin_roller'

@@ -352,7 +352,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = outbound_host
-    racks = OutboundRacks(host.outbound, caller=origin("AUTO_OUTBOUND_RETURN").caller)
+    racks = OutboundRacks(host.outbound, station_id="station")
     async with host.factory.begin() as session:
         plan = await session.scalar(select(AutoTaskInput))
         member = AutoOutboundSourceMember(
@@ -369,6 +369,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         await racks.advance(session, task_id="t", now_ms=20)
         assert member.rack_job_id
         progress = await host.dispatch.progress(session, job_id=member.rack_job_id)
+        assert progress.origin.caller.workline_id == "1"
         await apply_outcome(
             session,
             progress.actions[-1],
@@ -542,7 +543,7 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = decided_outbound
-    racks = OutboundRacks(host.outbound, caller=origin("AUTO_OUTBOUND_TARGET").caller)
+    racks = OutboundRacks(host.outbound, station_id="station")
     await host.settle(
         "outbound.bin.material.decide@v1",
         dict(
@@ -672,7 +673,7 @@ async def test_return_faces_reuse_original_job_only_after_terminal_face(outbound
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = outbound_host
-    racks = OutboundRacks(host.outbound, caller=origin("AUTO_OUTBOUND_RETURN").caller)
+    racks = OutboundRacks(host.outbound, station_id="station")
     async with host.factory.begin() as session:
         plan = await session.scalar(select(AutoTaskInput))
         members = [
@@ -741,7 +742,7 @@ async def test_target_replacement_waits_for_original_put_but_not_report(decided_
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = decided_outbound
-    racks = OutboundRacks(host.outbound, caller=origin("AUTO_OUTBOUND_TARGET").caller)
+    racks = OutboundRacks(host.outbound, station_id="station")
     next_source = dict(
         cell_id="C2", cell_index=2, bin_type=3, reel_layer=1, reel_thickness=20, reel_diameter=7
     )
@@ -1146,7 +1147,7 @@ async def test_return_slot_empty_only_for_original_pick_failure(
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = outbound_host
-    racks = OutboundRacks(host.outbound, caller=origin("AUTO_OUTBOUND_RETURN").caller)
+    racks = OutboundRacks(host.outbound, station_id="station")
     async with host.factory.begin() as session:
         plan = await session.scalar(select(AutoTaskInput))
         member = AutoOutboundSourceMember(

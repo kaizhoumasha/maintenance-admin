@@ -15,10 +15,8 @@ from .rack_ports import AutoRackPorts, RackAuthorization
 
 
 class SourceFlow:
-    def __init__(self, inbound, *, caller: TransportCaller):
-        if not isinstance(caller, TransportCaller):
-            raise ValueError("explicit transport caller required")
-        self.inbound, self.caller = inbound, caller
+    def __init__(self, inbound, *, station_id: str | None = None):
+        self.inbound, self.station_id = inbound, station_id
         self.dispatch = inbound.dispatch
         self.ports = AutoRackPorts(self.dispatch, inbound=inbound)
 
@@ -141,7 +139,7 @@ class SourceFlow:
                 task.workline_code,
                 point,
                 None,
-                self.caller,
+                TransportCaller(str(line.id), self.station_id),
                 str(uuid7()),
                 asdict(binding),
             )

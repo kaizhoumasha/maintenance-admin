@@ -21,10 +21,8 @@ from .rack_ports import AutoRackPorts, RackAuthorization
 
 
 class OutboundRacks:
-    def __init__(self, outbound, *, caller: TransportCaller):
-        if not isinstance(caller, TransportCaller):
-            raise ValueError("explicit transport caller required")
-        self.outbound, self.caller = outbound, caller
+    def __init__(self, outbound, *, station_id: str | None = None):
+        self.outbound, self.station_id = outbound, station_id
         self.dispatch = outbound.dispatch
         self.ports = AutoRackPorts(self.dispatch, outbound=outbound)
 
@@ -38,7 +36,7 @@ class OutboundRacks:
             task.workline_code,
             point,
             face,
-            self.caller,
+            TransportCaller(str(task.work_line_id), self.station_id),
             str(uuid7()),
             asdict(binding),
         )

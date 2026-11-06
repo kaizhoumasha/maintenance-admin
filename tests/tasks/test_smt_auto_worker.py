@@ -67,11 +67,6 @@ async def test_committed_auto_receiver_wakes_worker_and_beat_recovers_original_p
         )
 
     (tmp_path / "auto_celery.py").write_text("""import os
-from app.businesses import catalog
-from app.businesses.smt_auto import composition
-
-entries = catalog.entries()
-catalog.entries = lambda: (*entries, composition)
 
 from app.tasks.celery_app import celery_app
 
@@ -94,10 +89,7 @@ celery_app.conf.beat_schedule = {key: celery_app.conf.beat_schedule[key]}
                 {
                     "work_line_id": line_id,
                     "work_line_version": line_version,
-                    "rack_arm_timeout_ms": 10000,
-                    "bin_arm_timeout_ms": 10000,
                     "source_locations": [],
-                    "transport_workline_id": line_code,
                 }
             ]
         ),
