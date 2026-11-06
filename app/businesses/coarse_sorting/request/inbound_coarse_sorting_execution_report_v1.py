@@ -6,9 +6,7 @@ from pydantic import Field
 
 from app.integrations.wms_request import RequestPayload
 
-from .inbound_coarse_sorting_storage_allocate_v1 import BinLocation, Reference
-
-OPERATION = "inbound.coarse_sorting.execution_report@v1"
+from ..contracts import BinLocation, Reference
 
 
 class ExecutionReport(RequestPayload):

@@ -26,6 +26,14 @@ def build_direct_put_service(capabilities, *, output_locations, clock):
     """Explicit assembly seam for candidate contracts outside the deployed catalog."""
     from dataclasses import replace
 
+    from .request.inbound_coarse_sorting_execution_report_v1 import ExecutionReport
+    from .request.inbound_coarse_sorting_storage_allocate_v1 import StorageAllocate
+    from .service import DirectPutContracts
+
     return replace(
-        build_service(capabilities), direct_put_locations=dict(output_locations), clock=clock
+        build_service(capabilities),
+        direct_put_contracts=DirectPutContracts(
+            StorageAllocate, ExecutionReport, dict(output_locations)
+        ),
+        clock=clock,
     )

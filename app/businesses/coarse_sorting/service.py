@@ -20,24 +20,17 @@ from app.integrations.wms_request import RequestPayload
 from app.models import Device, WorkLine
 from app.services.workline_service import business_configuration_issue, read_workline
 
-from .contracts import ScanCompletedData, ValidateBindDecision
-from .definition import DEFINITION
-from .ecs_command import MoveForward, PutToBin, PutToBinResult
-from .request.inbound_coarse_sorting_execution_report_v1 import (
-    OPERATION as REPORT,
-)
-from .request.inbound_coarse_sorting_execution_report_v1 import (
-    ExecutionReport,
-)
-from .request.inbound_coarse_sorting_storage_allocate_v1 import (
-    OPERATION as ALLOCATE,
-)
-from .request.inbound_coarse_sorting_storage_allocate_v1 import (
+from .contracts import (
+    ALLOCATE,
+    REPORT,
     Allocated,
-    StorageAllocate,
+    ScanCompletedData,
+    ValidateBindDecision,
     Wait,
     allocation_decision,
 )
+from .definition import DEFINITION
+from .ecs_command import MoveForward, PutToBin, PutToBinResult
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
@@ -48,17 +41,24 @@ WAIT_INTERVAL = timedelta(milliseconds=5000)
 
 
 @dataclass(frozen=True)
+class DirectPutContracts:
+    allocate: type[RequestPayload]
+    report: type[RequestPayload]
+    output_locations: Mapping[str, str]
+
+
+@dataclass(frozen=True)
 class CoarseSortingService:
     scan_table: Table
     capabilities: Capabilities
     validate_bind: type[RequestPayload]
     action_table: Table | None = None
-    direct_put_locations: Mapping[str, str] | None = None
+    direct_put_contracts: DirectPutContracts | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     @property
     def direct_put(self) -> bool:
-        return self.direct_put_locations is not None
+        return self.direct_put_contracts is not None
 
     async def accept_scan(self, ctx: EcsEventContext, payload: ScanCompletedData) -> None:
         table = self.scan_table
@@ -574,7 +574,7 @@ class CoarseSortingService:
             or output is None
             or output.work_line_id != line.id
             or list(line.device_bindings.values()).count(output.device_code) != 1
-            or not (location := self.direct_put_locations.get(line.line_code))
+            or not (location := self.direct_put_contracts.output_locations.get(line.line_code))
         ):
             return None
         return {
@@ -592,7 +592,7 @@ class CoarseSortingService:
         if not position or (row["rack_position_code"] and row["rack_position_code"] != position):
             return await save("ORIGINAL_RACK_POSITION_CHANGED", **values)
         try:
-            model = StorageAllocate(
+            model = self.direct_put_contracts.allocate(
                 workline_code=row["workline_code"], binding_id=row["binding_id"]
             )
         except ValidationError:
@@ -762,7 +762,7 @@ class CoarseSortingService:
                 or decision.reel_totalthickness != original.reel_totalthickness
             ):
                 return await save("PUT_RECONCILIATION_REQUIRED")
-            model = ExecutionReport(
+            model = self.direct_put_contracts.report(
                 workline_code=row["workline_code"],
                 binding_id=row["binding_id"],
                 bin_code=decision.bin_code,

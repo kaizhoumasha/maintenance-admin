@@ -7,12 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
-from .request.inbound_coarse_sorting_storage_allocate_v1 import (
-    BinLocation,
-    BinType,
-    ReelHeight,
-    Reference,
-)
+from .contracts import BinLocation, BinType, ReelHeight, Reference
 
 
 class MoveForwardResult(BaseModel):

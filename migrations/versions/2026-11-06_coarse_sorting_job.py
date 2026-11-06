@@ -47,6 +47,13 @@ def upgrade() -> None:
     schema = "enterprise_backend" if bind.dialect.name == "postgresql" else None
     prefix = f"{schema}." if schema else ""
     op.rename_table(SCAN, JOB, schema=schema)
+    if schema:
+        bind.execute(
+            sa.text(
+                f"ALTER TABLE {schema}.{JOB} RENAME CONSTRAINT "
+                f"{SCAN}_event_digest_key TO {JOB}_event_digest_key"
+            )
+        )
     for name, kind in COLUMNS:
         op.add_column(JOB, sa.Column(name, kind, nullable=True), schema=schema)
     op.add_column(
@@ -276,3 +283,10 @@ def downgrade() -> None:
         batch.drop_column("updated_at")
     op.drop_table(ACTION, schema=schema)
     op.rename_table(JOB, SCAN, schema=schema)
+    if schema:
+        bind.execute(
+            sa.text(
+                f"ALTER TABLE {schema}.{SCAN} RENAME CONSTRAINT "
+                f"{JOB}_event_digest_key TO {SCAN}_event_digest_key"
+            )
+        )
