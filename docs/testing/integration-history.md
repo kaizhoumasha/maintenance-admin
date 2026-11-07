@@ -44,13 +44,13 @@ SQL 管理查询可使用 `integration_exchange_summary` 与 `integration_record
 
 ## 最终软件与独立审查结果
 
-实施阶段的串行基线为 **6,618 passed /150 skipped**，耗时2,368.15秒；本轮源码 `d8d5279` 在修复12个旧迁移测试文件后的最终完整结果为 **6,661 passed /150 skipped /0 failed**，共6,811个收集身份、288个测试文件，六道结果逐项合并后无缺失、额外或重复身份。150项跳过身份与串行基线完全一致：83项为未配置的7种旧专项PostgreSQL迁移库，67项为后端专属排除（含既有SQLite保存点限制）。所需新历史PostgreSQL、独立历史/Transport迁移库及Redis用例已实际执行，跳过不计为通过。各道耗时和测量条件见[并行测试实测](test-lanes.md#本机完整运行实测)。
+实施阶段的串行基线为 **6,618 passed /150 skipped**，耗时2,368.15秒；本轮源码 `e3067e8` 在修复旧迁移测试生命周期及按需初始化边界后的最终完整结果为 **6,661 passed /150 skipped /0 failed**，共6,811个收集身份、288个测试文件，六道结果逐项合并后无缺失、额外或重复身份。150项跳过身份与串行基线完全一致：83项为未配置的7种旧专项PostgreSQL迁移库，67项为后端专属排除（含既有SQLite保存点限制）。所需新历史PostgreSQL、独立历史/Transport迁移库及Redis用例已实际执行，跳过不计为通过。各道耗时和测量条件见[并行测试实测](test-lanes.md#本机完整运行实测)。
 
 实施阶段的独立全分支审查核对了850个源码文件的校验值，没有Critical，发现4项Important及2项查询描述问题；后两项按用户完整历史与统一格式目标提升为Important，一并修复。六项均有RED→GREEN回归，再完成上述完整测试；该阶段没有进行第二轮审查或把作者自查称为独立复审。后续提交前的独立审查及其修复另外记录，不沿用旧源码指纹宣告当前通过。
 
 修复覆盖：旧NOT_RECEIVED/UNKNOWN无正文结论的权威迁移；新无正文/仅响应头尝试的收缩；即时及延迟采用的Transport原规范化快照（含不一致拒绝）；实时/回填准备引用和原保留资格；原最终回复及迟到ACK来源；SQL/API统一的原始、借用和清理后正文描述。扩展回归332通过/18后端排除。
 
-实施验收时的启用候选为A4，849个文件，head=integrationhistoryauthority，不含contract；在其实际解包源码上501通过/18后端排除，全部归档/解包校验值一致。此前A1至A5的归档保留为已被后续候选替代的追溯资料，均未发布或部署。A6 在实际解包源码上 **551 passed /18 skipped**，耗时403.63秒；本轮最新 A7 的853个归档成员及实际解包文件已逐项独立核验，在其解包源码上 **555 passed /18 skipped**，耗时431.41秒。A7 的源码摘要为 `3c8a6340bfdd835e12ad88b0eecfb6f49b95019845ff943da386d049ce804d02`，归档 SHA-256 为 `ff769cb24279ba6c2f14b8560952f3761848cdd86a6decadb29983944f2304aa`。这是 A 阶段专用源验证，不替代上述最终全套；head 仍为 authority，保留与 A6 一致的旧 ORM / 可空原文列，不含 contract revision 或破坏性 DDL helper，既有只读 v2 校验器保留。旧 A1～A6 / B / B2 / B3 归档不改；B侧仍需真实A验收及维护窗口证据才能执行生产收缩，最终 B4 候选在本轮文档提交后另行生成和核验，本记录不表示 B4 已完成。
+实施验收时的启用候选为A4，849个文件，head=integrationhistoryauthority，不含contract；在其实际解包源码上501通过/18后端排除，全部归档/解包校验值一致。此前A1至A5的归档保留为已被后续候选替代的追溯资料，均未发布或部署。A6 在实际解包源码上 **551 passed /18 skipped**，耗时403.63秒；本轮最新 A7 的853个归档成员及实际解包文件已逐项独立核验，在其解包源码上 **555 passed /18 skipped**，耗时431.41秒。A7 的源码摘要为 `3c8a6340bfdd835e12ad88b0eecfb6f49b95019845ff943da386d049ce804d02`，归档 SHA-256 为 `ff769cb24279ba6c2f14b8560952f3761848cdd86a6decadb29983944f2304aa`。这是 A 阶段专用源验证，不替代上述最终全套；head 仍为 authority，保留与 A6 一致的旧 ORM / 可空原文列，不含 contract revision 或破坏性 DDL helper，既有只读 v2 校验器保留。旧 A1～A6 / B / B2 / B3 / B4 归档不改；B侧仍需真实A验收及维护窗口证据才能执行生产收缩，最终 B5 候选在本轮文档提交后另行生成和核验，本记录不表示 B5 已完成。
 
 此前一个完整试跑在既有5秒SQLite测试等待上发生过一次超时；19项专项、20次独立进程复跑和后续完整运行均通过，未放宽时限，具体调度原因仍未证实。日志留存，若再发生须继续调查。本轮先前远端 CI 在 pytest 前因离线实验的 Markdown 代码块格式失败，修正格式后 Python AST 不变；本地 Ruff check、817个文件的 format 检查及 diff 检查通过，本地 linux/amd64 Docker 构建通过。本轮文档更新后已重新执行全仓库 Ruff check / format（均带 --no-cache，含 Markdown 代码块），817个文件格式检查及 diff 检查通过。未执行镜像发布、生产迁移或现场验收；远端CI须以实际运行结果为准，测试环境结果不能替代这些事实。
 
@@ -70,7 +70,9 @@ SQL 管理查询可使用 `integration_exchange_summary` 与 `integration_record
 
 本轮 PostgreSQL 迁移证明用例改为每例独立临时源库，初始迁移及断言失败也回收；配置 URL 安全校验、项目 search_path 和 SQLite 模板缓存保留。此前两个门禁拒绝与后续 autovacuum 观察的因果关系尚未完全证实，未放宽生产门禁，见[测试隔离](test-lanes.md#独立存储)。
 
-此前远端 `8499ddb` 的 CI 在第3、6道发生旧迁移用例 teardown 失败，原记录保留追溯。本轮测试修复仅涉及12个迁移测试文件：PostgreSQL fixture 复用每例唯一临时库，直接进入所测历史 revision，移除与测试目标无关的恢复到未来 head；原迁移拒绝门禁、业务断言及必要的内部清理保留，生产代码不变。两个原失败节点复跑 **2 passed /10.07秒**；12文件配置全部相关 PostgreSQL 来源后 **149 passed /0 skipped /274.49秒**，另有一个既有 record_property / xunit2 警告；未配置 PostgreSQL 的对照为 **76 passed /73 skipped /98.24秒**。当前源码的完整六道结果见上，不能把本机通过写成远端已绿；远端 CI 仍须按最终提交实际运行确认。
+此前远端 `8499ddb` 的 CI 在第3、6道发生旧迁移用例 teardown 失败，原记录保留追溯。此前测试修复涉及12个迁移测试文件：PostgreSQL fixture 复用每例唯一临时库，直接进入所测历史 revision，移除与测试目标无关的恢复到未来 head；原迁移拒绝门禁、业务断言及必要的内部清理保留，生产代码不变。两个原失败节点复跑 **2 passed /10.07秒**；12文件配置全部相关 PostgreSQL 来源后 **149 passed /0 skipped /274.49秒**，另有一个既有 record_property / xunit2 警告；未配置 PostgreSQL 的对照为 **76 passed /73 skipped /98.24秒**。当前源码的完整六道结果见上，不能把本机通过写成远端已绿；远端 CI 仍须按最终提交实际运行确认。
+
+随后 `dc24a16` 的远端 CI（42411093144）五道通过，仅第4道两个 audit_archive 用例在 setup 阶段失败：迁移目录的模块级 `pg_url` 对仅供管理连接的源库执行了无关的 `upgrade head`，碰到正式维护门禁，尚未进入用例正文断言。当前 `e3067e8` 仅进一步调整 `tests/migrations/conftest.py`：模块级 `pg_url` 创建并回收自有空管理库，历史用例仍在独立库执行各自指定 revision；只有现代运行结构的 `pg_sessions` 按需执行真实 `upgrade head`，当前仅 expiry-index 用例消费该 fixture。原迁移、数据保全断言和生产门禁不变，不新增重试。相关专项 **9 passed /15.51秒**，另有原有 JUnit 警告；本轮本机完整结果不代表最终远端 CI 已通过，旧失败记录继续保留。
 
 事件名称兼容修复由四项 HTTP 回归验证：NUL / 正常中文 × SQLite / PostgreSQL，先有2失败、2通过，修复后4通过（0.79秒），并纳入本轮全套。未注册事件仍 ACK，只有含 NUL 的可选 message_type 投影为空；原请求字节、摘要、诊断和先查重顺序不变，普通中文保留原值，非法代理字符仍沿原 Pydantic 校验返回400。
 
