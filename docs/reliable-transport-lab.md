@@ -249,7 +249,10 @@ async def storage():
         async with engine.begin() as connection:
             await connection.run_sync(LabBase.metadata.create_all)
             for model in (
-                IntegrationExchange, IntegrationRecord, IntegrationReference, ReliableMessage
+                IntegrationExchange,
+                IntegrationRecord,
+                IntegrationReference,
+                ReliableMessage,
             ):
                 await connection.run_sync(model.__table__.create)
         yield async_sessionmaker(engine, expire_on_commit=False)
