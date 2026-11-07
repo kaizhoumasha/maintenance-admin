@@ -2,6 +2,12 @@
 
 本页描述统一历史的查询合同。运行启用需要先完成维护窗口的最终补录和对账；不能把开发任务的中间状态直接作为生产兼容版本。
 
+当前最终模型为 `IntegrationExchange`（原交互与状态）、`IntegrationRecord`（原请求、回复、发送及采用证据）和 `IntegrationReference`（可证明的关联），加上保留执行职责的 `ReliableMessage` 与 `TransportTask`。原命令、收据、发送/Result 证据和诊断快照统一写入前三类；旧 ORM 只在迁移来源与制品 A 中保留。统一存储不改变原协议身份、幂等、冲突检测或长期 ECS Result 重放。
+
+应用在 `app/reliable_runtime.py` 注入 `app.integrations.history` 作为 `Outbox(..., records=...)` 和 `MessageStore(..., records=...)` 的同一记录端口；独立运行时也须显式注入。可靠层通过端口保存证据，不导入协议或历史 ORM；原文由证据指针读取，不再从 ReliableMessage 的旧原文列取值。独立装配示例见[离线实验](../reliable-transport-lab.md)，业务仍使用公开结果读口。
+
+[设计](../superpowers/specs/2026-11-06-integration-history-unification-design.md)与[实施计划](../superpowers/plans/2026-11-06-integration-history-unification-implementation.md)保留设计阶段的决策和任务；当前软件结果以[验证记录](../testing/integration-history.md)为准，历史计划不构成部署或现场验收证明。
+
 ## 查询接口
 
 | 接口 | 用途 | 权限 |

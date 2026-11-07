@@ -30,6 +30,8 @@ async with session.begin():
 
 reference 只表示入队引用/状态，不是异步业务结果。Celery/脚本可用同样的配置与适配器构造 Outbox，不创建 HTTP 客户端；已有 Celery 发送任务不因引入 Outbox 自动迁移。业务和入队一起提交/回滚，插入竞争不破坏外层事务；存续身份先比冻结字节，同字节返回原引用、异字节冲突，只对新消息做 HTTP 校验。
 
+主应用已注入统一历史记录端口。独立运行时构造 `Outbox` 和 `MessageStore` 时均须传 `records=history_records`，其中 `history_records` 由 `from app.integrations import history as history_records` 导入；数据库须包含统一历史表。记录端口保存规范原文和原身份引用，不增加发送器或技术重试，完整示例见[离线实验](../reliable-transport-lab.md)。
+
 ## 保留的投递和恢复边界
 
 - 单逻辑消息只有可靠发送器负责技术重试；HttpClient 只做单次请求，不叠加其他发送器或调度器。
@@ -38,7 +40,7 @@ reference 只表示入队引用/状态，不是异步业务结果。Celery/脚�
 - TTL 从入队创建起算，重试/提示/重复入队不重置；到期不发新请求，不撤销在途动作。未知租约恢复也不证明对端未执行；ECS 的未知或中断租约进入 HELD，不自动重放。
 - Sender 停机共用一个 monotonic deadline，默认总预算 15 秒；各阶段分配剩余预算，仅释放已确认停止且仍属当前租约的任务，未确认者留待租约恢复，不强行解锁。这不是整个进程/API/Redis 的退出 SLA。
 - 数据库行进入消息/Claim 时统一 UTC-aware；只为本层已知 UTC 写入的 SQLite naive 读值补 UTC，不接受外部未知 naive 时钟。主机仍需时钟同步，时区统一不校正偏差；实例偏差及调度/回写延迟须远小于默认 5 秒租约余量。
-- DONE/PEER_TERMINAL 的终态原文只在 response_raw 保存，last_response_raw 清空；其余尝试保留实际取得的有界诊断响应，分类失败不伪造终态正文。
+- 请求与响应原文保存在统一证据中；消息通过 request_record_id、terminal_response_record_id 与 last_response_record_id 引用原记录。终局正文与最近尝试诊断分开，租约恢复清空旧最近响应指针但保留历史字节；分类失败不伪造终态正文。见[统一历史](integration-history.md)。
 - 仅 DONE/FAILED/EXPIRED 按进入终态后不再刷新的 updated_at 保留，默认 90 天；清理后同身份可成为新投递，没有跨清理本地幂等。可靠层表不能代替业务任务记录或公开结果消费接口。
 - 消息原文明文存储。对端去重、访问控制、出口限流/熔断、公平调度和生产容量按启用范围另验；执行并发预算不等于出口限流。非空表及存在快照/证据时的迁移降级守卫不可绕过。
 

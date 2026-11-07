@@ -18,6 +18,8 @@ uv run ruff format --check .
 
 普通测试走脚本化 HTTP 客户端、MockTransport 或测试自身持有的回环服务，不向真实 ECS/WMS 发送任务。需要使用真实地址的调试应另按接入合同授权；测试出口保护不变成生产地址白名单。
 
+CI 使用[六道完整测试](test-lanes.md)，每道独立运行 PostgreSQL、历史迁移库、Transport 迁移库及 Redis。默认命令仍跑完整套件；本地使用 `--test-lane=N/T` 时必须合并全部道的结果并逐项核对收集、跳过和重复身份。
+
 ## 按行为选择已有回归
 
 | 行为 | 入口与关键断言 |
@@ -34,6 +36,7 @@ uv run ruff format --check .
 | 业务多能力组合与原归属唤醒 | [阶段一验收](business-components-phase1.md)、[阶段二验收](business-components-phase2.md)；共享合同消费者/唯一输入目标、新动作授权与原重放、WMS 原关联、Transport 原 owner 及实际应用后通知；测试组件不进入生产 catalog |
 | BIN_Roller 箱流、架流与记录适配 | `tests/businesses/bin_roller/`；四点与 SCAN2 接缝、FIFO、原身份/恢复、统一架生命周期及隔离并发；[WES 记录适配验证](bin-roller-wes-recorded-cases.md)区分原始事实与受控刺激。正式手工消费者、组件状态迁移及真实 worker/Beat 软件验证见[手工统一验收](smt-manual.md#current-delivery)；供应商/现场验收未执行 |
 | ECS 命令与结果 | [ECS 测试说明](ecs-command-verification.md)，复用实际装配、原期限、当前许可和消费者锁序，不增加独立验收平台 |
+| 统一对接历史与分阶段迁移 | [软件验证记录](integration-history.md)、[接口与运维合同](../integrations/integration-history.md)；原身份/冲突/长期重放、正文权限/审计、引用保护清理、可恢复补录及 authority / contract 拒绝门禁；A 的隔离源码验证与最终全套分开计数，未进行真实停写切换或现场验收 |
 | 安全诊断 | `tests/core/test_global_diagnostics.py`、`tests/reliable/test_sender_logging.py`、delivery/snapshot 与 `tests/tasks/`；安全字段、取消/落库失败传播，各任务独立降噪/恢复；[日志说明](../logging.md) |
 
 先固定需要修复的失败行为，再最小修改并执行受影响测试。已有通过且输入未变的验证可复用；全量统一执行后，仅在新改动、失败或未决疑点出现时重跑。人类说明文档只检查内容、链接和归档完整性，不新增永久演示测试。
