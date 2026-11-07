@@ -55,6 +55,7 @@ class Registered:
     title: str | None
     ttl: timedelta | None
     registration_source: RegistrationSource
+    requires_business_owner: bool = False
 
     @cached_property
     def payload_schema(self) -> dict:
@@ -87,6 +88,7 @@ def request_operation(
     *,
     title: str | None = None,
     ttl: timedelta | None = None,
+    requires_business_owner: bool = False,
 ):
     def register(cls):
         source = operation_source(name, cls)
@@ -102,7 +104,7 @@ def request_operation(
             )
         if not (isinstance(cls, type) and issubclass(cls, RequestPayload)):
             raise TypeError(f"{source.location}: 修复: 装饰 RequestPayload 模型")
-        item = Registered(name, endpoint, cls, title, ttl, source)
+        item = Registered(name, endpoint, cls, title, ttl, source, requires_business_owner)
         if (example := item.example) is not None:
             try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
                 cls.model_validate_json(json.dumps(example, allow_nan=False))

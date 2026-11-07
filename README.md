@@ -170,6 +170,8 @@ WES → WMS 的 `decisions` / `facts` 出站端点已实现，当前已登记粗
 
 管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单提供 coarse_sorting 扫码 → WMS 验证 → MOVE_FORWARD → 原 Result 消费，必需设备角色为 INPUT_ARM 和 CONVEYOR，另声明可选的 OUTPUT_ARM。扫码事实、原 WMS 决策和新 ECS Result 提交后按业务唤醒，统一 `business.advance_pending(business_code)` 任务调用声明的待办入口，Beat 每 5 秒调用同一任务兜底；推进使用自己的会话工厂，原 Sender 发送；成功后停在待箱格分配，WMS 业务 NG 停在待 NG 搬运。粗分直分入箱、NG、补换架和仅退架的隔离实现及启用边界见[实施计划](docs/superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md)。手工业务按上述独立 `smt_manual` 宿主交付，正式登记与内部验证不代表真实对端或现场验收。
 
+共享联调环境可显式启用粗分尾段，API、worker 和 Beat 共用同一份配置。配置和启用检查见 [WES 联调装配](docs/superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md#wes-联调装配)。
+
 ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前已正式登记粗分 SCAN_COMPLETED 扫码受理处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/businesses/<业务>/ecs_event.py` 或同名包，并显式列入 catalog 所属 composition.ENTRY_MODULES，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
 
 调试状态由 ECS 决定，额外 `is_debug` 不参与新事件身份或处理器上下文。历史收据仍按旧摘要查重并返回原响应，不重写身份、不回放旧事件；接收实例须协调切换算法，不支持新旧版本混跑。
@@ -226,6 +228,8 @@ RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000
 ```
 
 演示 operation 在 `app/integrations/wms_request/dev.py`,只在 local 登记;真实 operation 的写法见该文件头注释。
+
+粗分尾段启用后，调试目录可查看箱格分配和执行报告的合同。这两项请求由粗分业务推进发送。
 
 新增业务接入层时,在 `app/businesses/<业务>/dev.py` 用 `@dev_scenario` 登记场景，并把入口加入 catalog 所属 composition.ENTRY_MODULES，local 加载后才出现在下拉里,详见 `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`。非 local 环境这些路由不存在。**部署时必须显式设置 `ENVIRONMENT`(如 `production`)**:它的默认值是 `local`,漏设会同时挂出该控制台(含无认证的 Mock WMS 接收端)、开放 API 文档并关闭 Cookie 的 Secure。示例里的 Zone、储位、滚筒线编码是占位值,联调前按现场替换。
 

@@ -17,6 +17,21 @@ if TYPE_CHECKING:
 _validated_entries: "_CatalogSnapshot | None" = None
 # Failed revalidation invalidates runtime assembly without reopening startup registration.
 _registration_guard_enabled = False
+_coarse_sorting_integration = False
+
+
+def select_runtime(settings) -> None:
+    """Select the integration catalog before loading process-wide registrations."""
+    global _coarse_sorting_integration
+    integration = settings.COARSE_SORTING_TAIL_ENABLED
+    if integration != _coarse_sorting_integration and _registration_guard_enabled:
+        raise RuntimeError("Business catalog cannot change after startup")
+    if integration:
+        from .coarse_sorting import integration as coarse_sorting
+
+        coarse_sorting.validate_configuration(settings)
+        coarse_sorting.register_requests()
+    _coarse_sorting_integration = integration
 
 
 @dataclass(frozen=True)
@@ -124,10 +139,13 @@ def command_is_allowed(business_code: str, role: str, model: type, task_type: st
 
 def entries() -> tuple[ModuleType, ...]:
     """Explicit business compositions shared by API, worker and model loading."""
-    from .coarse_sorting import composition as coarse_sorting
     from .smt_auto import composition as smt_auto
     from .smt_manual import composition as smt_manual
 
+    if _coarse_sorting_integration:
+        from .coarse_sorting import integration as coarse_sorting
+    else:
+        from .coarse_sorting import composition as coarse_sorting
     return (coarse_sorting, smt_manual, smt_auto)
 
 

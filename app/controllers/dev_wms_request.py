@@ -39,7 +39,7 @@ def _model(item: Registered) -> type[_DevWmsRequest]:
 
 
 def wms_request_router():
-    items = list(operations().values())
+    items = [item for item in operations().values() if not item.requires_business_owner]
     # 判别器必须写在 Body(discriminator=...) 上:放进 Annotated 里的 Field 会被 FastAPI 丢弃
     body = Union[tuple(_model(item) for item in items)]  # noqa: UP007  运行时构造
     examples = {

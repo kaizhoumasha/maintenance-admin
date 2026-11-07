@@ -66,6 +66,10 @@ class CoarseSortingService:
     def direct_put(self) -> bool:
         return self.direct_put_contracts is not None
 
+    @property
+    def components(self):
+        return {"rack_dispatch": self.rack_dispatch} if self.rack_dispatch else {}
+
     async def accept_scan(self, ctx: EcsEventContext, payload: ScanCompletedData) -> None:
         table = self.scan_table
         original = await ctx.session.scalar(

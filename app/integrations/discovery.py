@@ -61,3 +61,13 @@ def load_local_modules(*, environment: str, kind: Kind | None = None) -> None:
             in DEV_MODULES
         ):
             import_registration_module(name, local_only=True, required=True)
+
+
+def load_runtime_contracts(settings):
+    """Bootstrap the same process catalog in API, worker and Beat."""
+    with formal_registration():
+        catalog.select_runtime(settings)
+    load_formal_modules()
+    contracts = catalog.validate_business_contracts()
+    load_local_modules(environment=settings.ENVIRONMENT)
+    return contracts

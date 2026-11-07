@@ -1,5 +1,6 @@
 """The deployed catalog uses the same coarse scan entry in every environment."""
 
+import json
 import os
 import subprocess
 import sys
@@ -9,6 +10,14 @@ import pytest
 
 SCAN_MIGRATION = (
     Path(__file__).resolve().parents[2] / "migrations/versions/2026-10-29_coarse_sorting_scan.py"
+)
+WMS_TARGETS = json.dumps(
+    {
+        "targets": {
+            protocol: {"protocol": protocol, "base_url": "http://127.0.0.1:1"}
+            for protocol in ("wms-decisions", "wms-facts", "wms-transport")
+        }
+    }
 )
 
 
@@ -50,6 +59,116 @@ assert not handler.registration_source.local_only
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "environment,tail", [("production", False), ("local", False), ("local", True)]
+)
+def test_api_and_worker_start_with_the_same_coarse_contracts(environment, tail):
+    code = """
+import json
+from app.businesses import catalog
+from app.integrations.wms_request.operation import operations
+
+bindings, _ = catalog.validate_business_contracts()
+print(json.dumps({
+    "commands": sorted(
+        [binding.device_role, binding.task_type, binding.annex_id, binding.annex_version]
+        for binding in bindings
+        if "coarse_sorting" in catalog.contract_consumers(
+            ("ecs_command", binding.task_type, binding.device_role)
+        )
+    ),
+    "requests": sorted(
+        [name, item.endpoint.value] for name, item in operations().items()
+        if "coarse_sorting" in catalog.contract_consumers(("wms_request", name, None))
+    ),
+}))
+"""
+    reports = []
+    for module in ("app.main", "app.tasks.celery_app"):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}\n{code}"],
+            env={
+                **os.environ,
+                "ENVIRONMENT": environment,
+                "COARSE_SORTING_TAIL_ENABLED": str(tail).lower(),
+                "DATABASE_URL": "sqlite+aiosqlite://",
+                "RELIABLE_TARGETS": WMS_TARGETS,
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        reports.append(json.loads(result.stdout.splitlines()[-1]))
+    assert reports[0] == reports[1]
+    command_names = {tuple(command[:2]) for command in reports[0]["commands"]}
+    requests = dict(reports[0]["requests"])
+    expected_commands = {("CONVEYOR", "MOVE_FORWARD")}
+    expected_requests = {"inbound.coarse_sorting.validate_bind@v1": "decisions"}
+    if tail:
+        expected_commands.update({("INPUT_ARM", "MOVE_TO_NG"), ("OUTPUT_ARM", "PUT_TO_BIN")})
+        expected_requests.update(
+            {
+                "inbound.coarse_sorting.storage_allocate@v1": "decisions",
+                "inbound.coarse_sorting.execution_report@v1": "facts",
+                "rack.departure_decide@v1": "decisions",
+            }
+        )
+    assert command_names == expected_commands
+    assert requests == expected_requests
+
+
+@pytest.mark.parametrize("module", ["app.main", "app.tasks.celery_app"])
+@pytest.mark.parametrize("invalid_target", ["missing", "snapshot"])
+def test_coarse_integration_cannot_start_without_usable_wms_targets(module, invalid_target):
+    config = json.loads(WMS_TARGETS)
+    if invalid_target == "missing":
+        del config["targets"]["wms-decisions"]
+    else:
+        config["targets"]["wms-decisions"] = {
+            "protocol": "wms-decisions",
+            "address_mode": "SNAPSHOT",
+        }
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        env={
+            **os.environ,
+            "ENVIRONMENT": "local",
+            "COARSE_SORTING_TAIL_ENABLED": "true",
+            "RELIABLE_TARGETS": json.dumps(config),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "requires one STATIC target for wms-decisions" in result.stderr
+
+
+def test_worker_rejects_malformed_coarse_locations_at_startup():
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.tasks.celery_app"],
+        env={
+            **os.environ,
+            "ENVIRONMENT": "local",
+            "COARSE_SORTING_TAIL_ENABLED": "true",
+            "COARSE_SORTING_NG_LOCATIONS": '{"COARSE":" "}',
+            "RELIABLE_TARGETS": WMS_TARGETS,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "COARSE_SORTING_NG_LOCATIONS must map workline codes to valid locations" in result.stderr
+
+
+def test_coarse_tail_cannot_be_enabled_in_production():
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError, match="available only in the local integration mode"):
+        Settings(ENVIRONMENT="production", COARSE_SORTING_TAIL_ENABLED=True)
 
 
 @pytest.fixture

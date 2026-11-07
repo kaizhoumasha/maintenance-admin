@@ -87,6 +87,8 @@ class WmsRequests:
                 raise InvalidRequestPayload("business is not an authorized request consumer")
         elif shared:
             raise InvalidRequestPayload("shared formal request requires a bound business")
+        elif registered.requires_business_owner:
+            raise InvalidRequestPayload("request requires a bound business")
         business_key = None if self.owner_domain is None else "business:" + self.owner_domain
         try:
             validate_uuid7(operation_id)

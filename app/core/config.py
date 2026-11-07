@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     SMT_AUTO_WORKLINES: tuple[AutoWorklineSettings, ...] = ()
 
     SMT_MANUAL_FIRST_PLAN_WAIT_MS: int | None = Field(default=None, gt=0)
+    COARSE_SORTING_TAIL_ENABLED: bool = False
+    COARSE_SORTING_OUTPUT_LOCATIONS: dict[str, str] = Field(default_factory=dict)
+    COARSE_SORTING_NG_LOCATIONS: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", "SMT_AUTO_FIRST_PLAN_WAIT_MS", mode="before")
     @classmethod
@@ -69,6 +72,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_jwt_secret(self) -> "Settings":
+        if self.COARSE_SORTING_TAIL_ENABLED and self.ENVIRONMENT != "local":
+            raise ValueError("Coarse sorting tail is available only in the local integration mode")
         if self.ENVIRONMENT != "local" and len(self.JWT_SECRET_KEY) < 32:
             raise ValueError("JWT_SECRET_KEY 在非 local 环境至少 32 个字符(openssl rand -hex 32)")
         return self

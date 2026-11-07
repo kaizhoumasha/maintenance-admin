@@ -34,7 +34,7 @@ from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
-from app.integrations.discovery import load_formal_modules, load_local_modules
+from app.integrations.discovery import load_runtime_contracts
 from app.integrations.ecs_command.runtime import configure_ecs, ecs_runtime_config
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
@@ -161,9 +161,7 @@ app.include_router(ecs_status_router, prefix="/api/v1")
 app.include_router(devices_router, prefix="/api/v1")
 app.include_router(worklines_router, prefix="/api/v1")
 app.include_router(businesses_router, prefix="/api/v1")
-load_formal_modules()
-command_bindings, command_annexes = catalog.validate_business_contracts()
-load_local_modules(environment=settings.ENVIRONMENT)
+command_bindings, command_annexes = load_runtime_contracts(settings)
 from app.controllers.dev import include_dev_routers  # noqa: E402
 from app.integrations.ecs_command.dev import configure_local_ecs  # noqa: E402
 
