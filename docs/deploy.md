@@ -451,6 +451,8 @@ curl --noproxy '*' --fail http://100.94.216.118:18080/openapi.json -o /dev/null
 
 ### 后续应用更新(联调服务器)
 
+启用粗分尾段时，沿用现有共享联调服务，在包外为 API、worker 和 Beat 配置同一套站点参数。环境变量、旧候选队列隔离和升级检查见 [WES 联调装配](superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md#wes-联调装配)。
+
 先在构建机从选定干净提交生成、验收新的 amd64 固定制品，上传到新的 `releases/<新发布标识>`，不要覆盖当前目录或标签。在服务器提前加载新镜像、核对基础设施引用与 `shared` 站点文件兼容，并记录本项目及 WES 容器基线。共享 `.env`、站点覆盖文件和 `shared/redis/users.acl` 沿用；它们不随新包覆盖，不更换项目名、数据卷或数据库凭据。加载配置前确认 ACL 存在、`.env` 保留 `REDIS_PASSWORD`；保留两个仅绑定 Tailscale IP 的数据库映射、nginx 的 Tailscale/内网双地址映射和四个应用服务的带密码 Redis URL，不能退回无密码基础配置。
 
 更新前核对 API、worker、beat、migrate 的合并配置：`DATABASE_URL` 主机/端口必须为 `postgres:5432`，`REDIS_URL` 必须为 `redis:6379`，并保留数据库名、密码和 Redis DB `0`。不要将本地工具使用的 `100.94.216.118:25432` / `100.94.216.118:26379` 回填到应用配置，也不要将含密码的完整合并配置打印到普通日志。
