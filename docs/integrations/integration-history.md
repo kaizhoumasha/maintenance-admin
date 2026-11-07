@@ -8,6 +8,8 @@
 
 [设计](../superpowers/specs/2026-11-06-integration-history-unification-design.md)与[实施计划](../superpowers/plans/2026-11-06-integration-history-unification-implementation.md)保留设计阶段的决策和任务；当前软件结果以[验证记录](../testing/integration-history.md)为准，历史计划不构成部署或现场验收证明。
 
+ECS 未注册事件继续按原合同返回 ACK。事件名称不能安全投影为数据库文本时，`message_type` 为空，不能按该字段筛选；原请求字节、原事件身份及诊断不被改写，可按原身份或设备检索。已受理事件仍优先返回原回复，不因查询字段的存储限制重新裁决。
+
 ## 查询接口
 
 | 接口 | 用途 | 权限 |

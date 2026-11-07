@@ -220,7 +220,8 @@ async def receive_ecs_event(
         peer_system="ECS",
         protocol="ecs-event",
         interaction_kind="EVENT",
-        message_type=event_type,
+        # Optional search text cannot change the original ACK or retained request bytes.
+        message_type=None if "\x00" in event_type else event_type,
     )
     if receipt_id is None:  # 并发的同身份事件先提交了
         existing = await find_receipt(session, OPERATION, identity)

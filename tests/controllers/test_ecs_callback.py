@@ -51,6 +51,35 @@ async def test_valid_event_is_acked(callback_client, callback_store):
     assert calls == ["D1"]
 
 
+@pytest.mark.parametrize(
+    ("event_type", "projected_type"),
+    [("UNKNOWN" + chr(0) + "EVENT", None), ("未注册事件", "未注册事件")],
+)
+async def test_unregistered_event_keeps_ack_and_original_bytes_with_safe_type_projection(
+    callback_client, callback_store, event_type, projected_type
+):
+    import json
+
+    from tests.helpers import read_history_body
+
+    raw = json.dumps(body(event_type=event_type)).encode()
+    first = await callback_client.post(PATH, content=raw)
+    replay = await callback_client.post(PATH, content=raw)
+    assert first.status_code == replay.status_code == 200
+    assert first.json() == ACK and replay.content == first.content
+    async with callback_store() as session:
+        receipts = list(
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "RECEIPT")
+            )
+        )
+        assert len(receipts) == 1
+        receipt = receipts[0]
+        assert receipt.message_type == projected_type
+        assert receipt.diagnostic[0]["event_type"] == event_type
+        assert await read_history_body(session, receipt.request_record_id) == raw
+
+
 async def test_pure_replay_observation_failure_preserves_protocol_reply(
     callback_client, callback_store, monkeypatch
 ):
