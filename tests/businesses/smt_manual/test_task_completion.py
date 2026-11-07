@@ -75,6 +75,25 @@ async def test_manual_completion_does_not_wait_for_scan2_result(
     assert not (await flow.rows("scan2_release", component=True))[0]["pending"]
 
 
+@pytest.mark.parametrize("field", ["release_command_code", "scope_id", "production_record_id"])
+async def test_confirmation_requires_original_release_identity(
+    manual_bins, manual_completion_tools, field
+):
+    from sqlalchemy import update
+
+    flow = manual_bins
+    await flow.ready()
+    await flow.bin_plan(cancel=True)
+    await flow.scan()
+    work = (await flow.rows("manual_bin"))[0]
+    await flow.decision(dict(result="NO_WORK"))
+    await flow.advance("bin", work["arrival_id"])
+    async with flow.factory.begin() as session:
+        await session.execute(update(flow.roller_tables["bin_passage"]).values({field: "OTHER"}))
+    await flow.confirm()
+    assert await flow.confirmations() == []
+
+
 async def test_target_only_outbound_requires_reliable_transfer_arrival(
     manual_racks, manual_completion_tools
 ):

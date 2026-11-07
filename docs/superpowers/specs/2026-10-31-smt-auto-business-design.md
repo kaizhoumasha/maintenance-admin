@@ -134,10 +134,12 @@ WmsRequests 的 decisions/facts 绑定业务实例写 `business_key=business:smt
 | 空取/续取 | 明确 FAILED/0/PICK_EMPTY → RETRY/WAIT/SOURCE_ABSENT；NG 成功或 SOURCE_ABSENT 合法收口后依原规则续问 | 明确无料载体仍待设备附录；普通 FAILED/PICK_FAILED/0 不证明空取；RETRY/WAIT/SOURCE_DONE；保留 Cell/SLOT 关闭及异常续问规则 |
 | WAIT | work_plan/material.decide 到期可携最新 source_racks；empty_decide 保持原观察 | 五类决定到期新身份但原 data 不变；不能复制 inbound 的来源集合更新 |
 | 本箱/面结束 | NO_WORK 或正常 ACCEPT 无后继只是取料终局；本箱原授权/取放/扫码/决定及正常必报收口后释放 | 箱/面终局分别判断；正常与 NG 必报、授权/异常/未知动作全部收口，CLOSE/SOURCE_DONE 不等于箱/面结束 |
-| 整单完成 | 严格按统一API 3.7，含原需求/已受理生产及原释放收口 | 严格按统一API 3.7/5，含本任务供箱、实际 RackSlot 面、正常/NG 必报及公开已应用原释放成功 |
-| 明细保留 | 任务终态且直接义务收口后完整 7 天，未决继续保留，清理后持续保留最小终态摘要 | 维持原合同，不引入 inbound 的 7 天清理或清理后拒绝规则 |
+| 整单完成 | 严格按统一API 3.7，含原需求、已受理生产、正常必报及唯一原放行意图；不等尾箱 Result | 严格按统一API 3.7/5，含本任务供箱、实际 RackSlot 面、正常/NG 必报及 BIN 唯一原放行意图；不等尾箱 Result |
+| 明细保留 | 正常/取消归档均核对原放行成功；从任务终态、直接义务及最后原放行结果消费的最晚时刻保留完整 7 天，未决继续保留，清理后持续保留最小终态摘要 | 维持原合同，不引入 inbound 的 7 天清理或清理后拒绝规则 |
 
 同一任务最多一条未决 completion_confirm，共用登记/原响应关联；发起条件及响应复核委托冻结方向。准备未知、缺版、版本 0 的显式首批等待期限、新计划/新到位与旧 COMPLETED 冲突均按对应合同判断。任一方向不能以公共 FIFO/drain/全部回架/独立离场未空作统一门槛，也不能用“终态后可继续义务”跳过其正常完成前置。
+
+AUTO 与 MANUAL 共用 BIN_Roller 完成检查，按原任务核对成功投箱数与已受理生产到箱数，未知或尚未全部进入生产时保持等待。原生产终局及必报收口、严格匹配原 SCAN2 的唯一放行意图可靠保存后即可确认；尾箱原 Result 独立恢复，已有 Result 形式的确认依据继续沿原证据恢复。AUTO/outbound 首版仅有目标架且尚无来源或生产时仍等待；完整条件见[API §3.7.1](../../integrations/smt-auto-api.md#task-completion-conditions)，本轮验证见[完成确认交付记录](../plans/2026-11-07-smt-completion-readiness.md#最终交付验证2026-11-07)。
 
 inbound 的 archive_guard 在共享任务入口按原任务方向显式委托；只对满足 inbound 原归档条件的记录生效。outbound、smt_manual、旧接口默认行为不变。公共原结果回调不接入任务归档门禁，仍能收口原物理事实。
 

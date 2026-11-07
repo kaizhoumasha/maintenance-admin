@@ -195,6 +195,8 @@ class TaskRepository:
 
     async def bin_release_evidence(self, session, roller, work):
         """Read the original permission and SCAN2 release intent without waiting for its result."""
+        from app.businesses._components.bin_roller.completion import release_intent
+        from app.businesses._components.bin_roller.ports import Scan2Arrival
         from app.businesses._components.rack_dispatch.contracts import FactRef
 
         from .contracts import ADMISSION_DECISION
@@ -279,19 +281,21 @@ class TaskRepository:
                 return None
         else:
             return None
-        try:
-            scan = await roller.original_arrival(session, work["arrival_id"])
-        except ValueError:
-            return None
-        if (
-            scan["point"] != "SCAN2"
-            or scan["release_command_code"] != work["command_code"]
-            or not scan["production_record_id"]
-            or any(
-                scan[k] != work[k]
-                for k in ("work_line_id", "device_code", "bin_code", "scanned_at")
-            )
-        ):
+        scan = await release_intent(
+            roller,
+            session,
+            arrival=Scan2Arrival(
+                work["arrival_id"],
+                work["work_line_id"],
+                work["device_code"],
+                work["raw_bin_code"],
+                work["bin_code"],
+                work["scanned_at"],
+            ),
+            task_id=work["task_id"],
+            command_code=work["command_code"],
+        )
+        if scan is None:
             return None
         return FactRef(
             "scan2_release",

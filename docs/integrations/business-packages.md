@@ -125,6 +125,10 @@ catalog 将同键且完整相同的资源合并，资源冲突、输入双重认
 
 BIN_Roller 的 `get_supply_progress` 必须与宿主自己保存的原成员有效/撤销事实一起使用：有效需求要求 feed_complete=true 且 pending=false；未开始撤销可返回 false/false，不要求补造成功。已开始/原 pending 不因撤销跳过，缺预期关联不视为结清；DTO 不提供 withdrawn，宿主不查组件内部表。该进度不等于全局回流或全部架离场，人工完成映射见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)。
 
+`SupplyProgress.fed_bin_count` 为沿原供箱清单和成功消费游标确认的已投放箱数；原明确空面结束、未开始合法撤销为 0，缺原清单或游标不合法为 None。它不因提交 ACK 或面关闭标记而推断投箱成功。AUTO 和 MANUAL 完成资格复用 `bin_roller.completion.supply_accounted_for`，按任务汇总该数，与原任务已受理生产到箱数核对；宿主不读取组件内部表或建立逐箱供箱映射。两者复用 `release_intent` 核对原 SCAN2 到箱与唯一原放行命令；各自核对生产终局后即可确认，尾箱 Result 独立恢复。
+
+原供箱检查点尚存时，即使该面或任务已关闭，可靠消息清理也保留其原供箱清单，以支持宿主重查计数；检查点沿既有期限和原架责任门禁清理后解除该引用，不延长保留天数。
+
 人工两方向统一为 [smt_manual](../superpowers/specs/2026-10-31-smt-manual-business-design.md)，自动两方向统一为 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md)。各宿主分别组合同源 sorting_task 与一份 bin_roller，共用本宿主任务表/队列/服务/工厂/scan_pending；inbound/outbound 只是冻结任务方向及内部生产分支，无独立业务码或 owner。smt_auto 共享任务注册/平台适配/迁移和最终组合由[总计划](../superpowers/plans/2026-10-31-smt-auto-implementation.md)一次交付，保留两个方向各自合同与完成条件。首次 issued 先核对可信工作线业务，后续沿原 task/arrival/动作，不按当前方向重新路由。手工与自动宿主均登记于正式 catalog。AUTO 工作线的物理参数按站点配置，实机联调与现场启用单独验收。
 
 ### 3.2 WMS / Transport 原业务归属

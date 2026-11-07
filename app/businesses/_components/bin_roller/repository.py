@@ -218,16 +218,33 @@ class RollerRepository:
         ).mappings()
         result = []
         for face in rows:
+            from .feed_flow import read_feed_manifest
+
+            manifest = (
+                await read_feed_manifest(self.rack_dispatch.capabilities, session, face)
+                if face["feed_message_id"] is not None
+                else None
+            )
             complete = face["close_reason"] == "COMPLETED"
             # Feed completion is independent of the current return window.
-            if not complete and face["feed_message_id"] is not None:
-                from .feed_flow import read_feed_manifest
-
-                manifest = await read_feed_manifest(self.rack_dispatch.capabilities, session, face)
+            if not complete:
                 complete = manifest is not None and (
                     manifest["result"] == "RACK_FACE_DONE"
                     or face["feed_cursor"] == len(manifest.get("bins", ()))
                 )
+            withdrawn_before_start = (
+                face["closed_at"] is not None
+                and face["close_reason"] == "WITHDRAWN"
+                and face["demand_state"] == "WITHDRAWN"
+                and face["feed_operation_id"] is None
+                and face["preparation_action_id"] is None
+                and face["feed_cursor"] == 0
+                and face["current_transport_task_id"] is None
+            )
+            # The cursor advances only after strict original feed success, never submission ACK.
+            fed_bin_count = 0 if withdrawn_before_start else None
+            if manifest is not None and 0 <= face["feed_cursor"] <= len(manifest.get("bins", ())):
+                fed_bin_count = face["feed_cursor"]
             ids = tuple(
                 str(face[k])
                 for k in (
@@ -252,15 +269,8 @@ class RollerRepository:
                         face["demand_state"] == "ACTIVE" or await self.supply_started(session, face)
                     ),
                     ids,
-                    withdrawn_before_start=(
-                        face["closed_at"] is not None
-                        and face["close_reason"] == "WITHDRAWN"
-                        and face["demand_state"] == "WITHDRAWN"
-                        and face["feed_operation_id"] is None
-                        and face["preparation_action_id"] is None
-                        and face["feed_cursor"] == 0
-                        and face["current_transport_task_id"] is None
-                    ),
+                    withdrawn_before_start=withdrawn_before_start,
+                    fed_bin_count=fed_bin_count,
                 )
             )
         return tuple(result)

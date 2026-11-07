@@ -15,6 +15,10 @@ async def test_five_bins_split_four_and_one(roller_current):
     face_id = await flow.ready_supply_current(count=5)
     first = (await flow.current_rows("face_work"))[0]
     async with flow.factory() as session:
+        progress = await flow.roller.get_supply_progress(
+            session, work_line_id=1, task_id="task-original"
+        )
+        assert progress[0].fed_bin_count == 0
         task = await session.scalar(
             select(TransportTask).where(
                 TransportTask.transport_task_id == first["current_transport_task_id"]
@@ -40,6 +44,17 @@ async def test_five_bins_split_four_and_one(roller_current):
             len(task.frozen["moves"]) == 1
             and task.client_request_id != first["current_client_request_id"]
         )
+        progress = await flow.roller.get_supply_progress(
+            session, work_line_id=1, task_id="task-original"
+        )
+        assert progress[0].fed_bin_count == 4
+    await flow.complete_transport(current["current_transport_task_id"])
+    await flow.advance_current("FACE", face_id)
+    async with flow.factory() as session:
+        progress = await flow.roller.get_supply_progress(
+            session, work_line_id=1, task_id="task-original"
+        )
+        assert progress[0].fed_bin_count == 5
 
 
 async def test_segment_success_does_not_wait_for_scans(roller_current):
@@ -71,6 +86,7 @@ async def test_face_done_opens_return_without_fake_feed(roller_current):
             session, work_line_id=1, task_id="task-original"
         )
         assert progress[0].feed_complete and not progress[0].pending
+        assert progress[0].fed_bin_count == 0
 
 
 @pytest.mark.parametrize(

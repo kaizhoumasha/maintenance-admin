@@ -8,6 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.businesses._components.bin_roller.completion import supply_accounted_for
 from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyChange
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import CompletionDecision
@@ -778,7 +779,7 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        if any(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members) and not bins:
+        if not supply_accounted_for(all_progress, production_count=len(bins)):
             return False, {}
         faces = self.roller.repository(task["work_line_id"]).tables["face_work"]
         if await session.scalar(

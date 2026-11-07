@@ -2,7 +2,7 @@
 
 from dataclasses import asdict
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.businesses._components.rack_dispatch.contracts import (
     Coverage,
@@ -244,6 +244,16 @@ class Archive:
             return False
         else:
             closed = task.direct_obligations_closed_at_ms
+            if closed is not None:
+                closed = max(
+                    closed,
+                    await session.scalar(
+                        select(func.max(AutoBinWork.release_consumed_at_ms)).where(
+                            AutoBinWork.task_id == task_id
+                        )
+                    )
+                    or 0,
+                )
         if closed is None or now_ms < max(closed, task.closed_at_ms) + RETENTION_MS:
             return False
         for job in await dispatch.jobs(

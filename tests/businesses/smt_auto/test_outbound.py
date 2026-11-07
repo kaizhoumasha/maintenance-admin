@@ -14,6 +14,7 @@ from app.businesses.smt_auto.models import (
     AutoOutboundPlate,
     AutoTask,
     AutoTaskInput,
+    AutoTaskRequest,
 )
 from app.businesses.smt_auto.rack_ports import AutoRackPorts, RackAuthorization
 from app.http_client import DeliveryState, HttpResult
@@ -969,7 +970,7 @@ async def test_replacement_with_next_does_not_wait_for_its_own_successor_decisio
 
 
 @pytest.mark.parametrize("outbound_host", [("ARM02", "ARM01", "NO_BIN")], indirect=True)
-async def test_target_only_requires_original_terminal_confirmation(outbound_host):
+async def test_target_only_waits_for_production_sources(outbound_host):
     from app.businesses.smt_auto.task_flow import TaskFlow
 
     host = outbound_host
@@ -981,11 +982,52 @@ async def test_target_only_requires_original_terminal_confirmation(outbound_host
         job_id = plan.target_job_id
         ports = AutoRackPorts(host.dispatch, outbound=host.outbound)
         assert (await ports.facts(session, job_id=job_id))[0].state == "CONTINUE"
-        assert await flow.advance(session, task_id="t", now_ms=20) == "CONFIRMING"
-    await host.settle("sorting.task.completion_confirm@v1", dict(result="COMPLETED"))
+        for now in (20, 30):
+            assert await flow.advance(session, task_id="t", now_ms=now) == "WAITING"
+        assert (await session.get(AutoTask, "t")).status == "EXECUTING"
+        assert not await session.scalar(
+            select(AutoTaskRequest).where(AutoTaskRequest.purpose == "COMPLETION")
+        )
+        assert (await ports.facts(session, job_id=job_id))[0].state == "CONTINUE"
+
+
+@pytest.mark.parametrize("outbound_host", [("ARM02", "ARM01", "NO_BIN")], indirect=True)
+async def test_unstarted_withdrawn_supply_can_confirm_without_production(outbound_host):
+    from app.businesses._components.sorting_task.contracts import Cancel, PlanDelta
+    from app.businesses.smt_auto.task_flow import TaskFlow
+    from app.businesses.smt_auto.task_service import AutoTaskService
+    from app.integrations.wms_callback import CallbackContext
+
+    host = outbound_host
+    service = AutoTaskService(roller=host.roller)
+    delta = PlanDelta(
+        task_id="t",
+        plan_revision=2,
+        added_bin_source_racks=[{"rack_id": "unused", "rack_face": ["A"]}],
+    )
+    cancel = Cancel(
+        task_id="t",
+        cancel_scope="PLAN_MEMBERS",
+        bin_source_racks=[{"plan_revision": 2, "rack_id": "unused", "rack_face": ["A"]}],
+    )
     async with host.factory.begin() as session:
-        assert await flow.advance(session, task_id="t", now_ms=30) == "COMPLETED"
-        assert (await ports.facts(session, job_id=job_id))[0].state == "NONE"
+        for name, payload, accept in (
+            ("plan_delta", delta, service.accept_task_plan_delta),
+            ("cancel", cancel, service.accept_task_cancel),
+        ):
+            await accept(
+                CallbackContext(
+                    session,
+                    1,
+                    f"supply-{name}",
+                    50,
+                    payload.model_dump(mode="json", exclude_none=True),
+                    operation=f"sorting.task.{name}@v1",
+                ),
+                payload,
+            )
+        flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+        assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
 
 
 async def test_mixed_withdrawn_sources_release_target_before_report(decided_outbound):

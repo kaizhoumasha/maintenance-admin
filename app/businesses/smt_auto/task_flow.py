@@ -2,7 +2,8 @@
 
 from sqlalchemy import select
 
-from app.businesses._components.bin_roller.ports import SourceFaceRef
+from app.businesses._components.bin_roller.completion import release_intent, supply_accounted_for
+from app.businesses._components.bin_roller.ports import Scan2Arrival, SourceFaceRef
 from app.businesses._components.sorting_task.contracts import CompletionDecision, PrepareAccepted
 from app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1 import (
     CompletionConfirm,
@@ -587,11 +588,35 @@ class TaskFlow:
                 .order_by(AutoBinWork.id)
             )
         )
+        if not supply_accounted_for(progress, production_count=len(bins)):
+            return None
+        if (
+            task.status != "CANCELLED"
+            and task.business_type == "outbound"
+            and any(r.effective_request.get("target_rack") for r in inputs)
+            and not (supplies or outbound_members or bins)
+        ):
+            return None
         for work in bins:
             if (
                 work.work_line_id != task.work_line_id
                 or not await self._bin_terminal(session, work)
-                or not await self._released(session, work)
+                or self.roller is None
+                or work.release_decided_at_ms is None
+                or not await release_intent(
+                    self.roller,
+                    session,
+                    arrival=Scan2Arrival(
+                        work.arrival_id,
+                        work.work_line_id,
+                        work.device_code,
+                        work.raw_bin_code,
+                        work.bin_code,
+                        work.scanned_at,
+                    ),
+                    task_id=work.task_id,
+                    command_code=work.release_command_code,
+                )
             ):
                 return None
         for model in (AutoInboundDecisionRound, AutoOutboundDecisionRound):
@@ -612,15 +637,32 @@ class TaskFlow:
                     or round_.source_preparation_action_id not in closed_faces
                 ):
                     return None
-        return {
+        basis = {
             "plan_revision": task.plan_revision,
             "inputs": [r.operation_id for r in inputs],
-            "bins": [[b.id, b.release_result_ref] for b in bins],
+            "bins": [[b.id, b.release_command_code] for b in bins],
             "supply": [
                 [p.source.plan_revision, p.source.rack_id, p.source.rack_face, list(p.original_ids)]
                 for p in progress
             ],
         }
+        # Keep already-saved Result-based confirmations recoverable across this change.
+        legacy = {**basis, "bins": [[b.id, b.release_result_ref] for b in bins]}
+        if task.confirmation_basis == legacy:
+            for work in bins:
+                if not await self._released(session, work):
+                    return None
+            return legacy
+        return basis
+
+    async def _released_bins(self, session, task):
+        bins = tuple(
+            await session.scalars(select(AutoBinWork).where(AutoBinWork.task_id == task.task_id))
+        )
+        for work in bins:
+            if not await self._released(session, work):
+                return None
+        return bins
 
     async def cancelled_retention_closed_at(self, session, task, *, now_ms):
         requests = tuple(
@@ -634,6 +676,9 @@ class TaskFlow:
             or requests[0].purpose != "PREPARE"
             or not await self._obligation_basis(session, task, now_ms)
         ):
+            return None
+        bins = await self._released_bins(session, task)
+        if bins is None:
             return None
         prepare = requests[0]
         result = await self.requests.get_result(
@@ -654,18 +699,15 @@ class TaskFlow:
             PrepareAccepted.parse(result.http_status, result.response_code, result.response_data)
         except (ValueError, TypeError):
             return None
-        releases = tuple(
-            await session.scalars(
-                select(AutoBinWork.release_consumed_at_ms).where(
-                    AutoBinWork.task_id == task.task_id
-                )
-            )
+        return max(
+            task.closed_at_ms, prepare.consumed_at_ms, *(b.release_consumed_at_ms for b in bins)
         )
-        return max(task.closed_at_ms, prepare.consumed_at_ms, *releases)
 
     async def retention_basis(self, session, task, *, now_ms):
         """Original completion and obligations, independent of present line configuration."""
         if task.status != "COMPLETED" or task.closed_at_ms is None:
+            return None
+        if await self._released_bins(session, task) is None:
             return None
         requests = list(
             await session.scalars(

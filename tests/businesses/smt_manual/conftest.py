@@ -1012,7 +1012,7 @@ async def manual_supply(manual_racks, manual_completion_tools):
             await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
             return await advance_face(flow.roller, session, demand_id)
 
-    async def feed_success(demand_id):
+    async def feed_success(demand_id, *, count=1):
         original = (await flow.rows("feed", component=True))[0]
         async with flow.factory.begin() as session:
             await update_message_bodies(
@@ -1030,14 +1030,15 @@ async def manual_supply(manual_racks, manual_completion_tools):
                             result="READY",
                             bins=[
                                 dict(
-                                    bin_code="A000000001",
+                                    bin_code=f"A{i + 1:09}",
                                     source_locator=dict(
                                         type="RACK_BIN_SLOT",
                                         rack_id="R",
                                         rack_face="A",
-                                        slot_id="S1",
+                                        slot_id=f"S{i + 1}",
                                     ),
                                 )
+                                for i in range(count)
                             ],
                         ),
                     )
@@ -1054,10 +1055,11 @@ async def manual_supply(manual_racks, manual_completion_tools):
                 outcome_revision=1,
                 results=[
                     dict(
-                        container_id="A000000001",
+                        container_id=f"A{i + 1:09}",
                         status="SUCCEEDED",
                         final_position=dict(kind="HANDOFF_POSITION", location_code="IN"),
                     )
+                    for i in range(count)
                 ],
             ),
         )
@@ -1067,6 +1069,15 @@ async def manual_supply(manual_racks, manual_completion_tools):
 
     flow.start_supply, flow.withdraw_supply = started, withdraw
     flow.feed_success, flow.advance_supply = feed_success, advance
+    return flow
+
+
+@pytest.fixture
+async def manual_production_supply(manual_bins, manual_supply):
+    from dataclasses import replace
+
+    flow = manual_supply
+    flow.roller.capabilities = replace(flow.roller.capabilities, ecs=flow.manual.capabilities.ecs)
     return flow
 
 
