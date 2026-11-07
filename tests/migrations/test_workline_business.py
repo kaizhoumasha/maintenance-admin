@@ -1,4 +1,5 @@
 import shutil
+from contextlib import AsyncExitStack
 
 import pytest
 from alembic.config import Config
@@ -7,6 +8,7 @@ from sqlalchemy import text
 
 from app.database import create_database_engine
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 BASE = "c31f20261027"
 
@@ -36,60 +38,61 @@ def test_workline_business_has_single_migration_head(tmp_path, later_migrations)
 async def test_old_line_stays_null_and_selected_business_blocks_downgrade(
     backend, tmp_path, request
 ):
-    url = (
-        f"sqlite+aiosqlite:///{tmp_path / 'business.db'}"
-        if backend == "sqlite"
-        else request.getfixturevalue("pg_url")
-    )
+    url = f"sqlite+aiosqlite:///{tmp_path / 'business.db'}" if backend == "sqlite" else None
+    async with AsyncExitStack() as databases:
+        if backend == "postgres":
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
 
-    async def migrate(direction, revision):
-        return await run_alembic(url, direction, revision)
+        async def migrate(direction, revision):
+            return await run_alembic(url, direction, revision)
 
-    up = await migrate("upgrade", "head")
-    assert up.returncode == 0, up.stdout + up.stderr
-    down = await migrate("downgrade", BASE)
-    assert down.returncode == 0, down.stdout + down.stderr
-    engine = create_database_engine(url)
-    try:
-        async with engine.begin() as connection:
-            await connection.execute(
-                text("INSERT INTO work_lines (line_code,line_name) VALUES ('BUSINESS_OLD','Old')")
-            )
-        up = await migrate("upgrade", "head")
+        up = await migrate("upgrade", BASE)
         assert up.returncode == 0, up.stdout + up.stderr
-        async with engine.begin() as connection:
-            assert (
-                await connection.scalar(
-                    text("SELECT business_code FROM work_lines WHERE line_code='BUSINESS_OLD'")
+        engine = create_database_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "INSERT INTO work_lines (line_code,line_name) VALUES ('BUSINESS_OLD','Old')"
+                    )
                 )
-                is None
-            )
-            await connection.execute(
-                text(
-                    "UPDATE work_lines SET business_code='test_sorting' "
-                    "WHERE line_code='BUSINESS_OLD'"
+            up = await migrate("upgrade", "a6d464b20ab7")
+            assert up.returncode == 0, up.stdout + up.stderr
+            async with engine.begin() as connection:
+                assert (
+                    await connection.scalar(
+                        text("SELECT business_code FROM work_lines WHERE line_code='BUSINESS_OLD'")
+                    )
+                    is None
                 )
-            )
-            head = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-        refused = await migrate("downgrade", BASE)
-        assert refused.returncode != 0
-        assert "business selections exist" in refused.stdout + refused.stderr
-        async with engine.begin() as connection:
-            assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == head
-            assert (
-                await connection.scalar(
-                    text("SELECT business_code FROM work_lines WHERE line_code='BUSINESS_OLD'")
+                await connection.execute(
+                    text(
+                        "UPDATE work_lines SET business_code='test_sorting' "
+                        "WHERE line_code='BUSINESS_OLD'"
+                    )
                 )
-                == "test_sorting"
-            )
-            await connection.execute(text("DELETE FROM work_lines WHERE line_code='BUSINESS_OLD'"))
-        down = await migrate("downgrade", BASE)
-        assert down.returncode == 0, down.stdout + down.stderr
-        up = await migrate("upgrade", "head")
-        assert up.returncode == 0, up.stdout + up.stderr
-    finally:
-        async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM work_lines WHERE line_code='BUSINESS_OLD'"))
-        await engine.dispose()
-        restored = await migrate("upgrade", "head")
-        assert restored.returncode == 0, restored.stdout + restored.stderr
+                head = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            refused = await migrate("downgrade", BASE)
+            assert refused.returncode != 0
+            assert "business selections exist" in refused.stdout + refused.stderr
+            async with engine.begin() as connection:
+                assert (
+                    await connection.scalar(text("SELECT version_num FROM alembic_version")) == head
+                )
+                assert (
+                    await connection.scalar(
+                        text("SELECT business_code FROM work_lines WHERE line_code='BUSINESS_OLD'")
+                    )
+                    == "test_sorting"
+                )
+                await connection.execute(
+                    text("DELETE FROM work_lines WHERE line_code='BUSINESS_OLD'")
+                )
+            down = await migrate("downgrade", BASE)
+            assert down.returncode == 0, down.stdout + down.stderr
+            up = await migrate("upgrade", "a6d464b20ab7")
+            assert up.returncode == 0, up.stdout + up.stderr
+        finally:
+            await engine.dispose()

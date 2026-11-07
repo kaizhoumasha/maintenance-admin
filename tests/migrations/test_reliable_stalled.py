@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from sqlalchemy.exc import DBAPIError
 from app.core.identifiers import uuid7
 from app.database import create_database_engine as create_async_engine
 from tests.helpers import run_alembic as migrate
+from tests.migration_helpers import isolated_schema_database
 
 BASE, HEAD = "a019b20261021", "a019c20261022"
 ROOT = Path(__file__).parents[2]
@@ -57,22 +59,17 @@ async def query(url, sql, **params):
 
 @pytest.fixture(params=["sqlite", "pg"])
 async def db(request, tmp_path):
-    if request.param == "sqlite":
-        url = f"sqlite+aiosqlite:///{tmp_path / 'm.db'}"
-    else:
-        url = request.getfixturevalue("pg_url")
-        stepped = await migrate(url, "downgrade", BASE)
-        assert stepped.returncode == 0, stepped.stdout + stepped.stderr
-    prepared = await migrate(url, "upgrade", BASE)
-    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
-    target = "stalled-" + uuid7().hex
-    try:
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'm.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
+        prepared = await migrate(url, "upgrade", BASE)
+        assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+        target = "stalled-" + uuid7().hex
         yield url, target
-    finally:
-        if request.param == "pg":
-            await query(url, "DELETE FROM reliable_message WHERE target = :target", target=target)
-            restored = await migrate(url, "upgrade", "head")
-            assert restored.returncode == 0, restored.stdout + restored.stderr
 
 
 def old_row(target, oid, status):

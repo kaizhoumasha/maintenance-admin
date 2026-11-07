@@ -2,57 +2,63 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, insert, inspect, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
+from app.database import create_database_engine
 from app.integrations import history as history_records
 from app.models import ReliableMessage
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 
 @pytest.mark.parametrize("occupied", [False, True])
-async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occupied):
+async def test_message_downgrade_requires_empty_table(pg_url, occupied):
     from sqlalchemy import MetaData, Table, select
 
-    result = await run_alembic(pg_url, "downgrade", "a019b20261021")
-    assert result.returncode == 0, result.stdout + result.stderr
-    engine = pg_sessions.kw["bind"]
-    async with engine.connect() as c:
-        original = await c.run_sync(
-            lambda sync: Table("reliable_message", MetaData(), autoload_with=sync)
-        )
-    try:
-        if occupied:
-            async with pg_sessions.begin() as session:
-                await session.execute(
-                    original.insert().values(
-                        target="original",
-                        operation="opaque",
-                        operation_id="original",
-                        request_raw=b"opaque",
-                        status="PENDING",
-                        attempts=0,
-                        next_attempt_at=datetime.now(UTC),
-                        created_at=datetime.now(UTC),
-                        updated_at=datetime.now(UTC),
-                    )
-                )
-        result = await run_alembic(pg_url, "downgrade", "c9f2b7a41d08")
-        assert (result.returncode != 0) == occupied, result.stdout + result.stderr
-        if occupied:
-            assert "非空" in result.stdout + result.stderr
-            async with pg_sessions.begin() as session:
-                assert await session.scalar(select(original.c.request_raw)) == b"opaque"
-                assert (
-                    await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == "a019b20261021"
-                )
-                await session.execute(original.delete())
-        else:
-            async with pg_sessions() as session:
-                assert await session.scalar(text("SELECT to_regclass('reliable_message')")) is None
-    finally:
-        result = await run_alembic(pg_url, "upgrade", "head")
+    async with isolated_schema_database(pg_url) as (url, _):
+        result = await run_alembic(url, "upgrade", "a019b20261021")
         assert result.returncode == 0, result.stdout + result.stderr
+        engine = create_database_engine(url)
+        pg_sessions = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with engine.connect() as c:
+                original = await c.run_sync(
+                    lambda sync: Table("reliable_message", MetaData(), autoload_with=sync)
+                )
+            if occupied:
+                async with pg_sessions.begin() as session:
+                    await session.execute(
+                        original.insert().values(
+                            target="original",
+                            operation="opaque",
+                            operation_id="original",
+                            request_raw=b"opaque",
+                            status="PENDING",
+                            attempts=0,
+                            next_attempt_at=datetime.now(UTC),
+                            created_at=datetime.now(UTC),
+                            updated_at=datetime.now(UTC),
+                        )
+                    )
+            result = await run_alembic(url, "downgrade", "c9f2b7a41d08")
+            assert (result.returncode != 0) == occupied, result.stdout + result.stderr
+            if occupied:
+                assert "非空" in result.stdout + result.stderr
+                async with pg_sessions.begin() as session:
+                    assert await session.scalar(select(original.c.request_raw)) == b"opaque"
+                    assert (
+                        await session.scalar(text("SELECT version_num FROM alembic_version"))
+                        == "a019b20261021"
+                    )
+                    await session.execute(original.delete())
+            else:
+                async with pg_sessions() as session:
+                    assert (
+                        await session.scalar(text("SELECT to_regclass('reliable_message')")) is None
+                    )
+        finally:
+            await engine.dispose()
 
 
 async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, record_property):

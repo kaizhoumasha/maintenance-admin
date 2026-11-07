@@ -1,5 +1,6 @@
 """Offline schema replacement rejects old responsibility before destroying private history."""
 
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import pytest
@@ -7,43 +8,42 @@ from sqlalchemy import MetaData, Table, inspect, select, text
 
 from app.database import SCHEMA, create_database_engine
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
 async def roller_migration(request, tmp_path):
-    url = (
-        f"sqlite+aiosqlite:///{tmp_path / 'cutover.db'}"
-        if request.param == "sqlite"
-        else request.getfixturevalue("pg_url")
-    )
-
-    async def migrate(command, revision):
-        result = await run_alembic(url, command, revision)
-        return result
-
-    result = await migrate("upgrade", "head")
-    assert result.returncode == 0, result.stdout + result.stderr
-    result = await migrate("downgrade", "rollerfoundation")
-    assert result.returncode == 0, result.stdout + result.stderr
-    engine = create_database_engine(url)
-
-    async def table(name):
-        async with engine.connect() as connection:
-            return await connection.run_sync(
-                lambda c: Table(
-                    name,
-                    MetaData(),
-                    schema=None if c.dialect.name == "sqlite" else SCHEMA,
-                    autoload_with=c,
-                )
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'cutover.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
             )
 
-    try:
-        yield engine, migrate, table
-    finally:
-        await engine.dispose()
-        result = await migrate("upgrade", "head")
+        async def migrate(command, revision):
+            result = await run_alembic(url, command, revision)
+            return result
+
+        result = await migrate("upgrade", "rollerfoundation")
         assert result.returncode == 0, result.stdout + result.stderr
+        engine = create_database_engine(url)
+
+        async def table(name):
+            async with engine.connect() as connection:
+                return await connection.run_sync(
+                    lambda c: Table(
+                        name,
+                        MetaData(),
+                        schema=None if c.dialect.name == "sqlite" else SCHEMA,
+                        autoload_with=c,
+                    )
+                )
+
+        try:
+            yield engine, migrate, table
+        finally:
+            await engine.dispose()
 
 
 def old_scan(identity, *, pending):
