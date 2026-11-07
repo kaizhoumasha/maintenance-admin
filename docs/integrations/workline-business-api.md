@@ -9,6 +9,7 @@
 | [SMT 手工线](manual-picking-api.md) | 一个业务承接入库/出库；共用供箱、SCAN2 箱级作业和任务生命周期，直接取料/可选转运架仅出库 | 当前设计采用 sorting.task.* 与 manual_bin.*；共享 sorting_task ST1/ST2 已随 PR #44 合入 develop，SMT 手工宿主仍未实施，BIN_Roller 正式生产接入仍待完成 |
 | [粗分机](coarse-sorting-api-draft.md) | 设备驱动，验证绑定、分流、分配储位、机械臂搬运、反馈 | 正式启用扫码、验证绑定、MOVE_FORWARD 及原 Result 消费，成功后等待箱格分配。直分入箱、NG、补换架和仅退架已完成项目内隔离实现，对端合同及设备附录由联调阶段确认 |
 | [SMT 自动线](smt-auto-api.md) | 一个 smt_auto 业务：任务及共同规则统一定义，inbound/outbound以资源联合、专属逐盘合同与完成条件区分 | 唯一自动线 API 文档；共享 sorting_task ST1/ST2 已随 PR #44 合入 develop，smt_auto 宿主及消费方已登记正式运行目录，对端交付、设备附录、联调与现场验收另行记录 |
+| [X-Ray 退料线](xray-api.md) | 逐盘清点、贴标、复核、五层架上架和通箱中转，复用 WMS Operation、Transport 及 ECS 公共能力 | WMS Operation 和 ECS Event／Command／Result 的本地开发合同已拟定。ECS 通用投递策略增量、业务实现及软件验证待完成 |
 | [BIN_Roller](../superpowers/specs/2026-10-30-bin-roller-capability-design.md) | 四点、完整供箱/回流及架生命周期；生产业务提供上下文与 SCAN2 接缝 | B1～B5 本地实现及分项验证、B6 边界核对已完成；B7 共享声明/隔离测试装配已完成，正式生产宿主/catalog、组件状态迁移及现场验收未完成，不加锁/占位 |
 | [公共料箱回流](workline-bin-return-api.md) | SCAN3 → SCAN4 → 工作线 FIFO → Return_Batch、回架及尾箱清退 | C01～C07 本方边界及组件本地实现已完成；正式生产宿主/catalog、组件状态迁移及供应商/现场验收仍属 B7 |
 | [业务开发唯一用法设计](../superpowers/specs/2026-10-28-business-development-single-api-design.md) | 唯一公开模型 API、命令声明、业务目录及迁移边界 | 已实现；MOCK 与内部验证结果见当前验收说明 |
