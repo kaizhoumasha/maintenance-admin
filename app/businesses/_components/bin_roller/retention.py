@@ -112,8 +112,14 @@ async def protected_event_ids(session, *, candidate_ids: tuple[int, ...]) -> fro
 
 
 async def _message_references(session, candidates, line_ids=None, *, business_references=None):
-    references = []
     table = TABLES["face_work"]
+    # Hosts recheck supplied counts until the original supply checkpoint is cleaned up.
+    query = select(table.c.work_line_id, table.c.feed_message_id).where(
+        table.c.purpose == "SUPPLY", table.c.feed_message_id.in_(candidates)
+    )
+    if line_ids is not None:
+        query = query.where(table.c.work_line_id.in_(line_ids))
+    references = list(await session.execute(query))
     query = select(table).where(table.c.closed_at.is_(None))
     if line_ids is not None:
         query = query.where(table.c.work_line_id.in_(line_ids))

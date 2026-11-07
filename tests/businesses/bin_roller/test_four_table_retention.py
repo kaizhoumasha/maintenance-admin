@@ -103,8 +103,46 @@ async def test_protected_first_page_does_not_starve_later_expired_rows(roller_cu
         ) == [anchor["scan1_event_id"]]
 
 
+async def test_closed_supply_keeps_original_feed_count_when_messages_expire(
+    roller_current, monkeypatch
+):
+    from app.businesses._components.bin_roller import retention
+    from app.reliable.store import cleanup_terminal
+
+    flow = roller_current
+    monkeypatch.setattr(retention, "TABLES", flow.roller.tables)
+    face_id = await flow.ready_supply_current(count=1)
+    face = (await flow.current_rows("face_work"))[0]
+    await flow.complete_transport(face["current_transport_task_id"])
+    await flow.advance_current("FACE", face_id)
+    now = datetime.now(UTC)
+    async with flow.factory.begin() as session:
+        await flow.roller.repository(1).close(session, "face_work", face_id, "COMPLETED")
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id == face["feed_message_id"])
+            .values(updated_at=now - timedelta(days=100))
+        )
+        candidates = (face["feed_message_id"],)
+        protected = await retention.protected_message_ids(session, candidate_ids=candidates)
+        assert (
+            await cleanup_terminal(
+                session,
+                now=now,
+                retention_days=90,
+                candidate_ids=candidates,
+                protected_ids=protected,
+            )
+            == 0
+        )
+        progress = await flow.roller.get_supply_progress(
+            session, work_line_id=1, task_id="task-original"
+        )
+        assert progress[0].fed_bin_count == 1
+
+
 @pytest.mark.parametrize("handed_off", [False, True])
-async def test_task_close_releases_host_references_but_preserves_original_rack_responsibility(
+async def test_task_close_keeps_feed_evidence_until_original_checkpoint_cleanup(
     roller_lifecycle, monkeypatch, handed_off
 ):
     from app.businesses._components.bin_roller import retention
@@ -120,13 +158,13 @@ async def test_task_close_releases_host_references_but_preserves_original_rack_r
     async with flow.factory() as session:
         all_ids = tuple(await session.scalars(select(ReliableMessage.id)))
         protected = await retention.protected_message_ids(session, candidate_ids=all_ids)
-        assert (feed["feed_message_id"] in protected) is (not handed_off)
+        assert feed["feed_message_id"] in protected
     async with flow.factory.begin() as session:
         await flow.roller.close_scope(
             session, ScopeRef("first", "TASK", "task-original"), reason="TASK_COMPLETED"
         )
     async with flow.factory() as session:
-        assert feed["feed_message_id"] not in await retention.protected_message_ids(
+        assert feed["feed_message_id"] in await retention.protected_message_ids(
             session, candidate_ids=all_ids
         )
     async with flow.factory.begin() as session:
@@ -139,6 +177,8 @@ async def test_task_close_releases_host_references_but_preserves_original_rack_r
         assert await flow.roller.cleanup_closed(
             session, cutoff=datetime.now(UTC) - timedelta(days=90)
         ) == int(handed_off)
+        protected = await retention.protected_message_ids(session, candidate_ids=all_ids)
+        assert (feed["feed_message_id"] in protected) is (not handed_off)
 
 
 async def test_finished_line_run_does_not_pin_the_last_point_forever(roller_current, monkeypatch):
