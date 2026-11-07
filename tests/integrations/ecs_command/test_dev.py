@@ -1,11 +1,15 @@
 import pytest
 from fastapi import FastAPI
+from sqlalchemy import select
 
+from app.integrations import history as history_records
 from app.integrations.ecs_command.dev import create_debug_command
+from app.models import IntegrationExchange
 from tests.helpers import (
     EcsMove,
     ecs_history_annexes,
     ecs_protocol_annexes,
+    read_history_body,
     reset_ecs_assembly,
     simulator_sender,
 )
@@ -258,21 +262,27 @@ async def test_main_lifespan_assembles_ecs_once_with_restricted_factory(
                     "MOVE",
                     "LIFT",
                 }
-                from sqlalchemy import func
 
-                from app.models import EcsCommand, EcsSendEvidence
+                from app.models import IntegrationExchange
 
                 async with ecs.factory() as session:
                     for sent_code, raw in peers.raw_requests.items():
-                        assert (await session.get(EcsCommand, sent_code)).request_raw == raw
-                    assert (
-                        await session.scalar(
-                            select(func.count())
-                            .select_from(EcsSendEvidence)
-                            .where(EcsSendEvidence.command_code == blocked.json()["command_code"])
-                        )
-                        == 0
-                    )
+                        assert (
+                            await read_history_body(
+                                session,
+                                (
+                                    await session.scalar(
+                                        select(IntegrationExchange).where(
+                                            IntegrationExchange.role == "ECS_COMMAND",
+                                            IntegrationExchange.command_code == sent_code,
+                                        )
+                                    )
+                                ).request_record_id,
+                            )
+                        ) == raw
+                    from tests.helpers import ecs_attempt_evidence
+
+                    assert not await ecs_attempt_evidence(session, blocked.json()["command_code"])
                 result_body = {
                     "command_code": code,
                     "device_code": "D1",
@@ -315,7 +325,7 @@ async def test_debug_concurrent_identity_uses_final_winner_origin(
 
     from app.core.errors import AppError, ErrorCode
     from app.integrations.ecs_command.dev import DevEcsRoutes, create_debug_command
-    from app.models import EcsCommand, ReliableMessage
+    from app.models import ReliableMessage
 
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("PostgreSQL unique-key arbitration")
@@ -380,11 +390,21 @@ async def test_debug_concurrent_identity_uses_final_winner_origin(
         assert len(winners) == (2 if same_origin else 1)
         assert len(set(winners)) == 1
         async with ecs.factory() as session:
-            assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(IntegrationExchange)
+                    .where(IntegrationExchange.role == "ECS_COMMAND")
+                )
+                == 1
+            )
             assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
-            row = await session.scalar(select(EcsCommand))
+            row = await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
             assert row.route["origin"] == winners[0][1]
             assert row.delivery_snapshot["origin"] == winners[0][1]
+            expected_request = await read_history_body(session, row.request_record_id)
 
         async with simulator_sender(ecs, [a, b]) as sender:
             assert await sender.tick() == 1
@@ -392,7 +412,7 @@ async def test_debug_concurrent_identity_uses_final_winner_origin(
                 await asyncio.gather(*list(sender.inflight))
             assert len(hits) == 1
             assert hits[0][0] == ("A" if winners[0][1] == a else "B")
-            assert hits[0][1] == row.request_raw
+            assert hits[0][1] == expected_request
 
 
 @pytest.mark.parametrize(
@@ -402,7 +422,6 @@ async def test_sender_fences_unavailable_policy_without_unholding(ecs, change):
     from app.integrations.ecs_command.dev import DevEcsRoutes
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
-    from app.models import EcsCommand
     from app.reliable.store import MessageStore
 
     ecs.service.annexes = ecs_protocol_annexes()
@@ -422,7 +441,12 @@ async def test_sender_fences_unavailable_policy_without_unholding(ecs, change):
                 authorize_send=authorized_debug,
             )
         )[0]
-        row = await session.get(EcsCommand, command.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
         if change in ("v1", "v2"):
             row.route = {**row.route, "version": change[1:]}
         if change == "old_grant":
@@ -433,19 +457,38 @@ async def test_sender_fences_unavailable_policy_without_unholding(ecs, change):
             row.route = {**row.route, "route_id": "unrecognized-policy"}
         if change == "extra_fields":
             row.route = {**row.route, "kind": "mock"}
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     ecs.service.routes = DevEcsRoutes()
     assert not await store.before_send(claim, ecs.targets["ecs"])
     async with ecs.factory() as session:
-        row = await session.get(EcsCommand, command.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
         assert row.delivery_status == "HELD"
-        original, frozen = row.request_raw, dict(row.route)
+        original, frozen = (
+            (await read_history_body(session, (row).request_record_id)),
+            dict(row.route),
+        )
     ecs.service.routes = DevEcsRoutes()
     assert not await store.claim(1, ecs.targets)
     async with ecs.factory() as session:
-        row = await session.get(EcsCommand, command.command_code)
-        assert row.delivery_status == "HELD" and row.request_raw == original and row.route == frozen
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
+        assert (
+            row.delivery_status == "HELD"
+            and (await read_history_body(session, (row).request_record_id)) == original
+            and row.route == frozen
+        )
 
 
 async def test_request_contexts_send_frozen_bytes_to_independent_simulators(ecs, loopback_server):
@@ -454,7 +497,6 @@ async def test_request_contexts_send_frozen_bytes_to_independent_simulators(ecs,
     from fastapi import Request
 
     from app.integrations.ecs_command.dev import DevEcsRoutes, create_debug_command
-    from app.models import EcsCommand
 
     hits = {}
 
@@ -498,8 +540,13 @@ async def test_request_contexts_send_frozen_bytes_to_independent_simulators(ecs,
             assert set(hits) == {"A", "B"}
             async with ecs.factory() as session:
                 for key, code in commands.items():
-                    row = await session.get(EcsCommand, code)
-                    assert hits[key] == row.request_raw
+                    row = await session.scalar(
+                        select(IntegrationExchange).where(
+                            IntegrationExchange.role == "ECS_COMMAND",
+                            IntegrationExchange.command_code == code,
+                        )
+                    )
+                    assert hits[key] == (await read_history_body(session, (row).request_record_id))
                     assert row.delivery_status == "DONE" and row.status == "WAITING_RESULT"
 
 
@@ -558,7 +605,7 @@ async def test_formal_route_provider_uses_automatic_channel_without_debug_defaul
     from app.core.config import Settings
     from app.integrations.ecs_command import configure_ecs
     from app.integrations.ecs_command.runtime import ecs_runtime_config
-    from app.models import EcsCommand, ReliableMessage
+    from app.models import ReliableMessage
     from app.reliable import Outbox
 
     app = FastAPI()
@@ -572,7 +619,10 @@ async def test_formal_route_provider_uses_automatic_channel_without_debug_defaul
     )
     config = ecs_runtime_config(settings, service)
     service.outbox = Outbox(
-        config.targets, app.state.reliable_adapters, lifecycles=app.state.reliable_lifecycles
+        config.targets,
+        app.state.reliable_adapters,
+        lifecycles=app.state.reliable_lifecycles,
+        records=history_records,
     )
     for device, origin in (
         ("DEVICE_A", "http://127.0.0.1:8000"),
@@ -588,10 +638,19 @@ async def test_formal_route_provider_uses_automatic_channel_without_debug_defaul
                 timeout_ms=30000,
                 command=EcsMove(qty=1),
             )
-            row = await session.get(EcsCommand, command.command_code)
+            row = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == command.command_code,
+                )
+            )
             assert row.route["origin"] == origin and row.device_code == device
     async with ecs.factory() as session:
-        commands = (await session.scalars(select(EcsCommand))).all()
+        commands = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
         messages = (await session.scalars(select(ReliableMessage))).all()
         assert len(commands) == len(messages) == 2
         assert len({row.target for row in commands}) == 1
@@ -617,10 +676,9 @@ async def test_isolated_sender_rejects_unowned_origin_before_tcp(ecs, monkeypatc
     import asyncio
 
     from httpcore._backends.auto import AutoBackend
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
     from app.integrations.ecs_command.dev import DevEcsRoutes
-    from app.models import EcsCommand, EcsSendEvidence
 
     connections = []
 
@@ -652,10 +710,17 @@ async def test_isolated_sender_rejects_unowned_origin_before_tcp(ecs, monkeypatc
             await asyncio.gather(*list(sender.inflight))
         assert connections == []
         async with ecs.factory() as session:
-            row = await session.get(EcsCommand, view.command_code)
+            row = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == view.command_code,
+                )
+            )
             assert row.route["origin"] == destination and row.delivery_status == "PENDING"
             assert row.hold_reason is None
-            assert await session.scalar(select(func.count()).select_from(EcsSendEvidence)) == 0
+            from tests.helpers import ecs_attempt_evidence
+
+            assert not await ecs_attempt_evidence(session, view.command_code)
 
 
 @pytest.mark.parametrize(
@@ -685,14 +750,14 @@ def test_history_annexes_cannot_override_builtin_contract(history):
 async def test_startup_merges_history_annexes_for_original_results(
     ecs, monkeypatch, ecs_simulators, outcome
 ):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     import httpx
     from sqlalchemy import func, select
 
     import app.main as main
     import app.reliable_runtime as runtime
-    from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, ReliableMessage
+    from app.models import IntegrationRecord, ReliableMessage
 
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("Application Sender uses an independent PostgreSQL connection")
@@ -707,7 +772,12 @@ async def test_startup_merges_history_annexes_for_original_results(
                 timeout_ms=30000,
                 command=EcsMove(qty=1),
             )
-            row = await session.get(EcsCommand, view.command_code)
+            row = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == view.command_code,
+                )
+            )
             # Durable pre-upgrade fixture; no old dev policy is ever dispatched.
             row.route = {
                 **row.route,
@@ -719,7 +789,7 @@ async def test_startup_merges_history_annexes_for_original_results(
                 "origin": "http://127.0.0.1:1",
             }
             row.delivery_snapshot = {**row.delivery_snapshot, "origin": row.route["origin"]}
-            row.ack_raw = b'{"code":200,"message":"ACK"}' if outcome == "ACK" else None
+            ack_raw = b'{"code":200,"message":"ACK"}' if outcome == "ACK" else None
             row.expires_at = row.created_at + timedelta(seconds=60)
             row.dispatch_started_at = row.created_at
             row.status = "WAITING_RESULT" if outcome == "ACK" else "RECONCILING"
@@ -737,17 +807,48 @@ async def test_startup_merges_history_annexes_for_original_results(
             message.pause_reason = row.hold_reason
             message.delivery_uncertain = outcome == "UNKNOWN"
             message.expires_at = row.expires_at
-            session.add(
-                EcsSendEvidence(
-                    command_code=view.command_code,
-                    lease_id="historic",
-                    outcome=outcome,
-                    response_raw=row.ack_raw,
-                    http_status=200 if outcome == "ACK" else None,
-                    created_at=datetime.now(UTC),
-                    late=False,
-                )
+            from dataclasses import replace
+
+            from app.http_client import DeliveryState, HttpResult
+            from app.reliable import Verdict, VerdictKind
+            from app.reliable.store import AttemptOutcome, MessageStore
+            from app.reliable.types import MessageStatus
+
+            store = MessageStore(ecs.factory, records=history_records)
+            claim = replace(await store._claim(session, message), lease_id="historic")
+            await history_records.opened(session, claim=claim, at=row.dispatch_started_at)
+            historical = AttemptOutcome(
+                MessageStatus.DONE if outcome == "ACK" else MessageStatus.HELD,
+                result=HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), ack_raw)
+                if ack_raw is not None
+                else None,
+                verdict=Verdict(VerdictKind.DELIVERED, response=ack_raw) if ack_raw else None,
+                pause_reason=None if ack_raw else "DELIVERY_UNKNOWN",
             )
+            observation_id = await history_records.finished(
+                session,
+                claim=claim,
+                outcome=historical,
+                at=row.dispatch_started_at,
+                late=False,
+            )
+            await history_records.write_record(
+                session,
+                draft=history_records.RecordDraft(
+                    exchange_id=row.id,
+                    record_kind="ECS_ATTEMPT_CONCLUSION",
+                    event_key="ECS:historic:1",
+                    direction="INTERNAL",
+                    attempt_id="historic",
+                    attempt_revision=1,
+                    ecs_attempt_outcome=outcome,
+                    parent_record_id=observation_id,
+                    http_status=200 if ack_raw else None,
+                    late=False,
+                ),
+            )
+            row.ack_record_id = observation_id if ack_raw else None
+            message.terminal_response_record_id = row.ack_record_id
             codes.append(view.command_code)
 
     settings = main.settings.model_copy(
@@ -793,8 +894,17 @@ async def test_startup_merges_history_annexes_for_original_results(
                         assert (
                             await session.scalar(
                                 select(func.count())
-                                .select_from(EcsResultEvidence)
-                                .where(EcsResultEvidence.command_code == code)
+                                .select_from(IntegrationRecord)
+                                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                                .where(
+                                    IntegrationRecord.exchange_id
+                                    == select(IntegrationExchange.id)
+                                    .where(
+                                        IntegrationExchange.role == "ECS_COMMAND",
+                                        IntegrationExchange.command_code == code,
+                                    )
+                                    .scalar_subquery()
+                                )
                             )
                             == 0
                         )
@@ -806,7 +916,12 @@ async def test_startup_merges_history_annexes_for_original_results(
                 assert conflict.status_code == 409
             else:
                 async with ecs.factory() as session:
-                    original = await session.get(EcsCommand, codes[1])
+                    original = await session.scalar(
+                        select(IntegrationExchange).where(
+                            IntegrationExchange.role == "ECS_COMMAND",
+                            IntegrationExchange.command_code == codes[1],
+                        )
+                    )
                     before = (
                         original.status,
                         original.delivery_status,
@@ -818,7 +933,12 @@ async def test_startup_merges_history_annexes_for_original_results(
                 )
                 assert unavailable.status_code == 503
                 async with ecs.factory() as session:
-                    original = await session.get(EcsCommand, codes[1])
+                    original = await session.scalar(
+                        select(IntegrationExchange).where(
+                            IntegrationExchange.role == "ECS_COMMAND",
+                            IntegrationExchange.command_code == codes[1],
+                        )
+                    )
                     assert (
                         original.status,
                         original.delivery_status,
@@ -828,8 +948,17 @@ async def test_startup_merges_history_annexes_for_original_results(
                     assert (
                         await session.scalar(
                             select(func.count())
-                            .select_from(EcsResultEvidence)
-                            .where(EcsResultEvidence.command_code == codes[1])
+                            .select_from(IntegrationRecord)
+                            .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                            .where(
+                                IntegrationRecord.exchange_id
+                                == select(IntegrationExchange.id)
+                                .where(
+                                    IntegrationExchange.role == "ECS_COMMAND",
+                                    IntegrationExchange.command_code == codes[1],
+                                )
+                                .scalar_subquery()
+                            )
                         )
                         == 0
                     )

@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import update
+
+from app.integrations import history as history_records
+from tests.helpers import seed_transport_task
 
 SCAN_MIGRATION = (
     Path(__file__).resolve().parents[2] / "migrations/versions/2026-10-29_coarse_sorting_scan.py"
@@ -189,7 +193,7 @@ async def configured_scan(client, admin, callback_db, monkeypatch):
     from tests.helpers import add_bound_device
 
     bindings, annexes = catalog.validate_business_contracts()
-    outbox = Outbox({}, {})
+    outbox = Outbox({}, {}, records=history_records)
     commands = EcsCommands(outbox, "coarse-test", DeviceRoutes(bindings, annexes=annexes), annexes)
     runtime = build_runtime(outbox=outbox, ecs_commands=commands, session_factory=callback_db)
     monkeypatch.setattr(app.state, "business_runtime", runtime, raising=False)
@@ -341,7 +345,8 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
 
         task_id = "transport-" + str(uuid7())
         async with e.factory.begin() as session:
-            session.add(
+            await seed_transport_task(
+                session,
                 TransportTask(
                     client_request_id=str(uuid7()),
                     transport_task_id=task_id,
@@ -359,7 +364,7 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
                         "target_face": "90",
                         "rcs_template_id": "F01",
                     },
-                )
+                ),
             )
         try:
             applied = await e.client.post(
@@ -388,9 +393,8 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
 
 
 async def test_scan_projection_survives_receipt_retention_in_configured_database(configured_scan):
-    from sqlalchemy import delete
 
-    from app.models import CallbackReceipt
+    from app.models import IntegrationExchange
 
     e = configured_scan
     url = "/api/v1/dev/ecs/events"
@@ -398,7 +402,14 @@ async def test_scan_projection_survives_receipt_retention_in_configured_database
     digest = first.json()["digest"]
     original = (await e.client.get(url + "/" + digest, headers=e.headers)).json()["business"]
     async with e.factory.begin() as session:
-        await session.execute(delete(CallbackReceipt).where(CallbackReceipt.operation_id == digest))
+        await session.execute(
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+            .where(IntegrationExchange.operation_id == digest)
+        )
     state = (await e.client.get(url + "/" + digest, headers=e.headers)).json()
     assert state["receipt"] is None
     assert state["business"] == original

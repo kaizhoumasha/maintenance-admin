@@ -174,7 +174,8 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
 
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
     from app.businesses.smt_manual.models import ManualTask
-    from app.models import ReliableMessage, TransportTask
+    from app.models import TransportTask
+    from tests.migration_helpers import source_table
 
     store = state_migration
     now = datetime(2026, 11, 3, tzinfo=UTC)
@@ -198,6 +199,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
 
     try:
         async with store.engine.begin() as conn:
+            reliable = await source_table(conn, "reliable_message")
             line = await conn.scalar(
                 text(
                     "INSERT INTO work_lines (line_code,line_name,business_code,position_bindings) "
@@ -237,7 +239,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
                     )
                 )
                 message = await conn.scalar(
-                    ReliableMessage.__table__.insert()
+                    reliable.insert()
                     .values(
                         target="original-peer",
                         operation="transport.task.submit@v1",
@@ -247,9 +249,10 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
                         created_at=now,
                         updated_at=now,
                         status="HELD",
+                        attempts=0,
                         pause_reason="ORIGINAL",
                     )
-                    .returning(ReliableMessage.id)
+                    .returning(reliable.c.id)
                 )
                 await conn.execute(
                     TransportTask.__table__.insert().values(

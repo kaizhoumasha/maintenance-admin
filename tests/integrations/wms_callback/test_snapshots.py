@@ -1,10 +1,8 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
-
 from app.integrations.wms_callback import snapshots
 from app.integrations.wms_callback.receiver import CallbackResponse
-from app.models import CallbackSnapshot
+from tests.helpers import read_diagnostic_snapshots
 
 
 def test_each_source_has_its_own_quota(callback_store, monkeypatch):
@@ -33,5 +31,5 @@ async def test_record_snapshot_stores_source(callback_store):
             **({"source": source} if source else {}),
         )
     async with callback_store() as session:
-        rows = list(await session.scalars(select(CallbackSnapshot).order_by(CallbackSnapshot.id)))
+        rows = await read_diagnostic_snapshots(session)
     assert [row.source for row in rows] == ["ecs", None]

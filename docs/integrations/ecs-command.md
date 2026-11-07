@@ -180,4 +180,4 @@ POST `/api/v1/callback/result` 严格校验核心包络及冻结附录，忽略�
 
 可终止调度登记可传入冻结 `scope=ScopeRef(owner_domain, "TASK" | "LINE", scope_id)`。`stop_scope` 经原 snapshot lifecycle 锁序将尚未结束的投递置为 ABANDONED，停止后续尝试；不改变原 DISPATCHING/WAITING_RESULT、Result、needs_reconciliation 或原冻结请求。原派发门禁已提交时，该次 HTTP 仍可能发生；晚到发送证据和严格匹配 Result 继续接收，不使 ABANDONED 或父 TASK 复活。
 
-可靠消息上的首个 `dispatch_started_at` 仅为带范围标签的消息记录取得派发权的持久依据，claim/attempts/last_attempt_at 不等价。未标签消息不写入此新增字段；原 EcsCommand 派发记录和 EcsSendEvidence 继续按既有生命周期保存。现有路由、角色、配置代次和原附录授权保持，Sender 不增加业务状态回调。只需读原命令时可使用 `ecs_command.results.get_command`，不创建第二个发送器或 runtime。
+可靠消息上的首个 `dispatch_started_at` 仅为带范围标签的消息记录取得派发权的持久依据，claim/attempts/last_attempt_at 不等价。未标签消息不写入此新增字段；原命令派发字段保存在 `IntegrationExchange` 的 ECS_COMMAND 实例，发送证据保存在 `IntegrationRecord`，继续遵守既有生命周期；原执行、租约和恢复职责不变，见[统一对接历史](integration-history.md)。现有路由、角色、配置代次和原附录授权保持，Sender 不增加业务状态回调。只需读原命令时可使用 `ecs_command.results.get_command`，不创建第二个发送器或 runtime。

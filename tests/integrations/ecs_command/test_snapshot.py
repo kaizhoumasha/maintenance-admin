@@ -8,10 +8,42 @@ import pytest
 from sqlalchemy import select
 
 from app.http_client import DeliveryState, HttpClientConfig, HttpResult
+from app.integrations import history as history_records
 from app.models import ReliableMessage
 from app.reliable import MessageDraft
 from app.reliable.types import DeliverySnapshot, DuplicateMessage
-from tests.helpers import EcsMove
+from tests.helpers import EcsMove, read_history_body
+
+
+async def test_open_commit_failure_prevents_http_for_both_modes(ecs, delivery, monkeypatch):
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+
+    from app.integrations import history
+
+    original = history.opened
+
+    async def opened(session, **kwargs):
+        result = await original(session, **kwargs)
+        session.info["fail_history_commit"] = True
+        return result
+
+    def fail_commit(session):
+        if session.info.get("fail_history_commit"):
+            raise OperationalError(None, None, RuntimeError("commit unavailable"))
+
+    monkeypatch.setattr(history, "opened", opened)
+    event.listen(ecs.factory.class_.sync_session_class, "before_commit", fail_commit)
+    try:
+        with pytest.raises(history.EvidencePersistenceError):
+            await delivery.send(**delivery.args)
+    finally:
+        event.remove(ecs.factory.class_.sync_session_class, "before_commit", fail_commit)
+    assert delivery.client.requests == []
+    async with ecs.factory() as session:
+        row = await session.get(ReliableMessage, delivery.claim.message_id)
+        assert row.status == "SENDING"
+        assert row.lease_id == delivery.claim.lease_id
 
 
 async def test_snapshot_is_part_of_identity_and_hold_is_not_resumable(ecs):
@@ -30,7 +62,7 @@ async def test_snapshot_is_part_of_identity_and_hold_is_not_resumable(ecs):
             row.target,
             row.operation,
             row.operation_id,
-            row.request_raw,
+            (await read_history_body(session, (row).request_record_id)),
             delivery_snapshot=DeliverySnapshot(**row.delivery_snapshot),
         )
         with pytest.raises(DuplicateMessage):
@@ -67,7 +99,9 @@ async def delivery(ecs):
             timeout_ms=30000,
             command=EcsMove.model_validate({"qty": 1}),
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     (claim,) = await store.claim(1, ecs.targets)
     client = ScriptedHttpClient(
         HttpResult(
@@ -168,8 +202,10 @@ async def test_snapshot_failure_reports_phase_and_preserves_hold(
         row = await session.get(ReliableMessage, delivery.claim.message_id)
         assert row.status == "HELD" and row.pause_reason == reason
         assert row.delivery_uncertain is gated
-        assert row.request_raw == delivery.claim.message.request_raw
-        assert row.response_raw is None
+        assert (
+            await read_history_body(session, (row).request_record_id)
+        ) == delivery.claim.message.request_raw
+        assert row.terminal_response_record_id is None
     records = [r for r in caplog.records if r.getMessage().startswith("reliable delivery failed ")]
     assert len(records) == 1 and records[0].phase == phase
     assert records[0].component == "reliable" and records[0].message_id == delivery.claim.message_id
@@ -195,7 +231,7 @@ async def test_snapshot_cancellation_and_finish_failure_propagate(
     async with ecs.factory() as session:
         row = await session.get(ReliableMessage, delivery.claim.message_id)
         assert row.status == "SENDING" and row.attempts == 0
-        assert row.response_raw is None and row.lease_id == delivery.claim.lease_id
+        assert row.terminal_response_record_id is None and row.lease_id == delivery.claim.lease_id
     assert not any(r.getMessage().startswith("reliable delivery failed ") for r in caplog.records)
     async with delivery.provider.borrow(HttpClientConfig("http://other.test", "probe")):
         pass
@@ -226,7 +262,7 @@ async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evide
 ):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
-    from app.models import EcsCommand, EcsSendEvidence
+    from app.models import IntegrationExchange
     from app.reliable import ScopeRef
     from app.reliable.store import MessageStore
 
@@ -241,14 +277,21 @@ async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evide
             command=EcsMove(qty=1),
             scope=scope,
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     (claim,) = await store.claim(1, ecs.targets)
     if gate_first:
         assert await store.before_send(claim, ecs.targets["ecs"])
     async with ecs.factory.begin() as session:
         (stopped,) = await ecs.outbox.stop_scope(session, scope, reason="TASK_COMPLETED")
         assert stopped.dispatch == ("MAY_HAVE_DISPATCHED" if gate_first else "NEVER_DISPATCHED")
-        current = await session.get(EcsCommand, command.command_code)
+        current = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
         assert current.status == ("DISPATCHING" if gate_first else "QUEUED")
         assert current.delivery_status == "ABANDONED"
     assert await store.before_send(claim, ecs.targets["ecs"]) is None
@@ -256,17 +299,15 @@ async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evide
     async with ecs.factory() as session:
         message = await session.get(ReliableMessage, claim.message_id)
         assert message.status == "ABANDONED" and message.next_attempt_at is None
-        evidence = list(
-            await session.scalars(
-                select(EcsSendEvidence).where(EcsSendEvidence.command_code == command.command_code)
-            )
-        )
+        from tests.helpers import ecs_attempt_evidence
+
+        evidence = await ecs_attempt_evidence(session, command.command_code)
         assert bool(evidence) == gate_first
     assert not await store.claim(1, ecs.targets)
 
 
 async def test_unscoped_snapshot_preserves_native_dispatch_without_scope_evidence(ecs, delivery):
-    from app.models import EcsCommand, EcsSendEvidence
+    from app.models import IntegrationExchange
 
     delivery.client.results[0] = replace(
         delivery.client.results[0], headers=(("Content-Type", "application/json"),)
@@ -274,13 +315,18 @@ async def test_unscoped_snapshot_preserves_native_dispatch_without_scope_evidenc
     await delivery.send(**delivery.args)
     async with ecs.factory() as session:
         message = await session.get(ReliableMessage, delivery.claim.message_id)
-        assert message.status == "DONE" and message.response_raw is not None
+        assert message.status == "DONE" and message.terminal_response_record_id is not None
         assert message.scope_owner is None and message.dispatch_started_at is None
-        command = await session.get(EcsCommand, delivery.claim.message.operation_id)
-        assert command.dispatch_started_at is not None
-        assert await session.scalar(
-            select(EcsSendEvidence.id).where(EcsSendEvidence.command_code == command.command_code)
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == delivery.claim.message.operation_id,
+            )
         )
+        assert command.dispatch_started_at is not None
+        from tests.helpers import ecs_attempt_evidence
+
+        assert await ecs_attempt_evidence(session, command.command_code)
 
 
 async def test_scope_stop_before_snapshot_send_makes_no_http_request(ecs):
@@ -303,7 +349,9 @@ async def test_scope_stop_before_snapshot_send_makes_no_http_request(ecs):
             command=EcsMove(qty=1),
             scope=scope,
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     (claim,) = await store.claim(1, ecs.targets)
     async with ecs.factory.begin() as session:
         await ecs.outbox.stop_scope(session, scope, reason="TASK_CANCELLED")

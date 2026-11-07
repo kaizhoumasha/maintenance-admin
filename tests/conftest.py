@@ -7,6 +7,8 @@ import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
+from sqlalchemy import update
+
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
 os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
@@ -30,12 +32,10 @@ from app.database import SCHEMA  # noqa: E402
 from app.database import create_database_engine as create_async_engine  # noqa: E402
 from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (  # noqa: E402
+from app.models import (
     AuditLog,
     AuditLogArchive,
     Base,
-    CallbackReceipt,
-    CallbackSnapshot,
     Device,
     DeviceRoute,
     Menu,
@@ -124,6 +124,13 @@ async def postgres_tables():
 
     @asynccontextmanager
     async def database(url, family, metadata):
+        if any(
+            table.name in {"reliable_message", "transport_task", "integration_exchange"}
+            for table in metadata.tables.values()
+        ):
+            from tests.helpers import copy_history_tables
+
+            copy_history_tables(metadata)
         assert all(table.schema in (None, SCHEMA) for table in metadata.tables.values())
         key = (url, family)
         fresh = key not in schemas
@@ -182,11 +189,48 @@ async def callback_db(request, tmp_path, monkeypatch, sqlite_tables):
     finally:
         if request.param == "postgres":
             async with factory.begin() as session:
-                await session.execute(delete(CallbackSnapshot))
-                await session.execute(delete(CallbackReceipt))
+                from app.models import IntegrationExchange
+                from tests.helpers import clear_integration_history
+
+                outgoing = list(await session.scalars(select(ReliableMessage.exchange_id)))
+                await session.execute(
+                    update(IntegrationExchange)
+                    .where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.receipt_active.is_(True),
+                    )
+                    .values(receipt_active=False)
+                )
                 await session.execute(delete(ReliableMessage))  # Transport 回调测试造的任务与消息
                 await session.execute(delete(TransportTask))
+                received = list(
+                    await session.scalars(
+                        select(IntegrationExchange.id).where(IntegrationExchange.id.is_not(None))
+                    )
+                )
+                await clear_integration_history(session, set(outgoing + received))
         await engine.dispose()
+
+
+@pytest.fixture
+async def callback_effects(callback_db):
+    from sqlalchemy import Column, Integer, MetaData, Table, Text
+
+    metadata = MetaData()
+    effects = Table(
+        "test_callback_effects",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("marker", Text),
+    )
+    engine = callback_db.kw["bind"]
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    try:
+        yield effects
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.drop_all)
 
 
 # 回调接收合同测试用:另外保证回调路径不碰 Redis 限流,并重置快照计数
@@ -549,3 +593,33 @@ async def formal_manual(pg_sessions, monkeypatch, request):
         pg_sessions, monkeypatch, line_count=getattr(request, "param", 2)
     ) as state:
         yield state
+
+
+def pytest_addoption(parser):
+    from tests.lane_partition import parse_lane
+
+    parser.addoption(
+        "--test-lane",
+        type=parse_lane,
+        metavar="N/T",
+        help="Run whole-file test lane N of T; each process needs independent test stores",
+    )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    selected = config.getoption("test_lane")
+    if selected is None:
+        return
+    from tests.lane_partition import partition_files
+
+    lane, total = selected
+    assigned = partition_files(
+        ((item.nodeid.split("::", 1)[0], item.fixturenames) for item in items), total
+    )
+    kept, deselected = [], []
+    for item in items:
+        target = kept if assigned[item.nodeid.split("::", 1)[0]] == lane else deselected
+        target.append(item)
+    items[:] = kept
+    config.hook.pytest_deselected(items=deselected)

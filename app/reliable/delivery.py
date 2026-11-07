@@ -6,6 +6,7 @@ from app.diagnostics import log_exception
 from app.http_client import DeliveryState, HttpClient, HttpResult, validate_request
 
 from .config import TargetConfig
+from .lifecycle import EvidencePersistenceError
 from .policy import retry_delay_s
 from .store import AttemptOutcome, Claim, MessageStore, utc_datetime
 from .types import FailReason, MessageStatus, ProtocolAdapter, Verdict, VerdictKind
@@ -103,6 +104,8 @@ async def send_one(
                         not_received_count=count,
                         delivery_uncertain=uncertain,
                     )
+    except EvidencePersistenceError:
+        raise
     except Exception as error:
         log_exception(
             logger,
@@ -251,6 +254,8 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                 pause_reason="DELIVERY_UNKNOWN",
                 delivery_uncertain=True,
             )
+    except EvidencePersistenceError:
+        raise
     except PoolUnavailable:
         outcome = AttemptOutcome(
             MessageStatus.PENDING, next_attempt_at=utc_datetime(clock()) + timedelta(seconds=1)

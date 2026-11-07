@@ -13,6 +13,7 @@ from app.integrations.wms_transport import Rack, RackPosition, TransportCaller
 from app.models import ReliableMessage
 from app.reliable.store import AttemptOutcome
 from app.reliable.types import FailReason, MessageStatus, Verdict, VerdictKind
+from tests.helpers import read_history_body
 
 
 @pytest.fixture
@@ -67,7 +68,10 @@ async def test_transport_acceptance_wakes_original_manual_owner(notices, http, c
     assert flow.notices == ["smt_manual"]
     async with flow.factory() as session:
         saved = await session.get(ReliableMessage, claim.message_id)
-        assert saved.status == "DONE" and saved.response_raw == raw
+        assert (
+            saved.status == "DONE"
+            and await read_history_body(session, saved.terminal_response_record_id) == raw
+        )
 
 
 async def test_transport_acceptance_waits_for_outer_commit_and_rollback(notices):

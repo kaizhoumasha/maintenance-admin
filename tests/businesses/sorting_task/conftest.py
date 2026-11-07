@@ -2,6 +2,7 @@ import importlib
 import sys
 
 import pytest
+from sqlalchemy import update
 
 from app.integrations import discovery
 from app.integrations.wms_request import operation
@@ -48,7 +49,7 @@ async def task_flow(callback_store, monkeypatch):
     from app.integrations.wms_callback import registry as callbacks
     from app.integrations.wms_callback.receiver import receive
     from app.integrations.wms_request import operation as requests
-    from app.models import CallbackReceipt, WorkLine
+    from app.models import IntegrationExchange, WorkLine
     from tests.helpers import business_composition
 
     factory = callback_store
@@ -281,7 +282,13 @@ async def task_flow(callback_store, monkeypatch):
                 await connection.run_sync(metadata.drop_all)
             async with factory() as session, session.begin():
                 await session.execute(
-                    delete(CallbackReceipt).where(CallbackReceipt.operation.like("sorting.task.%"))
+                    update(IntegrationExchange)
+                    .where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.receipt_active.is_(True),
+                    )
+                    .values(receipt_active=False)
+                    .where(IntegrationExchange.operation.like("sorting.task.%"))
                 )
                 await session.execute(delete(WorkLine).where(WorkLine.id.in_(line_ids)))
         finally:

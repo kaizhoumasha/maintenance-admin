@@ -12,7 +12,7 @@ from sqlalchemy import event, select, text, update
 from app.core.identifiers import uuid7
 from app.integrations.ecs_command import PROTOCOL_RETRY_WINDOW
 from app.main import app
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from app.reliable import DuplicateMessage
 from tests.helpers import flow_request
 
@@ -92,7 +92,12 @@ async def test_receipt_original_target_and_pending_work_share_acceptance_transac
         assert await mock_cycle.rows() == []
         async with mock_cycle.factory() as session:
             assert not await session.scalar(
-                select(CallbackReceipt.id).where(CallbackReceipt.id.in_(mock_cycle.receipt_ids))
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.receipt_id.in_(mock_cycle.receipt_ids))
             )
         monkeypatch.setattr(service, "accept", original)
         assert (await client.post(path, json=body)).status_code == (202 if kind == "wms" else 200)

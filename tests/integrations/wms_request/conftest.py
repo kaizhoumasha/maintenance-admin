@@ -6,6 +6,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import create_database_engine
 from app.integrations import discovery
+from app.integrations import history as history_records
 from app.integrations.wms_request import (
     ADAPTERS,
     DECISIONS_PROTOCOL,
@@ -68,4 +69,4 @@ def wms(clock):
         "wms-facts": TargetConfig("wms-facts", "http://example.test", FACTS_PROTOCOL),
         "wms-decisions": TargetConfig("wms-decisions", "http://example.test", DECISIONS_PROTOCOL),
     }
-    return WmsRequests(Outbox(targets, ADAPTERS, clock=clock), clock=clock)
+    return WmsRequests(Outbox(targets, ADAPTERS, clock=clock, records=history_records), clock=clock)

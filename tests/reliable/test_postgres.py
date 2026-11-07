@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Insert
 
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.models import ReliableMessage
 from app.reliable import DuplicateMessage
 from app.reliable.delivery import send_one
 from app.reliable.store import MessageStore
+from tests.helpers import message_history_view, read_history_body
 
 
 async def wait_for_database_lock(factory, pending):
@@ -63,7 +65,10 @@ async def test_concurrent_first_enqueue_preserves_outer_transactions(pg_rig, rol
                 select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
             )
         )
-        assert len(rows) == 2 and all(row.request_raw == b"\x00opaque" for row in rows)
+        assert len(rows) == 2 and all(
+            raw == b"\x00opaque"
+            for raw in [await read_history_body(session, row.request_record_id) for row in rows]
+        )
 
 
 async def test_cleanup_between_conflict_and_readback_creates_new_valid_row(pg_rig):
@@ -120,7 +125,9 @@ async def test_two_workers_claim_and_recovery_fence_have_one_winner(pg_rig, deli
         for number in range(8):
             await rig.outbox.enqueue(session, rig.draft(str(number)))
         await session.commit()
-    other = MessageStore(rig.factory, clock=rig.clock, uniform=lambda low, high: high)
+    other = MessageStore(
+        rig.factory, clock=rig.clock, uniform=lambda low, high: high, records=history_records
+    )
     first, second = await asyncio.gather(
         rig.store.claim(4, rig.targets), other.claim(4, rig.targets)
     )
@@ -133,7 +140,9 @@ async def test_two_workers_claim_and_recovery_fence_have_one_winner(pg_rig, deli
         other.recover_expired(8, rig.targets),
     )
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, old.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, old.message_id)
+        )
         assert row.attempts == 1 and row.status in ("DONE", "PENDING")
         assert (row.status == "DONE") == completed
     assert recovered in (7, 8)
@@ -192,7 +201,9 @@ async def test_process_crash_recovers_original_message(pg_rig, pg_url, tmp_path,
     before = evidence.read_text().splitlines() if evidence.exists() else []
     assert len(before) == (phase == "after_send")
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         assert row.status == "SENDING" and row.attempts == 0
         assert row.response_raw is None and row.last_http_status is None
         assert row.lease_until.tzinfo is not None
@@ -203,7 +214,9 @@ async def test_process_crash_recovers_original_message(pg_rig, pg_url, tmp_path,
     assert records[0]["body"] == b"\x00opaque".hex()
     assert records[0]["headers"] == [["X-Operation", "opaque"], ["X-Operation-Id", "id"]]
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         assert row.status == "DONE" and row.attempts == 2 and row.response_raw == b"accepted"
         assert row.operation_id == "id" and row.request_raw == b"\x00opaque"
 
@@ -284,7 +297,9 @@ async def test_sending_holds_no_database_connection_and_save_failure_keeps_lease
         )
     assert checked.is_set()
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, message.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, message.message_id)
+        )
         assert row.status == "SENDING" and row.attempts == 0 and row.response_raw is None
 
 

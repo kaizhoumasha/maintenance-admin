@@ -17,16 +17,18 @@ from app.businesses.smt_auto.models import (
 )
 from app.businesses.smt_auto.rack_ports import AutoRackPorts, RackAuthorization
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.ecs_command import compile_commands
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.integrations.ecs_command.service import CommandOwner
 from app.integrations.wms_request import ADAPTERS, FACTS_PROTOCOL
-from app.models import Device, DeviceRoute, EcsCommand, WorkLine, WorkLinePosition
+from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine, WorkLinePosition
 from app.reliable.config import TargetConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
 from app.services.device_bindings import resolve_binding
 from tests.businesses.rack_dispatch import apply_outcome, origin
+from tests.helpers import read_history_body
 
 
 @pytest.fixture(params=[("ARM02", "ARM01"), ("ARM04", "ARM03")])
@@ -186,7 +188,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
     pending_claims = []
 
     async def settle(operation, data, code="DECIDED"):
-        store = MessageStore(host.factory)
+        store = MessageStore(host.factory, records=history_records)
         pending_claims.extend(await store.claim(100, host.requests.outbox.targets))
         claims = pending_claims
         matching = [c for c in claims if c.message.operation == operation]
@@ -209,7 +211,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
         )
 
     async def result(code, *, scan=False, status="SUCCESS", empty=False):
-        store = MessageStore(host.factory, lifecycles=ecs.outbox.lifecycles)
+        store = MessageStore(
+            host.factory, lifecycles=ecs.outbox.lifecycles, records=history_records
+        )
         for claim in await store.claim(100, ecs.outbox.targets):
             assert await store.before_send(claim, ecs.outbox.targets["ecs"])
         async with host.factory.begin() as session:
@@ -279,8 +283,18 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=40)
         assert plate.pick_command_code
         pick_code = plate.pick_command_code
-        command = await session.get(EcsCommand, pick_code)
-        assert json.loads(command.request_raw)["params"]["source"]["reel_totalthickness"] == 30.6
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == pick_code,
+            )
+        )
+        assert (
+            json.loads(await read_history_body(session, (command).request_record_id))["params"][
+                "source"
+            ]["reel_totalthickness"]
+            == 30.6
+        )
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
@@ -343,7 +357,14 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         work = await session.get(AutoBinWork, host.work_id)
         assert await host.outbound.bin_closed(session, work)
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=200)
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 2
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 2
+        )
 
 
 @pytest.mark.parametrize("next_mode", [None, "valid", "invalid", "ng"])
@@ -401,8 +422,13 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         await host.outbound.advance(session, work_line_id=1, plate_id=plate.id, now_ms=50)
         assert plate.pick_command_code
         pick_code = plate.pick_command_code
-        command = await session.get(EcsCommand, pick_code)
-        raw = json.loads(command.request_raw)
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == pick_code,
+            )
+        )
+        raw = json.loads(await read_history_body(session, (command).request_record_id))
         assert raw["params"]["source"]["location_id"] == "STATION_B"
         assert raw["params"]["source"]["rack_layer"] == "2"
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200
@@ -424,10 +450,17 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
                 session, work_line_id=1, plate_id=plate_id, now_ms=70
             )
             put_code = plate.put_command_code
-            command = await session.get(EcsCommand, put_code)
+            command = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == put_code,
+                )
+            )
             line = await session.get(WorkLine, 1)
             assert command.device_code == line.device_bindings["BIN_ARM"]
-            assert json.loads(command.request_raw)["params"] == dict(
+            assert json.loads(await read_history_body(session, (command).request_record_id))[
+                "params"
+            ] == dict(
                 source=dict(location_id="STATION_SCAN", location_type="SCAN_PLATFORM"),
                 target=dict(location_id="STATION_NG", location_type="SCAN_NG"),
             )
@@ -479,8 +512,15 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=70)
         assert plate.put_command_code
         put_code = plate.put_command_code
-        command = await session.get(EcsCommand, put_code)
-        target = json.loads(command.request_raw)["params"]["target"]
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == put_code,
+            )
+        )
+        target = json.loads(await read_history_body(session, (command).request_record_id))[
+            "params"
+        ]["target"]
         assert target["reel_thickness"] == 15.3
         assert target["rack_layer"] == "4"
         member = await session.get(AutoOutboundSourceMember, member_id)
@@ -618,7 +658,14 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
         assert plate.report_message_id is None
         assert plate.pending
         assert not await host.outbound.closed(session, plate)
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 2
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 2
+        )
 
     if placed:
         assert (await host.arm_result(code)).status_code == 200
@@ -848,10 +895,24 @@ async def test_final_decision_and_put_intent_roll_back_together(decided_outbound
         plate = await session.get(AutoOutboundPlate, host.plate_id)
         assert plate.put_command_code is None
         assert plate.final_decision_round_id is None
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=70)
         assert plate.put_command_code
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 2
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 2
+        )
 
 
 async def test_transfer_demand_requires_complete_original_plan_coverage(decided_outbound):

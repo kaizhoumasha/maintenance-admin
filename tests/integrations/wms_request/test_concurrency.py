@@ -8,6 +8,7 @@ from app.businesses import catalog
 from app.core.identifiers import uuid7
 from app.integrations.wms_request import InvalidRequestPayload, WmsRequests
 from app.models import ReliableMessage
+from tests.helpers import message_history_view
 
 
 @pytest.mark.parametrize("competitor_owner", ["first", "second"])
@@ -39,7 +40,9 @@ async def test_concurrent_shared_request_preserves_original_owner(
     engine = factory.kw["bind"]
     async with factory() as session:
         original = await first.send(session, payload, operation_id=identity)
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         frozen = row.request_raw
 
         async def compete():
@@ -62,7 +65,9 @@ async def test_concurrent_shared_request_preserves_original_owner(
                     with pytest.raises(InvalidRequestPayload, match="business"):
                         await pending
             async with factory() as reader:
-                row = await reader.get(ReliableMessage, original.message_id)
+                row = await message_history_view(
+                    reader, await reader.get(ReliableMessage, original.message_id)
+                )
                 assert row.business_key == "business:first" and row.request_raw == frozen
                 assert (
                     len(

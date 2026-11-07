@@ -15,6 +15,7 @@ from app.controllers import wms_events
 from app.controllers.wms_events import include_wms_events
 from app.core.identifiers import uuid7
 from app.core.redis import get_redis
+from app.integrations import history as history_records
 from app.integrations.ecs_callback import registry as events
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.receiver import receive
@@ -177,7 +178,7 @@ async def transport_flow(callback_store, monkeypatch):
         monkeypatch.setattr(callbacks, "_registry", platform)
         catalog.validate_business_contracts()
         target = TargetConfig("component-transport", "http://example.test", PROTOCOL)
-        outbox = Outbox({target.name: target}, ADAPTERS)
+        outbox = Outbox({target.name: target}, ADAPTERS, records=history_records)
         runtime = build_runtime(outbox=outbox, ecs_commands=None, session_factory=factory)
         state = SimpleNamespace(notices=[], fail_publish=False)
 
@@ -466,7 +467,9 @@ async def test_submit_ack_does_not_wake_business_or_prove_application(transport_
 
     flow = transport_flow
     handle = await flow.register()
-    store = MessageStore(flow.factory, on_result=business_wakeups.wms_result_committed)
+    store = MessageStore(
+        flow.factory, on_result=business_wakeups.wms_result_committed, records=history_records
+    )
     [claim] = await store.claim(1, flow.targets)
     raw = json.dumps(
         {

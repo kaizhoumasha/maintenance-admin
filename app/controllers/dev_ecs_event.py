@@ -59,7 +59,9 @@ def ecs_event_router(*, read_business: BusinessReader | None = None):
         request: Request, background_tasks: BackgroundTasks
     ) -> DevEcsEventDelivery:
         """选择 Examples，修改绑定设备码与时间戳；原样重报可验证幂等。"""
-        result = await receive_event_request(request, background_tasks)
+        result = await receive_event_request(
+            request, background_tasks, response_scope="PROTOCOL_INNER"
+        )
         return DevEcsEventDelivery(
             digest=result.digest,
             status_code=result.status_code,

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.controllers.dev import include_dev_routers
 from app.core.dev_scenarios import scenarios
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_transport import (
     ADAPTERS,
     PROTOCOL,
@@ -27,7 +28,9 @@ FEED = next(s for s in scenarios() if s.name == "bin.feed")
 @pytest.fixture
 def wms(monkeypatch):
     target = TargetConfig("wms-test", "http://example.test", PROTOCOL, max_not_received_attempts=3)
-    service = TransportService(Outbox({target.name: target}, ADAPTERS), target=target.name)
+    service = TransportService(
+        Outbox({target.name: target}, ADAPTERS, records=history_records), target=target.name
+    )
     monkeypatch.setattr(bin_scenarios, "transport", service)
     monkeypatch.setattr(rack_scenarios, "transport", service)
 

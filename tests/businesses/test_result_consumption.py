@@ -7,13 +7,15 @@ from contextlib import asynccontextmanager
 import pytest
 from sqlalchemy import event, select, text, update
 
+from app.integrations import history as history_records
 from app.integrations.wms_callback import receive
 from app.main import app
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from tests.helpers import (
     FlowMove,
     business_flow_fixture,
     flow_request,
+    get_receipt_by_id,
     result_task,
     transport_callback,
 )
@@ -87,7 +89,7 @@ async def test_accepted_execution_advances_in_its_own_snapshot_transaction(pg_fl
         row = (await flow.rows())[0]
         assert row["done"] and not row["pending"] and row["receipt_id"]
         async with flow.factory() as session:
-            receipt = await session.get(CallbackReceipt, row["receipt_id"])
+            receipt = await get_receipt_by_id(session, row["receipt_id"])
             assert receipt.status_code == ack.status_code
     finally:
         event.remove(engine, "before_cursor_execute", sql)
@@ -113,7 +115,12 @@ async def test_acceptance_receipt_pending_and_state_roll_back_together(pg_flow, 
         async with flow.factory() as session:
             # Only this attempted identity; prior tests' receipts cannot affect the assertion.
             assert not await session.scalar(
-                select(CallbackReceipt.id).where(CallbackReceipt.id.in_(flow.receipt_ids))
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.receipt_id.in_(flow.receipt_ids))
             )
         monkeypatch.setattr(service, "accept", original)
         assert (await client.post(path, json=body)).status_code == (200 if kind == "ecs" else 202)
@@ -144,9 +151,7 @@ async def test_business_runtime_consumption_recovery(pg_flow):
     assert row["pending"] and not row["done"] and row["evidence"] is row["next_intent"] is None
     async with flow.factory() as session:
         assert await flow.commands.get_by_call(session, owner=flow.owner, call_key=identity) is None
-        assert (
-            await session.get(CallbackReceipt, row["receipt_id"])
-        ).status_code == ack.status_code
+        assert (await get_receipt_by_id(session, row["receipt_id"])).status_code == ack.status_code
 
     async def lost_caller(stage, attempt, session, evidence):
         if stage == "committed":
@@ -410,7 +415,11 @@ async def test_duplicate_wakeups_and_config_update_serialize_without_cross_line(
             timeout_ms=100,
             command=FlowMove(position="POSITION_0"),
         )
-    store = MessageStore(flow.factory, lifecycles={"ecs-command": EcsLifecycle(flow.commands)})
+    store = MessageStore(
+        flow.factory,
+        lifecycles={"ecs-command": EcsLifecycle(flow.commands)},
+        records=history_records,
+    )
     claims = await store.claim(1, {"seam-ecs": flow.targets["seam-ecs"]})
     assert len(claims) == 1
     async with _competing_tasks(release) as tasks:
@@ -757,9 +766,12 @@ async def test_partial_transport_callback_cleanup_keeps_unrelated_receipts(
                 len(
                     list(
                         await session.scalars(
-                            select(CallbackReceipt.id).where(
-                                CallbackReceipt.operation_id.in_(operations)
+                            select(IntegrationExchange.receipt_id)
+                            .where(
+                                IntegrationExchange.role == "RECEIPT",
+                                IntegrationExchange.receipt_active.is_(True),
                             )
+                            .where(IntegrationExchange.operation_id.in_(operations))
                         )
                     )
                 )
@@ -768,10 +780,20 @@ async def test_partial_transport_callback_cleanup_keeps_unrelated_receipts(
         await cleanup_flow_results(pg_sessions, [owned], operations)
         async with pg_sessions() as session:
             assert not await session.scalar(
-                select(CallbackReceipt.id).where(CallbackReceipt.operation_id.in_(operations))
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.operation_id.in_(operations))
             )
             assert await session.scalar(
-                select(CallbackReceipt.id).where(CallbackReceipt.operation_id.in_(sentinel_ops))
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.operation_id.in_(sentinel_ops))
             )
             result = await owned.service.get_result(
                 session,

@@ -1,11 +1,13 @@
 import json
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
 
 from app.core.strict_json import canonical_digest
+from app.integrations.callback_receipts import insert_receipt
 from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.envelope import EcsEventEnvelope
 from app.integrations.ecs_callback.receiver import (
@@ -18,8 +20,8 @@ from app.integrations.ecs_callback.receiver import (
 )
 from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback.operation import CallbackPayload
-from app.models import CallbackReceipt, CallbackSnapshot
-from tests.helpers import ecs_binding, legacy_ecs_receipt
+from app.models import IntegrationExchange
+from tests.helpers import ecs_binding, legacy_ecs_receipt, read_receipts
 
 BASE = {"device_code": "D1", "event_type": "SCAN_COMPLETED", "timestamp": 1}
 
@@ -40,7 +42,13 @@ async def receive(factory, raw: bytes):
 
 async def receipt_count(factory) -> int:
     async with factory() as session:
-        return await session.scalar(select(func.count()).select_from(CallbackReceipt))
+        return await session.scalar(
+            select(func.count())
+            .select_from(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
 
 
 @pytest.mark.parametrize("registered", [False, True])
@@ -66,7 +74,14 @@ async def test_receipts_are_searchable_by_original_device_without_truncation(
     async with callback_store() as session:
         for code in ("D1", long_code):
             matches = list(
-                await session.scalars(select(CallbackReceipt).filter_by(device_code=code))
+                await session.scalars(
+                    select(IntegrationExchange)
+                    .where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.receipt_active.is_(True),
+                    )
+                    .filter_by(device_code=code)
+                )
             )
             assert len(matches) == 1 and matches[0].device_code == code
 
@@ -158,10 +173,7 @@ async def test_extra_fields_do_not_split_event_identity(callback_store):
 
 
 def receipt_values(rows):
-    return [
-        {column.name: getattr(row, column.name) for column in CallbackReceipt.__table__.columns}
-        for row in rows
-    ]
+    return [asdict(row) for row in rows]
 
 
 @pytest.mark.parametrize("original_extra", [{}, {"is_debug": False}, {"is_debug": True}])
@@ -237,17 +249,16 @@ async def test_existing_receipt_short_circuits_before_data_validation(callback_s
     envelope = EcsEventEnvelope.model_validate(BASE)
     identity = event_identity(envelope)
     async with callback_store() as session, session.begin():
-        session.add(
-            CallbackReceipt(
-                operation="ecs.event",
-                operation_id=identity,
-                raw_digest="x",
-                compare_mode="RAW",
-                status_code=200,
-                body=dict(ACK),
-                resp_timestamp=1,
-                created_at=datetime.now(UTC),
-            )
+        await insert_receipt(
+            session,
+            operation="ecs.event",
+            operation_id=identity,
+            raw_digest="x",
+            compare_mode="RAW",
+            status_code=200,
+            body=dict(ACK),
+            resp_timestamp=1,
+            created_at=datetime.now(UTC),
         )
     resp = await receive(callback_store, json.dumps(BASE).encode())
     assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
@@ -256,11 +267,9 @@ async def test_existing_receipt_short_circuits_before_data_validation(callback_s
 EVENT = json.dumps({**BASE, "data": {"barcode": "B1"}}).encode()
 
 
-async def receipts(factory) -> list[CallbackReceipt]:
+async def receipts(factory):
     async with factory() as session:
-        return list(
-            (await session.scalars(select(CallbackReceipt).order_by(CallbackReceipt.id))).all()
-        )
+        return await read_receipts(session)
 
 
 async def test_new_event_gets_ack_and_one_receipt(callback_store):
@@ -300,18 +309,11 @@ async def test_replay_after_handler_validation_tightened_still_acks(callback_sto
     assert (resp.status_code, resp.body, resp.outcome) == (200, ACK, "duplicate")
 
 
-async def test_handler_exception_rolls_back_receipt_and_business_write(callback_store):
+async def test_handler_exception_rolls_back_receipt_and_business_write(
+    callback_store, callback_effects
+):
     async def handler(ctx, data):
-        ctx.session.add(
-            CallbackSnapshot(
-                request_id="r",
-                received_at=datetime.now(UTC),
-                body_b64="",
-                truncated=False,
-                http_status=200,
-                outcome="x",
-            )
-        )
+        await ctx.session.execute(callback_effects.insert().values(marker="r"))
         await ctx.session.flush()
         raise RuntimeError("boom")
 
@@ -322,7 +324,7 @@ async def test_handler_exception_rolls_back_receipt_and_business_write(callback_
                 await receive_ecs_event(session, EVENT, resolve_binding=ecs_binding)
     assert await receipt_count(callback_store) == 0
     async with callback_store() as session:
-        assert await session.scalar(select(func.count()).select_from(CallbackSnapshot)) == 0
+        assert await session.scalar(select(func.count()).select_from(callback_effects)) == 0
 
 
 async def test_unregistered_event_is_acked_with_full_event_in_diagnostic(callback_store):

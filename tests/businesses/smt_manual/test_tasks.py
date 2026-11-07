@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app.models import ReliableMessage, WorkLine
+from tests.helpers import read_history_body
 
 
 async def test_manual_directions_share_one_execution_slot(manual_flow):
@@ -42,11 +43,9 @@ async def test_manual_directions_share_one_execution_slot(manual_flow):
                 select(ReliableMessage).where(ReliableMessage.business_key == "business:smt_manual")
             )
         )
-    assert len(messages) == 2
-    assert json.loads(messages[0].request_raw)["data"] == {
-        "task_id": "A",
-        "workline_code": "SMT-M1-1",
-    }
+        assert len(messages) == 2
+        original = await read_history_body(session, messages[0].request_record_id)
+    assert json.loads(original)["data"] == {"task_id": "A", "workline_code": "SMT-M1-1"}
 
 
 async def test_task_identity_and_direction_never_change(manual_flow):

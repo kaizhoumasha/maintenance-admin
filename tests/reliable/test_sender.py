@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 
 from app.http_client import DeliveryState, HttpResult
 from app.models import ReliableMessage
+from tests.helpers import message_history_view
 
 
 @pytest.mark.parametrize("claim_batch_size", [1, 4])
@@ -190,7 +191,9 @@ async def test_idle_poll_expires_messages_without_send_completions(storage):
             rig.clock.advance(1)
             assert await polls.get() == 1
         async with rig.factory() as session:
-            row = await session.get(ReliableMessage, result.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
             assert row.status == "EXPIRED" and row.attempts == 0
     finally:
         await sender.aclose()
@@ -236,15 +239,21 @@ async def test_slots_do_not_preclaim_and_ttl_runs_while_full(rig):
             await started.wait()
         assert await sender.tick() == 0
         async with rig.factory() as session:
-            row = await session.scalar(
-                select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+            row = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+                ),
             )
             assert row.status == "PENDING" and row.lease_id is None
         rig.clock.advance(1)
         assert await sender.tick() == 0
         async with rig.factory() as session:
-            row = await session.scalar(
-                select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+            row = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+                ),
             )
             assert row.status == "EXPIRED" and row.attempts == 0
         unblock.set()
@@ -371,7 +380,9 @@ async def test_busy_sender_expires_messages_when_maintenance_interval_elapses(
             release.set()
             for _ in range(100):
                 async with rig.factory() as session:
-                    row = await session.get(ReliableMessage, expired.message_id)
+                    row = await message_history_view(
+                        session, await session.get(ReliableMessage, expired.message_id)
+                    )
                     if row.status == "EXPIRED":
                         break
                 await asyncio.sleep(0.01)
@@ -519,7 +530,9 @@ async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(stor
             await sender.aclose()
         assert cancelled.is_set() and closed.is_set()
         async with rig.factory() as session:
-            row = await session.get(ReliableMessage, result.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
             assert row.status == "SENDING" and row.lease_id is not None
         assert "unconfirmed" in caplog.text
     finally:
@@ -667,7 +680,9 @@ async def test_cancelled_shutdown_waiters_do_not_abort_cleanup(pg_rig, phase):
             assert not disposed.is_set()
             if phase in ("inflight", "release"):
                 async with rig.factory() as session:
-                    row = await session.get(ReliableMessage, result.message_id)
+                    row = await message_history_view(
+                        session, await session.get(ReliableMessage, result.message_id)
+                    )
                     assert row.status == "SENDING" and row.attempts == 0
                     assert row.lease_id is not None
             resume.set()
@@ -676,7 +691,9 @@ async def test_cancelled_shutdown_waiters_do_not_abort_cleanup(pg_rig, phase):
         assert closed.is_set() and disposed.is_set()
         assert close_calls == dispose_calls == 1
         async with rig.factory() as session:
-            row = await session.get(ReliableMessage, result.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
             assert row.status == ("PENDING" if phase == "release" else "DONE")
             assert row.response_raw == (None if phase == "release" else b"ok")
             assert row.attempts == 1

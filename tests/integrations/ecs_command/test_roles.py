@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from sqlalchemy import func, select
 
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
 from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.receiver import receive_ecs_event
@@ -17,7 +18,7 @@ from app.integrations.ecs_command import RoleRoutes, compile_commands, ecs_comma
 from app.integrations.ecs_command.contracts import ErrorDetail
 from app.integrations.ecs_command.declaration import command_declaration
 from app.integrations.ecs_command.routing import RouteAuthorization
-from app.models import EcsCommand, ReliableMessage
+from app.models import IntegrationExchange, ReliableMessage
 from tests.helpers import loopback_app, simulator_sender
 
 SCAN1 = "SCAN1"
@@ -144,7 +145,14 @@ async def test_invalid_role_routes_do_not_persist_commands(ecs, role_runtime, ro
             await ecs.service.get_by_call(session, owner=ecs.owner, call_key=arguments["call_key"])
             is None
         )
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
         assert (
             await session.scalar(
                 select(func.count())
@@ -160,7 +168,14 @@ async def test_invalid_role_routes_do_not_persist_commands(ecs, role_runtime, ro
             session, owner=ecs.owner, call_key=arguments["call_key"]
         )
         assert stored.command_code == command.command_code
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         assert (
             await session.scalar(
                 select(func.count())
@@ -334,7 +349,9 @@ async def test_role_configuration_revocation_retains_original_result(ecs, role_r
             timeout_ms=30000,
             command=ScanData(qty=1),
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     assert await store.before_send(claim, ecs.targets["ecs"])
     role_runtime.binding = None

@@ -11,6 +11,7 @@ from app.integrations.wms_request import InvalidRequestPayload, UnknownOperation
 from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 from app.reliable import DuplicateMessage, MessageStatus
+from tests.helpers import message_history_view
 
 FACT, DECISION = "example.fact.report@v1", "example.decision.ask@v1"
 DATA = {"task_id": "T-1", "qty": 2}
@@ -38,7 +39,10 @@ def canonical_model():
 
 async def rows(sessions):
     async with sessions() as session:
-        return list(await session.scalars(select(ReliableMessage).order_by(ReliableMessage.id)))
+        return [
+            await message_history_view(session, row)
+            for row in await session.scalars(select(ReliableMessage).order_by(ReliableMessage.id))
+        ]
 
 
 async def test_operation_is_routed_to_its_endpoint_target_in_the_callers_transaction(
@@ -698,7 +702,9 @@ async def test_shared_request_freezes_original_business_and_wire(
     identity = str(uuid7(clock()))
     async with sessions.begin() as session:
         original = await first.send(session, payload, operation_id=identity)
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         frozen = row.request_raw
         assert row.business_key == original.business_key == "business:first"
         assert set(json.loads(frozen)) == {"operation_id", "operation", "timestamp", "data"}
@@ -713,7 +719,9 @@ async def test_shared_request_freezes_original_business_and_wire(
     async with sessions.begin() as session:
         other = await second.send(session, payload, operation_id=str(uuid7(clock())))
         assert other.business_key == "business:second"
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         assert row.business_key == "business:first" and row.request_raw == frozen
 
 
@@ -753,5 +761,26 @@ async def test_legacy_null_business_is_not_adopted_by_bound_facade(sessions, wms
         async with sessions.begin() as session:
             await bound.send(session, payload, operation_id=identity)
     async with sessions() as session:
-        row = await session.get(ReliableMessage, original.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, original.message_id)
+        )
         assert row.business_key is None
+
+
+async def test_original_business_owner_is_recorded_when_request_is_registered(
+    sessions, wms, shared_wms_contract
+):
+    from app.businesses import catalog
+    from app.integrations.wms_request import WmsRequests
+    from app.models import IntegrationExchange
+
+    service = WmsRequests(
+        wms.outbox, owner_domain="first", contract_consumers=catalog.contract_consumers
+    )
+    async with sessions.begin() as session:
+        ref = await service.send(
+            session, shared_wms_contract.model(reference="original"), operation_id=str(uuid7())
+        )
+        message = await session.get(ReliableMessage, ref.message_id)
+        root = await session.get(IntegrationExchange, message.exchange_id)
+        assert root.owner_domain == "first"

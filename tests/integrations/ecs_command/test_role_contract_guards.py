@@ -23,7 +23,7 @@ from app.integrations.ecs_command.dev import (
     configure_local_ecs,
 )
 from app.integrations.ecs_command.routing import RouteAuthorization
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from tests.helpers import TrialPayload, ecs_binding, ecs_history_annexes
 
 
@@ -199,7 +199,14 @@ async def test_injected_event_resolver_failure_returns_503_then_retries_original
         response = await client.post("/api/v1/callback/event", json=body)
         assert response.status_code == 503
         async with callback_store() as session:
-            assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(IntegrationExchange)
+                    .where(IntegrationExchange.role == "RECEIPT")
+                )
+                == 0
+            )
         unavailable = False
         for _ in range(2):
             response = await client.post("/api/v1/callback/event", json=body)

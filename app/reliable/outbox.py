@@ -13,6 +13,7 @@ from app.http_client import validate_request
 from app.models.reliable import ReliableMessage
 
 from .config import TargetConfig
+from .lifecycle import ensure_savepoint_transaction
 from .store import utc_datetime
 from .types import (
     ComparableRequests,
@@ -51,10 +52,12 @@ class Outbox:
         targets: Mapping[str, TargetConfig],
         adapters: Mapping[str, ProtocolAdapter],
         *,
+        records,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         lifecycles=None,
     ):
         self.targets = targets
+        self.records = records
         self.adapters = adapters
         self.clock = clock
         self.lifecycles = lifecycles or {}
@@ -78,7 +81,7 @@ class Outbox:
         )
         existing = await session.scalar(query.execution_options(populate_existing=True))
         if existing is not None:
-            return self._existing(existing, draft)
+            return await self._existing(session, existing, draft)
         if draft.ttl is not None and (
             not isinstance(draft.ttl, timedelta) or draft.ttl < timedelta(0)
         ):
@@ -101,6 +104,9 @@ class Outbox:
                 expires_at,
                 draft.delivery_snapshot,
                 draft.scope,
+                exchange_id=draft.exchange_id,
+                request_record_id=draft.request_record_id,
+                owner_domain=draft.owner_domain,
             )
             target = self.targets[draft.target].effective(draft.delivery_snapshot)
             request = self.adapters[target.protocol].build_request(message, target)
@@ -119,7 +125,6 @@ class Outbox:
             target=message.target,
             operation=message.operation,
             operation_id=message.operation_id,
-            request_raw=message.request_raw,
             status=MessageStatus.PENDING,
             attempts=0,
             next_attempt_at=now,
@@ -130,19 +135,35 @@ class Outbox:
             updated_at=now,
         )
         while True:
-            message_id = await session.scalar(
-                insert(ReliableMessage)
-                .values(**values)
-                .on_conflict_do_nothing(index_elements=["target", "operation", "operation_id"])
-                .returning(ReliableMessage.id)
-            )
+            await ensure_savepoint_transaction(session)
+            async with session.begin_nested() as registration:
+                exchange_id, request_id = await self.records.register(
+                    session,
+                    message=message,
+                    protocol=target.protocol,
+                )
+                message_id = await session.scalar(
+                    insert(ReliableMessage)
+                    .values(**values, exchange_id=exchange_id, request_record_id=request_id)
+                    .on_conflict_do_nothing(index_elements=["target", "operation", "operation_id"])
+                    .returning(ReliableMessage.id)
+                )
+                if message_id is None:
+                    await registration.rollback()
+                else:
+                    await self.records.link_message(
+                        session,
+                        exchange_id=exchange_id,
+                        message_id=message_id,
+                        at=message.created_at,
+                    )
             if message_id is not None:
                 return EnqueueResult(message_id, MessageStatus.PENDING, message.business_key)
             existing = await session.scalar(query.execution_options(populate_existing=True))
             if existing is not None:
-                return self._existing(existing, draft)
+                return await self._existing(session, existing, draft)
 
-    def _existing(self, existing, draft) -> EnqueueResult:
+    async def _existing(self, session, existing, draft) -> EnqueueResult:
         scope = (
             (draft.scope.owner_domain, draft.scope.kind, draft.scope.scope_id)
             if draft.scope
@@ -153,18 +174,20 @@ class Outbox:
         snapshot = asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None
         if existing.delivery_snapshot != snapshot:
             raise DuplicateMessage("identity already has different delivery snapshot")
-        if existing.request_raw != draft.request_raw and not self._same_request(existing, draft):
+        bodies = await self.records.requests(session, record_ids=(existing.request_record_id,))
+        raw = bodies[existing.request_record_id]
+        if raw != draft.request_raw and not self._same_request(raw, draft):
             raise DuplicateMessage("identity already has different bytes")
         return EnqueueResult(existing.id, MessageStatus(existing.status), existing.business_key)
 
-    def _same_request(self, existing, draft) -> bool:
+    def _same_request(self, raw, draft) -> bool:
         """字节不同但适配器认定内容等价(例如只有时间戳变了)时,同身份重入返回原消息。"""
         if draft.delivery_snapshot is not None:
             return False
         target = self.targets.get(draft.target)
         adapter = self.adapters.get(target.protocol) if target is not None else None
         return isinstance(adapter, ComparableRequests) and adapter.same_request(
-            existing.request_raw, draft.request_raw
+            raw, draft.request_raw
         )
 
     async def check_scope(self, session, *, target, operation, operation_id, scope):
@@ -238,7 +261,7 @@ class Outbox:
                 else "NEVER_DISPATCHED"
             )
             if port is not None:
-                claim = MessageStore._claim(self, session, row)
+                claim = await MessageStore._claim(self, session, row)
                 await port.apply_transition(
                     session,
                     context,
@@ -415,12 +438,16 @@ class Outbox:
                 row.target,
                 row.operation,
                 row.operation_id,
-                row.request_raw,
+                (await self.records.requests(session, record_ids=(row.request_record_id,)))[
+                    row.request_record_id
+                ],
                 row.business_key,
                 row.trace_id,
                 utc_datetime(row.created_at, known_sqlite_utc=True),
                 utc_datetime(row.expires_at, known_sqlite_utc=True),
                 snapshot,
+                exchange_id=row.exchange_id,
+                request_record_id=row.request_record_id,
             )
             claim = Claim(
                 row.id,

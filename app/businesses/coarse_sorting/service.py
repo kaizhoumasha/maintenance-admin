@@ -19,6 +19,7 @@ from app.integrations.ecs_callback.registry import EcsEventContext
 from app.integrations.ecs_command import CommandOwner
 from app.integrations.wms_request import RequestPayload
 from app.models import Device, WorkLine
+from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 from app.services.workline_service import business_configuration_issue, read_workline
 
 from .contracts import (
@@ -71,11 +72,25 @@ class CoarseSortingService:
         return {"rack_dispatch": self.rack_dispatch} if self.rack_dispatch else {}
 
     async def accept_scan(self, ctx: EcsEventContext, payload: ScanCompletedData) -> None:
+        from app.integrations.history import link_receipt
+
+        async def reference(identity):
+            await link_receipt(
+                ctx.session,
+                receipt_id=ctx.receipt_id,
+                reference_kind="BUSINESS_TASK",
+                namespace="coarse_sorting",
+                value=identity,
+                relation_role="SCAN_ACCEPTANCE",
+                at=self.clock(),
+            )
+
         table = self.scan_table
         original = await ctx.session.scalar(
             select(table.c.id).where(table.c.event_digest == ctx.digest)
         )
         if original is not None:
+            await reference(original)
             return
 
         binding = ctx.binding
@@ -93,9 +108,10 @@ class CoarseSortingService:
             ctx.note(issue)
             return
         line = await read_workline(ctx.session, binding.work_line_id)
+        scan_id = str(uuid7())
         await ctx.session.execute(
             table.insert().values(
-                id=str(uuid7()),
+                id=scan_id,
                 event_digest=ctx.digest,
                 receipt_id=ctx.receipt_id,
                 work_line_id=binding.work_line_id,
@@ -118,6 +134,8 @@ class CoarseSortingService:
             )
         )
 
+        await reference(scan_id)
+
     async def advance(self, scan_id: str) -> str:
         """Retry serialization failures as whole transactions on fresh sessions."""
         for attempt in range(3):
@@ -132,8 +150,8 @@ class CoarseSortingService:
                             }
                         )
                     return await self._advance(session, scan_id)
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+            except (DBAPIError, EvidencePersistenceError) as error:
+                if database_failure_code(error) != "40001" or attempt == 2:
                     raise
 
     async def _advance(self, session, scan_id):
@@ -538,6 +556,31 @@ class CoarseSortingService:
                 **references,
             )
         )
+        from app.integrations.history import SourceRef, link_source
+
+        source = (
+            SourceRef("WMS_MESSAGE", str(references["message_id"]))
+            if references.get("message_id")
+            else SourceRef("ECS_COMMAND", references["command_code"])
+            if references.get("command_code")
+            else None
+        )
+        if source is not None:
+            for kind, namespace, value, role in (
+                ("BUSINESS_ACTION", "coarse_sorting", action_id, "ORIGINAL_INTENT"),
+                ("BUSINESS_TASK", "coarse_sorting", row["id"], "OWNER"),
+                ("WORKLINE", "id", str(row["work_line_id"]), "OWNER"),
+            ):
+                await link_source(
+                    session,
+                    source=source,
+                    owner_domain="coarse_sorting",
+                    reference_kind=kind,
+                    namespace=namespace,
+                    value=value,
+                    relation_role=role,
+                    at=self.clock(),
+                )
         return action_id
 
     async def _consume(self, session, action, evidence):
@@ -547,7 +590,28 @@ class CoarseSortingService:
             {k: v for k, v in prior.items() if k != "consumed_at"} == evidence for prior in history
         ):
             return
+        from app.integrations.history import SourceRef, record_consumption
+
+        source = None
+        if evidence.get("command_code"):
+            source = SourceRef("ECS_COMMAND", evidence["command_code"], evidence.get("digest"))
+        elif evidence.get("transport_task_id"):
+            source = SourceRef(
+                "TRANSPORT_TASK", evidence["transport_task_id"], evidence.get("outcome_revision")
+            )
+        elif action.get("transport_task_id") and evidence.get("acceptance_basis"):
+            source = SourceRef("TRANSPORT_TASK", action["transport_task_id"])
+        elif action.get("message_id"):
+            source = SourceRef("WMS_MESSAGE", str(action["message_id"]))
         now = self.clock()
+        if source is not None:
+            await record_consumption(
+                session,
+                owner_domain="coarse_sorting",
+                action_id=action["id"],
+                source=source,
+                consumed_at=now,
+            )
         table = self.action_table
         await session.execute(
             table.update()
@@ -1304,8 +1368,8 @@ class CoarseSortingService:
                             execution_options={"isolation_level": "SERIALIZABLE"}
                         )
                     return await self._advance_preparation(session, preparation_id)
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+            except (DBAPIError, EvidencePersistenceError) as error:
+                if database_failure_code(error) != "40001" or attempt == 2:
                     raise
 
     async def _original_put_complete(self, session, put, job):
@@ -1711,6 +1775,28 @@ class CoarseSortingService:
                     **refs,
                 )
                 await session.execute(self.action_table.insert().values(**current))
+                from app.integrations.history import SourceRef, link_source
+
+                source = (
+                    SourceRef("WMS_MESSAGE", str(original.message_id))
+                    if original.kind == "DEPARTURE_DECIDE"
+                    else SourceRef("TRANSPORT_TASK", original.transport_task_id)
+                )
+                for kind, namespace, value, role in (
+                    ("BUSINESS_ACTION", "coarse_sorting", current["id"], "ORIGINAL_INTENT"),
+                    ("BUSINESS_PREPARATION", "coarse_sorting", prep["id"], "OWNER"),
+                    ("WORKLINE", "id", str(prep["work_line_id"]), "OWNER"),
+                ):
+                    await link_source(
+                        session,
+                        source=source,
+                        owner_domain="coarse_sorting",
+                        reference_kind=kind,
+                        namespace=namespace,
+                        value=value,
+                        relation_role=role,
+                        at=self.clock(),
+                    )
                 owned.append(current)
             if original.decision:
                 await self._consume(
@@ -1806,8 +1892,8 @@ class CoarseSortingService:
                             execution_options={"isolation_level": "SERIALIZABLE"}
                         )
                     return await self._advance_idle_rack(session, rack_job_id)
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+            except (DBAPIError, EvidencePersistenceError) as error:
+                if database_failure_code(error) != "40001" or attempt == 2:
                     raise
 
     async def _advance_idle_rack(self, session, rack_job_id):

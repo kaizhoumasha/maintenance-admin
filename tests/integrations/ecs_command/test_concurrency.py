@@ -5,10 +5,11 @@ import time
 import pytest
 from sqlalchemy import func, select, text
 
+from app.integrations import history as history_records
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
 from app.integrations.ecs_command.result import receive_ecs_result
-from app.models import EcsCommand, EcsResultEvidence, ReliableMessage
+from app.models import IntegrationExchange, IntegrationRecord, ReliableMessage
 from app.reliable.store import MessageStore
 from tests.helpers import EcsMove
 
@@ -34,7 +35,9 @@ async def test_concurrent_create_and_result_apply_once(ecs):
 
     first, second = await asyncio.gather(new(), new())
     assert first.command_code == second.command_code
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     await store.before_send(claim, ecs.targets["ecs"])
     raw = json.dumps(
@@ -54,7 +57,14 @@ async def test_concurrent_create_and_result_apply_once(ecs):
     a, b = await asyncio.gather(receive(), receive())
     assert a.status_code == b.status_code == 200 and a.body == b.body
     async with ecs.factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsResultEvidence)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationRecord)
+                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 
@@ -71,7 +81,12 @@ async def test_projection_failure_rolls_back_both_records_and_maintenance_contin
         async def apply_transition(self, *args):
             raise RuntimeError("injected projection failure")
 
-    store = MessageStore(ecs.factory, clock=clock, lifecycles={PROTOCOL: Broken(ecs.service)})
+    store = MessageStore(
+        ecs.factory,
+        clock=clock,
+        lifecycles={PROTOCOL: Broken(ecs.service)},
+        records=history_records,
+    )
     clock.advance(seconds=301)
     await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.2)
     records = [r for r in caplog.records if "snapshot maintenance unavailable" in r.getMessage()]
@@ -81,13 +96,21 @@ async def test_projection_failure_rolls_back_both_records_and_maintenance_contin
     assert "injected projection failure" not in caplog.text
     async with ecs.factory() as session:
         assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
-        assert (await session.scalar(select(EcsCommand))).status == "QUEUED"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "QUEUED"
     store.snapshots.lifecycles = {PROTOCOL: EcsLifecycle(ecs.service)}
     await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.2)
     await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.2)
     async with ecs.factory() as session:
         assert (await session.scalar(select(ReliableMessage))).status == "EXPIRED"
-        assert (await session.scalar(select(EcsCommand))).status == "EXPIRED"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "EXPIRED"
 
 
 async def test_table_lock_cannot_block_maintenance_past_round_deadline(ecs):
@@ -95,9 +118,11 @@ async def test_table_lock_cannot_block_maintenance_past_round_deadline(ecs):
         pytest.skip("PostgreSQL table locks")
     async with ecs.factory.begin() as session:
         await create(ecs, session)
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     async with ecs.factory.begin() as blocker:
-        await blocker.execute(text("LOCK TABLE ecs_command IN ACCESS EXCLUSIVE MODE"))
+        await blocker.execute(text("LOCK TABLE integration_exchange IN ACCESS EXCLUSIVE MODE"))
         started = time.monotonic()
         await store.maintain_snapshots(100, ecs.targets, started + 0.1)
         assert time.monotonic() - started < 0.8
@@ -112,11 +137,14 @@ async def test_missing_send_assembly_pauses_without_losing_maintenance_port(ecs)
         ecs.factory,
         lifecycles={PROTOCOL: EcsLifecycle(ecs.service)},
         served_snapshot_protocols=set(),
+        records=history_records,
     )
     await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.3)
     async with ecs.factory() as session:
         message = await session.scalar(select(ReliableMessage))
-        command = await session.scalar(select(EcsCommand))
+        command = await session.scalar(
+            select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+        )
         assert message.status == "HELD" and message.pause_reason == "ASSEMBLY_UNAVAILABLE"
         assert not message.delivery_uncertain and command.status == "RECONCILING"
 
@@ -166,10 +194,15 @@ async def test_broken_snapshot_projection_does_not_stop_static_delivery(ecs, cor
     targets = {**ecs.targets, target.name: target}
     adapters = {**ecs.adapters, "script": Adapter()}
     async with ecs.factory.begin() as session:
-        await Outbox(targets, adapters, clock=clock).enqueue(
+        await Outbox(targets, adapters, clock=clock, records=history_records).enqueue(
             session, MessageDraft(target.name, "opaque", "id", b"{}")
         )
-    store = MessageStore(ecs.factory, clock=clock, lifecycles={PROTOCOL: Broken(ecs.service)})
+    store = MessageStore(
+        ecs.factory,
+        clock=clock,
+        lifecycles={PROTOCOL: Broken(ecs.service)},
+        records=history_records,
+    )
     from app.integrations.ecs_command.clients import DynamicClients
 
     client = Client()
@@ -197,7 +230,9 @@ async def test_authorization_is_locked_before_waiting_for_message(ecs):
         pytest.skip("PostgreSQL lock order")
     async with ecs.factory.begin() as session:
         await create(ecs, session)
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     authorized = asyncio.Event()
     original = ecs.routes.authorize_frozen
@@ -233,7 +268,9 @@ async def test_persistent_route_revocation_serializes_with_send_gate(
         pytest.skip("PostgreSQL original authorization row locking")
     async with ecs.factory.begin() as session:
         command = await reference.register(session, action_id=1)
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     if first == "revoke":
         async with ecs.factory.begin() as blocker:
@@ -291,7 +328,9 @@ async def test_missing_original_authorization_does_not_allow_dispatch(reference)
     async with ecs.factory.begin() as session:
         command = await reference.register(session, action_id=1)
         await session.execute(delete(reference.routes))
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     assert not await store.before_send(claim, ecs.targets["ecs"])
     async with ecs.factory() as session:
@@ -299,3 +338,36 @@ async def test_missing_original_authorization_does_not_allow_dispatch(reference)
             session, owner=ecs.owner, command_code=command.command_code
         )
         assert view.status == "RECONCILING" and view.result is None
+
+
+async def test_consumption_and_send_gate_keep_original_lock_order(ecs):
+    if ecs.engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL lock ordering")
+    async with ecs.factory.begin() as session:
+        command = await create(ecs, session)
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
+    (claim,) = await store.claim(1, ecs.targets)
+    async with ecs.factory() as blocked_outbox:
+        await blocked_outbox.execute(
+            select(ReliableMessage.id)
+            .where(ReliableMessage.id == claim.message_id)
+            .with_for_update()
+        )
+        async with ecs.factory.begin() as consumer:
+            async with asyncio.timeout(5):
+                record = await history_records.record_consumption(
+                    consumer,
+                    owner_domain=ecs.owner.domain,
+                    action_id="original-action",
+                    source=history_records.SourceRef(
+                        "ECS_COMMAND", command.command_code, "not-yet-observed"
+                    ),
+                    consumed_at=ecs.service.clock(),
+                )
+                assert record is not None
+        gate = asyncio.create_task(store.before_send(claim, ecs.targets["ecs"]))
+        await blocked_outbox.rollback()
+        async with asyncio.timeout(5):
+            assert await gate

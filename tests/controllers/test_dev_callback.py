@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.core.identifiers import uuid7
 from app.models.transport import TransportTask
+from tests.helpers import seed_transport_task
 
 DEV = "/api/v1/dev/transport"
 RACK = {
@@ -31,7 +32,8 @@ BIN = {
 async def add_task(factory, frozen):
     task_id = "transport-" + str(uuid7())
     async with factory.begin() as session:
-        session.add(
+        await seed_transport_task(
+            session,
             TransportTask(
                 client_request_id=str(uuid7()),
                 transport_task_id=task_id,
@@ -41,7 +43,7 @@ async def add_task(factory, frozen):
                 workline_id="line",
                 created_at=datetime.now(UTC),
                 frozen=frozen,
-            )
+            ),
         )
     return task_id
 

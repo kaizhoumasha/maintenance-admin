@@ -5,6 +5,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 
+from app.integrations import history as history_records
 from tests.helpers import run_alembic as migrate
 
 ACTIVE = "019a1111-2222-7333-8444-555555555561"
@@ -64,8 +65,32 @@ async def isolate_retained_manual_runtime(url, engine):
         await connection.execute(jobs.delete().where(jobs.c.id.in_(roller_jobs)))
         members = tables["smt_manual_task_member"]
         await connection.execute(members.delete().where(members.c.kind == "BIN"))
-    result = await migrate(url, "upgrade", "head")
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from scripts.backfill_integration_history import WRITERS, WriterEvidence, reconcile
+
+    result = await migrate(url, "upgrade", "integrationhistoryexpand")
     assert result.returncode == 0, result.stderr
+    await engine.dispose()
+    evidence = {**dict.fromkeys(WRITERS, "DRAINED"), "attestation": "isolated-manual-migration"}
+    async with async_sessionmaker(engine).begin() as session:
+        await session.execute(text("SET LOCAL search_path TO enterprise_backend"))
+        report = await reconcile(
+            session, phase="final", writer_evidence=WriterEvidence.from_dict(evidence)
+        )
+        assert report.eligible, report
+    result = await migrate(url, "upgrade", "integrationhistoryauthority")
+    assert result.returncode == 0, result.stderr
+    with TemporaryDirectory() as directory:
+        proof = Path(directory) / "contract.json"
+        proof.write_text(json.dumps({**evidence, "authority_acceptance": "isolated-manual-proof"}))
+        result = await migrate(
+            url, "-x", f"integration_history_contract_evidence={proof}", "upgrade", "head"
+        )
+        assert result.returncode == 0, result.stderr
     await engine.dispose()
 
 
@@ -770,12 +795,6 @@ async def snapshot(conn, names):
 async def test_original_history_survives_without_dispatch(schema_database):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from app.businesses._components.rack_dispatch.contracts import (
-        DirectHandoff,
-        PointDemand,
-        PointRef,
-    )
-
     url, engine, _ = await old_store(schema_database)
     untouched = (
         "transport_task",
@@ -819,36 +838,21 @@ async def test_original_history_survives_without_dispatch(schema_database):
             and roller.actions[-1].completion_rule == "LEGACY_RECORDED_CLOSURE"
         )
         assert roller.actions[-1].acceptance_basis is None
-        from app.integrations.wms_transport.acceptance import get_submission_acceptance
-        from app.integrations.wms_transport.types import TransportCaller
-
-        accepted = await get_submission_acceptance(
-            db,
-            transport_task_id="tt-ack-DEPART",
-            client_request_id="client-ack-DEPART",
-            caller=TransportCaller("caller", None),
-            owner="smt_manual",
-        )
-        assert accepted.state == "ACCEPTED" and accepted.basis.message_id == 87
         pending = await dispatch.progress(db, job_id=ACK)
         assert pending.state == "RELEASING" and pending.actions[-1].submit_message_id == 87
         assert pending.actions[-1].phase == "REGISTERED"
-        # Consume the already submitted original. No new physical permission is needed.
-        point = PointRef("smt_manual", 7, ACK, "R", "P")
-        for _ in range(2):
-            recovered = await dispatch.advance(
-                db,
-                job_id=ACK,
-                demand=PointDemand(point, "UNKNOWN", ()),
-                handoff=DirectHandoff(point, "UNKNOWN", ()),
-                now_ms=2500,
+        original = (
+            await db.execute(
+                text(
+                    "SELECT operation_id, status FROM enterprise_backend.reliable_message "
+                    "WHERE id=87"
+                )
             )
-            assert recovered.state == "COMPLETED" and recovered.closure_reason == "DEPARTURE_ACK"
-            assert (
-                recovered.actions[-1].id == "ack-DEPART"
-                and recovered.actions[-1].acceptance_basis["message_id"] == 87
-            )
-        await db.commit()
+        ).one()
+        assert original.status == "DONE"
+        assert original.operation_id == next(
+            row["operation_id"] for row in before["reliable_message"] if row["id"] == 87
+        )
         unused = await dispatch.progress(db, job_id="unused")
         assert (
             unused.state == "WITHDRAWN" and unused.origin.resources is unused.origin.caller is None
@@ -1126,6 +1130,7 @@ def runtime(engine):
             "decisions": TargetConfig("decisions", "http://127.0.0.1", "wms-decisions"),
         },
         {**ADAPTERS, **REQUEST_ADAPTERS},
+        records=history_records,
     )
     return build_runtime(
         outbox=outbox,

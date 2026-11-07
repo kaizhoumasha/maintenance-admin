@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core import get_settings
 from app.database import create_database_engine as create_async_engine
 from app.http_client import AsyncHttpClient, HttpClient, HttpClientConfig
+from app.integrations import history as history_records
 from app.reliable import Outbox, OutgoingMessage, ProtocolAdapter
 from app.reliable.config import ReliableConfig
 from app.reliable.sender import Sender
@@ -44,6 +45,7 @@ async def reliable_lifespan(
         served_snapshot_protocols=set(adapters) if client_provider is not None else set(),
         on_result=on_result,
         on_delivered=on_delivered,
+        records=history_records,
     )
     sender = Sender(
         store,
@@ -76,6 +78,10 @@ async def reliable_lifespan(
                     target.protocol,
                 )
         sender.runner = asyncio.create_task(sender.run())
-        yield Outbox(config.targets, adapters, lifecycles=lifecycles) if config.targets else None
+        yield (
+            Outbox(config.targets, adapters, lifecycles=lifecycles, records=history_records)
+            if config.targets
+            else None
+        )
     finally:
         await sender.aclose()

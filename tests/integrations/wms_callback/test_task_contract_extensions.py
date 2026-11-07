@@ -25,7 +25,7 @@ from app.integrations.wms_callback import (
     registry,
 )
 from app.main import app
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 
 ERRORS = CallbackErrors("INVALID_DATA", "INVALID_ENVELOPE", "IDEMPOTENCY_CONFLICT")
 OPERATION = "isolated.plan@v1"
@@ -165,6 +165,30 @@ async def extension(callback_db, monkeypatch):
     finally:
         async with callback_db.kw["bind"].begin() as connection:
             await connection.run_sync(metadata.drop_all)
+
+
+async def test_recheck_new_facts_require_atomic_evidence(extension, monkeypatch):
+    from app.integrations import history
+
+    ext = extension
+    first = await ext.send(ext.body)
+    assert first.body["code"] == "UNAVAILABLE"
+    ext.state.ready = True
+    original = history.write_record
+
+    async def unavailable(session, *, draft):
+        if draft.record_kind == "RESPONSE_PREPARED":
+            raise history.EvidencePersistenceError("authoritative reply unavailable")
+        return await original(session, draft=draft)
+
+    monkeypatch.setattr(history, "write_record", unavailable)
+    with pytest.raises(history.EvidencePersistenceError):
+        await ext.send(ext.body)
+    assert await ext.kinds() == ["pending"]
+    assert ext.events == []
+    async with ext.factory() as session:
+        receipt = await find_receipt(session, OPERATION, ext.body["operation_id"])
+        assert receipt.body["code"] == "UNAVAILABLE"
 
 
 @pytest.mark.parametrize(
@@ -404,8 +428,11 @@ async def test_recheck_lock_timeout_preserves_original_receipt(
     monkeypatch.setattr(app.state, "business_committed", ext.events.append, raising=False)
     async with ext.factory() as blocker, blocker.begin():
         await blocker.scalar(
-            select(CallbackReceipt)
-            .where(CallbackReceipt.operation_id == ext.body["operation_id"])
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.operation_id == ext.body["operation_id"])
             .with_for_update()
         )
         pending = asyncio.create_task(callback_client.post("/api/v1/wms/events", json=ext.body))

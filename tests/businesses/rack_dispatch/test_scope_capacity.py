@@ -15,6 +15,7 @@ from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest
 from app.models import ReliableMessage, TransportTask, WorkLine
 from app.reliable import ScopeRef
+from tests.helpers import read_history_body, set_message_bodies
 
 from . import TaskGrant, apply_outcome, evidence, origin, respond, store
 
@@ -211,14 +212,19 @@ async def test_only_strict_original_departure_acceptance_releases_stopped_positi
         task = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == depart.transport_task_id)
         )
-        task.submission_acceptance = saved
+        from tests.helpers import set_submission_acceptance
+
+        await set_submission_acceptance(session, task, saved)
         await session.flush()
         await stop(session, dispatch)
         assert (await dispatch.progress(session, job_id=job)).pending
         message = await session.get(ReliableMessage, depart.submit_message_id)
         message.status = "ABANDONED"
         message.next_attempt_at = None
-        message.response_raw = message.last_http_status = None
+        message.last_http_status = None
+        from tests.helpers import set_message_bodies
+
+        await set_message_bodies(session, message, response_raw=None)
         if invalid:
             task.cycle_id = str(uuid7())
         await session.flush()
@@ -309,7 +315,9 @@ async def test_stopped_submit_rejection_requires_full_original_no_responsibility
                 "saved_at": 100,
             }
             saved["evidence_sha256"] = canonical_digest(saved)
-            task.submission_acceptance = saved
+            from tests.helpers import set_submission_acceptance
+
+            await set_submission_acceptance(session, task, saved)
             await session.flush()
         await respond(
             session,
@@ -329,9 +337,9 @@ async def test_stopped_submit_rejection_requires_full_original_no_responsibility
                     else {"target": {"kind": "RACK_POSITION", "location_code": "OTHER"}}
                 ),
             }
-            raw = json.loads(message.request_raw)
+            raw = json.loads(await read_history_body(session, (message).request_record_id))
             raw["data"] = {"transport_task_id": action.transport_task_id, **task.frozen}
-            message.request_raw = json.dumps(raw).encode()
+            await set_message_bodies(session, message, request_raw=json.dumps(raw).encode())
         elif fault == "invalid_acceptance":
             task.submission_acceptance = {"invalid": True}
         await session.flush()
@@ -373,7 +381,9 @@ async def test_stopped_handoff_reader_requires_exact_persisted_original_release(
         task = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == depart.transport_task_id)
         )
-        task.submission_acceptance = saved
+        from tests.helpers import set_submission_acceptance
+
+        await set_submission_acceptance(session, task, saved)
         await session.flush()
         await stop(session, dispatch)
         view = await dispatch.advance(session, job_id=job, **evidence(job), now_ms=10)

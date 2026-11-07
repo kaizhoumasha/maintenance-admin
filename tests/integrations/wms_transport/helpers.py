@@ -28,7 +28,9 @@ async def frozen_requests(session, rig):
         .where(ReliableMessage.target == rig.target.name)
         .order_by(ReliableMessage.id)
     )
-    return [row.request_raw for row in rows]
+    from tests.helpers import read_history_body
+
+    return [await read_history_body(session, row.request_record_id) for row in rows]
 
 
 def caller(rig, station=None):

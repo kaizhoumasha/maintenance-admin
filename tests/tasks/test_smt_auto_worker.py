@@ -7,7 +7,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.businesses._components.bin_roller.models import TABLES as ROLLER_TABLES
 from app.businesses.smt_auto.models import (
@@ -19,20 +19,19 @@ from app.businesses.smt_auto.models import (
 )
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
 from app.models import (
-    CallbackReceipt,
     Device,
     DeviceRoute,
-    EcsCommand,
-    EcsResultEvidence,
-    EcsSendEvidence,
+    IntegrationExchange,
     ReliableMessage,
     WorkLine,
 )
 from app.reliable.config import TargetConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
+from tests.helpers import clear_integration_history
 
 
 async def test_committed_auto_receiver_wakes_worker_and_beat_recovers_original_prepare(
@@ -152,7 +151,7 @@ celery_app.conf.beat_schedule = {key: celery_app.conf.beat_schedule[key]}
                 await asyncio.sleep(0.05)
 
     async def settle(message_id, operation_id, status, code, data):
-        store = MessageStore(pg_sessions)
+        store = MessageStore(pg_sessions, records=history_records)
         claims = await store.claim(1, {target.name: target})
         assert len(claims) == 1 and claims[0].message_id == message_id
         result = HttpResult(
@@ -370,7 +369,10 @@ async def deliver(factory):
     commands = host.capabilities.ecs
     outbox = commands.outbox
     target = outbox.targets[commands.target]
-    store = MessageStore(factory, lifecycles={PROTOCOL: outbox.lifecycles[PROTOCOL]})
+    from app.integrations import history as history_records
+    store = MessageStore(
+        factory, lifecycles={PROTOCOL: outbox.lifecycles[PROTOCOL]}, records=history_records
+    )
     claims = await store.claim(1, {target.name: target})
     assert len(claims) == 1 and claims[0].message.business_key == os.environ["AUTO_COMMAND"]
     assert await store.before_send(claims[0], target)
@@ -408,8 +410,25 @@ run_with_factory(os.environ["DATABASE_URL"], deliver)
             decision_ids = select(AutoOutboundDecisionRound.message_id).where(
                 AutoOutboundDecisionRound.task_id == task_id
             )
-            command_codes = select(EcsCommand.command_code).where(
-                EcsCommand.device_code == device_code
+            command_codes = (
+                select(IntegrationExchange.command_code)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+                .where(IntegrationExchange.device_code == device_code)
+            )
+            history_ids = list(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(
+                        (IntegrationExchange.device_code == device_code)
+                        | IntegrationExchange.operation_id.in_((operation_id, cancel_id))
+                        | IntegrationExchange.id.in_(
+                            select(ReliableMessage.exchange_id).where(
+                                ReliableMessage.id.in_(message_ids)
+                                | ReliableMessage.id.in_(decision_ids)
+                                | ReliableMessage.business_key.in_(command_codes)
+                            )
+                        )
+                    )
+                )
             )
             await session.execute(
                 delete(ReliableMessage).where(
@@ -417,13 +436,6 @@ run_with_factory(os.environ["DATABASE_URL"], deliver)
                     | ReliableMessage.business_key.in_(command_codes)
                 )
             )
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(command_codes))
-            )
-            await session.execute(
-                delete(EcsSendEvidence).where(EcsSendEvidence.command_code.in_(command_codes))
-            )
-            await session.execute(delete(EcsCommand).where(EcsCommand.device_code == device_code))
             await session.execute(
                 delete(AutoOutboundDecisionRound).where(
                     AutoOutboundDecisionRound.task_id == task_id
@@ -434,7 +446,13 @@ run_with_factory(os.environ["DATABASE_URL"], deliver)
                 table = ROLLER_TABLES[key]
                 await session.execute(delete(table).where(table.c.work_line_id == line_id))
             await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.device_code == device_code)
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .values(receipt_active=False)
+                .where(IntegrationExchange.device_code == device_code)
             )
             await session.execute(delete(Device).where(Device.device_code == device_code))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
@@ -445,9 +463,14 @@ run_with_factory(os.environ["DATABASE_URL"], deliver)
             await session.execute(delete(AutoTaskInput).where(AutoTaskInput.task_id == task_id))
             await session.execute(delete(AutoTask).where(AutoTask.task_id == task_id))
             await session.execute(
-                delete(CallbackReceipt).where(
-                    CallbackReceipt.operation_id.in_((operation_id, cancel_id))
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
                 )
+                .values(receipt_active=False)
+                .where(IntegrationExchange.operation_id.in_((operation_id, cancel_id)))
             )
+            await clear_integration_history(session, history_ids)
             await session.execute(delete(WorkLine).where(WorkLine.id == line_id))
         await real_redis.delete(queue)

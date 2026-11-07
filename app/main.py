@@ -22,6 +22,7 @@ from app.controllers.ecs_result import router as ecs_result_router
 from app.controllers.ecs_status import router as ecs_status_router
 from app.controllers.ecs_status import status_capability
 from app.controllers.health import router as health_router
+from app.controllers.integration_history import router as integration_history_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
 from app.controllers.permissions import router as permissions_router
@@ -143,6 +144,7 @@ app = FastAPI(
 app.middleware("http")(trace_id_middleware)
 app.add_middleware(AuditMiddleware)  # 后添加 = 最外层,能看到最终状态码
 app.state.audit_session_factory = session_factory
+app.state.integration_history_session_factory = session_factory
 app.state.integration_capabilities = [status_capability()]
 # WMS 目标由 RELIABLE_TARGETS 配置;local ECS 自动装配通用合同并加入同一发送器。
 app.state.reliable_adapters = {**WMS_TRANSPORT_ADAPTERS, **WMS_REQUEST_ADAPTERS}
@@ -150,6 +152,7 @@ register_exception_handlers(app)
 setup_logging()
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(audit_log_router, prefix="/api/v1")
+app.include_router(integration_history_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 app.include_router(permissions_router, prefix="/api/v1")

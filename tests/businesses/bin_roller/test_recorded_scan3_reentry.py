@@ -7,6 +7,7 @@ import pytest
 
 from app.businesses._components.bin_roller.service import BinRoller
 from app.models import ReliableMessage
+from tests.helpers import read_history_body
 
 BAD = json.loads((Path(__file__).parent / "fixtures/wes_recorded_cases.json").read_text())["bad"]
 OTHER = "A000002701-B"
@@ -123,7 +124,10 @@ async def test_recorded_reentry_preserves_old_facts_and_requires_current_fifo_su
     async with flow.factory() as session:
         for code in (old["scan3_command_code"], old["scan4_command_code"]):
             command = await flow.command(session, code)
-            native[code] = (command.request_raw, command.expires_at)
+            native[code] = (
+                await read_history_body(session, (command).request_record_id),
+                command.expires_at,
+            )
     old_roller = flow.roller
     flow.roller = BinRoller(
         old_roller.context,
@@ -143,7 +147,10 @@ async def test_recorded_reentry_preserves_old_facts_and_requires_current_fifo_su
     async with flow.factory() as session:
         for code, frozen in native.items():
             command = await flow.command(session, code)
-            assert (command.request_raw, command.expires_at) == frozen
+            assert (
+                await read_history_body(session, (command).request_record_id),
+                command.expires_at,
+            ) == frozen
 
 
 @pytest.mark.parametrize("window", ["FACE_END", "PURE_RETURN", "SEGMENT"])
@@ -162,7 +169,7 @@ async def test_recorded_old_allocation_releases_unchanged_members_in_fifo(
         await flow.start(session, face_id)
         face = await flow.roller.original_record(session, "face_work", face_id)
         message = await session.get(ReliableMessage, face["return_message_id"])
-        original_raw = message.request_raw
+        original_raw = await read_history_body(session, (message).request_record_id)
     await visit(flow, raw, 30)
     async with flow.factory.begin() as session:
         await flow.decide(session, face_id, count=allocated)
@@ -173,8 +180,12 @@ async def test_recorded_old_allocation_releases_unchanged_members_in_fifo(
             "WAIT_FEED_DECISION" if window == "SEGMENT" else "RETURN_WINDOW"
         )
         assert (
-            await session.get(ReliableMessage, face["return_message_id"])
-        ).request_raw == original_raw
+            await read_history_body(
+                session,
+                (await session.get(ReliableMessage, face["return_message_id"])).request_record_id,
+            )
+            == original_raw
+        )
     assert [r["id"] for r in await candidates(flow)] == [other["id"]]
 
 

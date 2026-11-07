@@ -7,7 +7,7 @@ from typing import Literal
 
 from sqlalchemy import or_, select
 
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 
 from .envelope import EcsEventEnvelope
 
@@ -96,7 +96,7 @@ def _read(row):
         return EventReadResult(
             "FOUND",
             EventRecord(
-                row.id,
+                row.receipt_id,
                 row.operation_id,
                 row.created_at,
                 deepcopy(
@@ -112,7 +112,13 @@ def _read(row):
 
 async def get_event(session, *, event_id: int) -> EventReadResult:
     with session.no_autoflush:
-        row = await session.scalar(select(CallbackReceipt).where(CallbackReceipt.id == event_id))
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.receipt_active.is_(True),
+                IntegrationExchange.receipt_id == event_id,
+            )
+        )
         return _read(row)
 
 
@@ -127,21 +133,23 @@ async def list_point_events(
 ) -> tuple[EventRecord, ...]:
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
-    table = CallbackReceipt
+    table = IntegrationExchange
     query = select(table).where(
+        table.role == "RECEIPT",
+        table.receipt_active.is_(True),
         table.operation == "ecs.event",
         table.event_context["owner_domain"].as_string() == owner_domain,
         table.event_context["work_line_id"].as_integer() == work_line_id,
         table.event_context["device_role"].as_string() == point,
         or_(
             table.application_ref.is_(None),
-            table.application_ref["canonical_event_id"].as_integer() == table.id,
+            table.application_ref["canonical_event_id"].as_integer() == table.receipt_id,
         ),
     )
     if before_event_id is not None:
-        query = query.where(table.id < before_event_id)
+        query = query.where(table.receipt_id < before_event_id)
     with session.no_autoflush:
-        rows = await session.scalars(query.order_by(table.id.desc()).limit(limit))
+        rows = await session.scalars(query.order_by(table.receipt_id.desc()).limit(limit))
         return tuple(
             result.record for row in rows if (result := _read(row)).availability == "FOUND"
         )

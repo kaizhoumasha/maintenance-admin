@@ -8,15 +8,16 @@ from hashlib import sha256
 from typing import Literal
 
 from sqlalchemy import select
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history
 from app.integrations.wms_envelope import outgoing_message, stored_response
 from app.models import TransportTask
 from app.reliable import OutgoingMessage, VerdictKind
 from app.reliable.config import TargetConfig
+from app.reliable.lifecycle import database_failure_code
 from app.reliable.store import AttemptOutcome, Claim, utc_datetime
 from app.transactions import after_commit
 
@@ -129,6 +130,15 @@ def _basis(task, message, message_id, response, *, attempt_no=None, lease_id=Non
 def _saved(task, evidence):
     if not isinstance(evidence, dict) or evidence["saved_at"] is None:
         raise ValueError("Missing recorded attempt")
+    if evidence.get("format_version") not in {None, 2}:
+        raise ValueError("Unknown acceptance format")
+    evidence = {
+        k: v
+        for k, v in evidence.items()
+        if k not in {"format_version", "request_raw", "response_raw"}
+    }
+    evidence["request_raw"] = history.projected_body(task, name="acceptance_request").decode()
+    evidence["response_raw"] = history.projected_body(task, name="acceptance_response").decode()
     message = OutgoingMessage(
         evidence["target"],
         OPERATION,
@@ -266,7 +276,11 @@ def submission_observer(
                         saved_at=timestamp_ms(datetime.now(UTC)),
                     )
                     if task["has_acceptance"]:
-                        existing = _saved(task, task["submission_acceptance"])
+                        rows = await read_rows(
+                            session, (message.business_key,), check_conflicts=True
+                        )
+                        saved_task, _ = rows[message.business_key]
+                        existing = _saved(saved_task, task["submission_acceptance"])
                         if (existing.message_id, existing.target, existing.request_sha256) != (
                             basis.message_id,
                             basis.target,
@@ -289,24 +303,35 @@ def submission_observer(
                         raise ValueError("Claim does not identify the original submission")
                     snapshot = asdict(basis)
                     snapshot["evidence_sha256"] = canonical_digest(snapshot)
+                    del snapshot["request_raw"], snapshot["response_raw"]
+                    snapshot["format_version"] = 2
+                    response_id = await history.observe_response(
+                        session, claim=claim, outcome=outcome
+                    )
                     await session.execute(
-                        task_table.update().where(identity).values(submission_acceptance=snapshot)
+                        task_table.update()
+                        .where(identity)
+                        .values(
+                            submission_acceptance=snapshot,
+                            acceptance_request_record_id=claim.message.request_record_id,
+                            acceptance_response_record_id=response_id,
+                        )
                     )
                     if basis.owner_domain is not None:
                         after_commit(session, partial(business_committed, basis.owner_domain))
                     committing = True
                 return
             except Exception as error:
-                if isinstance(error, DBAPIError) and getattr(error.orig, "sqlstate", None) in {
-                    "40001",
-                    "40P01",
-                }:
+                if database_failure_code(error) in {"40001", "40P01"}:
                     if attempt < 2:
                         continue
                 elif committing:
                     # A lost commit reply can mean success. Verify it in a new transaction.
                     async with session_factory() as reader:
-                        task = (await reader.execute(query)).mappings().one_or_none()
+                        rows = await read_rows(
+                            reader, (message.business_key,), check_conflicts=True
+                        )
+                        task, _ = rows.get(message.business_key, (None, []))
                         if task is not None and task["submission_acceptance"] is not None:
                             if _saved(task, task["submission_acceptance"]) == basis:
                                 return

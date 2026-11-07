@@ -13,6 +13,10 @@ from app.tasks.celery_app import celery_app
 
 async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> int:
     positive(days, "retention_days")
+    from app.tasks.callback_tasks import history_cleanup_ready
+
+    if not await history_cleanup_ready(factory):
+        return 0
     now = now or datetime.now(UTC)
     from app.businesses._components.bin_roller.retention import (
         cleanup_closed,

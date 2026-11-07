@@ -17,6 +17,7 @@ from app.businesses.runtime import Capabilities
 from app.core.clock import unix_ms
 from app.diagnostics import log_exception
 from app.integrations.ecs_command import CommandOwner
+from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 
 from .manual_bin_flow import ManualBinFlow
 from .manual_rack_flow import MANUAL_SOURCES
@@ -173,8 +174,8 @@ class SmtManualService(SmtManualTaskFlow):
             except RackLockSetChanged:
                 if attempt == 2:
                     raise
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+            except (DBAPIError, EvidencePersistenceError) as error:
+                if database_failure_code(error) != "40001" or attempt == 2:
                     raise
 
     async def _advance(self, session, kind, record_id):

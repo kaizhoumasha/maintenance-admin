@@ -30,10 +30,10 @@ async def _retained_rounds(session, line_ids=None):
     return {m["round_id"] for members in await session.scalars(query) for m in members or ()}
 
 
-async def protected_event_ids(session, *, candidate_ids: tuple[int, ...]) -> frozenset[int]:
+async def event_reference_lines(session, *, candidate_ids):
     if not candidate_ids:
-        return frozenset()
-    candidates, lines = set(candidate_ids), set()
+        return set()
+    lines = set()
     for identity in candidate_ids:
         event = await get_event(session, event_id=identity)
         if event.record:
@@ -50,6 +50,14 @@ async def protected_event_ids(session, *, candidate_ids: tuple[int, ...]) -> fro
                 .distinct()
             )
         )
+    return lines
+
+
+async def protected_event_ids(session, *, candidate_ids: tuple[int, ...]) -> frozenset[int]:
+    if not candidate_ids:
+        return frozenset()
+    candidates = set(candidate_ids)
+    lines = await event_reference_lines(session, candidate_ids=candidate_ids)
     await _lock_lines(session, lines)
     retained_rounds = await _retained_rounds(session, lines)
     protected, contexts = set(), set()

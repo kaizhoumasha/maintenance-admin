@@ -19,6 +19,7 @@ from app.integrations.wms_transport import (
 )
 from app.models import Menu, ReliableMessage, TransportTask
 from app.reliable import InvalidMessage
+from tests.helpers import message_history_view
 
 from .helpers import counts
 
@@ -88,8 +89,11 @@ async def test_role_selects_paired_templates_and_preserves_locations_and_face(
                     TransportTask.transport_task_id == handle.transport_task_id
                 )
             )
-            message = await session.scalar(
-                select(ReliableMessage).where(ReliableMessage.operation_id == task.operation_id)
+            message = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.operation_id == task.operation_id)
+                ),
             )
             data = json.loads(message.request_raw)["data"]
             assert data["rcs_template_id"] == template
@@ -121,8 +125,13 @@ async def test_move_allows_omitting_target_face(
     request = {key: value for key, value in scenario_request.items() if key != "target_face"}
     async with transport_storage.factory() as session:
         await register(scenarios, action, session, request)
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.target == transport_storage.target.name)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(
+                    ReliableMessage.target == transport_storage.target.name
+                )
+            ),
         )
         assert "target_face" not in json.loads(message.request_raw)["data"]
 
@@ -276,7 +285,12 @@ async def test_steps_of_one_cycle_share_a_local_group_key_that_never_reaches_the
         await session.commit()
     async with rig.factory() as session:
         tasks = list(await session.scalars(select(TransportTask).order_by(TransportTask.id)))
-        raw = (await session.scalars(select(ReliableMessage.request_raw))).all()
+        from tests.helpers import read_history_body
+
+        raw = [
+            await read_history_body(session, identity)
+            for identity in await session.scalars(select(ReliableMessage.request_record_id))
+        ]
     assert [t.cycle_id for t in tasks] == [cycle.cycle_id, cycle.cycle_id, other.cycle_id]
     assert all(cycle.cycle_id.encode() not in body for body in raw)
     assert all("cycle_id" not in json.loads(body)["data"] for body in raw)

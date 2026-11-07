@@ -2,11 +2,11 @@ import json
 from copy import deepcopy
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import receive
-from app.models import CallbackReceipt, TransportTask
+from app.models import IntegrationExchange, TransportTask
 from tests.helpers import result_task, transport_callback
 
 
@@ -235,7 +235,13 @@ async def test_migrated_postgres_observation_reader_and_owner_notification(pg_tr
     finally:
         async with rig.factory.begin() as session:
             await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.operation_id == operation_id)
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .values(receipt_active=False)
+                .where(IntegrationExchange.operation_id == operation_id)
             )
 
 

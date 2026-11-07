@@ -10,16 +10,17 @@ import pytest
 from sqlalchemy import select
 
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.ecs_command.clients import DynamicClients
 from app.integrations.ecs_command.dev import DevEcsRoutes
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
-from app.models import EcsCommand, EcsSendEvidence, ReliableMessage
+from app.models import IntegrationExchange, ReliableMessage
 from app.reliable import lifecycle
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore
 from app.reliable.testing import FakeClock, ScriptedHttpClient
-from tests.helpers import EcsMove, ecs_protocol_annexes
+from tests.helpers import EcsMove, ecs_attempt_evidence, ecs_protocol_annexes, read_history_body
 
 
 def reply(code=200, message="ACK", retry_after=None):
@@ -76,7 +77,9 @@ async def restart(ecs, request):
     if historical_window is not None:
         # A pre-upgrade formal snapshot fixture; no old dev policy is sent.
         async with ecs.factory.begin() as session:
-            row = await session.scalar(select(EcsCommand))
+            row = await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
             row.route = {**row.route, "retry_window": historical_window}
             row.expires_at = row.created_at + timedelta(seconds=historical_window)
             message = await session.scalar(select(ReliableMessage))
@@ -86,7 +89,10 @@ async def restart(ecs, request):
     def start(client):
         sender = Sender(
             MessageStore(
-                ecs.factory, clock=clock, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}
+                ecs.factory,
+                clock=clock,
+                lifecycles={PROTOCOL: EcsLifecycle(ecs.service)},
+                records=history_records,
             ),
             ecs.targets,
             ecs.adapters,
@@ -126,31 +132,28 @@ async def wait_for_expiry(ecs, sender):
 
 async def state(ecs):
     async with ecs.factory() as session:
-        command = await session.scalar(select(EcsCommand))
+        command = await session.scalar(
+            select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+        )
         message = await session.scalar(
             select(ReliableMessage).where(ReliableMessage.target == "ecs")
         )
-        evidence = (
-            await session.execute(
-                select(
-                    EcsSendEvidence.lease_id, EcsSendEvidence.outcome, EcsSendEvidence.response_raw
-                )
-                .where(EcsSendEvidence.command_code == command.command_code)
-                .order_by(EcsSendEvidence.id)
+        attempts = await ecs_attempt_evidence(session, command.command_code)
+        evidence = [(a.lease_id, a.outcome, a.response_raw) for a in attempts]
+        frozen = {
+            name: getattr(command, name)
+            for name in (
+                "command_code",
+                "call_key",
+                "route",
+                "request_record_id",
+                "delivery_snapshot",
+                "expires_at",
             )
-        ).all()
+        }
+        frozen["request_raw"] = await read_history_body(session, command.request_record_id)
         return {
-            "frozen": {
-                name: getattr(command, name)
-                for name in (
-                    "command_code",
-                    "call_key",
-                    "route",
-                    "request_raw",
-                    "delivery_snapshot",
-                    "expires_at",
-                )
-            },
+            "frozen": frozen,
             "status": message.status,
             "command_status": command.status,
             "delivery_status": command.delivery_status,

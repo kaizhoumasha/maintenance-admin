@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from sqlalchemy import func, select, text
 
+from app.integrations import history as history_records
 from app.integrations.wms_transport import (
     IdempotencyConflict,
     Rack,
@@ -164,7 +165,7 @@ async def test_callback_can_settle_while_evidence_waits_on_task(
     ).encode()
     peer = ScriptedHttpClient(HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 202, (), raw))
     sender = Sender(
-        MessageStore(rig.factory, clock=rig.clock),
+        MessageStore(rig.factory, clock=rig.clock, records=history_records),
         rig.outbox.targets,
         rig.adapters,
         {rig.target.name: peer},
@@ -193,6 +194,10 @@ async def test_callback_can_settle_while_evidence_waits_on_task(
             )
             assert result.state == "ACCEPTED" and result.basis.message_id == message.id
             final = await session.get(ReliableMessage, message.id)
-            assert final.status == "DONE" and final.response_raw is None and len(peer.requests) == 1
+            assert (
+                final.status == "DONE"
+                and final.terminal_response_record_id is None
+                and len(peer.requests) == 1
+            )
     finally:
         await sender.aclose()

@@ -10,15 +10,16 @@ from datetime import UTC, datetime
 from functools import partial
 
 from pydantic import ValidationError
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import unix_ms
+from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest, json_object
 from app.integrations.callback_diagnostics import queue_diagnostics
-from app.integrations.callback_receipts import find_receipt, insert_receipt
+from app.integrations.callback_receipts import ReceiptView, find_receipt, insert_receipt
 from app.integrations.wms_callback.receiver import CallbackResponse
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from app.transactions import after_commit
 
 from .binding import BindingResolver
@@ -112,7 +113,9 @@ async def receive_ecs_event(
     on_committed=None,
     on_business_committed=None,
     resolve_input_target=None,
+    attempt_id: str | None = None,
 ) -> EcsResponse:
+    attempt_id = attempt_id or str(uuid7())
     if len(raw) > MAX_BODY_BYTES:
         return EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
     parsed = json_object(raw)
@@ -132,7 +135,7 @@ async def receive_ecs_event(
         return _invalid(_INVALID_JSON, envelope)
     event_type, device_code = envelope.event_type, envelope.device_code
 
-    def duplicate(existing: CallbackReceipt) -> EcsResponse:
+    def duplicate(existing: ReceiptView) -> EcsResponse:
         return EcsResponse(
             existing.status_code,
             existing.body,
@@ -141,6 +144,10 @@ async def receive_ecs_event(
             device_code,
             existing.operation_id,
             existing.diagnostic,
+            pure_replay=True,
+            exchange_id=existing.exchange_id,
+            attempt_id=attempt_id,
+            prepared_body=existing.prepared_body,
         )
 
     existing = await find_receipt(session, OPERATION, identity)
@@ -194,6 +201,7 @@ async def receive_ecs_event(
         except ValidationError as error:
             issues = issues_from(error, model=registered.data_model, prefix="data")
             return _invalid(issues, envelope)
+    prepared = EcsResponse(200, dict(ACK), "received")
     receipt_id = await insert_receipt(
         session,
         operation=OPERATION,
@@ -206,6 +214,13 @@ async def receive_ecs_event(
         body=dict(ACK),
         resp_timestamp=unix_ms(datetime.now(UTC)),
         created_at=datetime.now(UTC),
+        raw_body=raw,
+        prepared_body=prepared.prepared_body,
+        attempt_id=attempt_id,
+        peer_system="ECS",
+        protocol="ecs-event",
+        interaction_kind="EVENT",
+        message_type=event_type,
     )
     if receipt_id is None:  # 并发的同身份事件先提交了
         existing = await find_receipt(session, OPERATION, identity)
@@ -238,10 +253,15 @@ async def receive_ecs_event(
             component_key=component_key,
         )
         await session.execute(
-            update(CallbackReceipt)
-            .where(CallbackReceipt.id == receipt_id)
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.receipt_id == receipt_id,
+                IntegrationExchange.receipt_active.is_(True),
+            )
             .values(
                 event_envelope=_event(envelope),
+                owner_domain=business_code,
                 event_context={
                     "owner_domain": business_code,
                     "component_key": component_key,
@@ -253,12 +273,32 @@ async def receive_ecs_event(
                 },
             )
         )
+        from app.integrations.history import write_reference
+
+        receipt_root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_id == receipt_id
+            )
+        )
+        await write_reference(
+            session,
+            exchange_id=receipt_root.id,
+            reference_kind="WORKLINE",
+            namespace="id",
+            value=str(binding.work_line_id),
+            relation_role="EVENT_CONTEXT",
+            created_at=receipt_root.created_at,
+        )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
         if ctx._applications:
             await session.execute(
-                update(CallbackReceipt)
-                .where(CallbackReceipt.id == receipt_id)
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_id == receipt_id,
+                    IntegrationExchange.receipt_active.is_(True),
+                )
                 .values(
                     application_ref=asdict(ctx._applications[0]),
                 )
@@ -270,7 +310,25 @@ async def receive_ecs_event(
         outcome, notes = "received", ctx.notes
     if notes:
         await session.execute(
-            update(CallbackReceipt).where(CallbackReceipt.id == receipt_id).values(diagnostic=notes)
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.receipt_id == receipt_id,
+                IntegrationExchange.receipt_active.is_(True),
+            )
+            .values(diagnostic=notes)
         )
         queue_diagnostics(session, [_alert(identity, note) for note in notes])
-    return EcsResponse(200, dict(ACK), outcome, event_type, device_code, identity, notes or None)
+    receipt = await find_receipt(session, OPERATION, identity)
+    return EcsResponse(
+        200,
+        dict(ACK),
+        outcome,
+        event_type,
+        device_code,
+        identity,
+        notes or None,
+        prepared_body=prepared.prepared_body,
+        exchange_id=receipt.exchange_id,
+        attempt_id=attempt_id,
+    )

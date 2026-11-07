@@ -5,7 +5,7 @@ from dataclasses import replace
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
-from sqlalchemy import Boolean, Column, MetaData, String, Table, delete, select
+from sqlalchemy import Boolean, Column, MetaData, String, Table, delete, select, update
 
 from app.businesses import catalog
 from app.businesses.components import ComponentDefinition
@@ -20,7 +20,7 @@ from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.operation import Registered
 from app.integrations.wms_callback.receiver import receive
 from app.integrations.wms_request import operation as requests
-from app.models import CallbackReceipt, Device, DeviceRoute, WorkLine
+from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine
 from app.services.device_bindings import resolve_binding
 from tests.helpers import add_bound_device, business_composition
 
@@ -177,7 +177,13 @@ async def component_flow(callback_store, monkeypatch):
             await connection.run_sync(metadata.drop_all)
         async with factory() as session, session.begin():
             await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.device_code.like("COMP-%"))
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .values(receipt_active=False)
+                .where(IntegrationExchange.device_code.like("COMP-%"))
             )
             await session.execute(delete(Device).where(Device.id.in_(device_ids)))
             await session.execute(
@@ -265,7 +271,12 @@ async def test_original_receipt_precedes_dispatch_and_business_dedupe_survives_c
     assert flow.callbacks == ["first"]
     async with flow.factory() as session, session.begin():
         await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.device_code == "COMP-0")
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+            .where(IntegrationExchange.device_code == "COMP-0")
         )
     await deliver()
     async with flow.factory() as session:

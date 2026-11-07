@@ -5,7 +5,6 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -13,7 +12,7 @@ from sqlalchemy import func, select
 from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_callback.receiver import ACK, receive_ecs_event
 from app.integrations.ecs_callback.registry import ecs_event
-from app.models import CallbackReceipt, CallbackSnapshot
+from app.models import IntegrationExchange
 from tests.helpers import ecs_binding
 
 EVENT = json.dumps(
@@ -27,7 +26,7 @@ def isolated(monkeypatch):
 
 
 @pytest.fixture
-def pg_factory(callback_store):
+def pg_factory(callback_store, callback_effects):
     if callback_store.kw["bind"].dialect.name != "postgresql":
         pytest.skip("并发串行化只在 PostgreSQL 上有意义")
     return callback_store
@@ -42,27 +41,16 @@ async def receive(factory, extra=None):
         )
 
 
-def snapshot(request_id: str) -> CallbackSnapshot:
-    return CallbackSnapshot(
-        request_id=request_id,
-        received_at=datetime.now(UTC),
-        body_b64="",
-        truncated=False,
-        http_status=200,
-        outcome="x",
-    )
-
-
-async def race(factory, wait_for_lock, handler_after_release, *, second_extra=None):
+async def race(factory, wait_for_lock, handler_after_release, effects, *, second_extra=None):
     """A 的处理器写入业务行后停住,B 此时进入并阻塞在收据唯一索引上,再放行 A。"""
     inserted, release, calls = asyncio.Event(), asyncio.Event(), []
 
     async def handler(ctx, data):
         calls.append(len(calls))
         if len(calls) > 1:  # B 接管时的执行
-            ctx.session.add(snapshot("B"))
+            await ctx.session.execute(effects.insert().values(marker="B"))
             return
-        ctx.session.add(snapshot("A"))
+        await ctx.session.execute(effects.insert().values(marker="A"))
         await ctx.session.flush()
         inserted.set()
         await release.wait()
@@ -88,37 +76,53 @@ async def race(factory, wait_for_lock, handler_after_release, *, second_extra=No
     return calls, results
 
 
-async def rows(factory):
+async def rows(factory, effects):
     async with factory() as session:
-        receipts = await session.scalar(select(func.count()).select_from(CallbackReceipt))
-        ids = (await session.scalars(select(CallbackSnapshot.request_id))).all()
+        receipts = await session.scalar(
+            select(func.count())
+            .select_from(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
+        ids = (await session.scalars(select(effects.c.marker))).all()
     return receipts, sorted(ids)
 
 
-async def test_concurrent_identical_events_run_handler_once(pg_factory, wait_for_lock):
-    calls, responses = await race(pg_factory, wait_for_lock, lambda: None)
+async def test_concurrent_identical_events_run_handler_once(
+    pg_factory, wait_for_lock, callback_effects
+):
+    calls, responses = await race(pg_factory, wait_for_lock, lambda: None, callback_effects)
     assert [(r.status_code, r.body) for r in responses] == [(200, ACK)] * 2
     assert sorted(r.outcome for r in responses) == ["duplicate", "received"]
     assert len(calls) == 1
-    assert await rows(pg_factory) == (1, ["A"])
+    assert await rows(pg_factory, callback_effects) == (1, ["A"])
 
 
-async def test_waiter_takes_over_when_first_request_rolls_back(pg_factory, wait_for_lock):
+async def test_waiter_takes_over_when_first_request_rolls_back(
+    pg_factory, wait_for_lock, callback_effects
+):
     def fail():
         raise RuntimeError("boom")
 
-    calls, (error_a, resp_b) = await race(pg_factory, wait_for_lock, fail)
+    calls, (error_a, resp_b) = await race(pg_factory, wait_for_lock, fail, callback_effects)
     assert isinstance(error_a, RuntimeError) and str(error_a) == "boom"
     assert (resp_b.status_code, resp_b.body, resp_b.outcome) == (200, ACK, "received")
     assert len(calls) == 2  # A 失败一次,B 成功一次
-    assert await rows(pg_factory) == (1, ["B"])
+    assert await rows(pg_factory, callback_effects) == (1, ["B"])
 
 
-async def test_same_core_event_concurrently_executes_once(pg_factory, wait_for_lock):
+async def test_same_core_event_concurrently_executes_once(
+    pg_factory, wait_for_lock, callback_effects
+):
     calls, responses = await race(
-        pg_factory, wait_for_lock, lambda: None, second_extra={"is_debug": True, "trace": "B"}
+        pg_factory,
+        wait_for_lock,
+        lambda: None,
+        callback_effects,
+        second_extra={"is_debug": True, "trace": "B"},
     )
     assert [(r.status_code, r.body) for r in responses] == [(200, ACK)] * 2
     assert sorted(r.outcome for r in responses) == ["duplicate", "received"]
     assert len(calls) == 1
-    assert await rows(pg_factory) == (1, ["A"])
+    assert await rows(pg_factory, callback_effects) == (1, ["A"])

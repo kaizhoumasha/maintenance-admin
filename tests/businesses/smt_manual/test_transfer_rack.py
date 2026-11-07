@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app.models import ReliableMessage, WorkLine
+from tests.helpers import set_message_bodies
 
 
 async def test_optional_transfer_rack_does_not_gate_unrelated_work(manual_racks):
@@ -86,14 +87,18 @@ async def test_departure_wait_and_unknown_keep_original_context(manual_racks):
             )
         )
         message.status, message.last_http_status, message.last_verdict = "DONE", 202, "DELIVERED"
-        message.response_raw = json.dumps(
-            dict(
-                operation_id=message.operation_id,
-                code="RECEIVED",
-                timestamp=100,
-                data=dict(transport_task_id=departure["transport_task_id"]),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="RECEIVED",
+                    timestamp=100,
+                    data=dict(transport_task_id=departure["transport_task_id"]),
+                )
+            ).encode(),
+        )
     assert await flow.rack_advance() == "COMPLETED"
     assert (await flow.rows("rack"))[0]["state"] == "COMPLETED"
     await flow.rack_outcome(departure, location="STORE-POS")

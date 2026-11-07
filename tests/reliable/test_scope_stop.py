@@ -2,6 +2,7 @@ import pytest
 
 from app.models import ReliableMessage
 from app.reliable import ScopeRef
+from tests.helpers import message_history_view
 
 
 async def test_unscoped_delivery_keeps_scope_evidence_empty(storage, delivered):
@@ -12,7 +13,9 @@ async def test_unscoped_delivery_keeps_scope_evidence_empty(storage, delivered):
     assert await rig.store.before_send(claim, rig.target)
     assert await rig.store.finish(claim, delivered)
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, queued.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, queued.message_id)
+        )
         assert row.status == "DONE" and row.response_raw == b"ok"
         assert row.scope_owner is None and row.dispatch_started_at is None
 
@@ -38,7 +41,9 @@ async def test_scope_stop_fences_claim_and_preserves_dispatch_fact(storage, deli
     async with rig.factory.begin() as session:
         assert not await rig.outbox.resume(session, claim.message.target, "opaque", "id")
         assert not await rig.outbox.settle(session, claim.message.target, "opaque", "id")
-        row = await session.get(ReliableMessage, result.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, result.message_id)
+        )
         assert row.status == "ABANDONED" and row.next_attempt_at is None
         assert row.lease_id is None and row.request_raw == claim.message.request_raw
         assert bool(row.dispatch_started_at) == gate_first
@@ -70,7 +75,9 @@ async def test_expired_claim_without_gate_is_still_never_dispatched(storage):
     rig.clock.advance(60)
     assert await rig.store.recover_expired(10, rig.targets) == 1
     async with rig.factory.begin() as session:
-        row = await session.get(ReliableMessage, result.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, result.message_id)
+        )
         assert row.attempts == 1 and row.last_attempt_at is not None
         assert row.dispatch_started_at is None and not row.delivery_uncertain
         (stopped,) = await rig.outbox.stop_scope(session, scope, reason="TASK_CANCELLED")

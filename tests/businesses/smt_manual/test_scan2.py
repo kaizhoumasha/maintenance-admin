@@ -1,5 +1,7 @@
 import pytest
 
+from tests.helpers import read_history_body
+
 
 @pytest.mark.parametrize("manual_sessions", ["sqlite", "postgres"], indirect=True)
 @pytest.mark.parametrize("direction", ["inbound", "outbound"])
@@ -23,7 +25,9 @@ async def test_both_manual_directions_use_bin_admission(manual_bins, direction):
                 ReliableMessage.operation == "manual_bin.work_admission_decide@v1"
             )
         )
-        assert json.loads(message.request_raw)["data"] == {
+        assert json.loads(await read_history_body(session, (message).request_record_id))[
+            "data"
+        ] == {
             "task_id": "T1",
             "bin_code": "A000000001",
             "scanned_at": 10,

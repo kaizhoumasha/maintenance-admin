@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dev_scenarios import DevOutcome, DevRequest, DevScenario
 from app.core.errors import AppError, ErrorCode
+from app.integrations.history import read_bodies
 from app.models import ReliableMessage
 from app.schemas.dev_console import DevMessageOut
 
@@ -40,7 +41,7 @@ def _decode(raw: bytes | None) -> Any:
         return text
 
 
-def message_out(m: ReliableMessage) -> DevMessageOut:
+def message_out(m: ReliableMessage, bodies: dict) -> DevMessageOut:
     return DevMessageOut(
         message_id=m.id,
         target=m.target,
@@ -56,9 +57,15 @@ def message_out(m: ReliableMessage) -> DevMessageOut:
         last_http_status=m.last_http_status,
         last_failure_kind=m.last_failure_kind,
         last_verdict=m.last_verdict,
-        request=_decode(m.request_raw),
-        response=_decode(m.response_raw),
-        last_response=_decode(m.last_response_raw),
+        request=_decode(bodies[m.request_record_id].raw_body)
+        if m.request_record_id in bodies
+        else None,
+        response=_decode(bodies[m.terminal_response_record_id].raw_body)
+        if m.terminal_response_record_id in bodies
+        else None,
+        last_response=_decode(bodies[m.last_response_record_id].raw_body)
+        if m.last_response_record_id in bodies
+        else None,
         created_at=m.created_at,
         updated_at=m.updated_at,
     )
@@ -76,7 +83,22 @@ async def messages_where(
     messages = (await session.scalars(query)).all()
     if not messages:
         raise AppError(ErrorCode.NOT_FOUND, not_found)
-    return [message_out(m) for m in messages]
+    bodies = await read_bodies(
+        session,
+        record_ids=tuple(
+            {
+                identity
+                for m in messages
+                for identity in (
+                    m.request_record_id,
+                    m.terminal_response_record_id,
+                    m.last_response_record_id,
+                )
+                if identity is not None
+            }
+        ),
+    )
+    return [message_out(m, bodies) for m in messages]
 
 
 async def message_status(session: AsyncSession, business_key: str) -> list[DevMessageOut]:

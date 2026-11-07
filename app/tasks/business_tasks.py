@@ -5,6 +5,7 @@ from functools import partial
 from app.businesses import catalog
 from app.businesses.runtime import build_runtime
 from app.core import get_settings
+from app.integrations import history as history_records
 from app.integrations.ecs_command import EcsCommands
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
@@ -31,6 +32,7 @@ def _runtime(factory):
         config.targets,
         {**WMS_ADAPTERS, **TRANSPORT_ADAPTERS, PROTOCOL: EcsCommandAdapter()},
         lifecycles={PROTOCOL: EcsLifecycle(commands)},
+        records=history_records,
     )
     commands.outbox = outbox
     return build_runtime(

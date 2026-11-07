@@ -1,13 +1,44 @@
 from dataclasses import asdict
+from datetime import UTC, datetime
+from hashlib import sha256
+from uuid import UUID
 
 from sqlalchemy import select
 
 from app.http_client import DeliveryState
-from app.models import EcsCommand, EcsSendEvidence
+from app.integrations.history import RecordDraft, read_bodies, write_record
+from app.models import IntegrationExchange, IntegrationRecord
 from app.reliable.types import VerdictKind
 
 from .contracts import PauseReason
 from .routing import RouteAuthorization
+
+
+async def get_attempt_conclusions(session, *, exchange_id: UUID) -> dict[str, str]:
+    with session.no_autoflush:
+        rows = await session.execute(
+            select(
+                IntegrationRecord.attempt_id,
+                IntegrationRecord.record_kind,
+                IntegrationRecord.attempt_revision,
+                IntegrationRecord.ecs_attempt_outcome,
+            ).where(
+                IntegrationRecord.exchange_id == exchange_id,
+                IntegrationRecord.record_kind.in_(
+                    ("SEND_ATTEMPT_OPENED", "ECS_ATTEMPT_CONCLUSION")
+                ),
+            )
+        )
+    opened, conclusions = set(), {}
+    for attempt, kind, revision, outcome in rows:
+        if kind == "SEND_ATTEMPT_OPENED":
+            opened.add(attempt)
+        elif attempt not in conclusions or conclusions[attempt][0] < revision:
+            conclusions[attempt] = (revision, outcome)
+    return {
+        attempt: conclusions[attempt][1] if attempt in conclusions else "OPEN_ATTEMPT"
+        for attempt in opened | conclusions.keys()
+    }
 
 
 class EcsLifecycle:
@@ -16,8 +47,11 @@ class EcsLifecycle:
 
     async def lock_context(self, session, identity, *, nowait=False):
         command = await session.scalar(
-            select(EcsCommand)
-            .where(EcsCommand.command_code == identity)
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == identity,
+            )
             .with_for_update(nowait=nowait)
             .execution_options(populate_existing=True)
         )
@@ -42,19 +76,16 @@ class EcsLifecycle:
             or command.status not in ("QUEUED", "DISPATCHING")
         ):
             return command.hold_reason or "PRE_GATE_VALIDATION"
-        if command.request_raw != claim.message.request_raw or command.delivery_snapshot != asdict(
-            claim.message.delivery_snapshot
+        bodies = await read_bodies(session, record_ids=(command.request_record_id,))
+        stored = bodies.get(command.request_record_id)
+        if (
+            stored is None
+            or stored.raw_body != claim.message.request_raw
+            or command.request_sha256 != sha256(claim.message.request_raw).hexdigest()
+            or command.request_record_id != claim.message.request_record_id
+            or command.delivery_snapshot != asdict(claim.message.delivery_snapshot)
         ):
             return "CONFIG_DRIFT"
-        session.add(
-            EcsSendEvidence(
-                command_code=command.command_code,
-                lease_id=claim.lease_id,
-                outcome="OPEN_ATTEMPT",
-                created_at=now,
-                late=False,
-            )
-        )
         command.dispatch_started_at = now
         command.status = "DISPATCHING"
         command.delivery_status = "SENDING"
@@ -62,9 +93,10 @@ class EcsLifecycle:
 
     async def record(self, session, command, claim, outcome, *, late=False):
         evidence = await session.scalar(
-            select(EcsSendEvidence).where(
-                EcsSendEvidence.command_code == command.command_code,
-                EcsSendEvidence.lease_id == claim.lease_id,
+            select(IntegrationRecord).where(
+                IntegrationRecord.exchange_id == command.id,
+                IntegrationRecord.record_kind == "SEND_ATTEMPT_OPENED",
+                IntegrationRecord.attempt_id == claim.lease_id,
             )
         )
         if evidence is None:
@@ -86,12 +118,40 @@ class EcsLifecycle:
             kind = "NOT_RECEIVED"
         else:
             kind = "UNKNOWN"
-        evidence.outcome = kind
-        evidence.response_raw = result.body if result else None
-        evidence.http_status = result.status_code if result else None
-        evidence.late = late
+        last = await session.scalar(
+            select(IntegrationRecord)
+            .where(
+                IntegrationRecord.exchange_id == command.id,
+                IntegrationRecord.record_kind == "ECS_ATTEMPT_CONCLUSION",
+                IntegrationRecord.attempt_id == claim.lease_id,
+            )
+            .order_by(IntegrationRecord.attempt_revision.desc())
+            .limit(1)
+        )
+        if last is None or (
+            last.ecs_attempt_outcome != kind
+            or last.parent_record_id != outcome.observation_record_id
+            or last.late != late
+        ):
+            revision = 1 if last is None else last.attempt_revision + 1
+            await write_record(
+                session,
+                draft=RecordDraft(
+                    exchange_id=command.id,
+                    record_kind="ECS_ATTEMPT_CONCLUSION",
+                    event_key=f"ECS:{claim.lease_id}:{revision}",
+                    attempt_id=claim.lease_id,
+                    attempt_revision=revision,
+                    ecs_attempt_outcome=kind,
+                    direction="INTERNAL",
+                    parent_record_id=outcome.observation_record_id,
+                    occurred_at=datetime.now(UTC),
+                    http_status=result.status_code if result else None,
+                    late=late,
+                ),
+            )
         if kind == "ACK":
-            command.ack_raw = result.body
+            command.ack_record_id = outcome.observation_record_id
         if late and command.applied_result_id and kind in ("REJECTED", "NOT_RECEIVED"):
             command.needs_reconciliation = True
 

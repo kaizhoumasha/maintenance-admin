@@ -3,7 +3,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, update
 
-from app.models import CallbackReceipt, ReliableMessage
+from app.integrations import history as history_records
+from app.integrations.callback_receipts import insert_receipt
+from app.integrations.ecs_callback import get_event
+from app.models import IntegrationExchange, ReliableMessage
 from app.reliable import ScopeRef
 
 
@@ -40,12 +43,18 @@ async def test_active_canonical_and_consumed_forward_anchor_survive_cleanup(
     await flow.advance_current("PASSAGE", original["id"])
     cutoff = datetime.now(UTC) - timedelta(days=100)
     async with flow.factory.begin() as session:
-        await session.execute(update(CallbackReceipt).values(created_at=cutoff))
+        await session.execute(
+            update(IntegrationExchange)
+            .where(IntegrationExchange.role == "RECEIPT")
+            .values(created_at=cutoff)
+        )
         await session.execute(update(ReliableMessage).values(updated_at=cutoff))
     await run_receipt_cleanup(flow.factory, 90, batch=1)
     await run_cleanup(flow.factory, 90, batch=1)
     async with flow.factory() as session:
-        assert await session.get(CallbackReceipt, original["scan1_event_id"])
+        assert (
+            await get_event(session, event_id=original["scan1_event_id"])
+        ).availability == "FOUND"
         command = await flow.ecs.get_command(
             session, owner=flow.roller.context, command_code=original["scan1_command_code"]
         )
@@ -64,26 +73,34 @@ async def test_protected_first_page_does_not_starve_later_expired_rows(roller_cu
     anchor = (await flow.current_rows("bin_passage"))[0]
     async with flow.factory.begin() as session:
         for number in range(5):
-            session.add(
-                CallbackReceipt(
-                    operation="unrelated",
-                    operation_id=str(number),
-                    raw_digest="a" * 64,
-                    compare_mode="RAW",
-                    status_code=200,
-                    body={},
-                    resp_timestamp=1,
-                    created_at=datetime.now(UTC) - timedelta(days=100),
-                )
+            await insert_receipt(
+                session,
+                operation="unrelated",
+                operation_id=str(number),
+                raw_digest="a" * 64,
+                effective_digest=None,
+                compare_mode="RAW",
+                status_code=200,
+                body={},
+                resp_timestamp=1,
+                created_at=datetime.now(UTC) - timedelta(days=100),
             )
         await session.execute(
-            update(CallbackReceipt)
-            .where(CallbackReceipt.id == anchor["scan1_event_id"])
+            update(IntegrationExchange)
+            .where(IntegrationExchange.role == "RECEIPT")
+            .where(IntegrationExchange.receipt_id == anchor["scan1_event_id"])
             .values(created_at=datetime.now(UTC) - timedelta(days=100))
         )
     assert await run_receipt_cleanup(flow.factory, 90, batch=1) == 5
     async with flow.factory() as session:
-        assert list(await session.scalars(select(CallbackReceipt.id))) == [anchor["scan1_event_id"]]
+        assert list(
+            await session.scalars(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+        ) == [anchor["scan1_event_id"]]
 
 
 @pytest.mark.parametrize("handed_off", [False, True])
@@ -138,7 +155,9 @@ async def test_finished_line_run_does_not_pin_the_last_point_forever(roller_curr
     assert (await flow.current_rows("workline_state"))[0]["line_run_id"] is None
     async with flow.factory.begin() as session:
         await session.execute(
-            update(CallbackReceipt).values(created_at=datetime.now(UTC) - timedelta(days=100))
+            update(IntegrationExchange)
+            .where(IntegrationExchange.role == "RECEIPT")
+            .values(created_at=datetime.now(UTC) - timedelta(days=100))
         )
     assert await run_receipt_cleanup(flow.factory, 90, batch=1) >= 1
 
@@ -224,7 +243,9 @@ async def test_wait_fact_protects_original_message_after_task_checkpoint_cleanup
                 "app.integrations.wms_transport", fromlist=["TransportCaller"]
             ).TransportCaller(**row["caller"]),
         )
-    store = MessageStore(flow.factory, lifecycles=flow.ecs.outbox.lifecycles)
+    store = MessageStore(
+        flow.factory, lifecycles=flow.ecs.outbox.lifecycles, records=history_records
+    )
     claims = await store.claim(100, flow.ecs.outbox.targets)
     claim = next(c for c in claims if c.message_id == view.submission_message_id)
     assert await store.before_send(claim, flow.ecs.outbox.targets[claim.message.target])
@@ -262,49 +283,104 @@ async def test_released_superseded_allocation_closes_resolved_round(roller_retur
 
 
 @pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
+@pytest.mark.parametrize("mode", ["receipt", "body", "history"])
+@pytest.mark.parametrize("first", ["cleanup", "business"])
 async def test_cleanup_and_new_passage_association_share_the_original_line_lock(
-    roller_current, monkeypatch
+    roller_current, monkeypatch, mode, first
 ):
     import asyncio
 
     from app.businesses._components.bin_roller import retention
-    from app.tasks.callback_tasks import run_receipt_cleanup
+    from app.integrations.history import RecordDraft, read_bodies, write_record
+    from app.tasks.callback_tasks import run_cleanup, run_history_cleanup, run_receipt_cleanup
 
     flow = roller_current
     monkeypatch.setattr(retention, "TABLES", flow.roller.tables)
     await flow.scan("SCAN1", "A000000001-B", timestamp=10)
     original = (await flow.current_rows("bin_passage"))[0]
+    old = datetime.now(UTC) - timedelta(days=100)
     async with flow.factory.begin() as session:
         await session.execute(
-            update(CallbackReceipt).values(created_at=datetime.now(UTC) - timedelta(days=100))
+            update(IntegrationExchange)
+            .where(IntegrationExchange.role == "RECEIPT")
+            .values(created_at=old)
         )
-    protected, release, entering = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        root = await session.scalar(
+            select(IntegrationExchange.id).where(
+                IntegrationExchange.receipt_id == original["scan1_event_id"]
+            )
+        )
+        body_id = await write_record(
+            session,
+            draft=RecordDraft(
+                exchange_id=root,
+                record_kind="CALLBACK_RECEIVED",
+                event_key="diagnostic",
+                direction="INBOUND",
+                evidence_class="DIAGNOSTIC",
+                raw_body=b"original-diagnostic",
+                occurred_at=old,
+            ),
+        )
+    held, release, entering, collecting = (asyncio.Event() for _ in range(4))
     lock = retention._lock_lines
+    scan_lock = flow.lock_scan_line
 
     async def cleanup_lock(session, lines):
+        collecting.set()
         await lock(session, lines)
-        protected.set()
-        await asyncio.wait_for(release.wait(), 5)
-
-    monkeypatch.setattr(retention, "_lock_lines", cleanup_lock)
-    cleanup = asyncio.create_task(run_receipt_cleanup(flow.factory, 90, batch=1))
-    await asyncio.wait_for(protected.wait(), 5)
-    scan_lock = flow.lock_scan_line
+        if first == "cleanup":
+            held.set()
+            await asyncio.wait_for(release.wait(), 5)
 
     async def receive_lock(session, line):
         entering.set()
-        return await scan_lock(session, line)
+        result = await scan_lock(session, line)
+        if first == "business":
+            held.set()
+            await asyncio.wait_for(release.wait(), 5)
+        return result
 
+    monkeypatch.setattr(retention, "_lock_lines", cleanup_lock)
     flow.lock_scan_line = receive_lock
-    receiver = asyncio.create_task(flow.scan("SCAN2", "A000000001-C", timestamp=20))
+
+    async def clean():
+        if mode == "receipt":
+            return await run_receipt_cleanup(flow.factory, 90, batch=1)
+        if mode == "body":
+            return await run_cleanup(flow.factory, 7, batch=1)
+        return await run_history_cleanup(flow.factory, batch=1)
+
+    cleanup = receiver = None
     try:
-        await asyncio.wait_for(entering.wait(), 5)
-        assert not receiver.done()
+        if first == "cleanup":
+            cleanup = asyncio.create_task(clean())
+            await asyncio.wait_for(held.wait(), 5)
+            receiver = asyncio.create_task(flow.scan("SCAN2", "A000000001-C", timestamp=20))
+            await asyncio.wait_for(entering.wait(), 5)
+            assert not receiver.done()
+        else:
+            receiver = asyncio.create_task(flow.scan("SCAN2", "A000000001-C", timestamp=20))
+            await asyncio.wait_for(held.wait(), 5)
+            cleanup = asyncio.create_task(clean())
+            await asyncio.wait_for(collecting.wait(), 5)
+            assert not cleanup.done()
+        release.set()
+        removed, response = await asyncio.wait_for(asyncio.gather(cleanup, receiver), 10)
+        assert removed == 0 and response.status_code == 200
     finally:
         release.set()
-    removed, response = await asyncio.wait_for(asyncio.gather(cleanup, receiver), 10)
-    assert removed == 0 and response.status_code == 200
+        tasks = [task for task in (cleanup, receiver) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     rows = await flow.current_rows("bin_passage")
     assert len(rows) == 1 and rows[0]["id"] == original["id"] and rows[0]["scan2_event_id"]
     async with flow.factory() as session:
-        assert await session.get(CallbackReceipt, original["scan1_event_id"])
+        assert (
+            await get_event(session, event_id=original["scan1_event_id"])
+        ).availability == "FOUND"
+        assert (await read_bodies(session, record_ids=(body_id,)))[
+            body_id
+        ].raw_body == b"original-diagnostic"

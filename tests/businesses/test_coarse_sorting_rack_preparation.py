@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import RackPreparation
+from app.models import IntegrationExchange
 from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import (
     allocated,
@@ -17,6 +18,7 @@ from tests.helpers import (
     enable_racks,
     reach_allocate,
     reach_move,
+    seed_reliable_message,
 )
 
 
@@ -52,6 +54,19 @@ async def test_replenish_requires_original_applied_arrival(rack):
     assert await flow.service.advance(row["id"]) == "AWAITING_RACK"
     prep = (await flow.rows())[0]["rack_preparation_id"]
     assert await flow.service.advance_preparation(prep) == "AWAITING_RACK_RESULT"
+    from app.schemas.integration_history import ExchangeListParams
+    from app.services.integration_history_service import list_exchanges
+
+    async with flow.factory() as session:
+        page = await list_exchanges(
+            session,
+            ExchangeListParams(
+                reference_kind="BUSINESS_PREPARATION",
+                reference_namespace="coarse_sorting",
+                reference_value=prep,
+            ),
+        )
+        assert page["items"]
     assert await flow.dispatch() == 1
     wire = flow.peer.transports[-1]
     assert wire["data"]["rcs_template_id"] == "F01"
@@ -584,7 +599,8 @@ async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(r
     source = next(a for a in await flow.action_rows(row["id"]) if a["kind"] == "ALLOCATE_STORAGE")
     old = flow.now - timedelta(days=100)
     async with flow.factory.begin() as session:
-        unrelated = ReliableMessage(
+        unrelated = await seed_reliable_message(
+            session,
             target="coarse-wms",
             operation="other.owner.fact",
             operation_id="unrelated-retention",
@@ -598,8 +614,6 @@ async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(r
             created_at=old,
             updated_at=old,
         )
-        session.add(unrelated)
-        await session.flush()
         unrelated_id = unrelated.id
 
     async def clean_original(message_id):
@@ -644,7 +658,6 @@ async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(r
 
 @pytest.mark.parametrize("proof", ["complete", "missing", "unknown", "wrong_call", "wrong_task"])
 async def test_original_saved_put_completion_is_required_when_command_was_removed(rack, proof):
-    from app.models import EcsCommand, EcsResultEvidence
 
     flow = rack
     flow.peer.allocate = allocated(flow)
@@ -675,12 +688,17 @@ async def test_original_saved_put_completion_is_required_when_command_was_remove
         ).status_code == 200
         assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
     async with flow.factory.begin() as session:
-        await session.execute(
-            delete(EcsResultEvidence).where(EcsResultEvidence.command_code == put["command_code"])
+        from app.models import ReliableMessage
+        from tests.helpers import clear_integration_history
+
+        root_id = await session.scalar(
+            select(IntegrationExchange.id).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == put["command_code"],
+            )
         )
-        await session.execute(
-            delete(EcsCommand).where(EcsCommand.command_code == put["command_code"])
-        )
+        await session.execute(delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id))
+        await clear_integration_history(session, (root_id,))
         if proof == "missing":
             await session.execute(
                 flow.actions.update()

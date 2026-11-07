@@ -4,6 +4,7 @@ from sqlalchemy import select
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import get_event
 from app.reliable import ScopeRef
+from tests.helpers import read_history_body
 
 
 async def test_equivalent_event_keeps_original_canonical_reference(roller_scans):
@@ -44,10 +45,14 @@ async def test_original_message_cannot_be_rebound(roller_scans):
     flow.rebuild("second")
     await flow.scan("SCAN2", "A000000001-C", timestamp=10)
     async with flow.factory() as session:
-        from app.models import CallbackReceipt
+        from app.models import IntegrationExchange
 
         receipt = await session.scalar(
-            select(CallbackReceipt).where(CallbackReceipt.device_code == flow.devices["SCAN2"])
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.device_code == flow.devices["SCAN2"])
         )
         assert (
             receipt.event_context["owner_domain"] == "first"
@@ -91,10 +96,13 @@ async def test_original_owner_and_request_identity_survive_restart(roller_lifecy
             await RackDispatch("second", flow.roller.capabilities).progress(session, job_id=job_id)
             is None
         )
-        original_wire = await session.scalar(
-            select(ReliableMessage.request_raw).where(
-                ReliableMessage.operation_id == action.submit_operation_id
-            )
+        original_wire = await read_history_body(
+            session,
+            await session.scalar(
+                select(ReliableMessage.request_record_id).where(
+                    ReliableMessage.operation_id == action.submit_operation_id
+                )
+            ),
         )
         frozen = await session.scalar(
             select(TransportTask.frozen).where(
@@ -111,7 +119,7 @@ async def test_original_owner_and_request_identity_survive_restart(roller_lifecy
         )
         assert (
             message.business_key == action.transport_task_id
-            and message.request_raw == original_wire
+            and await read_history_body(session, (message).request_record_id) == original_wire
         )
 
 

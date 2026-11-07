@@ -4,7 +4,8 @@ import json
 import pytest
 from sqlalchemy import select, update
 
-from app.models import CallbackReceipt, ReliableMessage, WorkLine
+from app.models import IntegrationExchange, ReliableMessage, WorkLine
+from tests.helpers import get_receipt_by_id, read_history_body
 
 
 async def test_queue_rejection_is_stable_but_success_replays_after_claim(manual_flow):
@@ -125,9 +126,16 @@ async def test_concurrent_first_issue_keeps_one_task_and_stable_conflict(
     loser_id = json.loads(originals[loser])["operation_id"]
     async with flow.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(CallbackReceipt.operation_id == loser_id)
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.operation_id == loser_id)
         )
-        assert receipt.status_code == 409 and receipt.body == conflict.body
+        assert (
+            receipt.status_code == 409
+            and (await get_receipt_by_id(session, receipt.receipt_id)).body == conflict.body
+        )
         created_at = receipt.created_at
     monkeypatch.setattr(receiver, "unix_ms", lambda _: 2222)
     assert (await flow.deliver(originals[loser])).body == conflict.body
@@ -139,16 +147,25 @@ async def test_concurrent_first_issue_keeps_one_task_and_stable_conflict(
     assert await flow.prepare(winner_line) is None
     async with flow.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(CallbackReceipt.operation_id == loser_id)
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.operation_id == loser_id)
         )
-        assert receipt.created_at == created_at and receipt.body == conflict.body
+        assert (
+            receipt.created_at == created_at
+            and (await get_receipt_by_id(session, receipt.receipt_id)).body == conflict.body
+        )
         messages = list(
             await session.scalars(
                 select(ReliableMessage).where(ReliableMessage.business_key == "business:smt_manual")
             )
         )
         assert len(messages) == 1
-        assert json.loads(messages[0].request_raw)["data"] == {
+        assert json.loads(await read_history_body(session, (messages[0]).request_record_id))[
+            "data"
+        ] == {
             "task_id": "SHARED-ID",
             "workline_code": original["data"]["workline_code"],
         }

@@ -7,13 +7,14 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.integrations import history as history_records
 from app.models.reliable import ReliableMessage
 from app.reliable import Outbox
 
 from .protocol import OPERATION
 
 # settle 只读消息身份,不依赖目标配置,所以空配置的 Outbox 即可
-_outbox = Outbox({}, {})
+_outbox = Outbox({}, {}, records=history_records)
 
 
 async def settle_submitted(session: AsyncSession, transport_task_id: str) -> int:

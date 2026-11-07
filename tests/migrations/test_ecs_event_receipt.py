@@ -5,8 +5,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.database import create_database_engine as create_async_engine
-from app.models import CallbackReceipt, CallbackSnapshot
 from tests.helpers import run_alembic
+from tests.migration_helpers import legacy_callback_tables
+
+receipts, snapshots = legacy_callback_tables()
 
 BASE = "a023a20261024"
 REVISION = "a024a20261024"
@@ -33,15 +35,15 @@ async def callback_db(request, tmp_path):
         yield engine, migrate
     finally:
         async with engine.begin() as connection:
-            await connection.execute(CallbackSnapshot.__table__.delete())
-            await connection.execute(CallbackReceipt.__table__.delete())
+            await connection.execute(snapshots.delete())
+            await connection.execute(receipts.delete())
         await engine.dispose()
         restored = await migrate("upgrade", "head")
         assert restored.returncode == 0, restored.stdout + restored.stderr
 
 
 def receipt(operation_id):
-    return CallbackReceipt.__table__.insert().values(
+    return receipts.insert().values(
         operation="ecs.event@v1",
         operation_id=operation_id,
         raw_digest="a" * 64,
@@ -55,7 +57,7 @@ def receipt(operation_id):
 
 
 def snapshot(source):
-    return CallbackSnapshot.__table__.insert().values(
+    return snapshots.insert().values(
         request_id="req-1",
         received_at=datetime.now(UTC),
         body_b64="e30=",
@@ -72,8 +74,8 @@ async def test_upgrade_accepts_64_char_receipt_identity_and_snapshot_source(call
         await session.execute(receipt("a" * 64))
         await session.execute(snapshot("ecs"))
     async with async_sessionmaker(engine)() as session:
-        assert await session.scalar(select(CallbackReceipt.operation_id)) == "a" * 64
-        assert await session.scalar(select(CallbackSnapshot.source)) == "ecs"
+        assert await session.scalar(select(receipts.c.operation_id)) == "a" * 64
+        assert await session.scalar(select(snapshots.c.source)) == "ecs"
 
 
 async def test_downgrade_is_refused_when_64_char_identity_or_source_exists(callback_db):
@@ -85,13 +87,13 @@ async def test_downgrade_is_refused_when_64_char_identity_or_source_exists(callb
     refused = await migrate("downgrade", BASE)
     assert refused.returncode != 0
     async with factory.begin() as session:
-        assert await session.scalar(select(CallbackReceipt.operation_id)) == "a" * 64
+        assert await session.scalar(select(receipts.c.operation_id)) == "a" * 64
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
-        await session.execute(CallbackReceipt.__table__.delete())
+        await session.execute(receipts.delete())
     still_refused = await migrate("downgrade", BASE)
     assert still_refused.returncode != 0
     async with factory.begin() as session:
-        assert await session.scalar(select(CallbackSnapshot.source)) == "ecs"
+        assert await session.scalar(select(snapshots.c.source)) == "ecs"
 
 
 async def test_empty_schema_roundtrips(callback_db):

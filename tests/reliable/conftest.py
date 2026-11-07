@@ -3,11 +3,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine as create_async_engine
 from app.http_client import HttpRequest
+from app.integrations import history as history_records
 from app.reliable import MessageDraft, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
@@ -29,8 +29,10 @@ def make_rig(factory, engine, name):
         targets=targets,
         adapter=adapter,
         adapters=adapters,
-        outbox=Outbox(targets, adapters, clock=clock),
-        store=MessageStore(factory, clock=clock, uniform=lambda low, high: high),
+        outbox=Outbox(targets, adapters, clock=clock, records=history_records),
+        store=MessageStore(
+            factory, clock=clock, uniform=lambda low, high: high, records=history_records
+        ),
         draft=lambda identity="id", **kw: MessageDraft(
             name, "opaque", identity, kw.pop("request_raw", b"\x00opaque"), **kw
         ),
@@ -61,12 +63,12 @@ class ScriptedAdapter:
 
 
 @pytest.fixture
-async def rig():
-    from app.models.reliable import ReliableMessage
+async def rig(tmp_path):
+    from app.models import Base
 
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'reliable.db'}")
     async with engine.begin() as connection:
-        await connection.run_sync(ReliableMessage.__table__.create)
+        await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield make_rig(factory, engine, "peer")

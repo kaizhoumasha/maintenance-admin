@@ -5,6 +5,7 @@ import pytest
 from app.models import ReliableMessage
 from app.reliable.store import AttemptOutcome
 from app.reliable.types import MessageStatus
+from tests.helpers import message_history_view
 
 
 async def enqueue(rig):
@@ -16,7 +17,9 @@ async def enqueue(rig):
 
 async def row(rig, message_id):
     async with rig.factory() as session:
-        return await session.get(ReliableMessage, message_id, populate_existing=True)
+        return await message_history_view(
+            session, await session.get(ReliableMessage, message_id, populate_existing=True)
+        )
 
 
 async def settle(rig):

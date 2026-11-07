@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlalchemy import func, select
 
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
 from app.integrations.ecs_command import (
     RoleRoutes,
     compile_commands,
@@ -20,8 +21,8 @@ from app.integrations.ecs_command import (
 from app.integrations.ecs_command.contracts import ErrorDetail
 from app.integrations.ecs_command.dev import DevEcsRoutes, LocalEcsRoutes, configure_local_ecs
 from app.integrations.ecs_command.result import receive_ecs_result
-from app.models import EcsCommand, ReliableMessage
-from tests.helpers import ecs_binding
+from app.models import IntegrationExchange, ReliableMessage
+from tests.helpers import ecs_binding, read_history_body
 
 
 class Item(BaseModel):
@@ -97,8 +98,19 @@ def arguments(ecs, **changes):
 
 async def assert_empty(ecs, session):
     assert await ecs.service.get_by_call(session, owner=ecs.owner, call_key="model-call") is None
-    for model in (EcsCommand, ReliableMessage):
-        assert await session.scalar(select(func.count()).select_from(model)) == 0
+    for model in (IntegrationExchange, ReliableMessage):
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(model)
+                .where(
+                    IntegrationExchange.role == "ECS_COMMAND"
+                    if model is IntegrationExchange
+                    else True
+                )
+            )
+            == 0
+        )
 
 
 async def test_model_calls_preserve_original_bytes_and_deadline(ecs, declared):
@@ -107,9 +119,23 @@ async def test_model_calls_preserve_original_bytes_and_deadline(ecs, declared):
     expected = {"quantity": 1, "items": [{"qty": 2}], "label": "MOVE", "optional": None}
     async with ecs.factory.begin() as session:
         first = await ecs.service.create(session, **model)
-        row = await session.get(EcsCommand, first.command_code)
-        frozen = (row.input_raw, row.request_raw, row.route, row.delivery_snapshot, row.expires_at)
-        assert json.loads(row.request_raw)["params"] == expected
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
+        frozen = (
+            row.input_raw,
+            (await read_history_body(session, (row).request_record_id)),
+            row.route,
+            row.delivery_snapshot,
+            row.expires_at,
+        )
+        assert (
+            json.loads(await read_history_body(session, (row).request_record_id))["params"]
+            == expected
+        )
         assert row.expires_at - row.created_at == timedelta(seconds=300)
     declared.binding = None
     declared.origin = "http://127.0.0.1:45872"
@@ -119,10 +145,15 @@ async def test_model_calls_preserve_original_bytes_and_deadline(ecs, declared):
         assert second.command_code == first.command_code
         assert declared.calls == calls
         assert model["command"].label == "move" and model["command"].items[0] is item
-        row = await session.get(EcsCommand, first.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
         assert (
             row.input_raw,
-            row.request_raw,
+            (await read_history_body(session, (row).request_record_id)),
             row.route,
             row.delivery_snapshot,
             row.expires_at,
@@ -131,7 +162,14 @@ async def test_model_calls_preserve_original_bytes_and_deadline(ecs, declared):
         with pytest.raises(ValueError, match="different input"):
             await ecs.service.create(session, **arguments(ecs, command=Move(quantity=2)))
         assert declared.calls == calls
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 
@@ -165,25 +203,48 @@ async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(ec
     model = arguments(ecs, command=payload)
     async with ecs.factory.begin() as session:
         first = await ecs.service.create(session, **model)
-        row = await session.get(EcsCommand, first.command_code)
-        assert json.loads(row.request_raw)["params"] == {
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
+        assert json.loads(await read_history_body(session, (row).request_record_id))["params"] == {
             "second": 11,
             "first": 22,
             "item": {"qty": 3},
         }
-        frozen = (row.input_raw, row.request_raw, row.route, row.delivery_snapshot, row.expires_at)
+        frozen = (
+            row.input_raw,
+            (await read_history_body(session, (row).request_record_id)),
+            row.route,
+            row.delivery_snapshot,
+            row.expires_at,
+        )
     async with ecs.factory.begin() as session:
         again = await ecs.service.create(session, **model)
         assert again.command_code == first.command_code
-        row = await session.get(EcsCommand, first.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
         assert (
             row.input_raw,
-            row.request_raw,
+            (await read_history_body(session, (row).request_record_id)),
             row.route,
             row.delivery_snapshot,
             row.expires_at,
         ) == frozen
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
     assert (payload.first, payload.second) == (11, 22)
     assert payload.item is item and item.qty == 3
@@ -347,8 +408,15 @@ async def test_local_model_and_debug_commands_use_one_sender(ecs, declared):
             authorize_send=authorized,
         )
         assert origin == "http://127.0.0.1:45872"
-        rows = (await session.scalars(select(EcsCommand))).all()
-        frozen = {row.command_code: row.request_raw for row in rows}
+        rows = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
+        frozen = {
+            row.command_code: (await read_history_body(session, (row).request_record_id))
+            for row in rows
+        }
         assert {row.route["origin"] for row in rows} == {declared.origin, origin}
         assert {row.target for row in rows} == {"ecs"}
     ack = HttpResult(
@@ -360,7 +428,9 @@ async def test_local_model_and_debug_commands_use_one_sender(ecs, declared):
     )
     client = ScriptedHttpClient(ack, ack)
     sender = Sender(
-        MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(service)}),
+        MessageStore(
+            ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(service)}, records=history_records
+        ),
         ecs.targets,
         ecs.adapters,
         {},
@@ -401,9 +471,22 @@ async def test_restart_keeps_original_result_contract_after_current_route_change
 
     async with ecs.factory.begin() as session:
         original = await ecs.service.create(session, **arguments(ecs))
-        row = await session.get(EcsCommand, original.command_code)
-        frozen = (row.input_raw, row.request_raw, row.route, row.delivery_snapshot, row.expires_at)
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == original.command_code,
+            )
+        )
+        frozen = (
+            row.input_raw,
+            (await read_history_body(session, (row).request_record_id)),
+            row.route,
+            row.delivery_snapshot,
+            row.expires_at,
+        )
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     assert await store.before_send(claim, ecs.targets["ecs"])
 
@@ -476,15 +559,20 @@ async def test_restart_keeps_original_result_contract_after_current_route_change
     async with ecs.factory() as session:
         view = await service.get_by_call(session, owner=ecs.owner, call_key="model-call")
         assert view.status == "SUCCEEDED" and view.result["data"] == {"qty": 7}
-        row = await session.get(EcsCommand, original.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == original.command_code,
+            )
+        )
         assert (
             row.input_raw,
-            row.request_raw,
+            (await read_history_body(session, (row).request_record_id)),
             row.route,
             row.delivery_snapshot,
             row.expires_at,
         ) == frozen
-        assert row.ack_raw is None
+        assert row.ack_record_id is None
 
 
 @pytest.mark.parametrize("routes", ["ordinary", "debug", "local-ordinary"])
@@ -579,17 +667,37 @@ async def test_model_creation_preserves_declared_json_output(ecs, declared, kind
     ecs.service.annexes = annexes
     async with ecs.factory.begin() as session:
         first = await ecs.service.create(session, **arguments(ecs, command=payload))
-        row = await session.get(EcsCommand, first.command_code)
-        assert json.loads(row.request_raw)["params"] == expected
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
+        assert (
+            json.loads(await read_history_body(session, (row).request_record_id))["params"]
+            == expected
+        )
         assert json.loads(row.input_raw)["params"] == expected
-        frozen = row.request_raw
+        frozen = await read_history_body(session, (row).request_record_id)
     declared.binding = None
     async with ecs.factory.begin() as session:
         again = await ecs.service.create(session, **arguments(ecs, command=payload))
         assert again.command_code == first.command_code
-        row = await session.get(EcsCommand, first.command_code)
-        assert row.request_raw == frozen
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
+        assert (await read_history_body(session, (row).request_record_id)) == frozen
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 
@@ -622,4 +730,11 @@ async def test_new_authorization_is_enforced_but_original_replay_keeps_identity(
         assert len(calls) == 1
         with pytest.raises(ValueError, match="not authorized"):
             await service.create(session, **arguments(ecs, call_key="another"))
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )

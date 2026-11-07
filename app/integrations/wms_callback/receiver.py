@@ -1,20 +1,28 @@
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from types import MappingProxyType
+from uuid import UUID
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clock import unix_ms
-from app.core.identifiers import validate_uuid7
+from app.core.identifiers import uuid7, validate_uuid7
 from app.core.strict_json import canonical_digest as _digest
 from app.core.strict_json import json_object
+from app.integrations import history
 from app.integrations.callback_diagnostics import queue_diagnostics
-from app.integrations.callback_receipts import LOCK_TIMEOUT, find_receipt, insert_receipt
-from app.models import CallbackReceipt
+from app.integrations.callback_receipts import (
+    LOCK_TIMEOUT,
+    ReceiptView,
+    find_receipt,
+    insert_receipt,
+    save_receipt_response,
+)
+from app.models import IntegrationExchange
 from app.transactions import after_commit
 
 from .registry import (
@@ -38,6 +46,14 @@ class CallbackResponse:
     status_code: int
     body: dict | None
     outcome: str
+    prepared_body: bytes | None = field(default=None, kw_only=True)
+    pure_replay: bool = field(default=False, kw_only=True)
+    exchange_id: UUID | None = field(default=None, kw_only=True)
+    attempt_id: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self):
+        if self.prepared_body is None:
+            object.__setattr__(self, "prepared_body", history.encode_reply(self.body))
 
 
 def _identity(payload: dict | None) -> str | None:
@@ -75,12 +91,21 @@ def unavailable(raw: bytes) -> CallbackResponse:
     return _unavailable(_identity(json_object(raw)))
 
 
-def _replay(existing: CallbackReceipt) -> CallbackResponse:
+def _replay(existing: ReceiptView) -> CallbackResponse:
     body = dict(existing.body)
     if body["code"] == "RECEIVED":
         body["code"] = "DUPLICATE"
-        return CallbackResponse(200, body, "duplicate")
-    return CallbackResponse(existing.status_code, body, "replay")
+        return CallbackResponse(
+            200, body, "duplicate", pure_replay=True, exchange_id=existing.exchange_id
+        )
+    return CallbackResponse(
+        existing.status_code,
+        body,
+        "replay",
+        pure_replay=True,
+        exchange_id=existing.exchange_id,
+        prepared_body=existing.prepared_body,
+    )
 
 
 def _answer(outcome: object, operation_id: str) -> CallbackResponse:
@@ -163,6 +188,9 @@ async def _handle(
     timestamp: int,
     parsed: dict,
     *,
+    raw: bytes,
+    attempt_id: str,
+    received_at: datetime,
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
@@ -214,13 +242,25 @@ async def _handle(
             raise _UnstoredUnavailable(_unavailable(operation_id))
     response = _answer(outcome, operation_id)
     json.dumps(response.body, allow_nan=False)
+    exchange_id = await save_receipt_response(
+        session,
+        receipt_id=receipt_id,
+        status_code=response.status_code,
+        prepared_body=response.prepared_body,
+        resp_timestamp=response.body["timestamp"],
+        attempt_id=attempt_id,
+        received_at=received_at,
+        raw_body=raw,
+        owner_domain=context.business_code,
+    )
     await session.execute(
-        update(CallbackReceipt)
-        .where(CallbackReceipt.id == receipt_id)
+        update(IntegrationExchange)
+        .where(
+            IntegrationExchange.role == "RECEIPT",
+            IntegrationExchange.receipt_active.is_(True),
+            IntegrationExchange.receipt_id == receipt_id,
+        )
         .values(
-            status_code=response.status_code,
-            body=response.body,
-            resp_timestamp=response.body["timestamp"],
             diagnostic=context.notes or None,
         )
     )
@@ -241,18 +281,20 @@ async def _handle(
             after_commit(session, partial(on_business_committed, context.business_code))
         elif not shared and on_committed is not None:
             after_commit(session, partial(on_committed, handler.registration_source))
-    return response
+    return replace(response, exchange_id=exchange_id, attempt_id=attempt_id)
 
 
 async def _receive(
     session: AsyncSession,
     raw: bytes,
     *,
+    attempt_id: str,
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
     on_owner_committed=None,
 ) -> CallbackResponse:
+    received_at = datetime.now(UTC)
     if len(raw) > MAX_BODY_BYTES:
         return CallbackResponse(413, None, "too_large")
     payload = json_object(raw)
@@ -313,11 +355,18 @@ async def _receive(
         status_code=reply.status_code,
         body=reply.body,
         resp_timestamp=reply.body["timestamp"],
-        created_at=datetime.now(UTC),
+        created_at=received_at,
+        raw_body=raw,
+        prepared_body=reply.prepared_body,
+        attempt_id=attempt_id,
+        peer_system="WMS",
+        protocol="wms-callback",
+        defer_response=reason is None,
     )
     if receipt_id is not None:
         if reason:
-            return reply
+            stored = await find_receipt(session, operation, operation_id)
+            return replace(reply, exchange_id=stored.exchange_id, attempt_id=attempt_id)
         context = _context(
             session,
             handler,
@@ -331,16 +380,18 @@ async def _receive(
         )
         guarded = await _guard(handler, context)
         if guarded is not None:
-            await session.execute(
-                update(CallbackReceipt)
-                .where(CallbackReceipt.id == receipt_id)
-                .values(
-                    status_code=guarded.status_code,
-                    body=guarded.body,
-                    resp_timestamp=guarded.body["timestamp"],
-                )
+            exchange_id = await save_receipt_response(
+                session,
+                receipt_id=receipt_id,
+                status_code=guarded.status_code,
+                prepared_body=guarded.prepared_body,
+                resp_timestamp=guarded.body["timestamp"],
+                attempt_id=attempt_id,
+                received_at=received_at,
+                raw_body=raw,
+                owner_domain=context.business_code,
             )
-            return guarded
+            return replace(guarded, exchange_id=exchange_id, attempt_id=attempt_id)
         response = await _handle(
             session,
             handler,
@@ -354,6 +405,9 @@ async def _receive(
             on_business_committed=on_business_committed,
             on_owner_committed=on_owner_committed,
             context=context,
+            raw=raw,
+            attempt_id=attempt_id,
+            received_at=received_at,
         )
         return response
     existing = await find_receipt(
@@ -374,7 +428,12 @@ async def _receive(
         echo_first = echo_for(first) if echo_for else {}
         if handler is not None and handler.errors is not None:
             echo_first = {**echo_first, "reason_code": handler.errors.identity_conflict}
-        return _reply(409, operation_id, "CONFLICT", echo_first, "conflict")
+        return replace(
+            _reply(409, operation_id, "CONFLICT", echo_first, "conflict"),
+            pure_replay=True,
+            exchange_id=existing.exchange_id,
+            attempt_id=attempt_id,
+        )
     if handler is not None and parsed is not None:
         context = _context(
             session,
@@ -390,7 +449,19 @@ async def _receive(
         )
         guarded = await _guard(handler, context)
         if guarded is not None:
-            return guarded
+            exchange_id = await save_receipt_response(
+                session,
+                receipt_id=existing.id,
+                status_code=guarded.status_code,
+                prepared_body=guarded.prepared_body,
+                resp_timestamp=guarded.body["timestamp"],
+                attempt_id=attempt_id,
+                received_at=received_at,
+                raw_body=raw,
+                owner_domain=context.business_code,
+                make_current=False,
+            )
+            return replace(guarded, exchange_id=exchange_id, attempt_id=attempt_id)
         if handler.recheck is not None and existing.body["code"] not in {"RECEIVED", "DUPLICATE"}:
             return await _handle(
                 session,
@@ -406,21 +477,26 @@ async def _receive(
                 on_owner_committed=on_owner_committed,
                 context=context,
                 original_response=context.original_response,
-                replay_response=_replay(existing),
+                replay_response=replace(_replay(existing), attempt_id=attempt_id),
+                raw=raw,
+                attempt_id=attempt_id,
+                received_at=received_at,
             )
-    return _replay(existing)
+    return replace(_replay(existing), attempt_id=attempt_id)
 
 
 async def receive(
     session: AsyncSession,
     raw: bytes,
     *,
+    attempt_id: str | None = None,
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
     on_owner_committed=None,
 ) -> CallbackResponse:
     options = dict(
+        attempt_id=attempt_id or str(uuid7()),
         runtime=runtime,
         on_committed=on_committed,
         on_business_committed=on_business_committed,

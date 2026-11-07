@@ -1,8 +1,9 @@
 import pytest
 from sqlalchemy import func, select, update
 
+from app.integrations import history as history_records
 from app.models import ReliableMessage
-from tests.helpers import EcsMove, EcsOther
+from tests.helpers import EcsMove, EcsOther, read_history_body
 
 
 async def create(ecs, session, key="call", qty=1):
@@ -66,12 +67,14 @@ async def test_timeout_must_match_frozen_annex(ecs):
 
 
 async def test_command_and_message_share_exact_sending_deadline(ecs):
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     async with ecs.factory.begin() as session:
         await create(ecs, session)
     async with ecs.factory() as session:
-        command = await session.scalar(select(EcsCommand))
+        command = await session.scalar(
+            select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+        )
         message = await session.scalar(select(ReliableMessage))
         assert command.expires_at == message.expires_at
 
@@ -82,7 +85,7 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
 ):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
     from app.reliable.store import MessageStore
 
     ecs = reference.ecs
@@ -92,7 +95,14 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
         await reference.add_route(session, "B", effective=False)
     async with ecs.factory.begin() as session:
         pending = await reference.register(session, action_id=2)
-        assert (await session.get(EcsCommand, pending.command_code)).route["route_id"] == "A"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == pending.command_code,
+                )
+            )
+        ).route["route_id"] == "A"
     async with ecs.factory.begin() as session:
         await reference.switch_route(session)
         await session.execute(
@@ -102,11 +112,23 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
         again = await reference.register(session, action_id=1)
         second = await reference.register(session, action_id=3)
         assert again.command_code == first.command_code
-        old = await session.get(EcsCommand, first.command_code)
-        new = await session.get(EcsCommand, second.command_code)
+        old = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == first.command_code,
+            )
+        )
+        new = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == second.command_code,
+            )
+        )
         assert old.route["route_id"] == "A" and new.route["route_id"] == "B"
-        frozen = old.request_raw
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+        frozen = await read_history_body(session, (old).request_record_id)
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claims = await store.claim(10, ecs.targets)
     permitted = {}
     for claim in claims:
@@ -118,7 +140,19 @@ async def test_pending_route_keeps_active_route_and_revocation_only_fences_old_c
     assert permitted[second.command_code]
     async with ecs.factory.begin() as session:
         assert (await reference.register(session, action_id=1)).command_code == first.command_code
-        assert (await session.get(EcsCommand, first.command_code)).request_raw == frozen
+        assert (
+            await read_history_body(
+                session,
+                (
+                    await session.scalar(
+                        select(IntegrationExchange).where(
+                            IntegrationExchange.role == "ECS_COMMAND",
+                            IntegrationExchange.command_code == first.command_code,
+                        )
+                    )
+                ).request_record_id,
+            )
+        ) == frozen
 
 
 @pytest.mark.parametrize("failure", ["reference_write", "enqueue", "outer_rollback"])
@@ -126,7 +160,7 @@ async def test_reference_registration_and_outbox_rollback_together(reference, mo
     from sqlalchemy import update
     from sqlalchemy.exc import IntegrityError
 
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     ecs = reference.ecs
     async with ecs.factory() as session:
@@ -144,8 +178,19 @@ async def test_reference_registration_and_outbox_rollback_together(reference, mo
                 await session.execute(update(reference.actions).values(state="INVALID"))
         await session.rollback()
     async with ecs.factory() as session:
-        for table in (EcsCommand, ReliableMessage):
-            assert await session.scalar(select(func.count()).select_from(table)) == 0
+        for table in (IntegrationExchange, ReliableMessage):
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(table)
+                    .where(
+                        IntegrationExchange.role == "ECS_COMMAND"
+                        if table is IntegrationExchange
+                        else True
+                    )
+                )
+                == 0
+            )
         assert (await reference.state(session))["state"] == "READY"
 
 
@@ -153,7 +198,7 @@ async def test_reference_registration_and_outbox_rollback_together(reference, mo
 async def test_no_single_authorized_route_or_action_has_no_side_effects(reference, case):
     from sqlalchemy import delete
 
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
@@ -171,14 +216,25 @@ async def test_no_single_authorized_route_or_action_has_no_side_effects(referenc
                 timeout_ms=30000,
                 command=(EcsOther if case == "action" else EcsMove)(qty=1),
             )
-        for table in (EcsCommand, ReliableMessage):
-            assert await session.scalar(select(func.count()).select_from(table)) == 0
+        for table in (IntegrationExchange, ReliableMessage):
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(table)
+                    .where(
+                        IntegrationExchange.role == "ECS_COMMAND"
+                        if table is IntegrationExchange
+                        else True
+                    )
+                )
+                == 0
+            )
 
 
 async def test_concurrent_reference_registration_preserves_original_mapping(reference):
     import asyncio
 
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     ecs = reference.ecs
     if ecs.engine.dialect.name != "postgresql":
@@ -191,8 +247,19 @@ async def test_concurrent_reference_registration_preserves_original_mapping(refe
     codes = await asyncio.gather(register(), register())
     assert codes[0] == codes[1]
     async with ecs.factory() as session:
-        for table in (EcsCommand, ReliableMessage):
-            assert await session.scalar(select(func.count()).select_from(table)) == 1
+        for table in (IntegrationExchange, ReliableMessage):
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(table)
+                    .where(
+                        IntegrationExchange.role == "ECS_COMMAND"
+                        if table is IntegrationExchange
+                        else True
+                    )
+                )
+                == 1
+            )
         call = (await session.execute(select(reference.actions))).mappings().one()
         assert call["intent_device_code"] == "D1" and call["intent_version"] == 1
 
@@ -202,7 +269,7 @@ async def test_new_reference_intent_requires_current_permission_but_replay_keeps
     reference,
     change,
 ):
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     ecs = reference.ecs
     async with ecs.factory.begin() as session:
@@ -231,8 +298,19 @@ async def test_new_reference_intent_requires_current_permission_but_replay_keeps
             await reference.register(session, action_id=2)
         assert len(reference.fact_reads) == reads + 1
         assert await reference.state(session, action_id=2) is None
-        for table in (EcsCommand, ReliableMessage):
-            assert await session.scalar(select(func.count()).select_from(table)) == 1
+        for table in (IntegrationExchange, ReliableMessage):
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(table)
+                    .where(
+                        IntegrationExchange.role == "ECS_COMMAND"
+                        if table is IntegrationExchange
+                        else True
+                    )
+                )
+                == 1
+            )
         mapping = (await session.execute(select(reference.actions))).mappings().one()
         assert mapping["intent_device_code"] == "D1" and mapping["intent_version"] == 1
 
@@ -256,7 +334,7 @@ async def test_new_authorized_reference_intent_uses_current_version(reference):
 
 @pytest.mark.parametrize("fact", [None, {"can_register": False, "device_code": "D1", "version": 7}])
 async def test_new_action_requires_current_business_fact(reference, fact):
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     async def current_business(session, *, business_key):
         assert business_key == "B1"
@@ -266,7 +344,14 @@ async def test_new_action_requires_current_business_fact(reference, fact):
     async with reference.ecs.factory.begin() as session:
         with pytest.raises(ValueError, match="current reference permission"):
             await reference.register(session, action_id=1, business_key="B1")
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 0
 
 
@@ -305,7 +390,7 @@ async def test_independent_authorized_business_is_not_blocked_by_device_history(
 
 
 async def test_cancelled_draft_does_not_create_a_command(reference):
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     async with reference.ecs.factory.begin() as session:
         assert await reference.change(session, action_id=1, kind="cancel")
@@ -313,7 +398,14 @@ async def test_cancelled_draft_does_not_create_a_command(reference):
         with pytest.raises(ValueError, match="current reference permission"):
             await reference.register(session, action_id=1)
         assert (await reference.state(session))["state"] == "CANCELLED"
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize("seconds", [None, "300", True, 0, -1, 60, 600, 299.999, 300.001, 300])
@@ -322,7 +414,7 @@ async def test_new_commands_require_protocol_retry_window(ecs, monkeypatch, seco
     from datetime import timedelta
 
     from app.core.errors import AppError, ErrorCode
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     resolve = ecs.routes.resolve_declared
 
@@ -337,11 +429,24 @@ async def test_new_commands_require_protocol_retry_window(ecs, monkeypatch, seco
                 await create(ecs, session)
             assert error.value.code == ErrorCode.DATABASE_UNAVAILABLE
             assert "PROTOCOL_RETRY_WINDOW" in error.value.message
-            for table in (EcsCommand, ReliableMessage):
-                assert await session.scalar(select(func.count()).select_from(table)) == 0
+            for table in (IntegrationExchange, ReliableMessage):
+                assert (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(table)
+                        .where(
+                            IntegrationExchange.role == "ECS_COMMAND"
+                            if table is IntegrationExchange
+                            else True
+                        )
+                    )
+                    == 0
+                )
         else:
             await create(ecs, session)
-            command = await session.scalar(select(EcsCommand))
+            command = await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
             message = await session.scalar(select(ReliableMessage))
             assert command.route["retry_window"] == 300
             assert command.expires_at == message.expires_at
@@ -353,17 +458,26 @@ async def test_new_commands_require_protocol_retry_window(ecs, monkeypatch, seco
 async def test_existing_calls_preserve_frozen_retry_window(ecs, monkeypatch, seconds, policy):
     from datetime import timedelta
 
-    from app.models import EcsCommand
+    from app.models import IntegrationExchange
 
     async with ecs.factory.begin() as session:
         original = await create(ecs, session)
-        row = await session.get(EcsCommand, original.command_code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == original.command_code,
+            )
+        )
         # Persisted pre-upgrade fixture, not a new command through an obsolete policy.
         row.route = {**row.route, "retry_window": seconds}
         row.expires_at = row.created_at + timedelta(seconds=seconds)
         message = await session.scalar(select(ReliableMessage))
         message.expires_at = row.expires_at
-        frozen = (dict(row.route), row.expires_at, row.request_raw)
+        frozen = (
+            dict(row.route),
+            row.expires_at,
+            (await read_history_body(session, (row).request_record_id)),
+        )
 
     async def unavailable(*args):
         raise AssertionError("old call must not resolve current routing")
@@ -384,7 +498,59 @@ async def test_existing_calls_preserve_frozen_retry_window(ecs, monkeypatch, sec
         assert (await create(ecs, session)).command_code == original.command_code
         with pytest.raises(ValueError, match="different input"):
             await create(ecs, session, qty=2)
-        row = await session.get(EcsCommand, original.command_code)
-        assert (row.route, row.expires_at, row.request_raw) == frozen
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == original.command_code,
+            )
+        )
+        assert (
+            row.route,
+            row.expires_at,
+            (await read_history_body(session, (row).request_record_id)),
+        ) == frozen
         assert (await session.scalar(select(ReliableMessage))).expires_at == frozen[1]
         assert ecs.routes.calls == calls
+
+
+async def test_command_reader_keeps_unflushed_local_changes_and_reads_committed_values(
+    ecs, monkeypatch
+):
+    from app.integrations.ecs_command.results import get_command
+    from app.models import IntegrationExchange
+    from tests.helpers import EcsMove
+
+    async with ecs.factory.begin() as session:
+        command = await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="read-only",
+            device_code="D1",
+            timeout_ms=1000,
+            command=EcsMove(qty=1),
+        )
+    async with ecs.factory() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
+        root.status = "SUCCEEDED"
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("reader wrote or flushed")
+
+        monkeypatch.setattr(session, "flush", forbidden)
+        for read in (
+            lambda: get_command(
+                session, owner_domain=ecs.owner.domain, command_code=command.command_code
+            ),
+            lambda: ecs.service.get_command(
+                session, owner=ecs.owner, command_code=command.command_code
+            ),
+        ):
+            result = await read()
+            assert (
+                result.status == "QUEUED" and root.status == "SUCCEEDED" and root in session.dirty
+            )

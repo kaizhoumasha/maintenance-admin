@@ -9,13 +9,21 @@ from sqlalchemy.exc import DBAPIError
 from app.businesses.runtime import Capabilities
 
 
-def failure(code):
-    return DBAPIError(None, None, SimpleNamespace(sqlstate=code))
+def failure(code, wrapped=False):
+    error = DBAPIError(None, None, SimpleNamespace(sqlstate=code))
+    if wrapped:
+        from app.reliable.lifecycle import EvidencePersistenceError
+
+        evidence = EvidencePersistenceError("integration evidence unavailable")
+        evidence.__cause__ = error
+        return evidence
+    return error
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("kind", ["PREPARE_NEXT", "PREPARE_RESULT"])
 @pytest.mark.parametrize("phase", ["body", "commit"])
-async def test_serialization_restarts_the_whole_transaction(kind, phase):
+async def test_serialization_restarts_the_whole_transaction(kind, phase, wrapped):
     from app.businesses.smt_auto.transactions import AutoS1Transactions
 
     events, sessions = [], []
@@ -39,7 +47,7 @@ async def test_serialization_restarts_the_whole_transaction(kind, phase):
                 yield
                 events.append("commit")
                 if phase == "commit" and len(sessions) < 3:
-                    raise failure("40001")
+                    raise failure("40001", wrapped)
             except BaseException:
                 events.append("rollback")
                 raise
@@ -58,7 +66,7 @@ async def test_serialization_restarts_the_whole_transaction(kind, phase):
             }
             events.append("body")
             if phase == "body" and len(sessions) < 3:
-                raise failure("40001")
+                raise failure("40001", wrapped)
             return "done"
 
         prepare_next = run
@@ -72,8 +80,9 @@ async def test_serialization_restarts_the_whole_transaction(kind, phase):
     assert events[-2:] == ["commit", "close"]
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("code,attempts", [("40001", 3), ("23505", 1)])
-async def test_failure_propagates_without_unbounded_retry(code, attempts):
+async def test_failure_propagates_without_unbounded_retry(code, attempts, wrapped):
     from app.businesses.smt_auto.transactions import AutoS1Transactions
 
     opened = []
@@ -92,7 +101,7 @@ async def test_failure_propagates_without_unbounded_retry(code, attempts):
         @asynccontextmanager
         async def begin(self):
             yield
-            raise failure(code)
+            raise failure(code, wrapped)
 
     class Host:
         async def prepare_next(self, session, **kwargs):
@@ -100,9 +109,12 @@ async def test_failure_propagates_without_unbounded_retry(code, attempts):
 
     entry = AutoS1Transactions(Capabilities(None, None, None, Session))
     entry.host = Host()
-    with pytest.raises(DBAPIError) as caught:
+    from app.reliable.lifecycle import EvidencePersistenceError
+
+    with pytest.raises(EvidencePersistenceError if wrapped else DBAPIError) as caught:
         await entry.advance("PREPARE_NEXT", 1, now_ms=9)
-    assert caught.value.orig.sqlstate == code and len(opened) == attempts
+    original = caught.value.__cause__ if wrapped else caught.value
+    assert original.orig.sqlstate == code and len(opened) == attempts
     with pytest.raises(ValueError):
         await entry.advance("PRODUCTION", 1, now_ms=9)
     assert len(opened) == attempts

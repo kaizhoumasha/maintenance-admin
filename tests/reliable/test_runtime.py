@@ -12,6 +12,7 @@ from app.http_client import DeliveryState, HttpResult
 from app.models import ReliableMessage
 from app.reliable.config import ReliableConfig
 from app.reliable.sender import Sender
+from tests.helpers import message_history_view
 
 
 async def test_empty_runtime_keeps_scanning_with_zero_http_clients(pg_rig, pg_url, monkeypatch):
@@ -54,7 +55,9 @@ async def test_empty_runtime_keeps_scanning_with_zero_http_clients(pg_rig, pg_ur
         # 本进程没有配置该目标:不领取,消息保持 PENDING,不被终态失败。
         assert await senders[0].tick() == 0
         async with rig.factory() as session:
-            row = await session.get(ReliableMessage, result.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
             assert row.status == "PENDING" and row.attempts == 0
         assert engines[0].pool.size() == 2
         assert engines[0].pool._max_overflow == 0

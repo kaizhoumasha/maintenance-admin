@@ -9,9 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_settings
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
+from app.models.integration_history import IntegrationExchange
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
+from app.reliable.lifecycle import ensure_savepoint_transaction
 
 from .acceptance import SubmissionAcceptance, get_submission_acceptance
 from .adapter import ADAPTERS
@@ -60,7 +63,7 @@ class TransportService:
     def outbox(self) -> Outbox:
         if self._outbox is None:
             targets = parse_reliable_config(get_settings()).targets
-            self._outbox = Outbox(targets, ADAPTERS, clock=self.clock)
+            self._outbox = Outbox(targets, ADAPTERS, clock=self.clock, records=history_records)
         return self._outbox
 
     @property
@@ -232,11 +235,29 @@ class TransportService:
         raw = freeze_request(operation_id, task_id, timestamp, data)
         dialect = session.get_bind().dialect.name
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
-        async with session.begin_nested():
+        await ensure_savepoint_transaction(session)
+        async with session.begin_nested() as registration:
+            exchange = IntegrationExchange(
+                role="OUTGOING",
+                peer_system="WMS",
+                protocol=PROTOCOL,
+                direction="OUTBOUND",
+                interaction_kind="REQUEST",
+                operation=OPERATION,
+                operation_id=operation_id,
+                identity_kind="OPERATION_ID",
+                identity_value=operation_id,
+                target_key=target,
+                owner_domain=self.owner_domain,
+                created_at=now,
+            )
+            session.add(exchange)
+            await session.flush()
             task_row_id = await session.scalar(
                 insert(TransportTask)
                 .values(
                     client_request_id=client_request_id,
+                    submission_exchange_id=exchange.id,
                     transport_task_id=task_id,
                     operation_id=operation_id,
                     kind=data["kind"],
@@ -252,22 +273,44 @@ class TransportService:
                 .returning(TransportTask.id)
             )
             if task_row_id is None:
-                winner = await session.scalar(query)
-                if winner is None:
-                    raise RuntimeError("client_request_id conflict without a visible task")
-                return await self._existing_scoped(session, winner, digest, scope)
-            await outbox.enqueue(
-                session,
-                MessageDraft(
-                    target,
-                    OPERATION,
-                    operation_id,
-                    raw,
-                    business_key=task_id,
-                    ttl=SUBMIT_TTL,
-                    scope=scope,
-                ),
-            )
+                await registration.rollback()
+            else:
+                await history_records.write_reference(
+                    session,
+                    exchange_id=exchange.id,
+                    reference_kind="TRANSPORT_TASK",
+                    namespace="id",
+                    value=task_id,
+                    relation_role="SUBMISSION",
+                    created_at=now,
+                )
+                await history_records.write_reference(
+                    session,
+                    exchange_id=exchange.id,
+                    reference_kind="WORKLINE",
+                    namespace="code",
+                    value=caller.workline_id,
+                    relation_role="CALLER",
+                    created_at=now,
+                )
+                await outbox.enqueue(
+                    session,
+                    MessageDraft(
+                        target,
+                        OPERATION,
+                        operation_id,
+                        raw,
+                        business_key=task_id,
+                        ttl=SUBMIT_TTL,
+                        scope=scope,
+                        exchange_id=exchange.id,
+                    ),
+                )
+        if task_row_id is None:
+            winner = await session.scalar(query)
+            if winner is None:
+                raise RuntimeError("client_request_id conflict without a visible task")
+            return await self._existing_scoped(session, winner, digest, scope)
         return TransportHandle(task_id, client_request_id)
 
     async def _existing_scoped(self, session, task, digest, scope):

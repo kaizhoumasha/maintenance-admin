@@ -22,6 +22,7 @@ from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses.runtime import Capabilities
 from app.core.identifiers import uuid7
 from app.database import SCHEMA, create_database_engine
+from app.integrations import history as history_records
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_request.adapter import ADAPTERS as WMS
 from app.integrations.wms_transport import ADAPTERS, TransportCaller, TransportService
@@ -59,6 +60,9 @@ async def store(url, *, owner="owner"):
     metadata = MetaData(schema=SCHEMA)
     for model in (RackJob, RackAction, WorkLine, WorkLinePosition, ReliableMessage, TransportTask):
         model.__table__.to_metadata(metadata)
+    from tests.helpers import copy_history_tables
+
+    copy_history_tables(metadata)
     try:
         async with engine.begin() as conn:
             if pg:
@@ -80,7 +84,7 @@ async def store(url, *, owner="owner"):
         targets = {
             k: TargetConfig(k, "http://example.test", k) for k in ("wms-decisions", "wms-transport")
         }
-        outbox = Outbox(targets, {**WMS, **ADAPTERS})
+        outbox = Outbox(targets, {**WMS, **ADAPTERS}, records=history_records)
 
         async def allows_task_entry(session, *, work_line_id, task_id):
             return work_line_id == 12 and task_id == "task"
@@ -107,6 +111,15 @@ async def store(url, *, owner="owner"):
             table = RackAction.__table__
             for key in await conn.scalars(select(table.c.id).order_by(table.c.ordinal.desc())):
                 await conn.execute(table.delete().where(table.c.id == key))
+            await conn.execute(RackJob.__table__.delete())
+            await conn.execute(ReliableMessage.__table__.delete())
+            await conn.execute(TransportTask.__table__.delete())
+            from app.models import IntegrationExchange
+            from tests.helpers import clear_integration_history
+
+            await clear_integration_history(
+                conn, list(await conn.scalars(select(IntegrationExchange.id)))
+            )
             await conn.run_sync(metadata.drop_all)
             if pg:
                 await conn.execute(DropSchema(schema))
@@ -172,16 +185,18 @@ async def apply_outcome(
 
 async def respond(session, operation_id, http, code, data):
     terminal = (http, code) in ((409, "CONFLICT"), (422, "REJECTED"))
-    await session.execute(
-        update(ReliableMessage)
-        .where(ReliableMessage.operation_id == operation_id)
-        .values(
-            status="FAILED" if terminal else "DONE",
-            last_http_status=http,
-            last_verdict="PEER_TERMINAL" if terminal else "DELIVERED",
-            fail_reason=code if terminal else None,
-            response_raw=json.dumps(
-                dict(operation_id=operation_id, code=code, timestamp=100, data=data)
-            ).encode(),
-        )
+    from tests.helpers import update_message_bodies
+
+    await update_message_bodies(
+        session,
+        update(ReliableMessage).where(ReliableMessage.operation_id == operation_id),
+        status="FAILED" if terminal else "DONE",
+        last_http_status=http,
+        last_verdict="PEER_TERMINAL" if terminal else "DELIVERED",
+        fail_reason=code if terminal else None,
+        response_raw=json.dumps(
+            dict(operation_id=operation_id, code=code, timestamp=100, data=data)
+        ).encode(),
     )
+
+    await session.flush()

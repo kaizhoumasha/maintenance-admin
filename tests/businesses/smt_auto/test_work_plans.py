@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.businesses.smt_auto.models import AutoBinWork, AutoTask, AutoTaskRequest
+from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
 from app.models import (
     Device,
@@ -14,6 +15,7 @@ from app.models import (
     WorkLine,
     WorkLinePosition,
 )
+from tests.helpers import read_history_body
 
 
 async def test_repeated_bin_entry_preserves_original_outbox_and_subject(direction_host):
@@ -52,7 +54,7 @@ async def settle(host, data, *, status=200, code="DECIDED"):
     from app.reliable.store import AttemptOutcome, MessageStore
     from app.reliable.types import MessageStatus
 
-    store = MessageStore(host.factory)
+    store = MessageStore(host.factory, records=history_records)
     claims = await store.claim(1, host.requests.outbox.targets)
     assert len(claims) == 1
     claim = claims[0]
@@ -445,7 +447,7 @@ async def test_unknown_response_recovers_same_frozen_first_intent(direction_host
     async with direction_host.factory.begin() as session:
         original = await service.start_bin(session, work_line_id=1, arrival_id="arrival", now_ms=20)
         original_id, original_operation = original.id, original.operation_id
-    store = MessageStore(direction_host.factory)
+    store = MessageStore(direction_host.factory, records=history_records)
     (claim,) = await store.claim(1, direction_host.requests.outbox.targets)
     frozen = claim.message.request_raw
     response = HttpResult(
@@ -475,7 +477,7 @@ async def test_unknown_response_recovers_same_frozen_first_intent(direction_host
         )
         assert (repeated.id, repeated.operation_id) == (original_id, original_operation)
         message = await session.get(ReliableMessage, repeated.message_id)
-        assert message.request_raw == frozen
+        assert await read_history_body(session, (message).request_record_id) == frozen
 
 
 async def test_first_intent_rolls_back_with_original_caller_transaction(direction_host):

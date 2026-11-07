@@ -4,12 +4,12 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from app.database import create_database_engine
+from app.integrations import history as history_records
 from app.integrations.ecs_command import PROTOCOL_RETRY_WINDOW
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
-from tests.helpers import EcsMove, EcsOther
+from tests.helpers import EcsMove, EcsOther, clear_integration_history
 
 
 class Routes:
@@ -28,7 +28,7 @@ class Routes:
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
-async def ecs(request, sqlite_tables):
+async def ecs(request, sqlite_tables, tmp_path):
     from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
@@ -39,7 +39,7 @@ async def ecs(request, sqlite_tables):
         engine = create_database_engine(request.getfixturevalue("pg_url"))
         factory = async_sessionmaker(engine, expire_on_commit=False)
     else:
-        engine = create_database_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        engine = create_database_engine(f"sqlite+aiosqlite:///{tmp_path / 'ecs.sqlite'}")
         await sqlite_tables(engine)
         factory = async_sessionmaker(engine, expire_on_commit=False)
     if request.param == "postgres":
@@ -55,7 +55,7 @@ async def ecs(request, sqlite_tables):
     targets = {"ecs": target}
     adapters = {PROTOCOL: EcsCommandAdapter()}
     routes = Routes()
-    outbox = Outbox(targets, adapters)
+    outbox = Outbox(targets, adapters, records=history_records)
     service = EcsCommands(outbox, "ecs", routes, compile_commands(EcsMove)[1])
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
 
@@ -75,25 +75,26 @@ async def ecs(request, sqlite_tables):
         if request.param == "postgres":
             from sqlalchemy import delete
 
-            from app.models import (
-                CallbackReceipt,
-                EcsCommand,
-                EcsResultEvidence,
-                EcsSendEvidence,
-                ReliableMessage,
-            )
+            from app.models import IntegrationExchange, ReliableMessage
 
             async with factory.begin() as session:
-                for model in (EcsSendEvidence, EcsResultEvidence, EcsCommand):
-                    await session.execute(delete(model))
                 await session.execute(
                     delete(ReliableMessage).where(
                         ReliableMessage.target.in_(("ecs", "old-static", "ecs-local"))
                     )
                 )
-                await session.execute(
-                    delete(CallbackReceipt).where(CallbackReceipt.operation == "ecs.result")
+                ids = list(
+                    await session.scalars(
+                        select(IntegrationExchange.id).where(
+                            (IntegrationExchange.target_key.in_(("ecs", "old-static", "ecs-local")))
+                            | (
+                                (IntegrationExchange.role == "RECEIPT")
+                                & (IntegrationExchange.operation == "ecs.result")
+                            )
+                        )
+                    )
                 )
+                await clear_integration_history(session, ids)
         await engine.dispose()
 
 
@@ -310,7 +311,9 @@ class Reference:
         from app.reliable.store import MessageStore
 
         store = MessageStore(
-            self.ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(self.ecs.service)}
+            self.ecs.factory,
+            lifecycles={PROTOCOL: EcsLifecycle(self.ecs.service)},
+            records=history_records,
         )
         claims = await store.claim(1, self.ecs.targets)
         if claims:

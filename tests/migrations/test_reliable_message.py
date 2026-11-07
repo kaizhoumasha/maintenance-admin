@@ -1,58 +1,58 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, insert, inspect, text
+from sqlalchemy import delete, insert, inspect, select, text
 
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
 from app.models import ReliableMessage
 from tests.helpers import run_alembic
 
 
 @pytest.mark.parametrize("occupied", [False, True])
 async def test_message_downgrade_requires_empty_table(pg_url, pg_sessions, occupied):
-    target = "migration-" + uuid7().hex
-    now = datetime.now(UTC)
-    if occupied:
-        async with pg_sessions() as session:
-            await session.execute(
-                insert(ReliableMessage).values(
-                    target=target,
-                    operation="opaque",
-                    operation_id="id",
-                    request_raw=b"opaque",
-                    status="PENDING",
-                    attempts=0,
-                    next_attempt_at=now,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            await session.commit()
+    from sqlalchemy import MetaData, Table, select
 
-    async def migrate(command, revision):
-        return await run_alembic(pg_url, command, revision)
-
+    result = await run_alembic(pg_url, "downgrade", "a019b20261021")
+    assert result.returncode == 0, result.stdout + result.stderr
+    engine = pg_sessions.kw["bind"]
+    async with engine.connect() as c:
+        original = await c.run_sync(
+            lambda sync: Table("reliable_message", MetaData(), autoload_with=sync)
+        )
     try:
-        async with pg_sessions() as session:
-            original_version = await session.scalar(text("SELECT version_num FROM alembic_version"))
-        result = await migrate("downgrade", "c9f2b7a41d08")
+        if occupied:
+            async with pg_sessions.begin() as session:
+                await session.execute(
+                    original.insert().values(
+                        target="original",
+                        operation="opaque",
+                        operation_id="original",
+                        request_raw=b"opaque",
+                        status="PENDING",
+                        attempts=0,
+                        next_attempt_at=datetime.now(UTC),
+                        created_at=datetime.now(UTC),
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+        result = await run_alembic(pg_url, "downgrade", "c9f2b7a41d08")
         assert (result.returncode != 0) == occupied, result.stdout + result.stderr
         if occupied:
             assert "非空" in result.stdout + result.stderr
-            async with pg_sessions() as session:
+            async with pg_sessions.begin() as session:
+                assert await session.scalar(select(original.c.request_raw)) == b"opaque"
                 assert (
                     await session.scalar(text("SELECT version_num FROM alembic_version"))
-                    == original_version
+                    == "a019b20261021"
                 )
+                await session.execute(original.delete())
         else:
             async with pg_sessions() as session:
                 assert await session.scalar(text("SELECT to_regclass('reliable_message')")) is None
     finally:
-        restored = await migrate("upgrade", "head")
-        assert restored.returncode == 0, restored.stdout + restored.stderr
-        async with pg_sessions() as session:
-            await session.execute(delete(ReliableMessage).where(ReliableMessage.target == target))
-            await session.commit()
+        result = await run_alembic(pg_url, "upgrade", "head")
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, record_property):
@@ -81,14 +81,48 @@ async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, re
     now = datetime.now(UTC)
     try:
         async with pg_sessions() as session:
-            await session.execute(
-                insert(ReliableMessage),
-                [
+            from hashlib import sha256
+
+            from app.models import IntegrationExchange, IntegrationRecord
+
+            roots, records, messages = [], [], []
+            for number in range(2000):
+                root_id, record_id = uuid7(), uuid7()
+                roots.append(
+                    dict(
+                        id=root_id,
+                        role="OUTGOING",
+                        protocol="opaque",
+                        direction="OUTBOUND",
+                        interaction_kind="REQUEST",
+                        identity_kind="OPERATION_ID",
+                        identity_value=str(number),
+                        operation="opaque",
+                        operation_id=str(number),
+                        target_key=target,
+                        created_at=now,
+                    )
+                )
+                records.append(
+                    dict(
+                        id=record_id,
+                        exchange_id=root_id,
+                        record_kind="REQUEST_REGISTERED",
+                        event_key="original",
+                        direction="OUTBOUND",
+                        raw_body=b"x",
+                        body_state="FULL",
+                        body_sha256=sha256(b"x").hexdigest(),
+                        stored_bytes=1,
+                    )
+                )
+                messages.append(
                     dict(
                         target=target,
                         operation="opaque",
                         operation_id=str(number),
-                        request_raw=b"x",
+                        exchange_id=root_id,
+                        request_record_id=record_id,
                         status="PENDING",
                         attempts=0,
                         next_attempt_at=now + timedelta(days=1),
@@ -96,9 +130,21 @@ async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, re
                         updated_at=now,
                         expires_at=now + timedelta(days=1) if number > 2 else now,
                     )
-                    for number in range(2000)
-                ],
+                )
+            await session.execute(IntegrationExchange.__table__.insert(), roots)
+            await session.execute(IntegrationRecord.__table__.insert(), records)
+            from sqlalchemy import update
+
+            await session.execute(
+                update(IntegrationExchange)
+                .where(IntegrationExchange.target_key == target)
+                .values(
+                    request_record_id=select(IntegrationRecord.id)
+                    .where(IntegrationRecord.exchange_id == IntegrationExchange.id)
+                    .scalar_subquery()
+                )
             )
+            await session.execute(insert(ReliableMessage), messages)
             await session.commit()
         async with pg_sessions() as session:
             plan = list(
@@ -115,11 +161,20 @@ async def test_expiry_index_matches_model_and_bounded_range_scan(pg_sessions, re
             assert plan
         from app.reliable.store import MessageStore
 
-        store = MessageStore(pg_sessions, clock=lambda: now)
+        store = MessageStore(pg_sessions, clock=lambda: now, records=history_records)
         assert await store.expire_pending(2) == 2
         assert await store.expire_pending(2) == 1
         assert await store.expire_pending(2) == 0
     finally:
         async with pg_sessions() as session:
+            from app.models import IntegrationExchange
+            from tests.helpers import clear_integration_history
+
+            roots = list(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(IntegrationExchange.target_key == target)
+                )
+            )
             await session.execute(delete(ReliableMessage).where(ReliableMessage.target == target))
+            await clear_integration_history(session, roots)
             await session.commit()

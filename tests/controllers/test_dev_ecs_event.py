@@ -15,7 +15,7 @@ from app.integrations.ecs_callback import CallbackPayload, ecs_event, registry
 from app.integrations.ecs_callback.envelope import EcsEventEnvelope
 from app.integrations.ecs_callback.receiver import MAX_BODY_BYTES, event_identity
 from app.main import app as main_app
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from tests.helpers import ecs_binding
 
 URL = "/api/v1/dev/ecs/events"
@@ -80,7 +80,17 @@ async def test_debug_preserves_original_data_identity_receipt_and_diagnostics(ev
     assert state.json()["receipt"].get("device_code") == e.body["device_code"]
     assert state.json()["business"] is None
     async with e.factory() as session:
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            == 1
+        )
 
 
 @pytest.mark.parametrize("data", [{}, {"barcode": 12}])
@@ -92,7 +102,17 @@ async def test_debug_reports_payload_rejection_without_creating_a_receipt(event_
     assert response.json()["response"]["message"] == "INVALID_ENVELOPE"
     assert response.json()["digest"] is None
     async with e.factory() as session:
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            == 0
+        )
 
 
 async def test_debug_keeps_unregistered_diagnostic_instead_of_claiming_acceptance(event_debug):
@@ -123,7 +143,17 @@ async def test_debug_bounds_body_and_rolls_back_failed_handler(event_debug, monk
     assert failed.json()["status_code"] == 503
     assert failed.json()["outcome"] == "error"
     async with e.factory() as session:
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize("digest,status", [("bad", 400), ("b" * 64, 404)])
@@ -164,7 +194,7 @@ async def test_swagger_handles_empty_registry_and_same_name_roles(event_debug, m
 
 
 async def test_event_query_projects_owned_state_in_one_read_only_snapshot(event_debug):
-    from sqlalchemy import Boolean, Column, MetaData, String, Table, delete, text, update
+    from sqlalchemy import Boolean, Column, MetaData, String, Table, text, update
 
     from app.controllers.dev_ecs_event import ecs_event_router
     from app.core.identifiers import uuid7
@@ -195,7 +225,11 @@ async def test_event_query_projects_owned_state_in_one_read_only_snapshot(event_
             assert await session.scalar(text("SHOW transaction_read_only")) == "on"
             if not changed:
                 async with e.factory.begin() as writer:
-                    await writer.execute(delete(CallbackReceipt))
+                    await writer.execute(
+                        update(IntegrationExchange)
+                        .where(IntegrationExchange.role == "RECEIPT")
+                        .values(receipt_active=False)
+                    )
                     await writer.execute(update(owned).values(pending=False))
                 changed = True
             row = (

@@ -44,13 +44,15 @@ async def run_cycle(rig, scenarios, role, rack_id):
 async def templates_of(rig, rack_id):
     async with rig.factory() as session:
         rows = await session.execute(
-            select(TransportTask.kind, ReliableMessage.request_raw, TransportTask.created_at)
+            select(TransportTask.kind, ReliableMessage.request_record_id, TransportTask.created_at)
             .join(ReliableMessage, ReliableMessage.operation_id == TransportTask.operation_id)
             .where(TransportTask.workline_id == rig.target.name)
         )
         found = []
-        for _kind, raw, _created in rows:
-            data = json.loads(raw)["data"]
+        from tests.helpers import read_history_body
+
+        for _kind, record_id, _created in rows:
+            data = json.loads(await read_history_body(session, record_id))["data"]
             if data["rack_id"] == rack_id:
                 found.append(data["rcs_template_id"])
         return sorted(found)

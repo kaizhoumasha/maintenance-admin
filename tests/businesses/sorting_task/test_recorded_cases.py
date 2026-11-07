@@ -11,7 +11,8 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import Accepted, Unavailable
 from app.integrations.wms_callback.receiver import receive
-from app.models import CallbackReceipt, WorkLine
+from app.models import IntegrationExchange, WorkLine
+from tests.helpers import get_receipt_by_id
 
 
 @pytest.fixture
@@ -169,9 +170,12 @@ async def test_recorded_cancel_unavailable_preserves_caller_fact_without_freezin
         )
         assert (
             await session.scalar(
-                select(CallbackReceipt.id).where(
-                    CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
                 )
+                .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
             )
             is None
         )
@@ -200,9 +204,12 @@ async def test_recorded_plan_failure_rolls_back_then_recovers_same_identity(
         ]
         assert (
             await session.scalar(
-                select(CallbackReceipt.id).where(
-                    CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
                 )
+                .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
             )
             is None
         )
@@ -237,11 +244,13 @@ async def test_recorded_plan_recheck_outer_rollback_keeps_original_pending(
     assert (await f.deliver(raw, rollback=True)).status_code == 202
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == pending.body
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == pending.body
         assert (
             await session.scalar(
                 select(f.hosts["first"].inputs.c.payload).where(

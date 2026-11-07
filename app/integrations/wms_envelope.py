@@ -2,6 +2,7 @@
 
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history
 from app.reliable import FailReason, OutgoingMessage, ProtocolAdapter, Verdict, VerdictKind
 
 INT64_MAX = 2**63 - 1
@@ -46,8 +47,9 @@ RESPONSE_COLUMNS = (
     "target",
     "operation",
     "operation_id",
-    "request_raw",
-    "response_raw",
+    "exchange_id",
+    "request_record_id",
+    "terminal_response_record_id",
     "status",
     "fail_reason",
     "last_http_status",
@@ -59,6 +61,25 @@ RESPONSE_COLUMNS = (
     "created_at",
     "expires_at",
 )
+
+
+def response_projection(message):
+    clause = message
+    columns = {name: message.c[name] for name in RESPONSE_COLUMNS}
+    for name, ref in (
+        ("request", message.c.request_record_id),
+        ("terminal", message.c.terminal_response_record_id),
+    ):
+        clause, body_columns = history.body_projection(clause, ref, name=name)
+        columns.update(body_columns)
+    return clause, columns
+
+
+def response_row(row):
+    row = dict(row)
+    row["request_raw"] = history.projected_body(row, name="request")
+    row["response_raw"] = history.projected_body(row, name="terminal")
+    return row
 
 
 def outgoing_message(row: dict) -> OutgoingMessage:
@@ -87,6 +108,8 @@ def stored_response(message: OutgoingMessage, row: dict, adapter: ProtocolAdapte
         return fields
     if row["status"] == "FAILED" and row["fail_reason"] == "LOCAL_ERROR":
         return fields
+    if not isinstance(message.request_raw, bytes):
+        return {**fields, "response_state": "INVALID"}
     raw = row["response_raw"]
     if raw is None or adapter is None:
         return {**fields, "response_state": "UNAVAILABLE"}

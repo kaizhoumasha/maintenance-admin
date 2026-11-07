@@ -70,9 +70,9 @@ async def db(request, tmp_path):
         yield url, target
     finally:
         if request.param == "pg":
+            await query(url, "DELETE FROM reliable_message WHERE target = :target", target=target)
             restored = await migrate(url, "upgrade", "head")
             assert restored.returncode == 0, restored.stdout + restored.stderr
-            await query(url, "DELETE FROM reliable_message WHERE target = :target", target=target)
 
 
 def old_row(target, oid, status):

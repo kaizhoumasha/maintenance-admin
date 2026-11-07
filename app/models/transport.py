@@ -1,7 +1,21 @@
 from datetime import datetime
+from uuid import UUID
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, Index, String, Text
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    Uuid,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database import SCHEMA
 
 from .base import Base
 
@@ -10,12 +24,34 @@ class TransportTask(Base):
     __tablename__ = "transport_task"
     __table_args__ = (
         Index("transport_task_cycle_idx", "cycle_id"),
+        *(
+            Index(
+                f"transport_task_{column}_idx",
+                column,
+                postgresql_where=text(f"{column} IS NOT NULL"),
+                sqlite_where=text(f"{column} IS NOT NULL"),
+            )
+            for column in (
+                "submission_exchange_id",
+                "acceptance_request_record_id",
+                "acceptance_response_record_id",
+            )
+        ),
         CheckConstraint(
             "kind IN ('RACK_MOVE','RACK_ROTATE','BIN_MOVE','BIN_EXCHANGE')", name="kind"
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    submission_exchange_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_exchange.id", ondelete="RESTRICT")
+    )
+    acceptance_request_record_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    )
+    acceptance_response_record_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    )
     client_request_id: Mapped[str] = mapped_column(Text, unique=True)
     transport_task_id: Mapped[str] = mapped_column(Text, unique=True)
     operation_id: Mapped[str] = mapped_column(Text, unique=True)

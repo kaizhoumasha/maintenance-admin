@@ -9,7 +9,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.identifiers import uuid7
 from app.integrations.wms_callback import receive
 from app.integrations.wms_transport.callback_samples import sample_callbacks
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from app.models.transport import TransportTask
 from app.schemas.dev_callback import DevCallbackOut, DevCallbackScenario, DevTaskStateOut
 
@@ -51,9 +51,11 @@ async def deliver(
             result = await receive(session, json.dumps(envelope).encode())
         async with factory() as session:
             diagnostic = await session.scalar(
-                select(CallbackReceipt.diagnostic).where(
-                    CallbackReceipt.operation == operation,
-                    CallbackReceipt.operation_id == envelope["operation_id"],
+                select(IntegrationExchange.diagnostic).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                    IntegrationExchange.operation == operation,
+                    IntegrationExchange.operation_id == envelope["operation_id"],
                 )
             )
         items.append(

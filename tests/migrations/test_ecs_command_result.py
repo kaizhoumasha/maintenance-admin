@@ -16,8 +16,10 @@ async def test_ecs_schema_roundtrip_and_guard_preserve_static_data(backend, tmp_
     async def migrate(command, revision):
         return await run_alembic(url, command, revision)
 
-    result = await migrate("upgrade", "head")
+    result = await migrate("upgrade", "a025a20261025")
     assert result.returncode == 0, result.stderr
+    result = await migrate("downgrade", "a025a20261025")
+    assert result.returncode == 0, result.stdout + result.stderr
     engine = create_database_engine(url)
     try:
         async with engine.begin() as c:
@@ -33,7 +35,7 @@ async def test_ecs_schema_roundtrip_and_guard_preserve_static_data(backend, tmp_
             )
         down = await migrate("downgrade", "a024a20261024")
         assert down.returncode == 0, down.stderr
-        up = await migrate("upgrade", "head")
+        up = await migrate("upgrade", "a025a20261025")
         assert up.returncode == 0, up.stderr
         async with engine.begin() as c:
             assert (
@@ -60,4 +62,5 @@ async def test_ecs_schema_roundtrip_and_guard_preserve_static_data(backend, tmp_
         async with engine.begin() as c:
             await c.execute(text("DELETE FROM reliable_message WHERE target='ecs-migration'"))
         await engine.dispose()
-        await migrate("upgrade", "head")
+        restored = await migrate("upgrade", "head")
+        assert restored.returncode == 0, restored.stdout + restored.stderr

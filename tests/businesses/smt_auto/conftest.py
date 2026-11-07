@@ -24,6 +24,7 @@ from app.businesses.smt_auto.transactions import AutoS1Transactions
 from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.ecs_callback import registry as events
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_callback.receiver import receive
@@ -33,10 +34,9 @@ from app.integrations.wms_request import operation as requests
 from app.integrations.wms_transport import ADAPTERS as TRANSPORT_ADAPTERS
 from app.integrations.wms_transport import TransportService
 from app.models import (
-    CallbackReceipt,
-    CallbackSnapshot,
     Device,
     DeviceRoute,
+    IntegrationExchange,
     ReliableMessage,
     TransportTask,
     WorkLine,
@@ -47,7 +47,7 @@ from app.reliable import Outbox
 from app.reliable.config import TargetConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
-from tests.helpers import business_composition
+from tests.helpers import business_composition, copy_history_tables
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -63,8 +63,7 @@ async def auto_receiver(request, monkeypatch, postgres_tables):
                 Device,
                 RackJob,
                 RackAction,
-                CallbackReceipt,
-                CallbackSnapshot,
+                IntegrationExchange,
                 ReliableMessage,
             )
         ),
@@ -87,6 +86,7 @@ async def auto_receiver(request, monkeypatch, postgres_tables):
             )
             stack.push_async_callback(engine.dispose)
             async with engine.begin() as connection:
+                copy_history_tables(metadata)
                 await connection.run_sync(metadata.create_all)
         factory = async_sessionmaker(engine, expire_on_commit=False)
         entry = business_composition("smt_auto")
@@ -134,7 +134,9 @@ async def auto_receiver(request, monkeypatch, postgres_tables):
             target = TargetConfig("auto-test-decisions", "http://example.test", DECISIONS_PROTOCOL)
             targets = {target.name: target}
             runtime = build_runtime(
-                outbox=Outbox(targets, ADAPTERS), ecs_commands=None, session_factory=factory
+                outbox=Outbox(targets, ADAPTERS, records=history_records),
+                ecs_commands=None,
+                session_factory=factory,
             )
             async with factory.begin() as session:
                 line = WorkLine(
@@ -183,7 +185,7 @@ async def auto_receiver(request, monkeypatch, postgres_tables):
                         raise
 
             async def accept_prepare():
-                store = MessageStore(factory)
+                store = MessageStore(factory, records=history_records)
                 claims = await store.claim(1, targets)
                 assert len(claims) == 1
                 claim = claims[0]
@@ -270,11 +272,12 @@ async def direction_host(monkeypatch):
         execution_options={"schema_translate_map": {Base.metadata.schema: None}},
     )
     async with engine.begin() as connection:
+        copy_history_tables(metadata)
         await connection.run_sync(metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     target = TargetConfig("decisions", "http://example.test", DECISIONS_PROTOCOL)
     requests = WmsRequests(
-        Outbox({target.name: target}, ADAPTERS),
+        Outbox({target.name: target}, ADAPTERS, records=history_records),
         owner_domain="smt_auto",
         contract_consumers=lambda _: frozenset({"smt_auto"}),
     )
@@ -329,7 +332,9 @@ async def direction_host(monkeypatch):
         )
     transport_target = TargetConfig("transport", "http://example.test", "wms-transport")
     transport = TransportService(
-        Outbox({transport_target.name: transport_target}, TRANSPORT_ADAPTERS),
+        Outbox(
+            {transport_target.name: transport_target}, TRANSPORT_ADAPTERS, records=history_records
+        ),
         owner_domain="smt_auto",
     )
 
@@ -366,7 +371,7 @@ async def s5_roller(direction_host, monkeypatch):
     from app.integrations.ecs_command.result import receive_ecs_result
     from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
-    from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence
+    from app.models import IntegrationExchange
 
     host = direction_host
     host.entry.COMPONENTS = (COMPONENT, replace(ROLLER, entry_modules=ROLLER.entry_modules[:1]))
@@ -388,9 +393,10 @@ async def s5_roller(direction_host, monkeypatch):
     tables = {key: table.to_metadata(metadata) for key, table in ROLLER_TABLES.items()}
     for model in (CoarseSortingJob, CoarseSortingAction, RackPreparation):
         model.__table__.to_metadata(metadata)
-    for model in (CallbackReceipt, EcsCommand, EcsResultEvidence, EcsSendEvidence):
+    for model in (IntegrationExchange,):
         model.__table__.to_metadata(metadata)
     async with host.factory.kw["bind"].begin() as connection:
+        copy_history_tables(metadata)
         await connection.run_sync(metadata.create_all)
     target = TargetConfig("ecs", None, PROTOCOL, address_mode="SNAPSHOT")
     _, annexes = compile_commands(MoveForward, MoveLeft, MoveRight)
@@ -412,7 +418,7 @@ async def s5_roller(direction_host, monkeypatch):
         async def authorize_frozen(self, session, route):
             return RouteAuthorization.ALLOW
 
-    outbox = Outbox({"ecs": target}, {PROTOCOL: EcsCommandAdapter()})
+    outbox = Outbox({"ecs": target}, {PROTOCOL: EcsCommandAdapter()}, records=history_records)
     ecs = EcsCommands(outbox, "ecs", Routes(), annexes)
     lifecycle = EcsLifecycle(ecs)
     outbox.lifecycles = {PROTOCOL: lifecycle}
@@ -462,7 +468,9 @@ async def s5_roller(direction_host, monkeypatch):
             )
 
     async def result(command_code, *, status="SUCCESS", device="SCAN2"):
-        store = MessageStore(host.factory, lifecycles={PROTOCOL: lifecycle})
+        store = MessageStore(
+            host.factory, lifecycles={PROTOCOL: lifecycle}, records=history_records
+        )
         for claim in await store.claim(100, {"ecs": target}):
             assert await store.before_send(claim, target)
         body = dict(

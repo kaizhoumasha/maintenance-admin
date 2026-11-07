@@ -1,5 +1,7 @@
 import pytest
 
+from tests.helpers import read_history_body
+
 
 @pytest.mark.parametrize("manual_sessions", ["sqlite", "postgres"], indirect=True)
 @pytest.mark.parametrize(
@@ -76,7 +78,9 @@ async def test_uncertain_admission_keeps_original_identity(manual_bins, failure)
     assert (await flow.scan()).status_code == 200
     original = (await flow.rows("admission"))[0]
     async with flow.factory() as session:
-        frozen = (await session.get(ReliableMessage, original["message_id"])).request_raw
+        frozen = await read_history_body(
+            session, (await session.get(ReliableMessage, original["message_id"])).request_record_id
+        )
     if failure == "http":
         await flow.decision({"result": "NO_WORK"}, http=202)
     elif failure == "code":
@@ -89,7 +93,7 @@ async def test_uncertain_admission_keeps_original_identity(manual_bins, failure)
                 delete(ReliableMessage) if failure == "not_found" else update(ReliableMessage)
             ).where(ReliableMessage.id == original["message_id"])
             if failure == "unavailable":
-                query = query.values(status="DONE", response_raw=None)
+                query = query.values(status="DONE", terminal_response_record_id=None)
             elif failure == "identity":
                 query = query.values(operation="sorting.task.prepare@v1")
             await session.execute(query)
@@ -105,7 +109,11 @@ async def test_uncertain_admission_keeps_original_identity(manual_bins, failure)
         message = await session.scalar(
             select(ReliableMessage).where(ReliableMessage.id == original["message_id"])
         )
-        assert message is None if failure == "not_found" else message.request_raw == frozen
+        assert (
+            message is None
+            if failure == "not_found"
+            else await read_history_body(session, (message).request_record_id) == frozen
+        )
 
 
 async def test_unknown_admission_notes_do_not_change_a_known_decision(manual_bins):

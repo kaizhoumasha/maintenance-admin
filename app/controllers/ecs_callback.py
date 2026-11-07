@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
@@ -59,16 +59,25 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
 )
 async def event_callback(request: Request, background_tasks: BackgroundTasks) -> Response:
     result = await receive_event_request(request, background_tasks)
-    return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
+    return Response(
+        result.prepared_body,
+        status_code=result.status_code,
+        media_type="application/json",
+        background=background_tasks,
+    )
 
 
-async def receive_event_request(request: Request, background_tasks: BackgroundTasks) -> EcsResponse:
+async def receive_event_request(
+    request: Request, background_tasks: BackgroundTasks, *, response_scope: str = "HTTP"
+) -> EcsResponse:
     started = perf_counter()
     received_at = datetime.now(UTC)
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
     raw = b""
+    body_available = False
     try:
         raw = await read_body_capped(request, MAX_BODY_BYTES)
+        body_available = True
         if len(raw) > MAX_BODY_BYTES:
             result = EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
         else:
@@ -105,6 +114,8 @@ async def receive_event_request(request: Request, background_tasks: BackgroundTa
             request_id=get_trace_id() or "",
             received_at=received_at,
             source="ecs",
+            body_available=body_available,
+            response_scope=response_scope,
         )
     return result
 

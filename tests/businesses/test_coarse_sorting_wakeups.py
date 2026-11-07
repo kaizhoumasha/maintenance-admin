@@ -86,7 +86,7 @@ async def test_committed_inputs_advance_without_waiting_for_beat(coarse_forward,
 
 
 async def test_scan_rollback_does_not_wake_or_leave_a_receipt(coarse_forward, monkeypatch):
-    from app.models import CallbackReceipt
+    from app.models import IntegrationExchange
 
     flow = instrument(coarse_forward, monkeypatch)
 
@@ -101,8 +101,11 @@ async def test_scan_rollback_does_not_wake_or_leave_a_receipt(coarse_forward, mo
         assert (
             await reader.scalar(
                 select(func.count())
-                .select_from(CallbackReceipt)
-                .where(CallbackReceipt.device_code.in_(flow.codes))
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.device_code.in_(flow.codes),
+                )
             )
             == 0
         )

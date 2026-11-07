@@ -7,6 +7,7 @@ import pytest
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
 from app.models import ReliableMessage
+from tests.helpers import read_history_body
 
 
 async def request_drain(flow, count=1):
@@ -22,7 +23,7 @@ async def test_first_ready_fifo_requests_drain_without_existing_cycle(roller_lif
     state = await request_drain(flow, 6)
     async with flow.factory() as session:
         msg = await session.get(ReliableMessage, state["drain_message_id"])
-        assert json.loads(msg.request_raw)["data"] == {
+        assert json.loads(await read_history_body(session, (msg).request_record_id))["data"] == {
             "workline_code": "LINE-1",
             "required_slot_count": 6,
         }

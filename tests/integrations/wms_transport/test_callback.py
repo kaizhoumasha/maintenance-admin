@@ -16,7 +16,8 @@ from app.integrations.wms_transport import (
 )
 from app.integrations.wms_transport.protocol import OPERATION as SUBMIT
 from app.integrations.wms_transport.wire import bin_move_data, move_rack_data
-from app.models import CallbackReceipt, ReliableMessage, TransportTask
+from app.models import ReliableMessage, TransportTask
+from tests.helpers import read_receipts, seed_reliable_message, seed_transport_task
 
 PATH = "/api/v1/wms/events"
 POSITION = "transport.task.member_position_changed@v1"
@@ -43,7 +44,8 @@ def bin_data():
 async def add_task(factory, data, *, frozen=True):
     task_id = "transport-" + str(uuid7())
     async with factory.begin() as session:
-        session.add(
+        await seed_transport_task(
+            session,
             TransportTask(
                 client_request_id=str(uuid7()),
                 transport_task_id=task_id,
@@ -53,7 +55,7 @@ async def add_task(factory, data, *, frozen=True):
                 workline_id="line",
                 created_at=datetime.now(UTC),
                 frozen=data if frozen else None,
-            )
+            ),
         )
     return task_id
 
@@ -67,7 +69,7 @@ async def task_row(factory, task_id):
 
 async def receipts(factory):
     async with factory() as session:
-        return list(await session.scalars(select(CallbackReceipt).order_by(CallbackReceipt.id)))
+        return await read_receipts(session)
 
 
 async def send(client, operation, data, *, operation_id=None, timestamp=1):
@@ -163,6 +165,16 @@ async def test_rack_result_is_applied_with_the_frozen_target_face(callback_clien
     assert row.outcome_status == "SUCCEEDED" and row.applied_outcome_revision == 1
     assert row.applied_outcome["arrival_face"] == "90"  # 缺省时用冻结目标面补齐
     assert row.applied_outcome["final_position"]["location_code"] == "CTU01"
+    from app.models import IntegrationRecord
+
+    async with callback_store() as session:
+        adopted = await session.scalar(
+            select(IntegrationRecord).where(
+                IntegrationRecord.exchange_id == row.submission_exchange_id,
+                IntegrationRecord.record_kind == "RESULT_APPLIED",
+            )
+        )
+        assert adopted.effective_payload == row.applied_outcome
 
 
 async def test_long_rack_and_position_codes_are_preserved_in_applied_results(
@@ -609,18 +621,17 @@ async def test_identity_conflict_echoes_the_first_messages_task_id(callback_clie
 async def submit_message(factory, task_id, *, status, operation=SUBMIT):
     now = datetime.now(UTC)
     async with factory.begin() as session:
-        session.add(
-            ReliableMessage(
-                target="wms",
-                operation=operation,
-                operation_id=str(uuid7()),
-                request_raw=json.dumps({}).encode(),
-                status=status,
-                next_attempt_at=None if status == "STALLED" else now,
-                business_key=task_id,
-                created_at=now,
-                updated_at=now,
-            )
+        await seed_reliable_message(
+            session,
+            target="wms",
+            operation=operation,
+            operation_id=str(uuid7()),
+            request_raw=json.dumps({}).encode(),
+            status=status,
+            next_attempt_at=None if status == "STALLED" else now,
+            business_key=task_id,
+            created_at=now,
+            updated_at=now,
         )
 
 
@@ -717,3 +728,96 @@ async def test_live_rack_cancellation_rejects_zone_result(callback_client, callb
     )
     assert (await send(callback_client, RESULTED, data)).status_code == 422
     assert (await task_row(callback_store, task_id)).applied_outcome is None
+
+
+async def test_pending_result_keeps_original_result_source_separate_from_position_trigger(
+    callback_client, callback_store
+):
+    from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
+
+    task_id = await add_task(callback_store, bin_data())
+    result_id = str(uuid7())
+    assert (
+        await send(callback_client, RESULTED, bin_result(task_id), operation_id=result_id)
+    ).status_code == 202
+    assert (await task_row(callback_store, task_id)).applied_outcome_revision is None
+    assert (await send(callback_client, POSITION, placed(task_id, "C1", "S1"))).status_code == 202
+    trigger_id = str(uuid7())
+    assert (
+        await send(callback_client, POSITION, placed(task_id, "C2", "S2"), operation_id=trigger_id)
+    ).status_code == 202
+    task = await task_row(callback_store, task_id)
+    assert task.applied_outcome_revision == 1
+    async with callback_store() as session:
+        adopted = await session.scalar(
+            select(IntegrationRecord).where(
+                IntegrationRecord.exchange_id == task.submission_exchange_id,
+                IntegrationRecord.record_kind == "RESULT_APPLIED",
+            )
+        )
+        result_root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.operation_id == result_id
+            )
+        )
+        trigger_root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.operation_id == trigger_id,
+            )
+        )
+        assert adopted.effective_payload == task.applied_outcome
+        assert adopted.parent_record_id == result_root.request_record_id
+        assert adopted.details["trigger_record_id"] == str(trigger_root.request_record_id)
+        refs = list(
+            await session.scalars(
+                select(IntegrationReference).where(
+                    IntegrationReference.source_record_id == adopted.id
+                )
+            )
+        )
+        assert {(ref.relation_role, ref.related_exchange_id) for ref in refs} == {
+            ("RESULT_SOURCE", result_root.id),
+            ("TRIGGER", trigger_root.id),
+        }
+
+
+async def test_task_reference_finds_submission_and_every_matched_callback(
+    callback_client, callback_store
+):
+    from app.schemas.integration_history import ExchangeListParams
+    from app.services.integration_history_service import get_exchange, list_exchanges
+    from tests.helpers import result_task
+
+    task = await result_task(callback_store)
+    for revision in (1, 2):
+        response = await send(
+            callback_client,
+            RESULTED,
+            rack_result(
+                task.handle.transport_task_id,
+                revision=revision,
+                status="FAILED",
+                failure_code="MANUAL_ABORTED",
+                final_position={"kind": "RACK_POSITION", "location_code": "FROM"},
+            ),
+        )
+        assert response.status_code == 202
+    async with callback_store() as session:
+        page = await list_exchanges(
+            session,
+            ExchangeListParams(
+                reference_kind="TRANSPORT_TASK",
+                reference_namespace="id",
+                reference_value=task.handle.transport_task_id,
+            ),
+        )
+        assert len(page["items"]) == 3
+        submission = next(row for row in page["items"] if row["role"] == "OUTGOING")
+        detail = await get_exchange(session, submission["id"])
+        receipt_ids = {row["id"] for row in page["items"] if row["role"] == "RECEIPT"}
+        assert receipt_ids <= {
+            ref["exchange_id"]
+            for ref in detail["references"]
+            if ref["relation_role"] == "CALLBACK_TARGET"
+        }

@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from math import isfinite
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from uuid import UUID
 
 from app.http_client import HttpRequest, HttpResult
 
@@ -95,6 +96,9 @@ class MessageDraft:
     delivery_snapshot: DeliverySnapshot | None = None
     expires_at: datetime | None = None
     scope: ScopeRef | None = None
+    exchange_id: UUID | None = field(default=None, kw_only=True)
+    request_record_id: UUID | None = field(default=None, kw_only=True)
+    owner_domain: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,9 @@ class OutgoingMessage:
     expires_at: datetime | None
     delivery_snapshot: DeliverySnapshot | None = None
     scope: ScopeRef | None = None
+    exchange_id: UUID | None = field(default=None, kw_only=True)
+    request_record_id: UUID | None = field(default=None, kw_only=True)
+    owner_domain: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

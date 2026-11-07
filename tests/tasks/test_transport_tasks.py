@@ -5,8 +5,9 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
-from app.models import ReliableMessage, TransportTask
+from app.models import TransportTask
 from app.tasks.transport_tasks import scan_stuck
+from tests.helpers import seed_reliable_message, seed_transport_task
 
 NOW = datetime.now(UTC)
 SUBMIT = "transport.task.submit@v1"
@@ -27,7 +28,7 @@ def task(age_minutes, **fields):
 
 
 def submit_message(task_id, status):
-    return ReliableMessage(
+    return dict(
         target="wms",
         operation=SUBMIT,
         operation_id=str(uuid7()),
@@ -50,8 +51,9 @@ async def test_only_old_tasks_without_a_determined_outcome_raise_an_alert(db, ca
     done = task(180, outcome_status="SUCCEEDED")
     cancelled = task(180, outcome_status="CANCELLED")
     abandoned = task(60 * 24 * 10)  # 搁置超过 7 天的无结果任务不再告警
-    db.add_all([fresh, waiting, expired, unknown, parked, done, cancelled, abandoned])
-    db.add(submit_message(expired.transport_task_id, "EXPIRED"))
+    for item in (fresh, waiting, expired, unknown, parked, done, cancelled, abandoned):
+        await seed_transport_task(db, item)
+    await seed_reliable_message(db, **submit_message(expired.transport_task_id, "EXPIRED"))
     await db.commit()
     caplog.set_level(logging.WARNING)
     assert await scan_stuck(async_sessionmaker(db.bind), 120, now=NOW) == 4
@@ -74,7 +76,8 @@ async def test_alert_threshold_must_be_a_positive_integer(db, minutes):
 
 async def test_every_stuck_task_is_alerted_even_when_older_tasks_remain(db, caplog):
     tasks = [task(180) for _ in range(201)]
-    db.add_all(tasks)
+    for item in tasks:
+        await seed_transport_task(db, item)
     await db.commit()
     caplog.set_level(logging.WARNING)
     expected = {item.transport_task_id for item in tasks}

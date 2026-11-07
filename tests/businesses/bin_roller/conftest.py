@@ -3,14 +3,20 @@ from functools import partial
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import MetaData
+from sqlalchemy import MetaData, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.businesses._components.rack_dispatch.contracts import Coverage, FactRef
 from app.businesses._components.rack_dispatch.models import RackAction, RackJob
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.database import SCHEMA, create_database_engine
-from tests.helpers import bin_roller_rows, roller_dispatch_rows
+from app.integrations import history as history_records
+from tests.helpers import (
+    bin_roller_rows,
+    copy_history_tables,
+    roller_dispatch_rows,
+    set_message_bodies,
+)
 
 
 async def arrived_face(roller, session, cycle_id, service_id, receipts):
@@ -91,8 +97,6 @@ async def arrived_face(roller, session, cycle_id, service_id, receipts):
 @pytest.fixture
 async def roller_lifecycle(roller_return):
     import json
-
-    from sqlalchemy import select
 
     from app.businesses._components.bin_roller.ports import (
         CurrentTask,
@@ -182,9 +186,13 @@ async def roller_lifecycle(roller_return):
                 200,
                 "DELIVERED",
             )
-            message.response_raw = json.dumps(
-                dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=data)
-            ).encode()
+            await set_message_bodies(
+                session,
+                message,
+                response_raw=json.dumps(
+                    dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=data)
+                ).encode(),
+            )
 
     async def callback(data, operation="transport.task.resulted@v1"):
         async with factory.begin() as session:
@@ -223,14 +231,18 @@ async def roller_lifecycle(roller_return):
                 http,
                 "DELIVERED",
             )
-            message.response_raw = json.dumps(
-                dict(
-                    operation_id=message.operation_id,
-                    code=code,
-                    timestamp=2,
-                    data=dict(transport_task_id=response_task or action["transport_task_id"]),
-                )
-            ).encode()
+            await set_message_bodies(
+                session,
+                message,
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=message.operation_id,
+                        code=code,
+                        timestamp=2,
+                        data=dict(transport_task_id=response_task or action["transport_task_id"]),
+                    )
+                ).encode(),
+            )
 
     async def ready_supply(*, count=5, rack="R1", face="A", revision=1):
         identity = await demand(rack=rack, face=face, revision=revision)
@@ -409,9 +421,13 @@ async def roller_feed(roller_current):
         )
         message = await session.get(ReliableMessage, face["feed_message_id"])
         message.status, message.last_http_status, message.last_verdict = "DONE", 200, "DELIVERED"
-        message.response_raw = json.dumps(
-            dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=manifest)
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=manifest)
+            ).encode(),
+        )
         await session.flush()
         return manifest
 
@@ -437,7 +453,7 @@ async def roller_scans(roller_store, monkeypatch):
     import json
     import sys
 
-    from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, delete, select
+    from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, delete
 
     from app.businesses import catalog
     from app.businesses._components.bin_roller.ecs_command import MoveForward, MoveLeft, MoveRight
@@ -459,13 +475,7 @@ async def roller_scans(roller_store, monkeypatch):
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
     from app.integrations.wms_callback import registry as callbacks
     from app.integrations.wms_request import operation as requests
-    from app.models import (
-        CallbackReceipt,
-        EcsCommand,
-        EcsResultEvidence,
-        EcsSendEvidence,
-        ReliableMessage,
-    )
+    from app.models import IntegrationExchange, ReliableMessage
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
     from app.reliable.store import MessageStore
@@ -521,12 +531,18 @@ async def roller_scans(roller_store, monkeypatch):
         Column("decision", String, nullable=False),
         Column("release_requested", Boolean, nullable=False),
     )
-    models = (CallbackReceipt, EcsCommand, EcsResultEvidence, EcsSendEvidence, ReliableMessage)
+    models = (IntegrationExchange, ReliableMessage)
     for model in models:
         model.__table__.to_metadata(metadata)
+    copy_history_tables(metadata)
     store = roller_store
     engine = store.factory.kw["bind"]
     async with engine.begin() as connection:
+        if any(
+            table.name in {"reliable_message", "transport_task"}
+            for table in metadata.tables.values()
+        ):
+            copy_history_tables(metadata)
         await connection.run_sync(metadata.create_all)
     prefix = "roller-" + str(uuid7())
     devices = {point: prefix + "-" + point for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")}
@@ -550,7 +566,7 @@ async def roller_scans(roller_store, monkeypatch):
         async def authorize_frozen(self, session, route):
             return RouteAuthorization.ALLOW
 
-    outbox = Outbox({prefix: target}, {PROTOCOL: EcsCommandAdapter()})
+    outbox = Outbox({prefix: target}, {PROTOCOL: EcsCommandAdapter()}, records=history_records)
     ecs = EcsCommands(outbox, prefix, Routes(), annexes)
     lifecycle = EcsLifecycle(ecs)
     outbox.lifecycles = {PROTOCOL: lifecycle}
@@ -692,15 +708,25 @@ async def roller_scans(roller_store, monkeypatch):
         return await bin_roller_rows(session, flow.roller, key)
 
     async def messages(session):
-        return (
+        from tests.helpers import message_history_view
+
+        rows = (
             await session.scalars(select(ReliableMessage).where(ReliableMessage.target == prefix))
         ).all()
+        return [await message_history_view(session, row) for row in rows]
 
     async def command(session, command_code):
-        return await session.get(EcsCommand, command_code)
+        return await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command_code,
+            )
+        )
 
     async def result(code, point, *, status="SUCCESS", finish_time=100):
-        message_store = MessageStore(store.factory, lifecycles={PROTOCOL: lifecycle})
+        message_store = MessageStore(
+            store.factory, lifecycles={PROTOCOL: lifecycle}, records=history_records
+        )
         for claim in await message_store.claim(100, {prefix: target}):
             assert await message_store.before_send(claim, target)
         body = dict(
@@ -746,23 +772,27 @@ async def roller_scans(roller_store, monkeypatch):
         yield flow
     finally:
         async with store.factory.begin() as session:
-            codes = select(EcsCommand.command_code).where(EcsCommand.target == prefix)
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+            from sqlalchemy import or_
+
+            from tests.helpers import clear_integration_history
+
+            roots = list(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(
+                        or_(
+                            IntegrationExchange.target == prefix,
+                            IntegrationExchange.device_code.in_(devices.values()),
+                        )
+                    )
+                )
             )
-            await session.execute(
-                delete(EcsSendEvidence).where(EcsSendEvidence.command_code.in_(codes))
-            )
-            await session.execute(delete(EcsCommand).where(EcsCommand.target == prefix))
             await session.execute(delete(ReliableMessage).where(ReliableMessage.target == prefix))
-            await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.device_code.in_(devices.values()))
-            )
+            await clear_integration_history(session, roots)
         async with engine.begin() as connection:
-            await connection.run_sync(production_table.drop)
             if engine.dialect.name == "sqlite":
-                for model in reversed(models):
-                    await connection.run_sync(model.__table__.drop)
+                await connection.run_sync(metadata.drop_all)
+            else:
+                await connection.run_sync(production_table.drop)
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -812,20 +842,32 @@ async def roller_transport(roller_store):
         PROTOCOL,
         TransportService,
     )
-    from app.models import CallbackReceipt, ReliableMessage, TransportTask
+    from app.models import IntegrationExchange, ReliableMessage, TransportTask
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
 
     store = roller_store
     engine = store.factory.kw["bind"]
     metadata = MetaData()
-    for table in [ReliableMessage.__table__, TransportTask.__table__, CallbackReceipt.__table__]:
+    for table in [
+        ReliableMessage.__table__,
+        TransportTask.__table__,
+        IntegrationExchange.__table__,
+    ]:
         table.to_metadata(metadata)
+    copy_history_tables(metadata)
     async with engine.begin() as connection:
+        if any(
+            table.name in {"reliable_message", "transport_task"}
+            for table in metadata.tables.values()
+        ):
+            copy_history_tables(metadata)
         await connection.run_sync(metadata.create_all)
     target = TargetConfig("roller-" + str(uuid7()), "http://example.test", PROTOCOL)
     service = TransportService(
-        Outbox({target.name: target}, ADAPTERS), target=target.name, owner_domain="first"
+        Outbox({target.name: target}, ADAPTERS, records=history_records),
+        target=target.name,
+        owner_domain="first",
     )
     try:
         yield SimpleNamespace(store=store, target=target.name, service=service)
@@ -914,9 +956,13 @@ async def roller_return(roller_feed):
         )
         message = await session.get(ReliableMessage, face["return_message_id"])
         message.status, message.last_http_status, message.last_verdict = "DONE", 200, "DELIVERED"
-        message.response_raw = json.dumps(
-            dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=decision)
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(operation_id=message.operation_id, code="DECIDED", timestamp=2, data=decision)
+            ).encode(),
+        )
         await session.flush()
         return decision
 
@@ -995,7 +1041,7 @@ async def roller_application(roller_scans, request):
     """Test consumers exercise real assembly/receiver; no application business is installed."""
     import json
 
-    from sqlalchemy import select, update
+    from sqlalchemy import update
     from sqlalchemy.exc import DBAPIError
 
     from app.businesses import catalog
@@ -1220,8 +1266,6 @@ async def roller_current(roller_scans, roller_declaration):
     import sys
     from dataclasses import replace
 
-    from sqlalchemy import select
-
     from app.businesses import catalog
     from app.businesses._components.bin_roller.ports import (
         RollerWorkRef,
@@ -1270,6 +1314,11 @@ async def roller_current(roller_scans, roller_declaration):
         model.__table__.to_metadata(metadata)
     engine = flow.factory.kw["bind"]
     async with engine.begin() as connection:
+        if any(
+            table.name in {"reliable_message", "transport_task"}
+            for table in metadata.tables.values()
+        ):
+            copy_history_tables(metadata)
         await connection.run_sync(metadata.create_all)
     async with flow.factory.begin() as session:
         await session.execute(
@@ -1322,9 +1371,13 @@ async def roller_current(roller_scans, roller_declaration):
         async with flow.factory.begin() as session:
             row = await session.get(ReliableMessage, message_id)
             row.status, row.last_http_status, row.last_verdict = "DONE", 200, "DELIVERED"
-            row.response_raw = json.dumps(
-                dict(operation_id=row.operation_id, code="DECIDED", timestamp=2, data=data)
-            ).encode()
+            await set_message_bodies(
+                session,
+                row,
+                response_raw=json.dumps(
+                    dict(operation_id=row.operation_id, code="DECIDED", timestamp=2, data=data)
+                ).encode(),
+            )
 
     async def callback(operation, data):
         async with flow.factory.begin() as session:

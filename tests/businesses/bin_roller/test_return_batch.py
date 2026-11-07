@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
 from app.models import ReliableMessage, TransportTask
+from tests.helpers import read_history_body, set_message_bodies
 
 
 async def test_unknown_request_keeps_frozen_prefix(roller_return):
@@ -145,14 +146,18 @@ async def test_transport_acceptance_does_not_complete_return(roller_return):
             select(ReliableMessage).where(ReliableMessage.operation_id == task.operation_id)
         )
         msg.status, msg.last_http_status, msg.last_verdict = "DONE", 202, "DELIVERED"
-        msg.response_raw = json.dumps(
-            dict(
-                operation_id=msg.operation_id,
-                code="RECEIVED",
-                timestamp=2,
-                data=dict(transport_task_id=task.transport_task_id),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            msg,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=msg.operation_id,
+                    code="RECEIVED",
+                    timestamp=2,
+                    data=dict(transport_task_id=task.transport_task_id),
+                )
+            ).encode(),
+        )
         await session.flush()
         assert await flow.consume_return(session, face_id) == "WAITING_FOR_RETURN_RESULT"
     await flow.success(face_id, placed=False)
@@ -354,9 +359,13 @@ async def test_original_request_failure_never_becomes_no_batch(roller_return, ht
             http,
             "PEER_TERMINAL",
         )
-        message.response_raw = json.dumps(
-            dict(operation_id=message.operation_id, code=code, timestamp=2, data={})
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(operation_id=message.operation_id, code=code, timestamp=2, data={})
+            ).encode(),
+        )
         await session.flush()
         assert await flow.consume_return(session, face_id) == "WAITING_FOR_ALLOCATION"
         assert await flow.roller.original_record(session, "face_work", face_id) == before
@@ -378,8 +387,13 @@ async def test_return_request_has_only_original_wire_fields(roller_return):
     async with flow.factory.begin() as session:
         batch_id = await flow.start(session, await flow.selected(session, face="90"))
         batch = await flow.record(session, "return_batch", batch_id)
-        raw = await session.scalar(
-            select(ReliableMessage.request_raw).where(ReliableMessage.id == batch["message_id"])
+        raw = await read_history_body(
+            session,
+            await session.scalar(
+                select(ReliableMessage.request_record_id).where(
+                    ReliableMessage.id == batch["message_id"]
+                )
+            ),
         )
         data = json.loads(raw)["data"]
         assert data == dict(

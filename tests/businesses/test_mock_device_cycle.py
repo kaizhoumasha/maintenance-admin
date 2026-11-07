@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, update
 
 from app.main import app
-from app.models import CallbackReceipt, WorkLine
+from app.models import IntegrationExchange, WorkLine
 from tests.helpers import flow_request
 
 
@@ -46,7 +46,12 @@ async def test_cross_entry_replay_and_conflict_keep_one_original_cycle(mock_cycl
     async with mock_cycle.factory() as session:
         receipts = list(
             await session.scalars(
-                select(CallbackReceipt).where(CallbackReceipt.id.in_(mock_cycle.receipt_ids))
+                select(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.receipt_id.in_(mock_cycle.receipt_ids))
             )
         )
         assert any(
@@ -127,7 +132,12 @@ async def test_device_entry_rejects_cross_line_and_wrong_role_without_business_w
     if wrong == "payload_device":
         async with mock_cycle.factory() as session:
             receipt = await session.scalar(
-                select(CallbackReceipt).where(CallbackReceipt.id.in_(mock_cycle.receipt_ids))
+                select(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .where(IntegrationExchange.receipt_id.in_(mock_cycle.receipt_ids))
             )
             assert receipt.diagnostic == [{"reason_code": "DEVICE_MISMATCH"}]
 

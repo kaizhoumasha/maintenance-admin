@@ -50,7 +50,7 @@ async def test_membership_change_during_resolution_rolls_back_without_a_receipt(
     from app.core.errors import AppError
     from app.integrations.ecs_callback.envelope import EcsEventEnvelope
     from app.integrations.ecs_callback.receiver import event_identity, receive_ecs_event
-    from app.models import CallbackReceipt, Device
+    from app.models import Device, IntegrationExchange
 
     factory, code = asset_pg
     async with factory.begin() as session:
@@ -101,9 +101,14 @@ async def test_membership_change_during_resolution_rolls_back_without_a_receipt(
             )
             assert (
                 await session.scalar(
-                    select(CallbackReceipt.id).where(
-                        CallbackReceipt.operation == "ecs.event",
-                        CallbackReceipt.operation_id == identity,
+                    select(IntegrationExchange.receipt_id)
+                    .where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.receipt_active.is_(True),
+                    )
+                    .where(
+                        IntegrationExchange.operation == "ecs.event",
+                        IntegrationExchange.operation_id == identity,
                     )
                 )
                 is None

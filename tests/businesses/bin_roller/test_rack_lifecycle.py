@@ -1,6 +1,7 @@
 import pytest
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef, SourceFaceRef, SupplyChange
+from tests.helpers import read_history_body
 
 
 async def test_unselected_demand_prepares_original_entry_in_same_transaction(roller_lifecycle):
@@ -57,9 +58,11 @@ async def test_final_face_done_prepares_departure_without_fake_feed(roller_lifec
             departure["operation_id"],
             "business:first",
         )
-        timestamp = json.loads(message.request_raw)["timestamp"]
+        timestamp = json.loads(await read_history_body(session, (message).request_record_id))[
+            "timestamp"
+        ]
         assert (
-            message.request_raw
+            await read_history_body(session, (message).request_record_id)
             == json.dumps(
                 dict(
                     operation_id=departure["operation_id"],

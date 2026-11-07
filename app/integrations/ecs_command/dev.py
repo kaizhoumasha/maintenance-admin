@@ -21,7 +21,7 @@ from app.integrations.ecs_command.contracts import (
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot, normalize_origin
 from app.integrations.ecs_command.runtime import check_assembly, configure_ecs
 from app.integrations.model_payload import validated_model_payload
-from app.models import EcsCommand
+from app.models import IntegrationExchange
 
 
 def debug_origin(value: str) -> str:
@@ -115,7 +115,12 @@ async def get_debug_command(session, *, service, owner, command_code):
     command = await service.get_command(session, owner=owner, command_code=command_code)
     if command is None:
         return None
-    row = await session.get(EcsCommand, command.command_code)
+    row = await session.scalar(
+        select(IntegrationExchange).where(
+            IntegrationExchange.role == "ECS_COMMAND",
+            IntegrationExchange.command_code == command.command_code,
+        )
+    )
     return command, row.route["origin"]
 
 
@@ -163,7 +168,7 @@ async def create_debug_command(
             ErrorCode.INVALID_REQUEST, "Invalid ECS command for protocol contract"
         ) from None
     row = await session.scalar(
-        select(EcsCommand).where(EcsCommand.command_code == command.command_code)
+        select(IntegrationExchange).where(IntegrationExchange.command_code == command.command_code)
     )
     if row.route["origin"] != origin:
         raise AppError(ErrorCode.CONFLICT, "client_request_id already has a different ecs_url")

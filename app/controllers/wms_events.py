@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 
 from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
@@ -62,9 +62,11 @@ router = APIRouter(tags=["WMS callbacks"], dependencies=[Depends(RateLimit(None)
 async def events(request: Request, background_tasks: BackgroundTasks) -> Response:
     received_at = datetime.now(UTC)
     body = b""
+    body_available = False
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
     try:
         body = await read_body_capped(request, MAX_BODY_BYTES)
+        body_available = True
         if len(body) > MAX_BODY_BYTES:
             result = CallbackResponse(413, None, "too_large")
         else:
@@ -91,10 +93,16 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
             response=result,
             request_id=get_trace_id() or "",
             received_at=received_at,
+            body_available=body_available,
         )
     if result.body is None:
         return Response(status_code=result.status_code, background=background_tasks)
-    return JSONResponse(result.body, status_code=result.status_code, background=background_tasks)
+    return Response(
+        result.prepared_body,
+        status_code=result.status_code,
+        media_type="application/json",
+        background=background_tasks,
+    )
 
 
 def include_wms_events(

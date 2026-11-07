@@ -18,6 +18,7 @@ from app.businesses import catalog
 from app.businesses.runtime import BusinessRuntime
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_transport import (
     ADAPTERS,
     Rack,
@@ -30,6 +31,7 @@ from app.models import ReliableMessage, TransportTask
 from app.reliable.config import ReliableConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
+from tests.helpers import message_history_view
 
 
 @pytest.mark.parametrize("status,code", [(202, "RECEIVED"), (200, "DUPLICATE")])
@@ -59,8 +61,11 @@ async def test_late_ack_survives_settle_and_cleanup(
             select(TransportTask).where(TransportTask.transport_task_id == handle.transport_task_id)
         )
         identity = (original.operation_id, original.transport_task_id, original.owner_domain)
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.operation_id == original.operation_id)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.operation_id == original.operation_id)
+            ),
         )
         frozen = message.request_raw
     service.owner_domain = "current"
@@ -149,8 +154,13 @@ async def test_late_ack_survives_settle_and_cleanup(
         async with asyncio.timeout(5):
             while True:
                 async with rig.factory() as session:
-                    message = await session.scalar(
-                        select(ReliableMessage).where(ReliableMessage.operation_id == identity[0])
+                    message = await message_history_view(
+                        session,
+                        await session.scalar(
+                            select(ReliableMessage).where(
+                                ReliableMessage.operation_id == identity[0]
+                            )
+                        ),
                     )
                     if message.status == "DONE" and (not late or notices):
                         break
@@ -212,6 +222,7 @@ async def submit(transport_storage, transport_request):
     store = MessageStore(
         rig.factory,
         clock=rig.clock,
+        records=history_records,
     )
     [claim] = await store.claim(1, rig.outbox.targets)
 
@@ -289,7 +300,8 @@ async def test_original_target_survives_new_send_configuration(submit, transport
         assert await flow.store.finish(flow.claim, flow.outcome())
     replacement = replace(flow.rig.target, name="replacement")
     service = TransportService(
-        Outbox({replacement.name: replacement}, ADAPTERS), owner_domain="original"
+        Outbox({replacement.name: replacement}, ADAPTERS, records=history_records),
+        owner_domain="original",
     )
     args = dict(
         transport_task_id=flow.handle.transport_task_id,
@@ -362,18 +374,23 @@ async def test_evidence_transactions_retry_without_changing_the_original_claim(
 
                 @event.listens_for(session.sync_session, "after_begin")
                 def capture_isolation(_, transaction, connection):
-                    initial_isolations.append(connection.scalar(text("SHOW transaction_isolation")))
+                    if not transaction.nested:
+                        initial_isolations.append(
+                            connection.scalar(text("SHOW transaction_isolation"))
+                        )
 
             if len(attempts) <= failures:
 
-                def fail(_):
+                def fail(sync_session):
+                    if sync_session.in_nested_transaction():
+                        return
                     assert flow.notices == []
                     error = Failure()
                     error.sqlstate = sqlstate
                     raise OperationalError(None, None, error)
 
                 if sqlstate != "lost_reply":
-                    event.listen(session.sync_session, "before_commit", fail, once=True)
+                    event.listen(session.sync_session, "before_commit", fail)
             yield session
             if sqlstate == "lost_reply" and len(attempts) == 1:
                 raise ConnectionError("lost commit reply")
@@ -396,5 +413,143 @@ async def test_evidence_transactions_retry_without_changing_the_original_claim(
             )
         )
         assert (task.submission_acceptance is not None) is accepted
-        message = await session.get(ReliableMessage, flow.claim.message_id)
+        message = await message_history_view(
+            session, await session.get(ReliableMessage, flow.claim.message_id)
+        )
         assert message.status == "SENDING" and message.lease_id == flow.claim.lease_id
+
+
+async def test_acceptance_body_references_preserve_original_basis(submit, transport_request):
+    flow = submit
+    from app.core.strict_json import canonical_digest
+
+    await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+        flow.claim, flow.outcome()
+    )
+    async with flow.rig.factory() as session:
+        result = await TransportService(
+            flow.rig.outbox, owner_domain="original"
+        ).get_submission_acceptance(
+            session,
+            transport_task_id=flow.handle.transport_task_id,
+            client_request_id=flow.handle.client_request_id,
+            caller=transport_request["caller"],
+        )
+        assert result.state == "ACCEPTED"
+        task = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == flow.handle.transport_task_id
+            )
+        )
+        stored = task.submission_acceptance
+        assert "request_raw" not in stored and "response_raw" not in stored
+        assert stored["format_version"] == 2
+        assert stored["evidence_sha256"] == canonical_digest(asdict(result.basis))
+        assert result.basis.lease_id == flow.claim.lease_id and result.basis.saved_at is not None
+
+
+async def test_acceptance_observer_survives_later_finish_failure_without_duplicate_body(
+    submit, transport_request, monkeypatch
+):
+    from app.models import IntegrationRecord
+
+    flow = submit
+    outcome = flow.outcome()
+    await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+        flow.claim, outcome
+    )
+    original_finish = history_records.finished
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("injected finish failure")
+
+    monkeypatch.setattr(history_records, "finished", fail)
+    with pytest.raises(RuntimeError):
+        await flow.store.finish(flow.claim, outcome)
+    async with flow.rig.factory() as session:
+        task = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == flow.handle.transport_task_id
+            )
+        )
+        assert task.submission_acceptance is not None
+        before = list(
+            await session.scalars(
+                select(IntegrationRecord).where(
+                    IntegrationRecord.exchange_id == flow.claim.message.exchange_id,
+                    IntegrationRecord.record_kind == "HTTP_RESPONSE_OBSERVED",
+                )
+            )
+        )
+        assert len(before) == 1 and before[0].raw_body == outcome.result.body
+    monkeypatch.setattr(history_records, "finished", original_finish)
+    assert await flow.store.finish(flow.claim, outcome)
+    async with flow.rig.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(IntegrationRecord).where(
+                    IntegrationRecord.exchange_id == flow.claim.message.exchange_id,
+                    IntegrationRecord.raw_body == outcome.result.body,
+                )
+            )
+        )
+        assert len(rows) == 1 and rows[0].id == before[0].id
+
+
+async def test_observer_retries_whole_transaction_after_core_record_serialization_failure(
+    submit, monkeypatch
+):
+    flow = submit
+    original = history_records.observe_response
+    sessions = []
+
+    class Failure(Exception):
+        sqlstate = "40001"
+
+    async def fail_twice(session, **kwargs):
+        sessions.append(session)
+        if len(sessions) <= 2:
+            try:
+                raise OperationalError(None, None, Failure())
+            except OperationalError as error:
+                raise history_records.EvidencePersistenceError(
+                    "integration evidence unavailable"
+                ) from error
+        return await original(session, **kwargs)
+
+    monkeypatch.setattr(history_records, "observe_response", fail_twice)
+    await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+        flow.claim, flow.outcome()
+    )
+    assert len(sessions) == 3 and len({id(s) for s in sessions}) == 3
+    assert flow.notices == ["original"]
+
+
+async def test_consumption_keeps_independent_acceptance_source_after_outbox_cleanup(submit):
+    from app.models import IntegrationRecord
+
+    flow = submit
+    await submission_observer(flow.rig.outbox.targets, flow.rig.factory, flow.notices.append)(
+        flow.claim, flow.outcome()
+    )
+    async with flow.rig.factory.begin() as session:
+        task = await session.scalar(
+            select(TransportTask).where(
+                TransportTask.transport_task_id == flow.handle.transport_task_id
+            )
+        )
+        reply_id = task.acceptance_response_record_id
+        await session.execute(
+            delete(ReliableMessage).where(ReliableMessage.id == flow.claim.message_id)
+        )
+        identity = await history_records.record_consumption(
+            session,
+            owner_domain="original",
+            action_id="departure",
+            source=history_records.SourceRef("TRANSPORT_TASK", task.transport_task_id),
+            consumed_at=datetime.now(UTC),
+        )
+    async with flow.rig.factory() as session:
+        record = await session.get(IntegrationRecord, identity)
+        assert record.parent_record_id == reply_id
+        assert record.details["coverage_reason"] == "ORIGINAL_REFERENCE"

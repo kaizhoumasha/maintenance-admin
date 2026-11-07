@@ -5,10 +5,11 @@ import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy import delete, select
 
+from app.integrations import history as history_records
 from app.integrations.ecs_command import compile_commands
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
-from app.models import Device, DeviceRoute, EcsCommand, WorkLine
+from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine
 from app.reliable.store import MessageStore
 from app.services.device_routes import DeviceRoutes
 from tests.helpers import EcsMove, add_bound_device, loopback_app, simulator_sender
@@ -55,7 +56,9 @@ async def test_configuration_commit_before_gate_stops_the_claim(role_device, wai
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("requires PostgreSQL row locks")
     command = await create(role_device, "before-gate")
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     pending = None
     try:
@@ -69,7 +72,12 @@ async def test_configuration_commit_before_gate_stops_the_claim(role_device, wai
             assert not pending.done()
         assert not await asyncio.wait_for(pending, 5)
         async with ecs.factory() as session:
-            saved = await session.get(EcsCommand, command.command_code)
+            saved = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == command.command_code,
+                )
+            )
             assert saved.hold_reason == "AUTHORIZATION_REVOKED"
             assert saved.dispatch_started_at is None
     finally:
@@ -81,13 +89,14 @@ async def test_configuration_commit_before_gate_stops_the_claim(role_device, wai
 async def test_gate_commit_precedes_configuration_and_later_attempt_is_blocked(
     role_device, wait_for_lock, monkeypatch
 ):
-    from app.models import EcsSendEvidence
 
     ecs = role_device.ecs
     if ecs.engine.dialect.name != "postgresql":
         pytest.skip("requires PostgreSQL row locks")
     command = await create(role_device, "gate-first")
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     locked, release = asyncio.Event(), asyncio.Event()
     original = ecs.service.routes.authorize_frozen
@@ -116,16 +125,17 @@ async def test_gate_commit_precedes_configuration_and_later_attempt_is_blocked(
         await asyncio.wait_for(writer, 5)
         assert not await store.before_send(claim, ecs.targets["ecs"])
         async with ecs.factory() as session:
-            saved = await session.get(EcsCommand, command.command_code)
-            assert saved.dispatch_started_at is not None
-            assert saved.hold_reason == "AUTHORIZATION_REVOKED"
-            attempts = list(
-                await session.scalars(
-                    select(EcsSendEvidence).where(
-                        EcsSendEvidence.command_code == command.command_code
-                    )
+            saved = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == command.command_code,
                 )
             )
+            assert saved.dispatch_started_at is not None
+            assert saved.hold_reason == "AUTHORIZATION_REVOKED"
+            from tests.helpers import ecs_attempt_evidence
+
+            attempts = await ecs_attempt_evidence(session, command.command_code)
             assert len(attempts) == 1
     finally:
         release.set()
@@ -164,7 +174,12 @@ async def test_loopback_only_receives_commands_from_current_configuration(role_d
                 await asyncio.gather(*list(sender.inflight))
         assert [row["command_code"] for row in received] == [current.command_code]
         async with ecs.factory() as session:
-            old = await session.get(EcsCommand, original.command_code)
+            old = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == original.command_code,
+                )
+            )
             assert old.hold_reason == "AUTHORIZATION_REVOKED"
             assert (
                 await ecs.service.get_by_call(session, owner=ecs.owner, call_key="old")
