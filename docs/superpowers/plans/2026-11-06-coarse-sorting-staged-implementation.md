@@ -101,6 +101,16 @@ Ruff、格式及差异检查通过。仅退架已有并发、原接纳、迟到�
 
 粗分业务和合同检查回归共 483 项通过、16 项按条件跳过。两条新增路径在 SQLite 和独立 PostgreSQL 各执行一次，4 项均通过。正式目录仍只启用原首段，旧候选队列保持隔离，Transport 原任务结果更正独立交付。
 
+### WES 联调装配
+
+在既有 `enterprise-backend-int` 保持 `ENVIRONMENT=local`，显式配置 `COARSE_SORTING_TAIL_ENABLED=true`。API、worker 和 Beat 从同一份站点配置加载联调合同，与其他业务子包共用本项目数据库、Redis、Sender、提交后唤醒和 `scan_pending`。粗分新增分配、完成报告、共享离场求值，以及 `PUT_TO_BIN` 和 `MOVE_TO_NG`。开关默认关闭，`production` 拒绝启用，正式目录继续只装配原首段。
+
+- 升级前核对本项目队列中没有旧候选箱格合同的消息。旧候选库、队列和旧 WES 继续使用各自原环境，首段待办留在本项目原库并按原身份继续。
+- `RELIABLE_TARGETS` 分别配置唯一一个 `wms-decisions`、`wms-facts` 和 `wms-transport` 静态目标。缺少、重复或使用快照地址模式时，API 和 worker 拒绝启动。ECS 地址沿用设备路由。模拟回归使用临时数据及模拟对端，现场联调沿用站点配置。
+- 通过工作线配置绑定 `INPUT_ARM`、`CONVEYOR`、`OUTPUT_ARM` 和 `OUTPUT_RACK`。用 JSON 对象 `COARSE_SORTING_OUTPUT_LOCATIONS`、`COARSE_SORTING_NG_LOCATIONS` 配置工作线编码到 ECS 结果位置的映射，例如 `{"COARSE-A":"OUTPUT-POINT"}` 与 `{"COARSE-A":"NG-POINT"}`。非法映射在启动时拦截。缺少某条线的末端配置时保持原待办，不登记相应后续命令。
+- 粗分分配和执行报告必须由粗分业务推进发送。调试控制台可查看合同，但不提供这两项的手工触发。
+- 备份现有联调库后执行迁移，再协调重启 API、worker 和单个 Beat。原身份恢复仍核对原证据及当前授权，Transport 原任务结果更正继续独立交付。
+
 ## 联调与正式启用前置
 
 以下事项按归属分别跟踪。相应流程在启用前须满足这些条件。
