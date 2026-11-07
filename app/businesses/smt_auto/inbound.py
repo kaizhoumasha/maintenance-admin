@@ -393,13 +393,15 @@ class Inbound:
                 ),
                 target=SCAN,
             )
+            command = PickAndPut.from_millimeters(**params)
+            params = command.model_dump()
             view = await self.ecs.create(
                 session,
                 owner=OWNER,
                 call_key=plate.pick_call_key,
                 device_code=role.device_code,
                 timeout_ms=settings.rack_arm_timeout_ms,
-                command=PickAndPut(**params),
+                command=command,
             )
             plate.pick_command_code = view.command_code
             plate.source_arrival_snapshot = {
@@ -580,13 +582,15 @@ class Inbound:
                     },
                 ),
             )
+            command = PickAndPut.from_millimeters(**params)
+            params = command.model_dump()
             view = await self.ecs.create(
                 session,
                 owner=OWNER,
                 call_key=plate.put_call_key,
                 device_code=role.device_code,
                 timeout_ms=settings.bin_arm_timeout_ms,
-                command=PickAndPut(**params),
+                command=command,
             )
             plate.put_command_code = view.command_code
             plate.target_snapshot = {
@@ -811,13 +815,15 @@ class Inbound:
             params = dict(
                 source=SCAN, target=dict(location_id="STATION_NG", location_type="SCAN_NG")
             )
+            command = PickAndPut.from_millimeters(**params)
+            params = command.model_dump()
             view = await self.ecs.create(
                 session,
                 owner=OWNER,
                 call_key=plate.put_call_key,
                 device_code=role.device_code,
                 timeout_ms=self.settings[work.work_line_id].bin_arm_timeout_ms,
-                command=PickAndPut(**params),
+                command=command,
             )
             plate.put_command_code = view.command_code
             plate.target_snapshot = {

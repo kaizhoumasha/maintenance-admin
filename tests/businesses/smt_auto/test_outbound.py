@@ -251,9 +251,18 @@ async def outbound_host(s5_roller, request, monkeypatch):
     "wait,disabled,cancel",
     [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
 )
+@pytest.mark.parametrize("legacy_diameter", [False, True])
 async def test_original_bin_pick_put_report_survives_wait_and_disable(
-    outbound_host, wait, disabled, cancel
+    outbound_host, wait, disabled, cancel, legacy_diameter, monkeypatch
 ):
+    from app.businesses.smt_auto.ecs_command import PickAndPut
+
+    builder = PickAndPut.from_millimeters
+    if legacy_diameter:
+        # Create frozen commands using the builder used before diameter conversion.
+        monkeypatch.setattr(
+            PickAndPut, "from_millimeters", classmethod(lambda cls, **params: cls(**params))
+        )
     host = outbound_host
     async with host.factory.begin() as session:
         work = await session.get(AutoBinWork, host.work_id)
@@ -269,7 +278,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             bin_type=3,
             reel_layer=2,
             reel_thickness=15.3,
-            reel_diameter=7,
+            reel_diameter=179,
         ),
     )
     async with host.factory.begin() as session:
@@ -296,6 +305,9 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             ]["reel_totalthickness"]
             == 30.6
         )
+        raw = json.loads(await read_history_body(session, command.request_record_id))
+        assert raw["params"]["source"]["reel_diameter"] == (179 if legacy_diameter else 7)
+        assert plate.source_params["reel_diameter"] == 179
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
@@ -333,8 +345,17 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=170)
         assert plate.put_command_code
         put_code = plate.put_command_code
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == put_code,
+            )
+        )
+        raw = json.loads(await read_history_body(session, command.request_record_id))
+        assert raw["params"]["target"]["reel_diameter"] == (179 if legacy_diameter else 7)
         if disabled:
             (await session.get(WorkLine, 1)).is_enabled = False
+    monkeypatch.setattr(PickAndPut, "from_millimeters", builder)
     assert (await host.arm_result(put_code)).status_code == 200
     async with host.factory.begin() as session:
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=180)
@@ -352,6 +373,20 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
     async with host.factory.begin() as session:
         original = await session.get(AutoOutboundPlate, plate_id)
         assert not await host.outbound.closed(session, original)
+        snapshot = original.source_arrival_snapshot
+        command = snapshot["put_command"]
+        params = command["params"]
+        original.source_arrival_snapshot = {
+            **snapshot,
+            "put_command": {
+                **command,
+                "params": {**params, "target": {**params["target"], "reel_diameter": 15}},
+            },
+        }
+        await host.outbound.advance_report(session, plate_id=plate_id, now_ms=189)
+        assert original.report_consumed_at_ms is None
+        assert not await host.outbound.closed(session, original)
+        original.source_arrival_snapshot = snapshot
         plate = await host.outbound.advance_report(session, plate_id=plate_id, now_ms=190)
         assert await host.outbound.closed(session, plate)
         assert not plate.pending
@@ -412,7 +447,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
             rack_layer=2,
             rack_column=3,
             reel_thickness=15.3,
-            reel_diameter=7,
+            reel_diameter=330.2,
         ),
     )
     async with host.factory.begin() as session:
@@ -432,6 +467,8 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         raw = json.loads(await read_history_body(session, (command).request_record_id))
         assert raw["params"]["source"]["location_id"] == "STATION_B"
         assert raw["params"]["source"]["rack_layer"] == "2"
+        assert raw["params"]["source"]["reel_diameter"] == 13
+        assert plate.source_params["reel_diameter"] == 330.2
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=60)
@@ -523,6 +560,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
             "params"
         ]["target"]
         assert target["reel_thickness"] == 15.3
+        assert target["reel_diameter"] == 13
         assert target["rack_layer"] == "4"
         member = await session.get(AutoOutboundSourceMember, member_id)
         assert await host.outbound.face_source_terminal(session, member) is (next_mode is None)
