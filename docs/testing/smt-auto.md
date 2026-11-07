@@ -28,3 +28,9 @@ SMT AUTO 的入库与出库共用宿主、待办入口和原身份恢复。API�
 方向与收尾组合 **208 项通过**，包含实际点位代入后的入库、出库、原释放与确认、归档、事务、目录和 SQLite/PostgreSQL 迁移验证。两线实际 worker/Beat 回归在修正测试目标名后分别通过，共 **2 项通过**。每线都验证并发首问唯一、原 PREPARE 重启恢复、NO_WORK、取消及原 ECS SUCCESS 恢复。Alembic 代码 head 仍为 `smtautosources`。
 
 现场收尾仍需核对实际工作线配置、容量和设备连通性。两臂未配置执行超时时发送 `timeout: 0`。出库空取原 Result、NG 放置和结果重报、WMS 入账与 RCS 到位继续按 D2–D8 联调验收。
+
+## 完成确认与原尾箱恢复（2026-11-07）
+
+[完成确认回归](../../tests/businesses/smt_auto/test_completion.py)覆盖仅目标架首版等待、供箱后未到/部分到生产、原生产与必报结清后不等尾箱 Result 确认、迟到/失败原结果独立恢复、旧确认依据兼容，以及正常/取消归档从最后原结果消费后保留完整期限。[共享完成检查](../../tests/businesses/bin_roller/test_completion_readiness.py)与[MANUAL 供箱回归](../../tests/businesses/smt_manual/test_supply_completion.py)共同核对成功投箱计数及严格原身份；[检查点保留回归](../../tests/businesses/bin_roller/test_four_table_retention.py)验证原供箱清单随检查点保留，检查点清理后解除引用。
+
+最终源代码的六道完整回归为 **6689 passed / 150 skipped**，6839 个收集项与报告项逐项一致，无缺项、额外项或重复项，六道退出码均为 0；不与前文历史组合数字相加。Ruff、820 文件格式检查和差异检查通过。过程及验收边界见[本轮交付记录](../superpowers/plans/2026-11-07-smt-completion-readiness.md#最终交付验证2026-11-07)；此结果不包含 WMS/ECS 实际对端或设备现场验收。
