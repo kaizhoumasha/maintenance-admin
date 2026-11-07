@@ -11,6 +11,7 @@ from app.integrations.wms_request import Endpoint, RequestPayload
 from app.integrations.wms_request import operation as registry
 from app.models import ReliableMessage
 from app.services import dev_wms_request_service
+from tests.helpers import message_history_view
 
 
 @pytest.fixture(autouse=True)
@@ -33,7 +34,7 @@ async def test_json_input_with_non_json_native_field_types_is_accepted(sessions,
         out = await dev_wms_request_service.send(
             session, dated, str(uuid7(clock())), {"at": "2026-01-01T00:00:00Z"}
         )
-        row = await session.scalar(select(ReliableMessage))
+        row = await message_history_view(session, await session.scalar(select(ReliableMessage)))
     assert out.status == "PENDING"
     assert json.loads(row.request_raw)["data"] == {"at": "2026-01-01T00:00:00Z"}
 
@@ -53,7 +54,9 @@ async def test_json_input_keeps_registered_aliases_defaults_and_serializers(sess
         out = await dev_wms_request_service.send(
             session, "example.fact.aliased@v1", str(uuid7(clock())), {"first": 11, "second": 22}
         )
-        row = await session.get(ReliableMessage, out.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, out.message_id)
+        )
     assert json.loads(row.request_raw)["data"] == {"first": 22, "second": 11, "qty": "Q2"}
 
 

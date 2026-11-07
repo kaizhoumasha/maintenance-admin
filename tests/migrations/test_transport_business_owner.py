@@ -64,7 +64,7 @@ async def test_transport_owner_upgrade_preserves_rows_and_fences_downgrade(backe
             )
             original = (await conn.execute(select(task_table))).mappings().one()
             frozen_raw = await conn.scalar(select(message_table.c.request_raw))
-        assert (result := await migrate("upgrade", "head")).returncode == 0, result.stderr
+        assert (result := await migrate("upgrade", "f0b120261030")).returncode == 0, result.stderr
         async with engine.begin() as conn:
             columns = await conn.run_sync(lambda c: inspect(c).get_columns("transport_task"))
             assert any(c["name"] == "owner_domain" and c["nullable"] for c in columns)
@@ -99,7 +99,7 @@ async def test_transport_owner_upgrade_preserves_rows_and_fences_downgrade(backe
             )
             await conn.execute(current.delete().where(current.c.transport_task_id == "owned-task"))
         assert (result := await migrate("downgrade", before_owner)).returncode == 0, result.stderr
-        assert (result := await migrate("upgrade", "head")).returncode == 0, result.stderr
+        assert (result := await migrate("upgrade", "f0b120261030")).returncode == 0, result.stderr
         async with engine.begin() as conn:
             assert await conn.scalar(select(current.c.owner_domain)) is None
             assert await conn.scalar(select(message_table.c.request_raw)) == frozen_raw
@@ -107,7 +107,9 @@ async def test_transport_owner_upgrade_preserves_rows_and_fences_downgrade(backe
             await conn.execute(message_table.delete())
         if backend == "postgres":
             assert (result := await migrate("downgrade", "base")).returncode == 0, result.stderr
-            assert (result := await migrate("upgrade", "head")).returncode == 0, result.stderr
+            assert (result := await migrate("upgrade", "f0b120261030")).returncode == 0, (
+                result.stderr
+            )
             assert (result := await migrate("downgrade", "base")).returncode == 0, result.stderr
         else:
             assert (result := await migrate("downgrade", before_owner)).returncode == 0, (

@@ -17,6 +17,7 @@ from app.integrations.wms_transport import (
 from app.integrations.wms_transport.protocol import SUBMIT_TTL
 from app.models import Menu, ReliableMessage, TransportTask
 from app.reliable import InvalidMessage
+from tests.helpers import message_history_view
 
 from .helpers import counts
 
@@ -39,8 +40,11 @@ async def test_same_normalized_input_replays_without_new_identity(
         second = await replay.move_rack(session, **transport_request, rcs_template_id="F01")
         await session.commit()
         assert first == second and await counts(session, rig) == (1, 1)
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            ),
         )
         task = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == first.transport_task_id)
@@ -302,8 +306,11 @@ async def test_all_transport_methods_preserve_original_owner_and_frozen_identity
         row = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == first.transport_task_id)
         )
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+            ),
         )
         frozen = (row.input_digest, row.operation_id, row.frozen, message.request_raw)
         assert row.owner_domain == owner
@@ -322,8 +329,11 @@ async def test_all_transport_methods_preserve_original_owner_and_frozen_identity
         row = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == first.transport_task_id)
         )
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.operation_id == row.operation_id)
+            ),
         )
         assert (row.input_digest, row.operation_id, row.frozen, message.request_raw) == frozen
 

@@ -23,7 +23,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import create_database_engine
 from app.http_client import DeliveryState, HttpRequest, HttpResult, validate_request
-from app.models import ReliableMessage
+from app.integrations import history as history_records
+from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference, ReliableMessage
 from app.reliable import FailReason, MessageDraft, Outbox, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 from app.reliable.sender import Sender
@@ -247,7 +248,13 @@ async def storage():
     try:
         async with engine.begin() as connection:
             await connection.run_sync(LabBase.metadata.create_all)
-            await connection.run_sync(ReliableMessage.__table__.create)
+            for model in (
+                IntegrationExchange,
+                IntegrationRecord,
+                IntegrationReference,
+                ReliableMessage,
+            ):
+                await connection.run_sync(model.__table__.create)
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
@@ -258,7 +265,7 @@ def outbox_setup(storage):
     target = TargetConfig("wms", "http://example.test", "wms-transport")
     targets = {"wms": target}
     adapters = {"wms-transport": TransportSubmitAdapter()}
-    return clock, targets, adapters, Outbox(targets, adapters, clock=clock)
+    return clock, targets, adapters, Outbox(targets, adapters, clock=clock, records=history_records)
 
 
 async def save_and_enqueue(storage, outbox):
@@ -288,7 +295,7 @@ async def test_committed_message_is_delivered(storage):
     request = adapters["wms-transport"].build_request(message(), targets["wms"])
     validate_request(targets["wms"].http_config(), request)
     assert client.requests == []
-    store = MessageStore(storage, clock=clock)
+    store = MessageStore(storage, clock=clock, records=history_records)
     sender = Sender(
         store, targets, adapters, {"wms": client}, clock=clock, uniform=DeterministicRandom()
     )
@@ -301,7 +308,10 @@ async def test_committed_message_is_delivered(storage):
             assert business.request_raw == REQUEST_RAW
             assert row.status == "DONE"
             assert row.attempts == 1
-            assert row.response_raw == response.body
+            bodies = await history_records.read_bodies(
+                session, record_ids=(row.terminal_response_record_id,)
+            )
+            assert bodies[row.terminal_response_record_id].raw_body == response.body
             assert row.lease_id is None
             assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
         assert client.closed
@@ -342,6 +352,8 @@ uv run python -m pytest --noconftest -q tests/reliable/test_transport_submit_exa
 预期为 `23 passed`。成功用例实际经过 `Outbox.enqueue → Sender.tick → MessageStore.claim → ScriptedHttpClient.send → classify_response → 数据库 DONE`。回滚用例证明业务记录和出站消息共同回滚。网络保护 fixture 会在尝试打开连接时使测试失败。
 
 可靠层表带项目 schema（`enterprise_backend`），所以实验必须用 `create_database_engine` 建引擎：它在 SQLite 下去掉 schema 前缀、在 PostgreSQL 下设置 `search_path`；直接用 `create_async_engine` 建表会报 `unknown database enterprise_backend`。
+
+统一历史将规范原文保存在证据表，实验因此同时创建三类历史表，并给 Outbox / MessageStore 注入同一个记录端口；断言沿终局响应指针读取字节。生产业务继续使用[公开结果读口](integrations/outbound-results.md)，不直接查询运行表或历史原文。
 
 `FakeClock` 固定持久化时间，`DeterministicRandom` 固定退避随机输入。`Sender.aclose()` 等待本次在途任务并关闭假客户端；内存库由 fixture 释放。测试读取 `ReliableMessage` 和装配 `Sender/MessageStore` 是基础设施测试做法，生产业务不能照搬这些内部依赖。
 

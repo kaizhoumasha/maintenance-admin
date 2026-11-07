@@ -11,7 +11,7 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.integrations.ecs_command import CommandOwner
-from app.models import Device, WorkLine
+from app.models import Device, IntegrationExchange, WorkLine
 from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import allocated, reach_allocate, reach_move
 
@@ -325,7 +325,7 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
     from alembic.migration import MigrationContext
     from alembic.operations import Operations
 
-    from app.models import EcsCommand, EcsResultEvidence, ReliableMessage
+    from app.models import ReliableMessage
     from app.schemas.workline import WorkLineUpdate
     from app.services.asset_audit import AssetActor
     from app.services.workline_service import update_workline
@@ -366,13 +366,17 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
             await connection.run_sync(remigrate)
         await engine.dispose()
 
+    from tests.helpers import clear_integration_history
+
     async with flow.factory.begin() as session:
-        await session.execute(
-            delete(EcsResultEvidence).where(EcsResultEvidence.command_code == row["command_code"])
+        root_id = await session.scalar(
+            select(IntegrationExchange.id).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == row["command_code"],
+            )
         )
-        await session.execute(
-            delete(EcsCommand).where(EcsCommand.command_code == row["command_code"])
-        )
+        await session.execute(delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id))
+        await clear_integration_history(session, (root_id,))
         await session.execute(
             delete(ReliableMessage).where(ReliableMessage.id == row["validation_message_id"])
         )
@@ -588,7 +592,7 @@ async def test_missing_historical_references_hold_when_original_already_started(
 
 
 async def test_missing_move_reference_does_not_repeat_a_physically_possible_move(direct):
-    from app.models import EcsCommand, ReliableMessage
+    from app.models import ReliableMessage
 
     flow = direct
     row = await reach_move(flow)
@@ -609,9 +613,15 @@ async def test_missing_move_reference_does_not_repeat_a_physically_possible_move
         await session.execute(
             delete(ReliableMessage).where(ReliableMessage.operation_id == row["command_code"])
         )
-        await session.execute(
-            delete(EcsCommand).where(EcsCommand.command_code == row["command_code"])
+        from tests.helpers import clear_integration_history
+
+        root_id = await session.scalar(
+            select(IntegrationExchange.id).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == row["command_code"],
+            )
         )
+        await clear_integration_history(session, (root_id,))
     for _ in range(2):
         assert await flow.service.advance(row["id"]) == "MOVE_RECONCILIATION_REQUIRED"
     assert await flow.dispatch() == 0
@@ -644,3 +654,30 @@ async def test_allocated_does_not_authorize_an_output_device_changed_since_reque
     action = (await flow.action_rows(row["id"]))[-1]
     assert action["kind"] == "ALLOCATE_STORAGE"
     assert action["evidence_history"][0]["data"] == flow.peer.allocate
+
+
+async def test_original_job_reference_finds_scan_decision_command_and_result(direct):
+    from app.schemas.integration_history import ExchangeListParams
+    from app.services.integration_history_service import list_exchanges
+
+    flow = direct
+    row = await reach_move(flow)
+    await flow.dispatch()
+    assert (await flow.result(row)).status_code == 200
+    async with flow.factory() as session:
+        page = await list_exchanges(
+            session,
+            ExchangeListParams(
+                reference_kind="BUSINESS_TASK",
+                reference_namespace="coarse_sorting",
+                reference_value=row["id"],
+            ),
+        )
+        assert len(page["items"]) == 4
+        assert {item["role"] for item in page["items"]} == {"RECEIPT", "OUTGOING", "ECS_COMMAND"}
+        assert {item["protocol"] for item in page["items"]} == {
+            "ecs-event",
+            "wms-decisions",
+            "ecs-command",
+            "ecs-result",
+        }

@@ -14,7 +14,7 @@ from sqlalchemy import Engine, event
 
 path, table, revision = sys.argv[1:]
 config = Config("alembic.ini")
-command.upgrade(config, "head")
+command.upgrade(config, "a019d20261022" if table == "transport_task" else "a019c20261022")
 if table == "transport_task":
     trigger = "DROP TABLE transport_task"
     insert = """INSERT INTO transport_task

@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from app.models import Device, DeviceRoute, EcsCommand, TransportTask, WorkLine
+from app.models import Device, DeviceRoute, IntegrationExchange, TransportTask, WorkLine
 from tests.businesses.smt_manual.factory_profile import PROFILE
-from tests.helpers import manual_return_opportunity
+from tests.helpers import manual_return_opportunity, read_history_body
 
 
 async def ready(flow, *, line=0):
@@ -350,16 +350,24 @@ async def test_source_context_and_same_bin_route_to_own_scan2(profile_flow):
         zip(("KT16", "KT18"), tasks, strict=True)
     )
     async with flow.factory() as session:
-        commands = list(await session.scalars(select(EcsCommand)))
+        commands = list(
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        )
         assert {r.device_code for r in commands} == {
             "STATION_SCAN9",
             "STATION_SCAN10",
             "STATION_SCAN13",
             "STATION_SCAN14",
         }
-        assert all(json.loads(r.request_raw)["timeout"] == 30000 for r in commands)
+        payloads = [await read_history_body(session, r.request_record_id) for r in commands]
+        assert all(json.loads(raw)["timeout"] == 30000 for raw in payloads)
         assert all((r.expires_at - r.created_at).total_seconds() == 300 for r in commands)
-        assert all(json.loads(r.request_raw)["device_code"] == r.device_code for r in commands)
+        assert all(
+            json.loads(raw)["device_code"] == r.device_code
+            for r, raw in zip(commands, payloads, strict=True)
+        )
         assert all(r.route["origin"] == flow.origin for r in commands)
 
 
@@ -407,10 +415,18 @@ async def test_wait_due_work_required_completion_original_release(
     ]
     assert len(releases) == 1 and releases[0]["release_command_code"] == released["command_code"]
     async with flow.factory() as session:
-        command = await session.get(EcsCommand, released["command_code"])
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == released["command_code"],
+            )
+        )
         assert command.device_code == flow.devices[line]["SCAN2"]
         assert command.applied_result_id is None
-        assert json.loads(command.request_raw)["timeout"] == 30000
+        assert (
+            json.loads(await read_history_body(session, (command).request_record_id))["timeout"]
+            == 30000
+        )
 
 
 @pytest.mark.parametrize("line", [0, 1], ids=["KT16", "KT18"])

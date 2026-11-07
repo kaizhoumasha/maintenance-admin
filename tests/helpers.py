@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
+from sqlalchemy import update
 
 from app.core.security import create_access_token
+from app.integrations import history as history_records
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
@@ -20,6 +22,208 @@ PAYLOAD = {"username": "kai", "email": "k@example.com", "password": "password123
 
 
 LOGIN = {"username": "root", "password": "password123"}
+
+
+class OpaqueHistoryAdapter:
+    def build_request(self, message, target):
+        from app.http_client import HttpRequest
+
+        return HttpRequest("POST", "/opaque", body=message.request_raw)
+
+    def classify_response(self, message, result):
+        from app.reliable import Verdict, VerdictKind
+
+        return Verdict(VerdictKind.DELIVERED, response=result.body)
+
+
+async def read_history_body(session, record_id):
+    from app.integrations.history import read_bodies
+
+    assert session.in_transaction(), "read the body before leaving the caller's transaction"
+    bodies = await read_bodies(session, record_ids=(record_id,))
+    assert record_id in bodies, "stored original body is missing"
+    return bodies[record_id].raw_body
+
+
+async def read_receipts(session):
+    from sqlalchemy import select
+
+    from app.integrations.callback_receipts import find_receipt
+    from app.models import IntegrationExchange
+
+    identities = list(
+        await session.execute(
+            select(
+                IntegrationExchange.operation,
+                IntegrationExchange.operation_id,
+            )
+            .where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.receipt_active.is_(True),
+            )
+            .order_by(IntegrationExchange.receipt_id)
+        )
+    )
+    return [await find_receipt(session, operation, identity) for operation, identity in identities]
+
+
+async def read_diagnostic_snapshots(session):
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from app.core.strict_json import json_object
+    from app.integrations.history import read_bodies
+    from app.models import IntegrationRecord
+
+    records = list(
+        await session.scalars(
+            select(IntegrationRecord)
+            .where(
+                IntegrationRecord.evidence_class == "DIAGNOSTIC",
+                IntegrationRecord.record_kind == "CALLBACK_RECEIVED",
+                IntegrationRecord.body_state != "PURGED",
+            )
+            .order_by(IntegrationRecord.recorded_at, IntegrationRecord.id)
+        )
+    )
+    if not records:
+        return []
+    replies = list(
+        await session.scalars(
+            select(IntegrationRecord).where(
+                IntegrationRecord.evidence_class == "DIAGNOSTIC",
+                IntegrationRecord.record_kind == "RESPONSE_PREPARED",
+                IntegrationRecord.parent_record_id.in_(record.id for record in records),
+            )
+        )
+    )
+    bodies = await read_bodies(session, record_ids=tuple(r.id for r in [*records, *replies]))
+    by_request = {reply.parent_record_id: reply for reply in replies}
+    result = []
+    for record in records:
+        meta = record.details or {}
+        reply = by_request.get(record.id)
+        wire = bodies[record.id].raw_body
+        reply_wire = bodies[reply.id].raw_body if reply is not None else None
+        result.append(
+            SimpleNamespace(
+                id=record.id,
+                request_id=meta.get("request_id"),
+                source=meta.get("source"),
+                received_at=record.occurred_at,
+                body_state=bodies[record.id].body_state,
+                body_b64=base64.b64encode((wire or b"")[: 48 * 1024]).decode("ascii"),
+                truncated=meta.get("truncated", False),
+                outcome=meta.get("outcome"),
+                http_status=reply.http_status if reply is not None else None,
+                response_body=json_object(reply_wire) if reply_wire else None,
+            )
+        )
+    return result
+
+
+async def ecs_attempt_evidence(session, command_code):
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+
+    from app.integrations.ecs_command.lifecycle import get_attempt_conclusions
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    exchange_id = await session.scalar(
+        select(IntegrationExchange.id).where(
+            IntegrationExchange.role == "ECS_COMMAND",
+            IntegrationExchange.command_code == command_code,
+        )
+    )
+    if exchange_id is None:
+        return []
+    outcomes = await get_attempt_conclusions(session, exchange_id=exchange_id)
+    evidence = []
+    for lease_id, outcome in sorted(outcomes.items()):
+        record = await session.scalar(
+            select(IntegrationRecord)
+            .where(
+                IntegrationRecord.exchange_id == exchange_id,
+                IntegrationRecord.attempt_id == lease_id,
+                IntegrationRecord.record_kind == "ECS_ATTEMPT_CONCLUSION",
+            )
+            .order_by(IntegrationRecord.attempt_revision.desc())
+            .limit(1)
+        )
+        body = (
+            await read_history_body(session, record.parent_record_id)
+            if (record is not None and record.parent_record_id is not None)
+            else None
+        )
+        evidence.append(
+            SimpleNamespace(
+                lease_id=lease_id,
+                outcome=outcome,
+                response_raw=body,
+                http_status=record.http_status if record else None,
+                late=bool(record.late) if record else False,
+            )
+        )
+    return evidence
+
+
+async def clear_integration_history(session, exchange_ids):
+    from sqlalchemy import delete, or_, select, update
+
+    from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
+
+    exchange_ids = set(exchange_ids)
+    if not exchange_ids:
+        return
+    while True:
+        records = select(IntegrationRecord.id).where(
+            IntegrationRecord.exchange_id.in_(exchange_ids)
+        )
+        dependent = set(
+            await session.scalars(
+                select(IntegrationRecord.exchange_id).where(
+                    or_(
+                        IntegrationRecord.parent_record_id.in_(records),
+                        IntegrationRecord.body_record_id.in_(records),
+                        IntegrationRecord.response_record_id.in_(records),
+                    )
+                )
+            )
+        )
+        dependent.update(
+            await session.scalars(
+                select(IntegrationReference.exchange_id).where(
+                    IntegrationReference.related_exchange_id.in_(exchange_ids)
+                )
+            )
+        )
+        dependent.update(
+            await session.scalars(
+                select(IntegrationReference.related_exchange_id).where(
+                    IntegrationReference.exchange_id.in_(exchange_ids),
+                    IntegrationReference.related_exchange_id.is_not(None),
+                )
+            )
+        )
+        if dependent <= exchange_ids:
+            break
+        exchange_ids.update(dependent)
+    await session.execute(
+        delete(IntegrationReference).where(IntegrationReference.exchange_id.in_(exchange_ids))
+    )
+    await session.execute(
+        update(IntegrationExchange)
+        .where(IntegrationExchange.id.in_(exchange_ids))
+        .values(request_record_id=None, ack_record_id=None, current_response_record_id=None)
+    )
+    await session.execute(
+        delete(IntegrationRecord).where(IntegrationRecord.exchange_id.in_(exchange_ids))
+    )
+    await session.execute(
+        delete(IntegrationExchange).where(IntegrationExchange.id.in_(exchange_ids))
+    )
 
 
 METADATA_ONLY_GUARD = """
@@ -157,7 +361,7 @@ async def legacy_ecs_receipt(factory, event, *, created_at=None):
     from datetime import UTC, datetime
 
     from app.core.strict_json import canonical_digest
-    from app.models import CallbackReceipt
+    from app.integrations.callback_receipts import insert_receipt
 
     normalized = {
         "device_code": event["device_code"],
@@ -167,7 +371,8 @@ async def legacy_ecs_receipt(factory, event, *, created_at=None):
         "data": event.get("data", {}),
     }
     async with factory.begin() as session:
-        receipt = CallbackReceipt(
+        await insert_receipt(
+            session,
             operation="ecs.event",
             operation_id=canonical_digest(normalized),
             raw_digest=canonical_digest(event),
@@ -185,7 +390,6 @@ async def legacy_ecs_receipt(factory, event, *, created_at=None):
             resp_timestamp=1,
             created_at=created_at or datetime.now(UTC),
         )
-        session.add(receipt)
 
 
 async def add_bound_device(session, code, origin, *, role="SCAN1", line_code=None):
@@ -377,7 +581,9 @@ async def simulator_sender(ecs, origins):
     from app.reliable.store import MessageStore
 
     sender = Sender(
-        MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}),
+        MessageStore(
+            ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+        ),
         ecs.targets,
         ecs.adapters,
         {},
@@ -448,7 +654,9 @@ async def result_task(factory, *, bins=False, cycle_id=None, caller=None):
     caller = caller or TransportCaller("result-" + str(uuid7()), "station")
     cycle_id = cycle_id or str(uuid7())
     target = TargetConfig("result-" + str(uuid7()), "http://example.test", PROTOCOL)
-    service = TransportService(Outbox({target.name: target}, ADAPTERS), target=target.name)
+    service = TransportService(
+        Outbox({target.name: target}, ADAPTERS, records=history_records), target=target.name
+    )
     async with factory.begin() as session:
         args = dict(client_request_id=str(uuid7()), caller=caller, cycle_id=cycle_id)
         if bins:
@@ -961,15 +1169,7 @@ async def business_flow_fixture(factory, monkeypatch):
     from app.integrations.wms_request import ADAPTERS, Endpoint, RequestPayload, request_operation
     from app.integrations.wms_request import operation as requests
     from app.main import app
-    from app.models import (
-        CallbackReceipt,
-        Device,
-        DeviceRoute,
-        EcsCommand,
-        EcsSendEvidence,
-        ReliableMessage,
-        WorkLine,
-    )
+    from app.models import Device, DeviceRoute, IntegrationExchange, ReliableMessage, WorkLine
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
     from app.services.device_bindings import resolve_binding
@@ -1013,7 +1213,9 @@ async def business_flow_fixture(factory, monkeypatch):
             "seam-ecs": TargetConfig("seam-ecs", None, "ecs-command", address_mode="SNAPSHOT"),
             "seam-wms": TargetConfig("seam-wms", "http://127.0.0.1:45873", "wms-decisions"),
         }
-        outbox = Outbox(targets, {**ADAPTERS, "ecs-command": EcsCommandAdapter()})
+        outbox = Outbox(
+            targets, {**ADAPTERS, "ecs-command": EcsCommandAdapter()}, records=history_records
+        )
         bindings, annexes = compile_commands(FlowMove)
         commands = EcsCommands(
             outbox,
@@ -1188,24 +1390,19 @@ async def business_flow_fixture(factory, monkeypatch):
             yield state
         finally:
             async with factory.begin() as session:
-                await session.execute(
-                    delete(CallbackReceipt).where(CallbackReceipt.id.in_(receipt_ids))
-                )
-                await session.execute(
-                    delete(EcsSendEvidence).where(
-                        EcsSendEvidence.command_code.in_(
-                            select(EcsCommand.command_code).where(
-                                EcsCommand.owner_domain == state.owner.domain
-                            )
+                roots = set(
+                    await session.scalars(
+                        select(IntegrationExchange.id).where(
+                            (IntegrationExchange.owner_domain == state.owner.domain)
+                            | IntegrationExchange.target_key.in_(targets)
+                            | IntegrationExchange.receipt_id.in_(receipt_ids)
                         )
                     )
                 )
                 await session.execute(
-                    delete(EcsCommand).where(EcsCommand.owner_domain == state.owner.domain)
-                )
-                await session.execute(
                     delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
                 )
+                await clear_integration_history(session, roots)
                 await session.execute(delete(Device).where(Device.device_code.in_(state.codes)))
                 await session.execute(
                     delete(WorkLine).where(
@@ -1253,7 +1450,7 @@ async def flow_decision(flow, identity):
                 operation_id=operation_id,
             )
         sender = Sender(
-            MessageStore(flow.factory),
+            MessageStore(flow.factory, records=history_records),
             {target.name: target},
             flow.outbox.adapters,
             {target.name: AsyncHttpClient(HttpClientConfig(origin, "seam-wms"))},
@@ -1291,11 +1488,16 @@ async def cleanup_flow_results(factory, tasks, operation_ids):
     """Remove only identities explicitly created by one public-seam fixture."""
     from sqlalchemy import delete
 
-    from app.models import CallbackReceipt, ReliableMessage, TransportTask
+    from app.models import IntegrationExchange, ReliableMessage, TransportTask
 
     async with factory.begin() as session:
         await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.operation_id.in_(operation_ids))
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+            .where(IntegrationExchange.operation_id.in_(operation_ids))
         )
         await session.execute(
             delete(ReliableMessage).where(ReliableMessage.target.in_(t.target for t in tasks))
@@ -1375,12 +1577,10 @@ async def formal_manual_fixture(
     from app.integrations.ecs_command.result import receive_ecs_result
     from app.integrations.wms_callback.receiver import receive
     from app.models import (
-        CallbackReceipt,
         Device,
         DeviceRoute,
-        EcsCommand,
-        EcsResultEvidence,
-        EcsSendEvidence,
+        IntegrationExchange,
+        IntegrationRecord,
         ReliableMessage,
         TransportTask,
         WorkLine,
@@ -1494,6 +1694,7 @@ async def formal_manual_fixture(
             lifecycles=outbox.lifecycles,
             on_result=business_wakeups.wms_result_committed,
             on_delivered=business_wakeups.transport_submit_delivered,
+            records=history_records,
         )
         sender = Sender(
             state.store,
@@ -1693,7 +1894,9 @@ async def formal_manual_fixture(
         async def result(code, *, status="SUCCESS", rollback=False, before_commit=None):
             async with factory() as session:
                 command = await session.scalar(
-                    select(EcsCommand).where(EcsCommand.command_code == code)
+                    select(IntegrationExchange)
+                    .where(IntegrationExchange.role == "ECS_COMMAND")
+                    .where(IntegrationExchange.command_code == code)
                 )
                 raw = json.dumps(
                     dict(
@@ -1748,12 +1951,10 @@ async def formal_manual_fixture(
                         WorkLine,
                         Device,
                         DeviceRoute,
-                        EcsCommand,
+                        IntegrationExchange,
                         ReliableMessage,
                         TransportTask,
-                        CallbackReceipt,
-                        EcsResultEvidence,
-                        EcsSendEvidence,
+                        IntegrationRecord,
                     ):
                         evidence[model.__tablename__] = [
                             dict(r)
@@ -1769,18 +1970,14 @@ async def formal_manual_fixture(
                 )
             await sender.aclose()
             async with factory.begin() as session:
-                codes = select(EcsCommand.command_code).where(owned_device(EcsCommand.device_code))
-                await session.execute(
-                    delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
-                )
-                await session.execute(
-                    delete(EcsSendEvidence).where(EcsSendEvidence.command_code.in_(codes))
-                )
-                await session.execute(
-                    delete(ReliableMessage).where(ReliableMessage.operation_id.in_(codes))
-                )
-                await session.execute(
-                    delete(EcsCommand).where(owned_device(EcsCommand.device_code))
+                history_ids = list(
+                    await session.scalars(
+                        select(IntegrationExchange.id).where(
+                            owned_device(IntegrationExchange.device_code)
+                            | IntegrationExchange.operation_id.in_(state.receipts)
+                            | IntegrationExchange.target_key.in_(targets)
+                        )
+                    )
                 )
                 await session.execute(
                     delete(TransportTask).where(
@@ -1792,14 +1989,12 @@ async def formal_manual_fixture(
                     )
                 )
                 await session.execute(
-                    delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
-                )
-                await session.execute(
-                    delete(CallbackReceipt).where(
-                        (CallbackReceipt.operation_id.in_(state.receipts))
-                        | owned_device(CallbackReceipt.device_code)
+                    delete(ReliableMessage).where(
+                        ReliableMessage.target.in_(targets)
+                        | ReliableMessage.exchange_id.in_(history_ids)
                     )
                 )
+                await clear_integration_history(session, history_ids)
                 await clear_test_rack_jobs(session, state.lines)
                 cleanup_tables = list(reversed(tuple(tables.items())))
                 cleanup_tables.sort(key=lambda pair: pair[1].name != "bin_roller_bin_return")
@@ -1837,27 +2032,7 @@ async def formal_manual_fixture(
                         )
                         for key, table in tables.items()
                     }
-                    counts.update(
-                        {
-                            model.__tablename__: await session.scalar(
-                                select(__import__("sqlalchemy").func.count()).select_from(model)
-                            )
-                            for model in (
-                                WorkLine,
-                                __import__(
-                                    "app.models", fromlist=["WorkLinePosition"]
-                                ).WorkLinePosition,
-                                Device,
-                                DeviceRoute,
-                                EcsCommand,
-                                ReliableMessage,
-                                TransportTask,
-                                CallbackReceipt,
-                                EcsResultEvidence,
-                                EcsSendEvidence,
-                            )
-                        }
-                    )
+                    pass
                 (evidence_dir / (evidence_name + ".cleanup.json")).write_text(
                     json.dumps(counts, indent=2)
                 )
@@ -2144,8 +2319,22 @@ def bin_roller_query(tables, key):
     """Read current checkpoints; host tests keep their responsibility-oriented helpers."""
     from sqlalchemy import BigInteger, case, literal, select, union_all
 
-    from app.models import CallbackReceipt
+    from app.models import IntegrationExchange
 
+    receipt = (
+        select(
+            IntegrationExchange.receipt_id.label("id"),
+            IntegrationExchange.operation,
+            IntegrationExchange.operation_id,
+            IntegrationExchange.device_code,
+            IntegrationExchange.event_envelope,
+            IntegrationExchange.application_ref,
+            IntegrationExchange.event_context,
+            IntegrationExchange.created_at,
+        )
+        .where(IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True))
+        .subquery()
+    )
     if key == "scan2_release":
         c = tables["bin_passage"].c
         return (
@@ -2201,7 +2390,6 @@ def bin_roller_query(tables, key):
         ):
             c = tables[table_key].c
             event = c[point.lower() + "_event_id"]
-            receipt = CallbackReceipt.__table__
             command = (
                 c.release_command_code if point == "SCAN2" else c[point.lower() + "_command_code"]
             )
@@ -2264,7 +2452,7 @@ def bin_roller_query(tables, key):
             .order_by(c.id)
         )
     if key == "scan_fact":
-        c = CallbackReceipt.__table__.c
+        c = receipt.c
         subjects = union_all(select(tables["bin_passage"].c.id), select(tables["bin_return"].c.id))
         return (
             select(
@@ -2673,3 +2861,190 @@ def enable_racks(flow):
         output_locations=flow.output_locations,
         clock=lambda: flow.now,
     )
+
+
+async def message_history_view(session, message):
+    if message is None:
+        return None
+    from types import SimpleNamespace
+
+    from app.integrations.history import read_bodies
+
+    refs = {
+        "request_raw": message.request_record_id,
+        "response_raw": message.terminal_response_record_id,
+        "last_response_raw": message.last_response_record_id,
+    }
+    bodies = await read_bodies(
+        session, record_ids=tuple(identity for identity in refs.values() if identity)
+    )
+    values = {c.key: getattr(message, c.key) for c in message.__table__.c}
+    values.update(
+        {
+            name: bodies[identity].raw_body if identity in bodies else None
+            for name, identity in refs.items()
+        }
+    )
+    return SimpleNamespace(**values)
+
+
+async def set_message_bodies(session, message, **values):
+    from app.core.identifiers import uuid7
+    from app.integrations.history import RecordDraft, write_record
+
+    for name, raw in values.items():
+        field = {
+            "request_raw": "request_record_id",
+            "response_raw": "terminal_response_record_id",
+            "last_response_raw": "last_response_record_id",
+        }[name]
+        identity = (
+            None
+            if raw is None
+            else await write_record(
+                session,
+                draft=RecordDraft(
+                    exchange_id=message.exchange_id,
+                    record_kind="REQUEST_REGISTERED"
+                    if name == "request_raw"
+                    else "HTTP_RESPONSE_OBSERVED",
+                    event_key="TEST_SEED:" + str(uuid7()),
+                    direction="OUTBOUND" if name == "request_raw" else "INBOUND",
+                    raw_body=raw,
+                ),
+            )
+        )
+        setattr(message, field, identity)
+
+
+async def update_message_bodies(session, statement, **values):
+    from app.models import ReliableMessage
+
+    names = {"request_raw", "response_raw", "last_response_raw"}
+    fields = {key: value for key, value in values.items() if key not in names}
+    if not fields:
+        fields = {"updated_at": ReliableMessage.updated_at}
+    ids = list(await session.scalars(statement.values(**fields).returning(ReliableMessage.id)))
+    for identity in ids:
+        message = await session.get(ReliableMessage, identity)
+        await set_message_bodies(
+            session, message, **{key: value for key, value in values.items() if key in names}
+        )
+
+
+async def seed_transport_task(session, task):
+    from app.models import IntegrationExchange
+
+    root = IntegrationExchange(
+        role="OUTGOING",
+        protocol="wms-transport",
+        peer_system="WMS",
+        direction="OUTBOUND",
+        interaction_kind="REQUEST",
+        identity_kind="OPERATION_ID",
+        identity_value=task.operation_id,
+        operation="transport.task.submit@v1",
+        operation_id=task.operation_id,
+        owner_domain=task.owner_domain,
+        created_at=task.created_at,
+        coverage="PARTIAL",
+    )
+    session.add(root)
+    await session.flush()
+    task.submission_exchange_id = root.id
+    session.add(task)
+    await session.flush()
+    return task
+
+
+async def seed_reliable_message(session, **values):
+    from app.models import ReliableMessage
+
+    raw = {
+        name: values.pop(name, None)
+        for name in ("request_raw", "response_raw", "last_response_raw")
+    }
+    message = ReliableMessage(**values)
+    from app.integrations.history import register
+    from app.reliable import OutgoingMessage
+
+    exchange_id, request_id = await register(
+        session,
+        message=OutgoingMessage(
+            message.target,
+            message.operation,
+            message.operation_id,
+            raw["request_raw"],
+            message.business_key,
+            message.trace_id,
+            message.created_at,
+            message.expires_at,
+        ),
+        protocol="opaque",
+    )
+    message.exchange_id, message.request_record_id = exchange_id, request_id
+    values = {
+        name: raw[name] for name in ("response_raw", "last_response_raw") if raw[name] is not None
+    }
+    session.add(message)
+    if values:
+        await set_message_bodies(session, message, **values)
+    await session.flush()
+    return message
+
+
+def copy_history_tables(metadata):
+    from sqlalchemy import Sequence
+
+    from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
+    from app.models.integration_history import RECEIPT_SEQUENCE
+
+    for model in (IntegrationExchange, IntegrationRecord, IntegrationReference):
+        if model.__table__.key not in metadata.tables:
+            model.__table__.to_metadata(metadata)
+    Sequence(RECEIPT_SEQUENCE.name, schema=RECEIPT_SEQUENCE.schema, metadata=metadata)
+
+
+async def get_receipt_by_id(session, receipt_id):
+    from sqlalchemy import select
+
+    from app.integrations.callback_receipts import find_receipt
+    from app.models import IntegrationExchange
+
+    original = (
+        await session.execute(
+            select(IntegrationExchange.operation, IntegrationExchange.operation_id).where(
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.receipt_active.is_(True),
+                IntegrationExchange.receipt_id == receipt_id,
+            )
+        )
+    ).one_or_none()
+    return (
+        await find_receipt(session, original.operation, original.operation_id) if original else None
+    )
+
+
+async def set_submission_acceptance(session, task, evidence):
+    from app.core.identifiers import uuid7
+    from app.integrations.history import RecordDraft, write_record
+
+    for slot, field in (
+        ("request", "acceptance_request_record_id"),
+        ("response", "acceptance_response_record_id"),
+    ):
+        identity = await write_record(
+            session,
+            draft=RecordDraft(
+                exchange_id=task.submission_exchange_id,
+                record_kind="REQUEST_REGISTERED" if slot == "request" else "HTTP_RESPONSE_OBSERVED",
+                event_key="TEST_ACCEPTANCE:" + str(uuid7()),
+                direction="OUTBOUND" if slot == "request" else "INBOUND",
+                raw_body=evidence[slot + "_raw"].encode(),
+            ),
+        )
+        setattr(task, field, identity)
+    task.submission_acceptance = {
+        **{k: v for k, v in evidence.items() if k not in {"request_raw", "response_raw"}},
+        "format_version": 2,
+    }

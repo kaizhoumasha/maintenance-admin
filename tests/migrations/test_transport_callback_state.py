@@ -1,4 +1,5 @@
 import json
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import pytest
@@ -6,6 +7,7 @@ import sqlalchemy as sa
 
 from app.database import create_database_engine as create_async_engine
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 BASE = "a020a20261022"
 REVISION = "a021a20261023"
@@ -49,29 +51,24 @@ MESSAGE = sa.table(
 
 @pytest.fixture(params=["sqlite", "pg"])
 async def state_db(request, tmp_path):
-    url = (
-        f"sqlite+aiosqlite:///{tmp_path / 'state.db'}"
-        if request.param == "sqlite"
-        else request.getfixturevalue("pg_url")
-    )
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'state.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
 
-    async def migrate(command, revision):
-        return await run_alembic(url, command, revision)
+        async def migrate(command, revision):
+            return await run_alembic(url, command, revision)
 
-    for step in ("upgrade", "downgrade"):  # 共享库可能已在 head:先收敛到迁移前版本
-        done = await migrate(step, BASE)
+        done = await migrate("upgrade", BASE)
         assert done.returncode == 0, done.stdout + done.stderr
-    engine = create_async_engine(url)
-    try:
-        yield engine, migrate
-    finally:
-        async with engine.begin() as connection:
-            await connection.execute(sa.text("DELETE FROM reliable_message"))
-            await connection.execute(sa.text("DELETE FROM transport_task"))
-            await connection.execute(sa.text("DELETE FROM callback_receipt"))
-        await engine.dispose()
-        restored = await migrate("upgrade", "head")
-        assert restored.returncode == 0, restored.stdout + restored.stderr
+        engine = create_async_engine(url)
+        try:
+            yield engine, migrate
+        finally:
+            await engine.dispose()
 
 
 def old_task(task_id):

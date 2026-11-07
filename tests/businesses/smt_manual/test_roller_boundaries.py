@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app import business_wakeups
 from app.models import ReliableMessage, TransportTask
-from tests.helpers import manual_return_opportunity
+from tests.helpers import manual_return_opportunity, read_history_body
 
 
 @pytest.mark.parametrize("kind", ["departure", "drain"])
@@ -89,10 +89,13 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
                 TransportTask.transport_task_id == batch["transport_task_id"]
             )
         )
-        frozen_bytes = await session.scalar(
-            select(ReliableMessage.request_raw).where(
-                ReliableMessage.operation_id == batch["transport_operation_id"]
-            )
+        frozen_bytes = await read_history_body(
+            session,
+            await session.scalar(
+                select(ReliableMessage.request_record_id).where(
+                    ReliableMessage.operation_id == batch["transport_operation_id"]
+                )
+            ),
         )
     await flow.scan("SCAN3", "A000000001-B", timestamp=20)
     arrivals = await flow.rows("scan_arrival", roller=True)
@@ -124,10 +127,13 @@ async def test_manual_host_preserves_new_scan3_round_and_old_obligations(
             == frozen_transport
         )
         assert (
-            await session.scalar(
-                select(ReliableMessage.request_raw).where(
-                    ReliableMessage.operation_id == batch["transport_operation_id"]
-                )
+            await read_history_body(
+                session,
+                await session.scalar(
+                    select(ReliableMessage.request_record_id).where(
+                        ReliableMessage.operation_id == batch["transport_operation_id"]
+                    )
+                ),
             )
             == frozen_bytes
         )

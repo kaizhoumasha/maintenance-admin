@@ -5,9 +5,11 @@ from sqlalchemy import func, select
 
 from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
 from app.models import ReliableMessage
 from app.reliable import ScopeRef
 from app.reliable.store import MessageStore
+from tests.helpers import set_message_bodies
 
 
 @pytest.mark.parametrize("stage", ["decision", "queued", "gated", "accepted"])
@@ -56,7 +58,9 @@ async def test_task_close_stops_only_its_execution_and_keeps_independent_return(
             else None
         )
     if stage == "gated":
-        store = MessageStore(flow.factory, lifecycles=flow.ecs.outbox.lifecycles)
+        store = MessageStore(
+            flow.factory, lifecycles=flow.ecs.outbox.lifecycles, records=history_records
+        )
         claims = await store.claim(100, flow.ecs.outbox.targets)
         claim = next(c for c in claims if c.message_id == view.submission_message_id)
         assert await store.before_send(claim, flow.ecs.outbox.targets[claim.message.target])
@@ -70,14 +74,18 @@ async def test_task_close_stops_only_its_execution_and_keeps_independent_return(
                 202,
                 "DELIVERED",
             )
-            message.response_raw = json.dumps(
-                dict(
-                    operation_id=view.operation_id,
-                    code="RECEIVED",
-                    timestamp=2,
-                    data=dict(transport_task_id=view.transport_task_id),
-                )
-            ).encode()
+            await set_message_bodies(
+                session,
+                message,
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=view.operation_id,
+                        code="RECEIVED",
+                        timestamp=2,
+                        data=dict(transport_task_id=view.transport_task_id),
+                    )
+                ).encode(),
+            )
     async with flow.factory.begin() as session:
         scope = ScopeRef("first", "TASK", "task-original")
         await flow.roller.close_scope(session, scope, reason="TASK_COMPLETED")
@@ -227,7 +235,9 @@ async def test_superseded_wait_fact_closes_only_on_known_original_final_position
             client_request_id=original["client_request_id"],
             caller=TransportCaller(**original["caller"]),
         )
-    store = MessageStore(flow.factory, lifecycles=flow.ecs.outbox.lifecycles)
+    store = MessageStore(
+        flow.factory, lifecycles=flow.ecs.outbox.lifecycles, records=history_records
+    )
     claims = await store.claim(100, flow.ecs.outbox.targets)
     claim = next(c for c in claims if c.message_id == view.submission_message_id)
     assert await store.before_send(claim, flow.ecs.outbox.targets[claim.message.target])
@@ -332,7 +342,9 @@ async def test_stopped_rack_consumes_original_departure_ack_without_host_demand(
         task = await session.scalar(
             select(TransportTask).where(TransportTask.transport_task_id == action.transport_task_id)
         )
-        task.submission_acceptance = saved
+        from tests.helpers import set_submission_acceptance
+
+        await set_submission_acceptance(session, task, saved)
         before = await session.scalar(select(func.count()).select_from(ReliableMessage))
     flow.current_task = "NEXT-TASK"
 
@@ -369,16 +381,21 @@ async def test_stopped_rack_consumes_original_submit_rejection_without_host_dema
             "PEER_TERMINAL",
         )
         message.fail_reason = "CONFLICT"
-        message.response_raw = json.dumps(
-            dict(
-                operation_id=message.operation_id,
-                code="CONFLICT",
-                timestamp=2,
-                data=dict(
-                    reason_code="REFERENCE_CONFLICT", transport_task_id=entry["transport_task_id"]
-                ),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="CONFLICT",
+                    timestamp=2,
+                    data=dict(
+                        reason_code="REFERENCE_CONFLICT",
+                        transport_task_id=entry["transport_task_id"],
+                    ),
+                )
+            ).encode(),
+        )
         await session.flush()
         await flow.roller.close_scope(
             session, ScopeRef("first", "TASK", flow.current_task), reason="TASK_COMPLETED"

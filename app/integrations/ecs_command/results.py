@@ -2,20 +2,74 @@
 
 from sqlalchemy import select
 
-from app.models import EcsCommand
+from app.integrations.history import EvidenceIntegrityError
+from app.models import IntegrationExchange, IntegrationRecord, ReliableMessage
 
 
 async def get_command(session, *, owner_domain: str, command_code: str):
-    from .service import EcsCommands
+    from .protocol import OPERATION
+    from .service import CommandView
 
+    root = IntegrationExchange.__table__
+    evidence = IntegrationRecord.__table__.alias("applied_result")
+    message = ReliableMessage.__table__
     with session.no_autoflush:
-        row = await session.scalar(
-            select(EcsCommand).where(
-                EcsCommand.owner_domain == owner_domain,
-                EcsCommand.command_code == command_code,
+        row = (
+            (
+                await session.execute(
+                    select(
+                        root.c.command_code,
+                        root.c.status,
+                        root.c.delivery_status,
+                        root.c.ack_record_id,
+                        root.c.applied_result_id,
+                        root.c.hold_reason,
+                        root.c.needs_reconciliation,
+                        root.c.task_type,
+                        root.c.device_code,
+                        evidence.c.effective_payload,
+                        message.c.id.label("message_id"),
+                    )
+                    .select_from(
+                        root.outerjoin(
+                            evidence,
+                            (evidence.c.exchange_id == root.c.id)
+                            & (evidence.c.record_kind == "RESULT_EVIDENCE")
+                            & (evidence.c.semantic_digest == root.c.applied_result_id),
+                        ).outerjoin(
+                            message,
+                            (message.c.exchange_id == root.c.id)
+                            & (message.c.target == root.c.target)
+                            & (message.c.operation == OPERATION)
+                            & (message.c.operation_id == root.c.command_code),
+                        )
+                    )
+                    .where(
+                        root.c.role == "ECS_COMMAND",
+                        root.c.owner_domain == owner_domain,
+                        root.c.command_code == command_code,
+                    )
+                )
             )
+            .mappings()
+            .one_or_none()
         )
-        return await EcsCommands._view(session, row) if row is not None else None
+    if row is None:
+        return None
+    if row["applied_result_id"] is not None and row["effective_payload"] is None:
+        raise EvidenceIntegrityError("original applied result unavailable")
+    return CommandView(
+        row["command_code"],
+        row["status"],
+        row["delivery_status"],
+        row["ack_record_id"] is not None,
+        row["effective_payload"],
+        row["hold_reason"],
+        row["needs_reconciliation"],
+        message_id=row["message_id"],
+        task_type=row["task_type"],
+        device_code=row["device_code"],
+    )
 
 
 async def get_message_ids(session, *, owner_domain, command_codes, candidate_ids):
@@ -28,16 +82,17 @@ async def get_message_ids(session, *, owner_domain, command_codes, candidate_ids
         return {}
     with session.no_autoflush:
         rows = await session.execute(
-            select(EcsCommand.command_code, ReliableMessage.id)
+            select(IntegrationExchange.command_code, ReliableMessage.id)
             .join(
                 ReliableMessage,
-                (ReliableMessage.target == EcsCommand.target)
+                (ReliableMessage.target == IntegrationExchange.target)
                 & (ReliableMessage.operation == OPERATION)
-                & (ReliableMessage.operation_id == EcsCommand.command_code),
+                & (ReliableMessage.operation_id == IntegrationExchange.command_code),
             )
             .where(
-                EcsCommand.owner_domain == owner_domain,
-                EcsCommand.command_code.in_(command_codes),
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.owner_domain == owner_domain,
+                IntegrationExchange.command_code.in_(command_codes),
                 ReliableMessage.id.in_(candidate_ids),
             )
         )

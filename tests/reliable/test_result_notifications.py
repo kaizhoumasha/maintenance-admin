@@ -6,13 +6,17 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import event
 
+from app.integrations import history as history_records
 from app.models import ReliableMessage
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
+from tests.helpers import message_history_view
 
 
 async def claim_message(storage, callback):
-    store = MessageStore(storage.factory, clock=storage.clock, on_result=callback)
+    store = MessageStore(
+        storage.factory, clock=storage.clock, on_result=callback, records=history_records
+    )
     async with storage.factory.begin() as session:
         reference = await storage.outbox.enqueue(
             session, storage.draft(business_key="opaque:original")
@@ -26,7 +30,9 @@ async def test_saved_result_notifies_operation_once(storage, delivered):
     store, reference, claim = await claim_message(storage, lambda *args: published.append(args))
     assert await store.finish(claim, delivered)
     async with storage.factory() as reader:
-        row = await reader.get(ReliableMessage, reference.message_id)
+        row = await message_history_view(
+            reader, await reader.get(ReliableMessage, reference.message_id)
+        )
         assert row.status == "DONE" and row.response_raw == b"ok"
     assert published == [("opaque", "opaque:original")]
     assert not await store.finish(claim, delivered)
@@ -51,8 +57,10 @@ async def test_result_commit_failure_does_not_publish(storage, delivered):
         await store.finish(claim, delivered)
     assert published == []
     async with storage.factory() as reader:
-        row = await reader.get(ReliableMessage, reference.message_id)
-        assert row.status == "SENDING" and row.response_raw is None
+        row = await message_history_view(
+            reader, await reader.get(ReliableMessage, reference.message_id)
+        )
+        assert row.status == "SENDING" and row.terminal_response_record_id is None
 
 
 async def test_application_sender_publishes_after_result_is_visible(pg_rig, pg_url):
@@ -86,7 +94,9 @@ async def test_application_sender_publishes_after_result_is_visible(pg_rig, pg_u
         async with asyncio.timeout(5):
             await notified.wait()
         async with pg_rig.factory() as reader:
-            row = await reader.get(ReliableMessage, reference.message_id)
+            row = await message_history_view(
+                reader, await reader.get(ReliableMessage, reference.message_id)
+            )
             assert row.status == "DONE" and row.response_raw == b"ok"
         assert published == [("opaque", None)]
 
@@ -98,7 +108,9 @@ async def test_publish_failure_does_not_undo_saved_result(storage, delivered):
     store, reference, claim = await claim_message(storage, unavailable)
     assert await store.finish(claim, delivered)
     async with storage.factory() as reader:
-        row = await reader.get(ReliableMessage, reference.message_id)
+        row = await message_history_view(
+            reader, await reader.get(ReliableMessage, reference.message_id)
+        )
         assert row.status == "DONE" and row.response_raw == b"ok"
 
 
@@ -124,14 +136,17 @@ async def test_lost_lease_cannot_publish_old_completion(storage, delivered):
     assert published == []
     async with storage.factory() as session:
         row = await session.get(ReliableMessage, reference.message_id)
-        assert row.status == "SENDING" and row.response_raw is None
+        assert row.status == "SENDING" and row.terminal_response_record_id is None
 
 
 @pytest.mark.parametrize("transition", ["pending", "lease_recovery", "lease_release"])
 async def test_committed_expiry_notifies_original_association_once(storage, transition, delivered):
     notices = []
     store = MessageStore(
-        storage.factory, clock=storage.clock, on_result=lambda *args: notices.append(args)
+        storage.factory,
+        clock=storage.clock,
+        on_result=lambda *args: notices.append(args),
+        records=history_records,
     )
     async with storage.factory.begin() as session:
         ref = await storage.outbox.enqueue(
@@ -153,8 +168,10 @@ async def test_committed_expiry_notifies_original_association_once(storage, tran
         assert not await store.finish(claim, delivered)
     assert notices == [("opaque", "opaque:deadline")]
     async with storage.factory() as session:
-        row = await session.get(ReliableMessage, ref.message_id)
-        assert row.status == "EXPIRED" and row.response_raw is None
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, ref.message_id)
+        )
+        assert row.status == "EXPIRED" and row.terminal_response_record_id is None
         assert row.business_key == "opaque:deadline"
         if claim is not None:
             assert row.delivery_uncertain

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import get_settings
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
+from app.integrations import history as history_records
 from app.integrations.model_payload import validated_model_payload
 from app.reliable import EnqueueResult, MessageDraft, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
@@ -40,7 +41,7 @@ class WmsRequests:
     def outbox(self) -> Outbox:
         if self._outbox is None:
             targets = parse_reliable_config(get_settings()).targets
-            self._outbox = Outbox(targets, ADAPTERS, clock=self.clock)
+            self._outbox = Outbox(targets, ADAPTERS, clock=self.clock, records=history_records)
         return self._outbox
 
     def target(self, protocol: str) -> str:
@@ -114,6 +115,7 @@ class WmsRequests:
             ttl=registered.ttl,
             business_key=business_key,
             scope=scope,
+            owner_domain=self.owner_domain,
         )
         reference = await self.outbox.enqueue(session, draft)
         if reference.business_key != business_key:

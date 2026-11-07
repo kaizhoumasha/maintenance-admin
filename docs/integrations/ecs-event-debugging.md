@@ -67,22 +67,23 @@ POST 完成一次接收尝试后 HTTP 为 200；原接收器状态在 status_cod
 
 粗分正式目录只启用扫码、验证和首个 MOVE_FORWARD / Result 消费。直分入箱、NG、补换架和仅退架通过[项目内隔离装配](../superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md)验证，真实交互及现场验收由联调阶段负责。
 
-### 按设备检索持久收据
+### 按设备检索持久历史
 
-应用本轮 `ea8b20261029` 迁移后，`callback_receipt.device_code` 保存新 ECS Event 和 ECS Result 收据对应的原设备码，无设备信封的 WMS 收据及历史收据为 NULL。该字段不关联设备表外键，设备删除、重分配或事件重报不改写原值，也不改变回调摘要和幂等身份。
+统一存储启用后，`integration_exchange.device_code` 保存原 ECS 信封设备码；无设备信封的 WMS 交互和历史未知值保持 NULL。该字段不关联设备表外键，设备删除、重分配或事件重报不改写原值，也不改变回调摘要和幂等身份。旧 `callback_receipt` 只属于切换前来源，收缩后不再存在，不能用它查询新交互。
 
-可在已有数据库检索工具执行等值查询，例如：
+通过统一查询接口或无正文 SQL 视图检索，例如 PostgreSQL：
 
 ```sql
-SELECT id, operation, operation_id, device_code, status_code, created_at
-FROM enterprise_backend.callback_receipt
+SELECT id, role, operation, operation_id, device_code, protocol_http_status, created_at
+FROM enterprise_backend.integration_exchange_summary
 WHERE device_code = 'RS-INPUT-ARM-01'
+  AND created_at >= CURRENT_TIMESTAMP - INTERVAL '90 days'
 ORDER BY created_at DESC, id DESC;
 ```
 
-PostgreSQL 的 `callback_receipt_device_idx` 哈希索引用于完整设备码等值匹配，SQLite 使用普通索引；不截断长码，不增加前缀或范围检索接口。历史 NULL 行不会被上述设备条件命中，仍按原摘要查询。迁移升级保留原行，有非空设备字段时拒绝删除该列的降级；新列及当前应用代码须按部署流程一并更新，实际生效状态以部署记录为准。
+这里的 `id` 为交互 UUID，原数值事件 ID 保留在 RECEIPT 主实体的 `receipt_id`，不会被 UUID 替换。PostgreSQL 的完整设备码哈希索引继续支持等值检索；SQLite 使用普通索引，不截断长码。历史 NULL 不通过当前绑定猜测回填。原资格到期后，运行事件读口返回 NOT_FOUND，历史查询在合法保留窗口内仍可查看旧实例。
 
-字段来源、迁移保护和内部验收记录见[设备检索设计](../superpowers/specs/2026-10-29-callback-receipt-device-code-design.md)与[实施计划](../superpowers/plans/2026-10-29-callback-receipt-device-code.md)。
+接口、权限、原文可用性和维护窗口见[统一对接历史](integration-history.md)。切换前设备字段的来源设计见[设备检索设计](../superpowers/specs/2026-10-29-callback-receipt-device-code-design.md)；历史设计不能作为当前物理表结构。
 
 ## 单独调试命令样例
 
@@ -170,6 +171,6 @@ ECS HTTP 200 `{"code":200,"message":"ACK"}` 只确认接收。原设备通过公
 
 ### 原 EVENT 读取
 
-正式已注册事件在原 `callback_receipt` 同事务保存 `event_envelope`、最小原 `event_context` 和可选 `application_ref`，handler 失败时与业务/出箱一起回滚。`get_event` / `list_point_events` 是 caller 事务内的纯读函数，不组装 runtime、不消费或补发事件；旧内容缺失明确返回 UNAVAILABLE。列表按 canonical 收据首次受理顺序，技术等价别名不刷新点位顺序。未注册/非法/超限事件沿原诊断策略，仍无未知事件 replay。
+正式已注册事件在 `IntegrationExchange` 的 RECEIPT 实例中沿原受理事务保存 `event_envelope`、最小原 `event_context` 和可选 `application_ref`，handler 失败时与业务/出箱一起回滚。`get_event` / `list_point_events` 是 caller 事务内的纯读函数，不组装 runtime、不消费或补发事件；旧内容缺失明确返回 UNAVAILABLE。列表按 canonical 收据首次受理顺序，技术等价别名不刷新点位顺序。未注册/非法/超限事件沿原诊断策略，仍无未知事件 replay。
 
-EVENT、ecs_send_evidence、ecs_result_evidence 分别表示原扫码事件、命令发送尝试和命令 Result，三者不能互相替代。当前调度引用的 canonical/前驱及点位锚点在同事务清理中受保护；TASK 终态且引用结束后按有限保存期清理，无永久业务历史。
+原 EVENT、命令发送尝试和命令 Result 统一存入 `IntegrationRecord`，通过记录种类和原身份区分，三者的事实含义不能互相替代。当前调度引用的 canonical/前驱及点位锚点在同事务清理中受保护；TASK 终态且引用结束后按有限保存期清理，无永久业务历史。

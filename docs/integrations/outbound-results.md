@@ -33,7 +33,7 @@ transport_result = await transport_service.get_result(
 
 availability为FOUND／NOT_FOUND／IDENTITY_MISMATCH／INVALID。身份不符不返回另一身份的响应。response_state为NONE／VALID／INVALID／UNAVAILABLE；非终局／LOCAL_ERROR不提供业务决定，终局响应缺失为UNAVAILABLE，身份／协议／投递证据矛盾为INVALID。未知字段为None，不造PENDING。
 
-WMS仅读取原消息的终局响应，沿用facts／decisions的适配器信封及分类规则，不读取last_response_raw。端点合同取已部署operation的注册声明；该声明已移除时响应为UNAVAILABLE，不从当前目标配置猜端点。response_data仍须由具体业务严格解析。RECORDED／DUPLICATE只表示事实收妥；PREPARE_ACCEPTED仍等待后续计划；DECIDED才可按业务合同解释决定。DONE、FAILED和EXPIRED均不直接表示业务或物理完成。
+WMS仅读取原消息的终局响应证据，沿用facts／decisions的适配器信封及分类规则，不把最近一次尝试的诊断响应当作终局。原正文由统一证据指针读取，见[统一历史](integration-history.md)。端点合同取已部署operation的注册声明；该声明已移除时响应为UNAVAILABLE，不从当前目标配置猜端点。response_data仍须由具体业务严格解析。RECORDED／DUPLICATE只表示事实收妥；PREPARE_ACCEPTED仍等待后续计划；DECIDED才可按业务合同解释决定。DONE、FAILED和EXPIRED均不直接表示业务或物理完成。
 
 响应中任意层的 JSON 数字若解码溢出为非有限数，同步分类为 UNKNOWN；读取已保存的终局响应时为 INVALID，不暴露失真的 response_data。原始响应字节继续保留，不改写历史消息身份或投递状态。
 

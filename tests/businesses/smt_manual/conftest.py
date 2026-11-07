@@ -10,14 +10,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine
+from app.integrations import history as history_records
 from app.models import (
-    CallbackReceipt,
     Device,
     DeviceRoute,
+    IntegrationExchange,
     ReliableMessage,
     WorkLine,
     WorkLinePosition,
 )
+from tests.helpers import clear_integration_history, set_message_bodies, update_message_bodies
 
 
 @pytest.fixture
@@ -45,7 +47,7 @@ async def manual_sessions(request, tmp_path, postgres_tables):
     )
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
     from app.database import SCHEMA
-    from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence, TransportTask
+    from app.models import IntegrationExchange, TransportTask
 
     metadata = MetaData(schema=SCHEMA)
     for model in (
@@ -55,14 +57,14 @@ async def manual_sessions(request, tmp_path, postgres_tables):
         WorkLinePosition,
         DeviceRoute,
         Device,
-        CallbackReceipt,
+        IntegrationExchange,
         ReliableMessage,
         TransportTask,
-        EcsCommand,
-        EcsResultEvidence,
-        EcsSendEvidence,
     ):
         model.__table__.to_metadata(metadata)
+    from tests.helpers import copy_history_tables
+
+    copy_history_tables(metadata)
     async with AsyncExitStack() as stack:
         postgres = url.startswith("postgres")
         if postgres:
@@ -173,7 +175,7 @@ async def manual_flow(manual_sessions, monkeypatch):
     catalog.validate_business_contracts()
     target = TargetConfig("smt-m1", "http://example.test", "wms-decisions")
     wms = WmsRequests(
-        Outbox({target.name: target}, ADAPTERS),
+        Outbox({target.name: target}, ADAPTERS, records=history_records),
         owner_domain="smt_manual",
         contract_consumers=catalog.contract_consumers,
     )
@@ -309,24 +311,20 @@ async def manual_flow(manual_sessions, monkeypatch):
         async def accept_prepare(task_id="T1"):
             row = next(row for row in await rows("task") if row["task_id"] == task_id)
             async with manual_sessions.begin() as session:
-                await session.execute(
-                    update(ReliableMessage)
-                    .where(ReliableMessage.id == row["prepare_message_id"])
-                    .values(
-                        status=case(
-                            (ReliableMessage.status == "ABANDONED", "ABANDONED"), else_="DONE"
-                        ),
-                        last_http_status=202,
-                        last_verdict="DELIVERED",
-                        response_raw=json.dumps(
-                            dict(
-                                operation_id=row["prepare_operation_id"],
-                                code="PREPARE_ACCEPTED",
-                                timestamp=110,
-                                data={},
-                            )
-                        ).encode(),
-                    )
+                await update_message_bodies(
+                    session,
+                    update(ReliableMessage).where(ReliableMessage.id == row["prepare_message_id"]),
+                    status=case((ReliableMessage.status == "ABANDONED", "ABANDONED"), else_="DONE"),
+                    last_http_status=202,
+                    last_verdict="DELIVERED",
+                    response_raw=json.dumps(
+                        dict(
+                            operation_id=row["prepare_operation_id"],
+                            code="PREPARE_ACCEPTED",
+                            timestamp=110,
+                            data={},
+                        )
+                    ).encode(),
                 )
             async with manual_sessions.begin() as session:
                 if engine.dialect.name == "postgresql":
@@ -359,12 +357,15 @@ async def manual_flow(manual_sessions, monkeypatch):
             notices=notices,
         )
     finally:
-        if engine.dialect.name == "sqlite":
-            async with engine.begin() as connection:
-                await connection.run_sync(metadata.drop_all)
         async with manual_sessions.begin() as session:
             await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.operation_id.in_(operations))
+                update(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .values(receipt_active=False)
+                .where(IntegrationExchange.operation_id.in_(operations))
             )
             await session.execute(
                 delete(ReliableMessage).where(ReliableMessage.business_key == "business:smt_manual")
@@ -373,6 +374,9 @@ async def manual_flow(manual_sessions, monkeypatch):
                 delete(WorkLinePosition).where(WorkLinePosition.work_line_id.in_(lines))
             )
             await session.execute(delete(WorkLine).where(WorkLine.id.in_(lines)))
+        if engine.dialect.name == "sqlite":
+            async with engine.begin() as connection:
+                await connection.run_sync(metadata.drop_all)
         for name in modules:
             if name in original_modules:
                 sys.modules[name] = original_modules[name]
@@ -399,7 +403,7 @@ async def manual_bins(manual_flow, monkeypatch):
     from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
     from app.integrations.ecs_command.service import EcsCommands
     from app.integrations.wms_request import operation
-    from app.models import EcsCommand, EcsResultEvidence, EcsSendEvidence
+    from app.models import IntegrationExchange
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
     from app.reliable.store import MessageStore
@@ -407,14 +411,7 @@ async def manual_bins(manual_flow, monkeypatch):
     flow = manual_flow
     entry = catalog.entries()[0]
     prefix = "manual-" + str(uuid7())
-    metadata = MetaData()
     engine = flow.factory.kw["bind"]
-    models = (EcsCommand, EcsResultEvidence, EcsSendEvidence)
-    if engine.dialect.name == "sqlite":
-        for model in models:
-            model.__table__.to_metadata(metadata)
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.create_all)
     devices = {point: prefix + "-" + point for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4")}
     route_ids = []
     async with flow.factory.begin() as session:
@@ -453,7 +450,7 @@ async def manual_bins(manual_flow, monkeypatch):
         async def authorize_frozen(self, session, route):
             return RouteAuthorization.ALLOW
 
-    outbox = Outbox({prefix: target}, {PROTOCOL: EcsCommandAdapter()})
+    outbox = Outbox({prefix: target}, {PROTOCOL: EcsCommandAdapter()}, records=history_records)
     _, annexes = compile_commands(*entry.COMPONENTS[1].commands)
     ecs = EcsCommands(outbox, prefix, Routes(), annexes)
     lifecycle = EcsLifecycle(ecs)
@@ -552,22 +549,20 @@ async def manual_bins(manual_flow, monkeypatch):
     ):
         row = (await flow.rows("admission"))[index]
         async with flow.factory.begin() as session:
-            await session.execute(
-                update(ReliableMessage)
-                .where(ReliableMessage.id == row["message_id"])
-                .values(
-                    status="DONE",
-                    last_http_status=http,
-                    last_verdict="DELIVERED",
-                    response_raw=json.dumps(
-                        dict(
-                            operation_id=response_id or row["operation_id"],
-                            code=code,
-                            timestamp=timestamp,
-                            data=data,
-                        )
-                    ).encode(),
-                )
+            await update_message_bodies(
+                session,
+                update(ReliableMessage).where(ReliableMessage.id == row["message_id"]),
+                status="DONE",
+                last_http_status=http,
+                last_verdict="DELIVERED",
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=response_id or row["operation_id"],
+                        code=code,
+                        timestamp=timestamp,
+                        data=data,
+                    )
+                ).encode(),
             )
 
     def completion(data=None, *, operation_id=None, timestamp=100, **values):
@@ -585,7 +580,9 @@ async def manual_bins(manual_flow, monkeypatch):
         return json.dumps(original).encode()
 
     async def result(command_code, *, point="SCAN2"):
-        store = MessageStore(flow.factory, lifecycles={PROTOCOL: lifecycle})
+        store = MessageStore(
+            flow.factory, lifecycles={PROTOCOL: lifecycle}, records=history_records
+        )
         for claim in await store.claim(100, {prefix: target}):
             assert await store.before_send(claim, target)
         async with flow.factory.begin() as session:
@@ -626,23 +623,18 @@ async def manual_bins(manual_flow, monkeypatch):
         yield flow
     finally:
         async with flow.factory.begin() as session:
-            codes = select(EcsCommand.command_code).where(EcsCommand.target == prefix)
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+            roots = list(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(
+                        IntegrationExchange.role == "ECS_COMMAND",
+                        IntegrationExchange.target == prefix,
+                    )
+                )
             )
-            await session.execute(
-                delete(EcsSendEvidence).where(EcsSendEvidence.command_code.in_(codes))
-            )
-            await session.execute(delete(EcsCommand).where(EcsCommand.target == prefix))
             await session.execute(delete(ReliableMessage).where(ReliableMessage.target == prefix))
-            await session.execute(
-                delete(CallbackReceipt).where(CallbackReceipt.device_code.in_(devices.values()))
-            )
+            await clear_integration_history(session, roots)
             await session.execute(delete(Device).where(Device.device_code.in_(devices.values())))
             await session.execute(delete(DeviceRoute).where(DeviceRoute.id.in_(route_ids)))
-        if engine.dialect.name == "sqlite":
-            async with engine.begin() as connection:
-                await connection.run_sync(metadata.drop_all)
 
 
 @pytest.fixture
@@ -693,14 +685,17 @@ async def manual_racks(manual_flow, monkeypatch):
     prefix = "m3-" + str(uuid7())
     target = TargetConfig(prefix, "http://transport.test", PROTOCOL)
     transport = TransportService(
-        Outbox({prefix: target}, {PROTOCOL: TransportSubmitAdapter()}),
+        Outbox({prefix: target}, {PROTOCOL: TransportSubmitAdapter()}, records=history_records),
         target=prefix,
         owner_domain="smt_manual",
     )
     wms = flow.task.capabilities.wms
     facts = TargetConfig(prefix + "-facts", "http://facts.test", "wms-facts")
     wms._outbox = Outbox(
-        {**wms.outbox.targets, facts.name: facts}, ADAPTERS, lifecycles=wms.outbox.lifecycles
+        {**wms.outbox.targets, facts.name: facts},
+        ADAPTERS,
+        lifecycles=wms.outbox.lifecycles,
+        records=history_records,
     )
     capabilities = replace(flow.task.capabilities, transport=transport)
     flow.task.capabilities = capabilities
@@ -796,17 +791,15 @@ async def manual_racks(manual_flow, monkeypatch):
     async def response(key, data, *, index=-1, code="DECIDED", http=200):
         row = (await flow.rows(key))[index]
         async with flow.factory.begin() as session:
-            await session.execute(
-                update(ReliableMessage)
-                .where(ReliableMessage.id == row["message_id"])
-                .values(
-                    status="DONE",
-                    last_http_status=http,
-                    last_verdict="DELIVERED",
-                    response_raw=json.dumps(
-                        dict(operation_id=row["operation_id"], code=code, timestamp=100, data=data)
-                    ).encode(),
-                )
+            await update_message_bodies(
+                session,
+                update(ReliableMessage).where(ReliableMessage.id == row["message_id"]),
+                status="DONE",
+                last_http_status=http,
+                last_verdict="DELIVERED",
+                response_raw=json.dumps(
+                    dict(operation_id=row["operation_id"], code=code, timestamp=100, data=data)
+                ).encode(),
             )
 
     async def acknowledge(action):
@@ -817,14 +810,18 @@ async def manual_racks(manual_flow, monkeypatch):
                 202,
                 "DELIVERED",
             )
-            message.response_raw = json.dumps(
-                dict(
-                    operation_id=message.operation_id,
-                    code="RECEIVED",
-                    timestamp=100,
-                    data=dict(transport_task_id=action["transport_task_id"]),
-                )
-            ).encode()
+            await set_message_bodies(
+                session,
+                message,
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=message.operation_id,
+                        code="RECEIVED",
+                        timestamp=100,
+                        data=dict(transport_task_id=action["transport_task_id"]),
+                    )
+                ).encode(),
+            )
 
     async def consume_report():
         (report,) = await flow.rows("rack_report")
@@ -916,22 +913,20 @@ async def manual_completion_tools(manual_flow, monkeypatch):
     async def confirmation_response(data, *, http=200, code="DECIDED", timestamp=100, index=-1):
         original = (await confirmations())[index]
         async with flow.factory.begin() as session:
-            await session.execute(
-                update(ReliableMessage)
-                .where(ReliableMessage.id == original.id)
-                .values(
-                    status="ABANDONED" if original.status == "ABANDONED" else "DONE",
-                    last_http_status=http,
-                    last_verdict="DELIVERED",
-                    response_raw=json.dumps(
-                        dict(
-                            operation_id=original.operation_id,
-                            code=code,
-                            timestamp=timestamp,
-                            data=data,
-                        )
-                    ).encode(),
-                )
+            await update_message_bodies(
+                session,
+                update(ReliableMessage).where(ReliableMessage.id == original.id),
+                status="ABANDONED" if original.status == "ABANDONED" else "DONE",
+                last_http_status=http,
+                last_verdict="DELIVERED",
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=original.operation_id,
+                        code=code,
+                        timestamp=timestamp,
+                        data=data,
+                    )
+                ).encode(),
             )
 
     async def bin_plan(revision=1, *, cancel=False, **fields):
@@ -1020,35 +1015,33 @@ async def manual_supply(manual_racks, manual_completion_tools):
     async def feed_success(demand_id):
         original = (await flow.rows("feed", component=True))[0]
         async with flow.factory.begin() as session:
-            await session.execute(
-                update(ReliableMessage)
-                .where(ReliableMessage.id == original["message_id"])
-                .values(
-                    status="DONE",
-                    last_http_status=200,
-                    last_verdict="DELIVERED",
-                    response_raw=json.dumps(
-                        dict(
-                            operation_id=original["operation_id"],
-                            code="DECIDED",
-                            timestamp=100,
-                            data=dict(
-                                result="READY",
-                                bins=[
-                                    dict(
-                                        bin_code="A000000001",
-                                        source_locator=dict(
-                                            type="RACK_BIN_SLOT",
-                                            rack_id="R",
-                                            rack_face="A",
-                                            slot_id="S1",
-                                        ),
-                                    )
-                                ],
-                            ),
-                        )
-                    ).encode(),
-                )
+            await update_message_bodies(
+                session,
+                update(ReliableMessage).where(ReliableMessage.id == original["message_id"]),
+                status="DONE",
+                last_http_status=200,
+                last_verdict="DELIVERED",
+                response_raw=json.dumps(
+                    dict(
+                        operation_id=original["operation_id"],
+                        code="DECIDED",
+                        timestamp=100,
+                        data=dict(
+                            result="READY",
+                            bins=[
+                                dict(
+                                    bin_code="A000000001",
+                                    source_locator=dict(
+                                        type="RACK_BIN_SLOT",
+                                        rack_id="R",
+                                        rack_face="A",
+                                        slot_id="S1",
+                                    ),
+                                )
+                            ],
+                        ),
+                    )
+                ).encode(),
             )
         await advance(demand_id)
         segment = (await flow.rows("feed_segment", component=True))[0]

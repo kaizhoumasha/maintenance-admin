@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select, update
 
 from app import business_wakeups
-from app.models import DeviceRoute, EcsCommand, ReliableMessage, TransportTask, WorkLine
+from app.models import DeviceRoute, IntegrationExchange, ReliableMessage, TransportTask, WorkLine
 from app.tasks.celery_app import celery_app
 from tests.helpers import manual_departure_obligation, manual_source_departure
 
@@ -391,9 +391,9 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
         assert preserved.frozen == frozen_transport and preserved.applied_outcome_revision is None
         assert (
             await session.scalar(
-                select(EcsCommand.owner_domain).where(
-                    EcsCommand.command_code == release["command_code"]
-                )
+                select(IntegrationExchange.owner_domain)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+                .where(IntegrationExchange.command_code == release["command_code"])
             )
             == "smt_manual"
         )

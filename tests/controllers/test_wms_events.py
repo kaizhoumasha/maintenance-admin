@@ -20,7 +20,8 @@ from app.integrations.wms_callback import (
 from app.integrations.wms_callback.dev_callback import OPERATION as EXAMPLE_OPERATION
 from app.integrations.wms_callback.dev_callback import EchoPayload, echo
 from app.main import app
-from app.models import CallbackReceipt, CallbackSnapshot
+from app.models import IntegrationExchange, IntegrationRecord
+from tests.helpers import read_diagnostic_snapshots, read_receipts
 
 PATH = "/api/v1/wms/events"
 
@@ -34,6 +35,10 @@ def envelope():
 
 async def stored(factory, model):
     async with factory() as session:
+        if model is IntegrationExchange:
+            return await read_receipts(session)
+        if model is IntegrationRecord:
+            return await read_diagnostic_snapshots(session)
         return list(await session.scalars(select(model).order_by(model.id)))
 
 
@@ -53,7 +58,7 @@ async def test_unknown_operation_replays_its_original_rejection(
     reordered = json.dumps(dict(reversed(list(envelope.items()))), indent=2)
     replay = await callback_client.post(PATH, content=reordered)
     assert replay.status_code == 422 and replay.json() == body
-    receipts = await stored(callback_store, CallbackReceipt)
+    receipts = await stored(callback_store, IntegrationExchange)
     assert len(receipts) == 1 and receipts[0].body == body
     assert receipts[0].compare_mode == "RAW" and receipts[0].effective_digest is None
     assert "Retry-After" not in first.headers
@@ -66,7 +71,14 @@ async def test_wms_receipt_does_not_infer_device_from_payload(
     assert (await callback_client.post(PATH, json=body)).status_code == 422
     async with callback_store() as session:
         unknown_device = list(
-            await session.scalars(select(CallbackReceipt).filter_by(device_code=None))
+            await session.scalars(
+                select(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+                .filter_by(device_code=None)
+            )
         )
         assert len(unknown_device) == 1
         assert unknown_device[0].operation_id == envelope["operation_id"]
@@ -82,7 +94,7 @@ async def test_changed_message_conflicts_without_replacing_receipt(
     assert conflict.json()["operation_id"] == envelope["operation_id"]
     assert conflict.json()["data"] == {}
     assert (await callback_client.post(PATH, json=envelope)).json() == first.json()
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
 
 
 @pytest.mark.parametrize(
@@ -103,14 +115,14 @@ async def test_invalid_envelope_rejection_is_persisted_and_replayed(
     assert response.status_code == 422
     assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE"}
     assert (await callback_client.post(PATH, json=request)).json() == response.json()
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
 
 
 async def test_operation_is_part_of_message_identity(callback_client, callback_store, envelope):
     first = await callback_client.post(PATH, json=envelope)
     second = await callback_client.post(PATH, json=envelope | {"operation": "another.unknown@v1"})
     assert first.status_code == second.status_code == 422
-    assert len(await stored(callback_store, CallbackReceipt)) == 2
+    assert len(await stored(callback_store, IntegrationExchange)) == 2
 
 
 async def test_operation_at_length_limit_is_stored_and_replayed(
@@ -122,7 +134,7 @@ async def test_operation_at_length_limit_is_stored_and_replayed(
     assert first.json()["data"] == {"reason_code": "UNSUPPORTED_OPERATION"}
     replay = await callback_client.post(PATH, json=envelope)
     assert replay.status_code == 422 and replay.json() == first.json()
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
 
 
 @pytest.mark.parametrize(
@@ -144,8 +156,8 @@ async def test_operation_at_length_limit_is_stored_and_replayed(
 async def test_unassociated_invalid_requests_return_empty_400(callback_client, callback_store, raw):
     response = await callback_client.post(PATH, content=raw)
     assert response.status_code == 400 and response.content == b""
-    assert await stored(callback_store, CallbackReceipt) == []
-    snapshot = (await stored(callback_store, CallbackSnapshot))[0]
+    assert await stored(callback_store, IntegrationExchange) == []
+    snapshot = (await stored(callback_store, IntegrationRecord))[0]
     assert base64.b64decode(snapshot.body_b64) == raw
     assert snapshot.http_status == 400
 
@@ -158,7 +170,7 @@ async def test_unusable_operation_returns_rejection_without_receipt(
     response = await callback_client.post(PATH, content=json.dumps(envelope))
     assert response.status_code == 422
     assert response.json()["data"] == {"reason_code": "INVALID_EVIDENCE"}
-    assert await stored(callback_store, CallbackReceipt) == []
+    assert await stored(callback_store, IntegrationExchange) == []
 
 
 async def test_missing_operation_returns_rejection_without_receipt(
@@ -168,7 +180,7 @@ async def test_missing_operation_returns_rejection_without_receipt(
     response = await callback_client.post(PATH, json=envelope)
     assert response.status_code == 422
     assert response.json()["operation_id"] == envelope["operation_id"]
-    assert await stored(callback_store, CallbackReceipt) == []
+    assert await stored(callback_store, IntegrationExchange) == []
 
 
 async def test_oversize_stream_is_bounded_and_snapshotted(callback_client, callback_store):
@@ -179,8 +191,8 @@ async def test_oversize_stream_is_bounded_and_snapshotted(callback_client, callb
 
     response = await callback_client.post(PATH, content=chunks())
     assert response.status_code == 413 and response.content == b""
-    assert await stored(callback_store, CallbackReceipt) == []
-    snapshot = (await stored(callback_store, CallbackSnapshot))[0]
+    assert await stored(callback_store, IntegrationExchange) == []
+    snapshot = (await stored(callback_store, IntegrationRecord))[0]
     assert len(snapshot.body_b64.encode("ascii")) <= 65536 and snapshot.truncated
     assert base64.b64decode(snapshot.body_b64).startswith(b"a")
 
@@ -198,7 +210,7 @@ async def test_concurrent_same_identity_has_one_replayable_receipt(
     responses = await asyncio.gather(*(callback_client.post(PATH, json=envelope) for _ in range(4)))
     assert all(response.status_code == 422 for response in responses)
     assert all(response.json() == responses[0].json() for response in responses)
-    receipts = await stored(callback_store, CallbackReceipt)
+    receipts = await stored(callback_store, IntegrationExchange)
     assert len(receipts) == 1 and receipts[0].body == responses[0].json()
 
 
@@ -210,10 +222,10 @@ async def test_callback_has_no_rate_limit_and_snapshot_budget_does_not_change_ac
     responses = [await callback_client.post(PATH, json=envelope) for _ in range(105)]
     assert all(response.status_code == 422 for response in responses)
     assert all(response.json() == responses[0].json() for response in responses)
-    assert len(await stored(callback_store, CallbackSnapshot)) == 2
+    assert len(await stored(callback_store, IntegrationRecord)) == 2
     monkeypatch.setattr(snapshots, "monotonic", lambda: 161.0)
     assert (await callback_client.post(PATH, json=envelope)).status_code == 422
-    assert len(await stored(callback_store, CallbackSnapshot)) == 3
+    assert len(await stored(callback_store, IntegrationRecord)) == 3
 
 
 async def test_snapshot_storage_failure_does_not_change_committed_ack(
@@ -231,8 +243,8 @@ async def test_snapshot_storage_failure_does_not_change_committed_ack(
     monkeypatch.setattr(app.state, "callback_session_factory", factory)
     response = await callback_client.post(PATH, json=envelope)
     assert response.status_code == 422
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
-    assert await stored(callback_store, CallbackSnapshot) == []
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
+    assert await stored(callback_store, IntegrationRecord) == []
 
     records = [r for r in caplog.records if "callback snapshot failed" in r.getMessage()]
     assert records and records[0].component == "callback" and records[0].phase == "snapshot"
@@ -260,8 +272,8 @@ async def test_snapshot_timeout_does_not_change_ack(
     monkeypatch.setattr(snapshots, "SNAPSHOT_TIMEOUT_S", 0.01)
     response = await callback_client.post(PATH, json=envelope)
     assert response.status_code == 422
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
-    assert await stored(callback_store, CallbackSnapshot) == []
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
+    assert await stored(callback_store, IntegrationRecord) == []
 
 
 async def test_waiting_identity_can_take_over_after_winner_rolls_back(
@@ -282,7 +294,7 @@ async def test_waiting_identity_can_take_over_after_winner_rolls_back(
         async with asyncio.timeout(5):
             response = await pending
     assert response.status_code == 422
-    receipts = await stored(callback_store, CallbackReceipt)
+    receipts = await stored(callback_store, IntegrationExchange)
     assert len(receipts) == 1 and receipts[0].body == response.json()
 
 
@@ -299,9 +311,11 @@ async def test_commit_failure_does_not_freeze_unavailable_response(
     response = await callback_client.post(PATH, json=envelope)
     assert response.status_code == 503 and response.json()["code"] == "UNAVAILABLE"
     assert response.json()["operation_id"] == envelope["operation_id"]
-    assert await stored(callback_store, CallbackReceipt) == []
+    assert await stored(callback_store, IntegrationExchange) == []
     retried = await callback_client.post(PATH, json=envelope)
-    assert retried.status_code == 422 and len(await stored(callback_store, CallbackReceipt)) == 1
+    assert (
+        retried.status_code == 422 and len(await stored(callback_store, IntegrationExchange)) == 1
+    )
 
 
 @pytest.mark.parametrize("has_identity", [True, False])
@@ -323,8 +337,8 @@ async def test_unexpected_receiver_error_uses_protocol_503(
         assert response.json()["code"] == "UNAVAILABLE" and response.json()["data"] == {}
     else:
         assert response.content == b""
-    assert await stored(callback_store, CallbackReceipt) == []
-    assert (await stored(callback_store, CallbackSnapshot))[0].outcome == "error"
+    assert await stored(callback_store, IntegrationExchange) == []
+    assert (await stored(callback_store, IntegrationRecord))[0].outcome == "error"
 
 
 # ---- operation 注册:处理器契约(Accepted/Duplicate/Conflict/Rejected) ----
@@ -399,7 +413,7 @@ async def test_handler_outcomes_map_to_protocol_responses(
     assert body["code"] == code and body["data"] == data
     assert body["operation_id"] == envelope["operation_id"]
     assert await probe_rows(callback_store) == rows  # Rejected 回滚了处理器写入
-    [receipt] = await stored(callback_store, CallbackReceipt)
+    [receipt] = await stored(callback_store, IntegrationExchange)
     assert receipt.status_code == status and receipt.body == body
     assert receipt.compare_mode == "EFFECTIVE"
     replay = await callback_client.post(PATH, json=envelope)
@@ -418,7 +432,7 @@ async def test_handler_failure_rolls_back_everything_and_returns_protocol_503(
     response = await callback_client.post(PATH, json=envelope)
     assert response.status_code == 503 and response.json()["code"] == "UNAVAILABLE"
     assert response.json()["operation_id"] == envelope["operation_id"]
-    assert await stored(callback_store, CallbackReceipt) == []
+    assert await stored(callback_store, IntegrationExchange) == []
     assert await probe_rows(callback_store) == []
 
 
@@ -430,7 +444,7 @@ async def test_invalid_payload_is_rejected_with_reason_and_replayed(
     assert first.status_code == 422
     assert first.json()["data"] == {"reason_code": "INVALID_EVIDENCE"}
     assert (await callback_client.post(PATH, json=envelope)).json() == first.json()
-    [receipt] = await stored(callback_store, CallbackReceipt)
+    [receipt] = await stored(callback_store, IntegrationExchange)
     assert receipt.compare_mode == "RAW"
 
 
@@ -477,7 +491,7 @@ async def test_effective_receipt_without_its_handler_is_unavailable_not_unknown(
     unavailable = await callback_client.post(PATH, json=padded)
     assert unavailable.status_code == 503 and unavailable.json()["code"] == "UNAVAILABLE"
     assert (await callback_client.post(PATH, json=envelope)).status_code == 200
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
 
 
 async def test_concurrent_same_identity_runs_the_handler_once(
@@ -487,7 +501,7 @@ async def test_concurrent_same_identity_runs_the_handler_once(
     responses = await asyncio.gather(*(callback_client.post(PATH, json=envelope) for _ in range(6)))
     assert sorted(response.status_code for response in responses) == [200] * 5 + [202]
     assert await probe_rows(callback_store) == ["accept"]
-    assert len(await stored(callback_store, CallbackReceipt)) == 1
+    assert len(await stored(callback_store, IntegrationExchange)) == 1
 
 
 @pytest.fixture
@@ -587,7 +601,11 @@ async def test_input_notification_observes_committed_acceptance_only(
     )
     async with callback_store() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(CallbackReceipt.operation_id == body["operation_id"])
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.operation_id == body["operation_id"])
         )
     assert (receipt is not None) == (mode != "rollback")
     assert len(notices) == (1 if mode in {"accept", "publish_failure"} else 0)

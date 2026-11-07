@@ -8,6 +8,8 @@
 
 平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接已实现独立异步 HTTP 客户端和协议无关的出站可靠交互首版（事务发件箱、持久化重试、租约与恢复），并提供 WMS/ECS 回调接收入口；接收与投递不代表业务或物理完成。
 
+ECS / WMS 对接历史现统一为交互、证据和明确引用，保留原命令、消息、数值事件 ID 与长期重放。查询接口分别展示交付、协议和业务采用状态，摘要与正文使用独立权限；接口、保留规则和分阶段迁移见[统一对接历史](docs/integrations/integration-history.md)，软件验证见[验证记录](docs/testing/integration-history.md)。现有库必须先完成制品 A 的停写、补录、权威交接及实际验收，再独立交付制品 B 收缩，不能直接执行最终源码的 `upgrade head`。
+
 最近发布基线为 `v0.2.0`，当前分支包含改名及 HTTP 客户端等后续未发布变更。固定镜像目前仅验收 `linux/arm64`，配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md)；固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
 
 默认 Compose 项目名固定为 `enterprise-backend`，数据卷为 `enterprise-backend_pgdata` 和 `enterprise-backend_redisdata`，不再随仓库目录名变化。数据库名统一为 `enterprise_backend`，独立测试库使用 `enterprise_backend_test`；现有 API 路径及权限码不变。已有部署在完成备份和数据迁移前，须通过 `-p` 或 `COMPOSE_PROJECT_NAME` 指定原项目名，沿用原数据卷和站点配置；仅修改项目名不会迁移数据。旧数据库原地改名及工具连接同步见 [数据库改名](docs/deploy.md#数据库改名)。显式设置了 `APP_NAME` 或 `APP_IMAGE` 的环境继续以配置值为准，按需更新。
@@ -47,7 +49,9 @@ scripts/lint.sh      # ruff check --fix + format
 
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
 
-项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。已有完整 `a023a20261024` 旧库运行在线 `alembic upgrade head` 时，只原地移动本项目 12 张表及版本表；其他系统表不动。更早的旧库先用旧代码升级到该基线。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
+CI 将完整套件分为六道，每道拥有独立 PostgreSQL、两个专项迁移库和 Redis；六道全部通过才算完整验证。可选 `--test-lane=N/T` 的用法、隔离要求及本机实测见[并行测试分道](docs/testing/test-lanes.md)；默认 `uv run pytest` 保持完整运行。
+
+项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。schema 搬迁仅接受完整 `a023a20261024` 旧基线，原地移动其 12 张项目表及版本表，其他系统表不动；更早的旧库先用旧代码升级到该基线。后续历史统一仍须按上面的 A / B 维护窗口分别交付。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
 
 ```bash
 TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/enterprise_backend_test \
@@ -81,6 +85,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` | 默认 30 分钟 / 7 天 |
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
+| `INTEGRATION_HISTORY_RETENTION_DAYS` | 普通对接历史摘要与索引默认保留 90 天；原收据资格、诊断正文和未决恢复证据沿各自合同，见[保留规则](docs/integrations/integration-history.md#保留与清理) |
 | `SMT_MANUAL_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，如 `60000`；从原 prepare 接纳的本地保存时间起计算首版计划等待。首版计划未到且未配置时保持 PREPARING，不发送版本 0 完成确认；配置时长须与 WMS 约定 |
 | `SMT_AUTO_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，从原 prepare 首次可靠接纳起计时。留空时继续等待首版计划 |
 | `SMT_AUTO_WORKLINES` | 站点运行配置的 JSON 数组。每项提供工作线 ID、版本和来源工位映射。两臂超时可分别配置，省略时发送 `timeout: 0`。Transport 调用方取数据库工作线 ID。空数组表示当前没有配置自动线 |

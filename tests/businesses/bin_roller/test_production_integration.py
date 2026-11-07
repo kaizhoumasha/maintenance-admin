@@ -3,7 +3,8 @@
 import pytest
 from sqlalchemy import select, text
 
-from app.models import EcsCommand
+from app.models import IntegrationExchange
+from tests.helpers import read_history_body
 
 
 async def test_two_businesses_have_separate_production_ports_and_original_owners(
@@ -22,7 +23,11 @@ async def test_two_businesses_have_separate_production_ports_and_original_owners
         await flow.hosts[owner].scan_pending()
     async with flow.factory() as session:
         rows = (await session.execute(select(flow.production_table))).mappings().all()
-        commands = (await session.scalars(select(EcsCommand))).all()
+        commands = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
         assert {(row["business"], row["release_requested"]) for row in rows} == {
             ("first", True),
             ("second", False),
@@ -34,7 +39,11 @@ async def test_two_businesses_have_separate_production_ports_and_original_owners
             await first.components["bin_roller"].release_scan2(session, arrival_id=second_id)
     await second.complete_production(second_id)
     async with flow.factory() as session:
-        commands = (await session.scalars(select(EcsCommand))).all()
+        commands = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
         assert {command.owner_domain for command in commands} == {"first", "second"}
     assert flow.notifications == ["first", "second"]
 
@@ -51,21 +60,33 @@ async def test_scan2_replay_and_pending_do_not_repeat_admission_or_release(
     await host.scan_pending()
     async with flow.factory() as session:
         production = (await session.execute(select(flow.production_table))).mappings().one()
-        commands = (await session.scalars(select(EcsCommand))).all()
+        commands = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
         assert len(commands) == int(permit)
         assert production["release_requested"] is permit
     host.production.valid = False
     await host.complete_production(production["arrival_id"])
     await host.complete_production(production["arrival_id"])
     async with flow.factory() as session:
-        command = (await session.scalars(select(EcsCommand))).one()
+        command = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).one()
         original_code = command.command_code
     await flow.result(original_code, "SCAN2")
     flow.application_rebuild()
     await flow.hosts["first"].scan_pending()
     await flow.hosts["first"].scan_pending()
     async with flow.factory() as session:
-        commands = (await session.scalars(select(EcsCommand))).all()
+        commands = (
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).all()
         assert [command.command_code for command in commands] == [original_code]
         assert len((await session.execute(select(flow.production_table))).all()) == 1
         release = (await flow.rows(session, "scan2_release"))[0]
@@ -105,12 +126,18 @@ async def test_committed_work_recovers_after_lost_notification(roller_applicatio
     async with flow.factory() as session:
         scan = (await flow.rows(session, "scan_arrival"))[0]
         command = await flow.command(session, scan["command_code"])
-        original = (command.command_code, command.request_raw)
+        original = (
+            command.command_code,
+            await read_history_body(session, (command).request_record_id),
+        )
     await flow.result(original[0], "SCAN1")
     flow.application_rebuild()
     await flow.runtime.progressions["first"]()
     async with flow.factory() as session:
         scan = (await flow.rows(session, "scan_arrival"))[0]
         command = await flow.command(session, scan["command_code"])
-        assert (command.command_code, command.request_raw) == original
+        assert (
+            command.command_code,
+            await read_history_body(session, (command).request_record_id),
+        ) == original
         assert scan["pending"] is False

@@ -1,19 +1,24 @@
 from datetime import datetime
+from uuid import UUID
 
 from sqlalchemy import (
     JSON,
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     false,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
+
+from app.database import SCHEMA
 
 from .base import Base
 
@@ -48,6 +53,20 @@ class ReliableMessage(Base):
         Index("reliable_message_lease_idx", "status", "lease_until"),
         Index("reliable_message_retention_idx", "status", "updated_at"),
         Index("reliable_message_business_key_idx", "business_key"),
+        *(
+            Index(
+                f"reliable_message_{column}_idx",
+                column,
+                postgresql_where=text(f"{column} IS NOT NULL"),
+                sqlite_where=text(f"{column} IS NOT NULL"),
+            )
+            for column in (
+                "exchange_id",
+                "request_record_id",
+                "terminal_response_record_id",
+                "last_response_record_id",
+            )
+        ),
         {"sqlite_autoincrement": True},
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -56,8 +75,18 @@ class ReliableMessage(Base):
     operation_id: Mapped[str] = mapped_column(Text)
     delivery_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     pause_reason: Mapped[str | None] = mapped_column(String(64))
-    request_raw: Mapped[bytes] = mapped_column(LargeBinary)
-    response_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
+    exchange_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_exchange.id", ondelete="RESTRICT")
+    )
+    request_record_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    )
+    terminal_response_record_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    )
+    last_response_record_id: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    )
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     fail_reason: Mapped[str | None] = mapped_column(String(32))
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -69,7 +98,6 @@ class ReliableMessage(Base):
     last_http_status: Mapped[int | None] = mapped_column(Integer)
     last_failure_kind: Mapped[str | None] = mapped_column(String(64))
     last_verdict: Mapped[str | None] = mapped_column(String(32))
-    last_response_raw: Mapped[bytes | None] = mapped_column(LargeBinary)
     lease_id: Mapped[str | None] = mapped_column(String(64))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     scope_owner: Mapped[str | None] = mapped_column(Text)

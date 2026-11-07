@@ -21,6 +21,8 @@ from app.schemas.user import UserCreate
 
 # 仅是初始数据;之后新权限走 POST /permissions,不必改这里
 INITIAL_PERMISSIONS = {
+    "integration:history:read": "查询对接历史",
+    "integration:payload:read": "读取对接原文",
     "asset:workline:read": "workline read",
     "asset:workline:create": "workline create",
     "asset:workline:update": "workline update",

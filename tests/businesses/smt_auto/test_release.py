@@ -7,15 +7,17 @@ from sqlalchemy import func, select
 
 from app.businesses.smt_auto.models import AutoBinWork, AutoTask, AutoTaskRequest
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
-from app.models import EcsCommand, ReliableMessage, WorkLine
+from app.models import IntegrationExchange, ReliableMessage, WorkLine
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
 from app.tasks.reliable_tasks import run_cleanup
+from tests.helpers import seed_reliable_message
 
 
 async def no_work(host, data=None):
-    store = MessageStore(host.factory)
+    store = MessageStore(host.factory, records=history_records)
     claims = await store.claim(1, host.requests.outbox.targets)
     assert len(claims) == 1
     claim = claims[0]
@@ -97,14 +99,28 @@ async def test_original_no_work_releases_only_after_actual_public_success(
         saved = await session.get(AutoBinWork, work.id)
         command = saved.release_command_code
         assert command and saved.release_consumed_at_ms is None
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
     response = await host.result(command, status=status)
     assert response.status_code == 200
     async with host.factory.begin() as session:
         assert await flow.release_bin(
             session, work_line_id=line, arrival_id=work.arrival_id, now_ms=100
         ) == ("RELEASED" if status == "SUCCESS" else "RELEASING")
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         saved = await session.get(AutoBinWork, work.id)
         assert (saved.release_consumed_at_ms is not None) == (status == "SUCCESS")
         assert (
@@ -169,7 +185,8 @@ async def test_terminal_cleanup_preserves_original_bin_closure(s5_roller):
         old = datetime.now(UTC) - timedelta(days=100)
         for message_id in original_messages:
             (await session.get(ReliableMessage, message_id)).updated_at = old
-        unrelated = ReliableMessage(
+        unrelated = await seed_reliable_message(
+            session,
             target="decisions",
             operation="unrelated",
             operation_id="unrelated",
@@ -180,7 +197,6 @@ async def test_terminal_cleanup_preserves_original_bin_closure(s5_roller):
             created_at=old,
             updated_at=old,
         )
-        session.add(unrelated)
 
     await run_cleanup(host.factory, 90, batch=1)
 
@@ -263,9 +279,23 @@ async def test_release_rollback_restores_original_intent_without_second_move(s5_
     async with host.factory.begin() as session:
         saved = await session.get(AutoBinWork, work.id)
         assert saved.release_command_code is None and saved.release_decided_at_ms is None
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
         await flow.release_bin(session, work_line_id=1, arrival_id=work.arrival_id, now_ms=40)
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
 
 
 async def test_plate_physical_json_and_timestamps_cannot_prove_real_closure(s5_roller):
@@ -303,7 +333,14 @@ async def test_plate_physical_json_and_timestamps_cannot_prove_real_closure(s5_r
             await flow.release_bin(session, work_line_id=1, arrival_id=work.arrival_id, now_ms=100)
             == "WAITING"
         )
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize("direction", ["inbound", "outbound"])

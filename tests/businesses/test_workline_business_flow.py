@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.businesses.runtime import BusinessRuntime
 from app.integrations.ecs_command.declaration import command_declaration
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from tests.helpers import FlowMove, business_flow_fixture, flow_request
 
 
@@ -46,7 +46,11 @@ async def test_business_mismatch_never_creates_intent(flow, client):
     assert response.status_code == 422, response.text
     assert await flow.rows() == []
     async with flow.factory() as session:
-        receipt = await session.scalar(select(CallbackReceipt))
+        receipt = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
         assert receipt.status_code == 422
 
 
@@ -79,7 +83,19 @@ async def test_callback_restart_preserves_original_receipt(flow, client, monkeyp
     assert (await client.post(path, json=body)).status_code == 200
     assert await flow.rows() == [before]
     async with flow.factory() as session:
-        assert len(list(await session.scalars(select(CallbackReceipt)))) == 1
+        assert (
+            len(
+                list(
+                    await session.scalars(
+                        select(IntegrationExchange).where(
+                            IntegrationExchange.role == "RECEIPT",
+                            IntegrationExchange.receipt_active.is_(True),
+                        )
+                    )
+                )
+            )
+            == 1
+        )
     assert await runtime.services["seam_a"].advance(before["id"]) == "advanced"
     assert await runtime.services["seam_a"].advance(before["id"]) == "done"
 
@@ -104,6 +120,7 @@ import app.businesses
 from app.businesses import catalog
 from app.services import device_routes
 from app.reliable import Outbox
+from app.integrations import history as history_records
 from tests.helpers import business_composition
 
 root, environment, invalid = Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "True"
@@ -161,7 +178,7 @@ else:
     @asynccontextmanager
     async def reliable(*args, **kwargs):
         trace.append('resources:outbox')
-        yield Outbox({}, {})
+        yield Outbox({}, {}, records=history_records)
     main.reliable_lifespan = reliable
     async def start():
         async with main.lifespan(main.app):

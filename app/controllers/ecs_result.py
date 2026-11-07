@@ -1,13 +1,20 @@
 import logging
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi.responses import Response
 
 from app.core.database import session_factory
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
+from app.core.request_context import get_trace_id
 from app.diagnostics import log_exception
 from app.integrations.ecs_command.result import receive_ecs_result, reply
+from app.integrations.wms_callback.snapshots import (
+    SNAPSHOT_PREVIEW_BYTES,
+    allow_snapshot,
+    record_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None))])
@@ -57,16 +64,20 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
         503: {"description": "TEMPORARILY_UNAVAILABLE"},
     },
 )
-async def result_callback(request: Request):
+async def result_callback(request: Request, background_tasks: BackgroundTasks):
+    received_at = datetime.now(UTC)
+    raw = b""
+    body_available = False
+    factory = getattr(request.app.state, "callback_session_factory", session_factory)
     try:
         raw = await read_body_capped(request, 262144)
+        body_available = True
         if len(raw) > 262144:
             result = reply(413, "PAYLOAD_TOO_LARGE")
         else:
             service = getattr(request.app.state, "ecs_commands", None)
             if service is None:
                 raise RuntimeError("ECS application assembly unavailable")
-            factory = getattr(request.app.state, "callback_session_factory", session_factory)
             async with factory() as session, session.begin():
                 result = await receive_ecs_result(
                     session,
@@ -79,4 +90,21 @@ async def result_callback(request: Request):
             logger, "ECS result transaction failed", error, component="http", phase="ecs_result"
         )
         result = reply(503, "TEMPORARILY_UNAVAILABLE")
-    return JSONResponse(result.body, status_code=result.status_code)
+    if allow_snapshot("ecs_result"):
+        background_tasks.add_task(
+            record_snapshot,
+            factory,
+            preview=raw[:SNAPSHOT_PREVIEW_BYTES],
+            truncated=len(raw) > SNAPSHOT_PREVIEW_BYTES,
+            response=result,
+            request_id=get_trace_id() or "",
+            received_at=received_at,
+            source="ecs_result",
+            body_available=body_available,
+        )
+    return Response(
+        result.prepared_body,
+        status_code=result.status_code,
+        media_type="application/json",
+        background=background_tasks,
+    )

@@ -188,7 +188,7 @@ async def test_callback_effective_content_and_identity_drift(manual_bins):
 async def test_completion_receipt_outer_rollback_keeps_no_pending_fact(manual_bins):
     from sqlalchemy import select
 
-    from app.models import CallbackReceipt
+    from app.models import IntegrationExchange
 
     flow = manual_bins
     await flow.ready()
@@ -198,9 +198,12 @@ async def test_completion_receipt_outer_rollback_keeps_no_pending_fact(manual_bi
     async with flow.factory() as session:
         assert (
             await session.scalar(
-                select(CallbackReceipt.id).where(
-                    CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+                select(IntegrationExchange.receipt_id)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
                 )
+                .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
             )
             is None
         )

@@ -4,12 +4,13 @@ from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import delete, event
+from sqlalchemy import delete, event, or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.identifiers import uuid7
 from app.database import create_database_engine as create_async_engine
+from app.integrations import history as history_records
 from app.integrations.wms_transport import (
     PROTOCOL,
     Rack,
@@ -18,10 +19,17 @@ from app.integrations.wms_transport import (
     TransportService,
     TransportSubmitAdapter,
 )
-from app.models import CallbackReceipt, Menu, ReliableMessage, TransportTask
+from app.models import (
+    IntegrationExchange,
+    IntegrationReference,
+    Menu,
+    ReliableMessage,
+    TransportTask,
+)
 from app.reliable import Outbox
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
+from tests.helpers import clear_integration_history
 
 
 def make_transport_rig(factory, engine):
@@ -34,7 +42,7 @@ def make_transport_rig(factory, engine):
         fixed_retry_interval_s=1,
     )
     adapters = {PROTOCOL: TransportSubmitAdapter()}
-    outbox = Outbox({target.name: target}, adapters, clock=clock)
+    outbox = Outbox({target.name: target}, adapters, clock=clock, records=history_records)
     return SimpleNamespace(
         factory=factory,
         engine=engine,
@@ -73,6 +81,42 @@ async def pg_transport_rig(pg_sessions):
         yield rig
     finally:
         async with rig.factory() as session:
+            task_ids = list(
+                await session.scalars(
+                    select(TransportTask.transport_task_id).where(
+                        TransportTask.workline_id == rig.target.name
+                    )
+                )
+            )
+            roots = set(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(
+                        IntegrationExchange.target_key == rig.target.name
+                    )
+                )
+            )
+            related = set(
+                await session.scalars(
+                    select(IntegrationReference.related_exchange_id).where(
+                        IntegrationReference.exchange_id.in_(roots),
+                        IntegrationReference.related_exchange_id.is_not(None),
+                    )
+                )
+            )
+            if task_ids:
+                related.update(
+                    await session.scalars(
+                        select(IntegrationReference.exchange_id).where(
+                            IntegrationReference.namespace == "transport-outcome",
+                            or_(
+                                *(
+                                    IntegrationReference.reference_value.startswith(task_id + ":")
+                                    for task_id in task_ids
+                                )
+                            ),
+                        )
+                    )
+                )
             await session.execute(
                 delete(TransportTask).where(TransportTask.workline_id == rig.target.name)
             )
@@ -80,6 +124,7 @@ async def pg_transport_rig(pg_sessions):
                 delete(ReliableMessage).where(ReliableMessage.target == rig.target.name)
             )
             await session.execute(delete(Menu).where(Menu.name == rig.target.name))
+            await clear_integration_history(session, roots | related)
             await session.commit()
 
 
@@ -149,11 +194,8 @@ def transport_http_server():
 async def rack_failure_callback():
     from app.integrations.wms_callback import receive
 
-    receipts = []
-
     async def apply(rig, session, handle, rack):
         operation_id = str(uuid7())
-        receipts.append((rig.factory, operation_id))
         body = json.dumps(
             dict(
                 operation="transport.task.resulted@v1",
@@ -172,11 +214,4 @@ async def rack_failure_callback():
         ).encode()
         assert (await receive(session, body)).status_code == 202
 
-    try:
-        yield apply
-    finally:
-        for factory, operation_id in receipts:
-            async with factory.begin() as session:
-                await session.execute(
-                    delete(CallbackReceipt).where(CallbackReceipt.operation_id == operation_id)
-                )
+    return apply

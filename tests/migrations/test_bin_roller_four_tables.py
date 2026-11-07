@@ -1,5 +1,6 @@
 """Offline schema replacement rejects old responsibility before destroying private history."""
 
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import pytest
@@ -7,43 +8,42 @@ from sqlalchemy import MetaData, Table, inspect, select, text
 
 from app.database import SCHEMA, create_database_engine
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
 async def roller_migration(request, tmp_path):
-    url = (
-        f"sqlite+aiosqlite:///{tmp_path / 'cutover.db'}"
-        if request.param == "sqlite"
-        else request.getfixturevalue("pg_url")
-    )
-
-    async def migrate(command, revision):
-        result = await run_alembic(url, command, revision)
-        return result
-
-    result = await migrate("upgrade", "head")
-    assert result.returncode == 0, result.stdout + result.stderr
-    result = await migrate("downgrade", "rollerfoundation")
-    assert result.returncode == 0, result.stdout + result.stderr
-    engine = create_database_engine(url)
-
-    async def table(name):
-        async with engine.connect() as connection:
-            return await connection.run_sync(
-                lambda c: Table(
-                    name,
-                    MetaData(),
-                    schema=None if c.dialect.name == "sqlite" else SCHEMA,
-                    autoload_with=c,
-                )
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'cutover.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
             )
 
-    try:
-        yield engine, migrate, table
-    finally:
-        await engine.dispose()
-        result = await migrate("upgrade", "head")
+        async def migrate(command, revision):
+            result = await run_alembic(url, command, revision)
+            return result
+
+        result = await migrate("upgrade", "rollerfoundation")
         assert result.returncode == 0, result.stdout + result.stderr
+        engine = create_database_engine(url)
+
+        async def table(name):
+            async with engine.connect() as connection:
+                return await connection.run_sync(
+                    lambda c: Table(
+                        name,
+                        MetaData(),
+                        schema=None if c.dialect.name == "sqlite" else SCHEMA,
+                        autoload_with=c,
+                    )
+                )
+
+        try:
+            yield engine, migrate, table
+        finally:
+            await engine.dispose()
 
 
 def old_scan(identity, *, pending):
@@ -437,40 +437,31 @@ async def test_shared_responsibility_alone_refuses_cutover_without_mutating_orig
 
 
 async def test_unscoped_delivery_preserves_foundation_downgrade(roller_migration):
-    from types import SimpleNamespace
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from app.http_client import DeliveryState, HttpRequest, HttpResult
-    from app.reliable import MessageDraft, Outbox, Verdict, VerdictKind
-    from app.reliable.config import TargetConfig
-    from app.reliable.store import AttemptOutcome, MessageStatus, MessageStore
-
     engine, migrate, table = roller_migration
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    target = TargetConfig("unscoped-peer", "http://peer.test", "opaque")
-    targets = {target.name: target}
-    adapter = SimpleNamespace(
-        build_request=lambda message, target: HttpRequest("POST", "/fact", body=message.request_raw)
-    )
-    outbox = Outbox(targets, {"opaque": adapter})
-    store = MessageStore(factory)
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
     messages = await table("reliable_message")
-    async with factory.begin() as session:
-        queued = await outbox.enqueue(
-            session, MessageDraft(target.name, "fact", "original-fact", b"original-fact-bytes")
+    async with engine.begin() as connection:
+        message_id = await connection.scalar(
+            messages.insert()
+            .values(
+                target="unscoped-peer",
+                operation="fact",
+                operation_id="original-fact",
+                request_raw=b"original-fact-bytes",
+                response_raw=b"ack",
+                status="DONE",
+                attempts=1,
+                next_attempt_at=now,
+                created_at=now,
+                updated_at=now,
+                last_http_status=200,
+                last_verdict="DELIVERED",
+            )
+            .returning(messages.c.id)
         )
     try:
-        (claim,) = await store.claim(1, targets)
-        assert await store.before_send(claim, target)
-        assert await store.finish(
-            claim,
-            AttemptOutcome(
-                MessageStatus.DONE,
-                result=HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ack"),
-                verdict=Verdict(VerdictKind.DELIVERED, response=b"ack"),
-            ),
-        )
         result = await migrate("downgrade", "sharedrackdispatch")
         assert result.returncode == 0, result.stdout + result.stderr
         await engine.dispose()
@@ -479,7 +470,7 @@ async def test_unscoped_delivery_preserves_foundation_downgrade(roller_migration
                 await connection.execute(
                     select(
                         messages.c.request_raw, messages.c.response_raw, messages.c.status
-                    ).where(messages.c.id == queued.message_id)
+                    ).where(messages.c.id == message_id)
                 )
             ).one() == (b"original-fact-bytes", b"ack", "DONE")
     finally:
@@ -487,4 +478,4 @@ async def test_unscoped_delivery_preserves_foundation_downgrade(roller_migration
         assert result.returncode == 0, result.stdout + result.stderr
         await engine.dispose()
         async with engine.begin() as connection:
-            await connection.execute(messages.delete().where(messages.c.id == queued.message_id))
+            await connection.execute(messages.delete().where(messages.c.id == message_id))

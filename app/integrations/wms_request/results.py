@@ -6,7 +6,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import json_object
-from app.integrations.wms_envelope import RESPONSE_COLUMNS, outgoing_message, stored_response
+from app.integrations.wms_envelope import (
+    outgoing_message,
+    response_projection,
+    response_row,
+    stored_response,
+)
 from app.models import ReliableMessage
 
 from .adapter import ADAPTERS, PROTOCOL_OF
@@ -35,13 +40,14 @@ async def get_result(
     session: AsyncSession, *, message_id: int, operation: str, operation_id: str
 ) -> WmsRequestResult:
     identity = dict(message_id=message_id, operation=operation, operation_id=operation_id)
+    clause, columns = response_projection(ReliableMessage.__table__)
     with session.no_autoflush:
         row = (
             (
                 await session.execute(
-                    select(*(ReliableMessage.__table__.c[n] for n in RESPONSE_COLUMNS)).where(
-                        ReliableMessage.id == message_id
-                    )
+                    select(*columns.values())
+                    .select_from(clause)
+                    .where(ReliableMessage.id == message_id)
                 )
             )
             .mappings()
@@ -51,7 +57,8 @@ async def get_result(
         return WmsRequestResult(**identity, availability="NOT_FOUND")
     if row["operation"] != operation or row["operation_id"] != operation_id:
         return WmsRequestResult(**identity, availability="IDENTITY_MISMATCH")
-    raw = json_object(row["request_raw"])
+    row = response_row(row)
+    raw = json_object(row["request_raw"]) if row["request_raw"] is not None else None
     if not raw or raw.get("operation") != operation or raw.get("operation_id") != operation_id:
         return WmsRequestResult(**identity, availability="INVALID")
     registered = lookup(operation)

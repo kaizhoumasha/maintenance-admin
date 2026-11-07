@@ -13,7 +13,7 @@ from app.businesses.smt_auto.models import (
     AutoTaskInput,
     AutoTaskRequest,
 )
-from app.models import CallbackReceipt, ReliableMessage, WorkLine
+from app.models import IntegrationExchange, ReliableMessage, WorkLine
 
 
 async def start(flow, *, direction="inbound"):
@@ -48,8 +48,15 @@ async def snapshot(flow, body):
             select(AutoTaskInput).where(AutoTaskInput.operation_id == body["operation_id"])
         )
         receipt = await session.scalar(
-            select(CallbackReceipt).where(CallbackReceipt.operation_id == body["operation_id"])
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .where(IntegrationExchange.operation_id == body["operation_id"])
         )
+        from tests.helpers import get_receipt_by_id
+
+        receipt = await get_receipt_by_id(session, receipt.receipt_id) if receipt else None
         members = list(
             await session.scalars(
                 select(AutoInboundSourceMember).order_by(AutoInboundSourceMember.rack_array_index)
@@ -156,7 +163,7 @@ async def test_rolled_back_issued_and_prepare_leave_no_new_intent(auto_receiver)
     )
     assert (await f.deliver(issued, rollback=True)).status_code == 202
     async with f.factory() as session:
-        for model in (AutoTask, AutoTaskInput, CallbackReceipt, ReliableMessage):
+        for model in (AutoTask, AutoTaskInput, IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(model)) == 0
     assert f.notices == []
     assert (await f.deliver(issued)).status_code == 202

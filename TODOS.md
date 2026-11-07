@@ -10,7 +10,7 @@
 
 **Why:** 保证收据清理与 ECS 重报行为一致。
 
-**Context:** 联调前与 ECS 供应商确认事件重报的最大窗口和去重保留期：ECS 事件回调复用 `callback_receipt`（按 `RELIABLE_RETENTION_DAYS`=90 天清理），收据清理后同一事件再来会被当作新事件，处理器必须自带持久幂等键（见 [ECS 事件回调设计 §5.5](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)）。同时确认两点：未注册事件类型回 `200 ACK` 不会被其重报逻辑误判；白皮书 §4.2 对 `ESTOP_PRESSED` 返回 `400` 的条款是否保留（设计评审决定暂不内置）。
+**Context:** 联调前与 ECS 供应商确认事件重报的最大窗口和去重保留期：统一历史以 `IntegrationExchange` 的原收据受理资格取代旧 `callback_receipt`，仍按 `RELIABLE_RETENTION_DAYS`=90 天管理；资格释放后同一事件再来会被当作新事件，处理器必须自带持久幂等键（见[统一历史保留规则](docs/integrations/integration-history.md#保留与清理)及 [ECS 事件回调设计 §5.5](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)）。同时确认两点：未注册事件类型回 `200 ACK` 不会被其重报逻辑误判；白皮书 §4.2 对 `ESTOP_PRESSED` 返回 `400` 的条款是否保留（设计评审决定暂不内置）。本次存储改造不完成这些对端确认。
 
 **Effort:** S
 **Priority:** P1
@@ -21,7 +21,7 @@
 
 **Why:** 补齐滚动发布期间被旧实例接收但未应用的业务效果。
 
-**Context:** ECS 未注册事件的回放能力：未注册事件类型按 `200 ACK` 接收并把完整事件（≤32 KiB）存入 `callback_receipt.diagnostic`，滚动发布窗口内被老实例占位的事件新实例只返回重复，业务效果补不上。需要一个对 `UNREGISTERED_EVENT_TYPE` 诊断行重新应用已注册处理器的入口，处理器须自带幂等键；超过 32 KiB 的事件只存了摘要，无法回放。依赖第一个具体事件处理器出现。当前以「先部署处理器、再在 ECS 侧启用事件类型」的发布顺序规避，见 [ECS 事件回调设计 §6](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)。
+**Context:** ECS 未注册事件仍按 `200 ACK` 接收；统一历史保存原请求证据和 `IntegrationExchange.diagnostic` 中的 `UNREGISTERED_EVENT_TYPE` 诊断，诊断超出32 KiB时仍仅留摘要与预览。原请求字节是否可用须按证据的 body_state 与保留合同判断，不能由诊断大小推断。滚动发布窗口内被老实例占位的事件，新实例只返回原重复响应，业务效果不会自动补齐。具体处理器现已存在，但受控重新应用入口仍未实现，不能把历史查询或原文下载当作回放；处理器仍须自带持久幂等键。当前继续按「先部署处理器、再在 ECS 侧启用事件类型」规避，见[统一历史](docs/integrations/integration-history.md)和 [ECS 事件回调设计 §6](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)。
 
 **Effort:** M
 **Priority:** P2
@@ -34,7 +34,7 @@
 
 **Why:** 避免收据清理后重报被重新受理。
 
-**Context:** 联调前与 WMS 确认收据清理：我方已按 `RELIABLE_RETENTION_DAYS`（90 天）每日清理 `callback_receipt`，需 WMS 确认同一消息身份最长重发时间不超过 1 小时（暂定，远小于该期限），并同意把清理周期写入合同（合同要求先改文档）。详见[回调接收设计 §7、§9](docs/superpowers/specs/2026-10-22-transport-callback-design.md)。
+**Context:** 联调前与 WMS 确认收据清理：统一历史将原受理资格保存在 `IntegrationExchange`，仍按 `RELIABLE_RETENTION_DAYS`（90 天）及原保护条件释放，不再以旧 `callback_receipt` 表作为运行存储。需 WMS 确认同一消息身份最长重发时间不超过 1 小时（暂定，远小于该期限），并同意把清理周期写入合同；本次改造不完成对端确认。详见[统一历史保留规则](docs/integrations/integration-history.md#保留与清理)及[回调接收设计 §7、§9](docs/superpowers/specs/2026-10-22-transport-callback-design.md)。
 
 **Effort:** S
 **Priority:** P1

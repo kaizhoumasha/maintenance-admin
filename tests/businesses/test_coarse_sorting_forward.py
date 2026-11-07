@@ -247,9 +247,9 @@ async def test_invalid_or_wrong_identity_result_cannot_complete_original_scan(
 async def test_result_before_ack_and_receipt_cleanup_keep_original_move(coarse_forward):
     import asyncio
 
-    from sqlalchemy import delete
+    from sqlalchemy import update
 
-    from app.models import CallbackReceipt
+    from app.models import IntegrationExchange
 
     flow = coarse_forward
     row = await flow.prepare_command()
@@ -264,7 +264,11 @@ async def test_result_before_ack_and_receipt_cleanup_keep_original_move(coarse_f
         await sending
     retained = (await flow.rows())[0]
     async with flow.factory.begin() as session:
-        await session.execute(delete(CallbackReceipt))
+        await session.execute(
+            update(IntegrationExchange)
+            .where(IntegrationExchange.role == "RECEIPT")
+            .values(receipt_active=False)
+        )
     flow.rebuild()
     assert (await flow.post(flow.event())).status_code == 200
     assert (await flow.result(row)).status_code == 200
@@ -288,17 +292,26 @@ async def test_unknown_ecs_delivery_keeps_original_command(coarse_forward):
 
 @pytest.mark.parametrize("stage", ["validation", "command"])
 async def test_missing_original_outcome_never_registers_replacement(coarse_forward, stage):
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
 
-    from app.models import EcsCommand, ReliableMessage
+    from app.models import IntegrationExchange, ReliableMessage
 
     flow = coarse_forward
     if stage == "command":
+        from tests.helpers import clear_integration_history
+
         row = await flow.prepare_command()
         async with flow.factory.begin() as session:
-            await session.execute(
-                delete(EcsCommand).where(EcsCommand.command_code == row["command_code"])
+            root_id = await session.scalar(
+                select(IntegrationExchange.id).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == row["command_code"],
+                )
             )
+            await session.execute(
+                delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id)
+            )
+            await clear_integration_history(session, (root_id,))
     else:
         assert (await flow.post(flow.event())).status_code == 200
         await flow.service.advance((await flow.rows())[0]["id"])
@@ -600,3 +613,43 @@ async def test_validation_delivery_without_a_decision_retains_original_request(
         assert saved["pending"] is True
     assert await flow.outbound_counts() == counts
     assert flow.peer.requests == flow.peer.commands == []
+
+
+async def test_consumption_and_action_rollback_together(direct, monkeypatch):
+    from sqlalchemy import select
+
+    from app.integrations import history
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    flow = direct
+    row = await flow.prepare_command()
+    await flow.dispatch()
+    assert (await flow.result(row)).status_code == 200
+    before = await flow.action_rows(row["id"])
+    original = history.write_record
+
+    async def fail(session, *, draft):
+        if draft.record_kind == "BUSINESS_CONSUMED":
+            raise RuntimeError("injected consumption failure")
+        return await original(session, draft=draft)
+
+    monkeypatch.setattr(history, "write_record", fail)
+    with pytest.raises(RuntimeError, match="consumption failure"):
+        await flow.service.advance(row["id"])
+    assert await flow.action_rows(row["id"]) == before
+    assert (await flow.rows())[0]["move_result"] is None
+    monkeypatch.setattr(history, "write_record", original)
+    assert await flow.service.advance(row["id"]) == "AWAITING_ALLOCATION_RESULT"
+    async with flow.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(IntegrationRecord)
+                .join(IntegrationExchange, IntegrationExchange.id == IntegrationRecord.exchange_id)
+                .where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == row["command_code"],
+                    IntegrationRecord.record_kind == "BUSINESS_CONSUMED",
+                )
+            )
+        )
+        assert len(rows) == 1 and rows[0].parent_record_id is not None

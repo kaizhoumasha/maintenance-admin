@@ -5,12 +5,14 @@ import pytest
 
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
 from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 from app.reliable.delivery import send_one
 from app.reliable.store import MessageStore
 from app.reliable.testing import ScriptedHttpClient
+from tests.helpers import message_history_view
 
 
 @pytest.mark.parametrize(
@@ -43,7 +45,9 @@ async def test_invalid_ack_preserves_uncertainty_and_retries_the_frozen_request(
         reference = await wms.send(
             session, lookup(operation).data_model(task_id="T-1", qty=2), operation_id=operation_id
         )
-    store = MessageStore(sessions, clock=clock, uniform=lambda low, high: high)
+    store = MessageStore(
+        sessions, clock=clock, uniform=lambda low, high: high, records=history_records
+    )
     responses = [
         HttpResult(
             DeliveryState.HTTP_RESPONSE_COMPLETE,
@@ -74,7 +78,9 @@ async def test_invalid_ack_preserves_uncertainty_and_retries_the_frozen_request(
             uniform=lambda low, high: high,
         )
         async with sessions() as session:
-            row = await session.get(ReliableMessage, reference.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, reference.message_id)
+            )
             assert row.status == expected_status and row.attempts == attempt
             assert row.fail_reason is None
             assert row.delivery_uncertain and row.not_received_count == 0

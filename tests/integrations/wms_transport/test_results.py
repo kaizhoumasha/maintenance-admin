@@ -5,7 +5,14 @@ from sqlalchemy import JSON, delete, select, update
 
 from app.integrations.wms_transport import TransportCaller, TransportService
 from app.models import ReliableMessage, TransportTask
-from tests.helpers import result_task, transport_callback
+from tests.helpers import (
+    read_history_body,
+    result_task,
+    seed_reliable_message,
+    set_message_bodies,
+    transport_callback,
+    update_message_bodies,
+)
 
 
 async def read(factory, task):
@@ -72,16 +79,20 @@ async def test_confirmed_refusal_closes_only_without_execution_evidence(transpor
         )
         row.status, row.fail_reason = "FAILED", code
         row.last_http_status, row.last_verdict = http, "PEER_TERMINAL"
-        row.response_raw = json.dumps(
-            dict(
-                operation_id=row.operation_id,
-                code=code,
-                timestamp=1,
-                data=dict(
-                    transport_task_id=task.handle.transport_task_id, reason_code="INVALID_DATA"
-                ),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            row,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=row.operation_id,
+                    code=code,
+                    timestamp=1,
+                    data=dict(
+                        transport_task_id=task.handle.transport_task_id, reason_code="INVALID_DATA"
+                    ),
+                )
+            ).encode(),
+        )
     result = await read(factory, task)
     assert result.closure == "CLOSED" and result.closure_reason == "SUBMIT_REJECTION"
     await transport_callback(factory, task, bins=True, known=False)
@@ -114,7 +125,7 @@ async def test_identity_missing_frozen_pending_and_ambiguous_submission(transpor
         values = dict(original)
         values.pop("id")
         values["target"] = "other-target"
-        session.add(ReliableMessage(**values))
+        await seed_reliable_message(session, **values)
     result = await read(factory, task)
     assert result.submission_state == "AMBIGUOUS" and result.closure == "UNDETERMINED"
     async with factory.begin() as session:
@@ -263,10 +274,10 @@ async def test_missing_task_and_bad_submission_never_become_success(transport_ri
         )
         assert missing.availability == "NOT_FOUND" and missing.closure == "UNDETERMINED"
     async with transport_rig.factory.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.target == task.target)
-            .values(request_raw=b"{}")
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.target == task.target),
+            request_raw=b"{}",
         )
     assert (await read(transport_rig.factory, task)).submission_state == "INVALID"
     assert (await read(transport_rig.factory, task)).closure == "UNDETERMINED"
@@ -338,16 +349,20 @@ async def test_refusal_and_applied_position_milestones_require_reconciliation(
         )
         row.status, row.fail_reason = "FAILED", code
         row.last_http_status, row.last_verdict = http, "PEER_TERMINAL"
-        row.response_raw = json.dumps(
-            dict(
-                operation_id=row.operation_id,
-                code=code,
-                timestamp=1,
-                data=dict(
-                    transport_task_id=task.handle.transport_task_id, reason_code="INVALID_DATA"
-                ),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            row,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=row.operation_id,
+                    code=code,
+                    timestamp=1,
+                    data=dict(
+                        transport_task_id=task.handle.transport_task_id, reason_code="INVALID_DATA"
+                    ),
+                )
+            ).encode(),
+        )
     event = dict(
         transport_task_id=task.handle.transport_task_id, container_id="C1", milestone=milestone
     )
@@ -435,27 +450,50 @@ async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
         )
         row.status = "DONE"
         row.last_http_status, row.last_verdict = 202, "DELIVERED"
-        row.response_raw = json.dumps(
-            {
-                "operation_id": row.operation_id,
-                "code": "RECEIVED",
-                "timestamp": 1,
-                "data": {"transport_task_id": task.handle.transport_task_id},
-            }
-        ).encode()
+        await set_message_bodies(
+            session,
+            row,
+            response_raw=json.dumps(
+                {
+                    "operation_id": row.operation_id,
+                    "code": "RECEIVED",
+                    "timestamp": 1,
+                    "data": {"transport_task_id": task.handle.transport_task_id},
+                }
+            ).encode(),
+        )
         if case == "rejected":
             row.last_http_status = 422
-            row.response_raw = row.response_raw.replace(b"RECEIVED", b"REJECTED")
+            await set_message_bodies(
+                session,
+                row,
+                response_raw=(
+                    await read_history_body(session, row.terminal_response_record_id)
+                ).replace(b"RECEIVED", b"REJECTED"),
+            )
         if case == "echo":
-            row.response_raw = row.response_raw.replace(
-                task.handle.transport_task_id.encode(), b"wrong"
+            await set_message_bodies(
+                session,
+                row,
+                response_raw=(
+                    await read_history_body(session, row.terminal_response_record_id)
+                ).replace(task.handle.transport_task_id.encode(), b"wrong"),
             )
         if case == "request":
-            row.request_raw += b" "
+            await set_message_bodies(
+                session,
+                row,
+                request_raw=(await read_history_body(session, row.request_record_id)) + b" ",
+            )
         if case == "duplicate_key":
-            row.response_raw = b'{"code":"RECEIVED",' + row.response_raw[1:]
+            await set_message_bodies(
+                session,
+                row,
+                response_raw=b'{"code":"RECEIVED",'
+                + (await read_history_body(session, row.terminal_response_record_id))[1:],
+            )
         if case == "settled":
-            row.response_raw = None
+            await set_message_bodies(session, row, response_raw=None)
         if case == "corrupt_preferred":
             await session.execute(
                 update(TransportTask).values(submission_acceptance={"partial": True})
@@ -467,14 +505,13 @@ async def test_acceptance_reads_historical_valid_ack_despite_invalid_outcome(
         if case == "empty_target":
             row.target = ""
         if case == "ambiguous_target":
-            session.add(
-                ReliableMessage(
-                    **{
-                        c.name: ("other-target" if c.name == "target" else getattr(row, c.name))
-                        for c in ReliableMessage.__table__.c
-                        if c.name != "id"
-                    }
-                )
+            await seed_reliable_message(
+                session,
+                **{
+                    c.name: ("other-target" if c.name == "target" else getattr(row, c.name))
+                    for c in ReliableMessage.__table__.c
+                    if c.name != "id"
+                },
             )
         if case == "owner":
             task.service.owner_domain = "other"

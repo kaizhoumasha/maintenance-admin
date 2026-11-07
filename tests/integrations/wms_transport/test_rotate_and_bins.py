@@ -16,6 +16,7 @@ from app.integrations.wms_transport import (
     RackPosition,
 )
 from app.models import ReliableMessage, TransportTask
+from tests.helpers import message_history_view
 
 from .helpers import caller, counts
 
@@ -30,8 +31,11 @@ async def stored(session, handle):
     task = await session.scalar(
         select(TransportTask).where(TransportTask.transport_task_id == handle.transport_task_id)
     )
-    message = await session.scalar(
-        select(ReliableMessage).where(ReliableMessage.operation_id == task.operation_id)
+    message = await message_history_view(
+        session,
+        await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == task.operation_id)
+        ),
     )
     return task, json.loads(message.request_raw)["data"]
 

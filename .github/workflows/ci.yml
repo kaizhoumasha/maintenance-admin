@@ -9,21 +9,12 @@ concurrency:
 
 jobs:
   pytest:
-    name: pytest (${{ matrix.group }})
+    name: pytest (lane ${{ matrix.lane }}/6)
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - group: migrations
-            args: tests/migrations
-          - group: workflows
-            args: tests/businesses/bin_roller tests/businesses/smt_manual
-          - group: remaining
-            args: >-
-              --ignore=tests/migrations
-              --ignore=tests/businesses/bin_roller
-              --ignore=tests/businesses/smt_manual
+        lane: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         # 与 docker-compose.yml 同一镜像
@@ -46,6 +37,8 @@ jobs:
       # 集成测试库/实例是一次性的,不要指向业务数据
       TEST_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/enterprise_backend_test
       TEST_REDIS_URL: redis://localhost:6379/15
+      TEST_HISTORY_MIGRATION_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/history_migration_test
+      TRANSPORT_OWNER_MIGRATION_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/transport_owner_migration_test
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
@@ -54,7 +47,22 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest ${{ matrix.args }} -ra --durations=30 --durations-min=1
+      - name: Prepare isolated migration stores
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          import os
+          from sqlalchemy.engine import make_url
+          from tests.migration_helpers import migration_database_ddl
+
+          async def prepare():
+              for key in ("TEST_HISTORY_MIGRATION_DATABASE_URL", "TRANSPORT_OWNER_MIGRATION_DATABASE_URL"):
+                  database = make_url(os.environ[key]).database
+                  await migration_database_ddl(os.environ["TEST_DATABASE_URL"], database, create=True)
+
+          asyncio.run(prepare())
+          PY
+      - run: uv run pytest --test-lane=${{ matrix.lane }}/6 -ra --durations=30 --junitxml=test-results.xml
 
   test:
     runs-on: ubuntu-24.04

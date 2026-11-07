@@ -13,6 +13,7 @@ from app.reliable.policy import retry_delay_s
 from app.reliable.store import AttemptOutcome, cleanup_terminal
 from app.reliable.testing import ScriptedHttpClient
 from app.reliable.types import MessageStatus, Verdict, VerdictKind
+from tests.helpers import message_history_view
 
 NOT_SENT = HttpResult(DeliveryState.NOT_SENT, FailureKind.CONNECT_ERROR, None, (), None)
 UNKNOWN_DELIVERY = HttpResult(
@@ -39,7 +40,9 @@ async def enqueue(rig, **kwargs):
 
 async def row(rig, message_id):
     async with rig.factory() as session:
-        return await session.get(ReliableMessage, message_id, populate_existing=True)
+        return await message_history_view(
+            session, await session.get(ReliableMessage, message_id, populate_existing=True)
+        )
 
 
 async def attempt(rig, outcome, *, uniform=lambda low, high: high):

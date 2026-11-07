@@ -1,10 +1,13 @@
+from sqlalchemy import select
+
 from app.core.identifiers import uuid7
+from app.integrations import history as history_records
 from app.integrations.ecs_command import compile_commands
-from app.models import Device, DeviceRoute, EcsCommand, WorkLine
+from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine
 from app.services.asset_audit import AssetActor
 from app.services.device_routes import DeviceRoutes
 from app.services.device_service import delete_device
-from tests.helpers import EcsMove, add_bound_device, workline_definition_lookup
+from tests.helpers import EcsMove, add_bound_device, read_history_body, workline_definition_lookup
 
 
 async def test_role_switch_selects_new_contract_and_preserves_original_result_contract(ecs):
@@ -58,7 +61,9 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
     try:
         async with ecs.factory.begin() as session:
             original = await create(session, "entry", EcsMove(qty=1))
-        store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+        store = MessageStore(
+            ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+        )
         claim = (await store.claim(1, ecs.targets))[0]
         assert await store.before_send(claim, ecs.targets["ecs"])
         async with ecs.factory() as session:
@@ -77,11 +82,23 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
             with pytest.raises(ValueError):
                 await create(session, "invalid-exit", EcsMove(qty=2))
             new = await create(session, "exit", ExitPayload(exit_code="RETURN"))
-            assert (await session.get(EcsCommand, new.command_code)).route["annex_id"] == "exit"
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange).where(
+                        IntegrationExchange.role == "ECS_COMMAND",
+                        IntegrationExchange.command_code == new.command_code,
+                    )
+                )
+            ).route["annex_id"] == "exit"
             assert (
                 await create(session, "entry", EcsMove(qty=1))
             ).command_code == original.command_code
-            old = await session.get(EcsCommand, original.command_code)
+            old = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == original.command_code,
+                )
+            )
             assert (
                 await ecs.service.routes.authorize_frozen(session, old.route)
             ).value == "REVOKED"
@@ -137,8 +154,18 @@ async def test_new_directory_identity_preserves_frozen_command_and_independent_i
         await add("http://127.0.0.1:45691")
         async with ecs.factory.begin() as session:
             first = await command(session, "first")
-            row = await session.get(EcsCommand, first.command_code)
-            frozen = (dict(row.route), row.request_raw, row.delivery_snapshot, row.expires_at)
+            row = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == first.command_code,
+                )
+            )
+            frozen = (
+                dict(row.route),
+                (await read_history_body(session, (row).request_record_id)),
+                row.delivery_snapshot,
+                row.expires_at,
+            )
             row.status = "HELD"
             row.needs_reconciliation = True
             row.hold_reason = "UNKNOWN_DELIVERY"
@@ -153,12 +180,27 @@ async def test_new_directory_identity_preserves_frozen_command_and_independent_i
         await add("http://127.0.0.1:45692")
         async with ecs.factory.begin() as session:
             assert (await command(session, "first")).command_code == first.command_code
-            row = await session.get(EcsCommand, first.command_code)
-            assert (row.route, row.request_raw, row.delivery_snapshot, row.expires_at) == frozen
+            row = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == first.command_code,
+                )
+            )
+            assert (
+                row.route,
+                (await read_history_body(session, (row).request_record_id)),
+                row.delivery_snapshot,
+                row.expires_at,
+            ) == frozen
             assert row.status == "HELD" and row.needs_reconciliation
             assert (await routes.authorize_frozen(session, row.route)).value == "REVOKED"
             new = await command(session, "independent")
-            current = await session.get(EcsCommand, new.command_code)
+            current = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == new.command_code,
+                )
+            )
             assert new.command_code != first.command_code
             assert current.route["origin"] == "http://127.0.0.1:45692"
     finally:
@@ -176,7 +218,7 @@ async def test_late_original_result_survives_configuration_deletion(ecs):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
     from app.integrations.ecs_command.result import receive_ecs_result
-    from app.models import EcsResultEvidence, EcsSendEvidence
+    from app.models import IntegrationRecord
     from app.reliable.store import MessageStore
 
     code = "late-directory-" + uuid7().hex
@@ -194,7 +236,9 @@ async def test_late_original_result_survives_configuration_deletion(ecs):
                 timeout_ms=30000,
                 command=EcsMove.model_validate({"qty": 1}),
             )
-        store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+        store = MessageStore(
+            ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+        )
         claim = (await store.claim(1, ecs.targets))[0]
         assert await store.before_send(claim, ecs.targets["ecs"])
         async with ecs.factory.begin() as session:
@@ -217,18 +261,29 @@ async def test_late_original_result_survives_configuration_deletion(ecs):
         async with ecs.factory.begin() as session:
             assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 200
         async with ecs.factory() as session:
-            saved = await session.get(EcsCommand, command.command_code)
+            saved = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == command.command_code,
+                )
+            )
             assert saved.status == "SUCCEEDED" and saved.route["origin"] == route.ecs_origin
             assert await session.scalar(
-                select(EcsResultEvidence.id).where(
-                    EcsResultEvidence.command_code == command.command_code
+                select(IntegrationRecord.id)
+                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                .where(
+                    IntegrationRecord.exchange_id
+                    == select(IntegrationExchange.id)
+                    .where(
+                        IntegrationExchange.role == "ECS_COMMAND",
+                        IntegrationExchange.command_code == command.command_code,
+                    )
+                    .scalar_subquery()
                 )
             )
-            assert await session.scalar(
-                select(EcsSendEvidence.id).where(
-                    EcsSendEvidence.command_code == command.command_code
-                )
-            )
+            from tests.helpers import ecs_attempt_evidence
+
+            assert await ecs_attempt_evidence(session, command.command_code)
             assert await session.get(Device, device_id) is None
             assert await session.get(DeviceRoute, route.id) is not None
     finally:

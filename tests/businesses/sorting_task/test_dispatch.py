@@ -14,7 +14,7 @@ from app.integrations.wms_callback import (
     Rejected,
     Unavailable,
 )
-from app.models import CallbackReceipt, WorkLine
+from app.models import IntegrationExchange, WorkLine
 
 
 def issued(task_id="TASK-1", mode="MANUAL", line="SORT-0", direction="outbound"):
@@ -262,11 +262,15 @@ async def test_archive_guard_routes_before_successful_replay(task_flow, name, da
     assert f.hosts["second"].calls == original_calls
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == first.body
+        from tests.helpers import get_receipt_by_id
+
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == first.body
     assert f.notices == ["second"]
 
 
@@ -284,7 +288,15 @@ async def test_guard_exception_and_positive_return_do_not_commit(task_flow, guar
     assert f.hosts["second"].calls == []
     assert f.notices == []
     async with f.factory() as session:
-        assert await session.scalar(select(CallbackReceipt.id)) is None
+        assert (
+            await session.scalar(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize("failure", ["reject", "store", "outer_rollback"])
@@ -304,7 +316,14 @@ async def test_business_change_and_callback_receipt_commit_together(task_flow, f
     async with f.factory() as session:
         assert (await session.execute(select(f.hosts["first"].tasks))).all() == []
         assert (await session.execute(select(f.hosts["first"].inputs))).all() == []
-        receipts = (await session.execute(select(CallbackReceipt))).all()
+        receipts = (
+            await session.execute(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+        ).all()
         assert len(receipts) == (1 if failure == "reject" else 0)
     assert f.notices == []
 
@@ -338,7 +357,13 @@ async def test_reference_resolution_survives_receipt_retention(task_flow):
     raw = f.message("cancel", dict(task_id="TASK-1", cancel_scope="TASK"))
     assert (await f.deliver(raw)).status_code == 202
     async with f.factory() as session, session.begin():
-        await session.execute(delete(CallbackReceipt))
+        await session.execute(
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+        )
         await session.execute(delete(f.hosts["first"].inputs))
         await session.execute(
             update(WorkLine).where(WorkLine.line_code == "SORT-0").values(business_code="second")
@@ -349,7 +374,13 @@ async def test_reference_resolution_survives_receipt_retention(task_flow):
     assert (await f.deliver(raw)).status_code == 200
     assert len(f.hosts["first"].calls) == 2
     async with f.factory() as session, session.begin():
-        await session.execute(delete(CallbackReceipt))
+        await session.execute(
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+        )
         await session.execute(delete(f.hosts["first"].tasks))
     assert (await f.deliver(raw)).status_code >= 400
     assert len(f.hosts["first"].calls) == 2
@@ -399,11 +430,15 @@ async def test_missing_reference_refusal_survives_later_incompatible_task(task_f
     assert f.notices == notices == ["first"]
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == first.body
+        from tests.helpers import get_receipt_by_id
+
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == first.body
         assert list(await session.scalars(select(f.hosts["first"].inputs.c.operation))) == [
             "sorting.task.issued@v1"
         ]
@@ -551,7 +586,15 @@ async def test_business_wakeup_waits_for_outer_commit(task_flow, caller_fact):
     assert f.notices == []
     async with f.factory() as session:
         assert (await session.execute(select(f.hosts["first"].tasks))).all() == []
-        assert await session.scalar(select(CallbackReceipt.id)) is None
+        assert (
+            await session.scalar(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize("name", ["issued", "cancel"])
@@ -570,11 +613,15 @@ async def test_successful_replay_without_original_owner_is_unavailable(task_flow
     assert replay.body["data"] == {}
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == first.body
+        from tests.helpers import get_receipt_by_id
+
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == first.body
     assert len(f.hosts["first"].calls) == 1
     assert f.notices == ["first"]
 
@@ -619,11 +666,15 @@ async def test_guard_receives_deeply_readonly_original_response(task_flow):
         original["data"]["nested"]["items"][0] = 9
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == first.body
+        from tests.helpers import get_receipt_by_id
+
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == first.body
 
 
 async def test_guard_and_recheck_share_original_response_snapshot(task_flow):
@@ -707,10 +758,14 @@ async def test_missing_owner_preserves_only_definite_original_refusals(
         assert replay.body["data"] == {}
     async with f.factory() as session:
         receipt = await session.scalar(
-            select(CallbackReceipt).where(
-                CallbackReceipt.operation_id == json.loads(raw)["operation_id"]
+            select(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
             )
+            .where(IntegrationExchange.operation_id == json.loads(raw)["operation_id"])
         )
-        assert receipt.body == first.body
+        from tests.helpers import get_receipt_by_id
+
+        assert (await get_receipt_by_id(session, receipt.receipt_id)).body == first.body
     assert len(f.hosts["first"].calls) == 1
     assert f.notices == []

@@ -8,6 +8,7 @@ from app.core.identifiers import uuid7
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
+from tests.helpers import read_history_body, update_message_bodies
 
 OP = "example.decision.ask@v1"
 
@@ -43,8 +44,8 @@ async def test_request_result_uses_original_message_identity(sessions, wms):
 async def test_invalid_original_request_cannot_expose_a_response(sessions, wms, raw):
     mid, oid = await registered(sessions, wms)
     async with sessions.begin() as session:
-        await session.execute(
-            update(ReliableMessage).where(ReliableMessage.id == mid).values(request_raw=raw)
+        await update_message_bodies(
+            session, update(ReliableMessage).where(ReliableMessage.id == mid), request_raw=raw
         )
     async with sessions() as session:
         result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
@@ -81,17 +82,15 @@ async def test_delivery_terminal_is_not_business_completion(
     raw = json.dumps(dict(operation_id=oid, code=code, timestamp=10, data=data)).encode()
     terminal = status in {"DONE", "FAILED"}
     async with sessions.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == mid)
-            .values(
-                status=status,
-                last_http_status=http,
-                last_verdict="PEER_TERMINAL" if status == "FAILED" else "DELIVERED",
-                fail_reason=code if status == "FAILED" else None,
-                response_raw=raw if terminal else None,
-                last_response_raw=None if terminal else raw,
-            )
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == mid),
+            status=status,
+            last_http_status=http,
+            last_verdict="PEER_TERMINAL" if status == "FAILED" else "DELIVERED",
+            fail_reason=code if status == "FAILED" else None,
+            response_raw=raw if terminal else None,
+            last_response_raw=None if terminal else raw,
         )
     async with sessions() as session:
         result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
@@ -143,17 +142,15 @@ async def test_fact_receipt_is_a_protocol_response(sessions, wms, code):
     oid = str(uuid7())
     async with sessions.begin() as session:
         ref = await wms.send(session, lookup(op).data_model(task_id="T", qty=1), operation_id=oid)
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == ref.message_id)
-            .values(
-                status="DONE",
-                last_verdict="DELIVERED",
-                last_http_status=200,
-                response_raw=json.dumps(
-                    dict(operation_id=oid, code=code, timestamp=1, data={})
-                ).encode(),
-            )
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == ref.message_id),
+            status="DONE",
+            last_verdict="DELIVERED",
+            last_http_status=200,
+            response_raw=json.dumps(
+                dict(operation_id=oid, code=code, timestamp=1, data={})
+            ).encode(),
         )
     async with sessions() as session:
         r = await wms.get_result(session, message_id=ref.message_id, operation=op, operation_id=oid)
@@ -173,10 +170,13 @@ async def test_invalid_terminal_envelope_is_not_a_decision(sessions, wms, change
     mid, oid = await registered(sessions, wms)
     raw = json.dumps(dict(operation_id=oid, code="DECIDED", timestamp=1, data={}) | change).encode()
     async with sessions.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == mid)
-            .values(status="DONE", last_verdict="DELIVERED", last_http_status=200, response_raw=raw)
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == mid),
+            status="DONE",
+            last_verdict="DELIVERED",
+            last_http_status=200,
+            response_raw=raw,
         )
     async with sessions() as session:
         r = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
@@ -186,12 +186,12 @@ async def test_invalid_terminal_envelope_is_not_a_decision(sessions, wms, change
 async def test_local_error_never_exposes_stale_response(sessions, wms):
     mid, oid = await registered(sessions, wms)
     async with sessions.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == mid)
-            .values(
-                status="FAILED", fail_reason="LOCAL_ERROR", last_response_raw=b'{"code":"DECIDED"}'
-            )
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == mid),
+            status="FAILED",
+            fail_reason="LOCAL_ERROR",
+            last_response_raw=b'{"code":"DECIDED"}',
         )
     async with sessions() as session:
         r = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
@@ -207,17 +207,58 @@ async def test_overflowed_terminal_response_is_invalid_and_keeps_original_bytes(
     raw = json.dumps(dict(operation_id=oid, code="DECIDED", timestamp=1, data={})).encode()
     raw = raw.replace(b'"data": {}', b'"data": {"nested": [' + number.encode() + b"]}")
     async with sessions.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == mid)
-            .values(status="DONE", last_verdict="DELIVERED", last_http_status=200, response_raw=raw)
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == mid),
+            status="DONE",
+            last_verdict="DELIVERED",
+            last_http_status=200,
+            response_raw=raw,
         )
     async with sessions() as session:
         result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
         assert result.response_state == "INVALID" and result.response_data is None
         assert (
-            await session.scalar(
-                select(ReliableMessage.response_raw).where(ReliableMessage.id == mid)
+            await read_history_body(
+                session,
+                await session.scalar(
+                    select(ReliableMessage.terminal_response_record_id).where(
+                        ReliableMessage.id == mid
+                    )
+                ),
             )
             == raw
         )
+
+
+async def test_result_reader_uses_only_original_terminal_reference(sessions, wms):
+    from app.integrations.history import RecordDraft, write_record
+
+    mid, oid = await registered(sessions, wms)
+    raw = json.dumps(
+        dict(operation_id=oid, code="DECIDED", timestamp=10, data={"ok": True})
+    ).encode()
+    async with sessions.begin() as session:
+        row = await session.get(ReliableMessage, mid)
+        reply = await write_record(
+            session,
+            draft=RecordDraft(
+                exchange_id=row.exchange_id,
+                record_kind="HTTP_RESPONSE_OBSERVED",
+                event_key="test-response",
+                direction="INBOUND",
+                raw_body=raw,
+            ),
+        )
+        row.status, row.last_verdict, row.last_http_status = "DONE", "DELIVERED", 200
+        row.last_response_record_id = reply
+    async with sessions() as session:
+        result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
+        assert result.response_state == "UNAVAILABLE"
+    async with sessions.begin() as session:
+        row = await session.get(ReliableMessage, mid)
+        row.terminal_response_record_id = reply
+        row.request_raw, row.response_raw = b"obsolete", b"obsolete"
+    async with sessions() as session:
+        result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
+        assert result.response_state == "VALID" and result.response_data == {"ok": True}

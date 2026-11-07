@@ -11,10 +11,14 @@ async def test_serialization_retries_whole_advance_in_new_session(manual_host, f
     sessions, isolations = [], []
 
     def started(session, transaction, connection):
+        if transaction.nested:
+            return
         sessions.append(session)
         isolations.append(connection.get_isolation_level())
 
     def committing(session):
+        if session.in_nested_transaction():
+            return
         if len(sessions) <= failures:
             session.execute(
                 text("DO $$ BEGIN RAISE EXCEPTION 'retry' USING ERRCODE='40001'; END $$")
@@ -87,6 +91,8 @@ async def test_commit_unknown_recovers_original_record_without_replacement(manua
     await flow.issue()
 
     def unknown(session):
+        if session.in_nested_transaction():
+            return
         raise DBAPIError(
             "COMMIT", None, RuntimeError("connection lost"), connection_invalidated=True
         )
@@ -152,6 +158,8 @@ async def test_original_capacity_slot_rolls_back_with_transport_before_commit(
     attempts = []
 
     def fail_after_registration(session):
+        if session.in_nested_transaction():
+            return
         action = session.scalar(select(RackAction).where(RackAction.job_id == job["id"]))
         if action is None:
             return

@@ -8,7 +8,8 @@ import sys
 
 from fastapi import FastAPI, Request
 
-from tests.helpers import loopback_app
+from tests.helpers import loopback_app, run_alembic
+from tests.migration_helpers import schema_database  # noqa: F401
 
 VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
@@ -17,6 +18,17 @@ DEPART = "rack.departure_decide@v1"
 
 
 async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp_path):
+    await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'first-and-tail.db'}")
+
+
+async def test_postgres_integration_resumes_original_work_across_processes(schema_database):  # noqa: F811
+    url, _ = schema_database
+    result = await run_alembic(url, "upgrade", "head")
+    assert result.returncode == 0, result.stdout + result.stderr
+    await exercise_integration(url)
+
+
+async def exercise_integration(integration_database):
     peer = FastAPI()
     requests, commands, reports, transports = [], [], [], []
     allocation = {
@@ -101,7 +113,7 @@ async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp
                 **os.environ,
                 "ENVIRONMENT": "local",
                 "COARSE_SORTING_TAIL_ENABLED": str(tail).lower(),
-                "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'first-and-tail.db'}",
+                "DATABASE_URL": integration_database,
                 "REDIS_URL": "redis://127.0.0.1:1/0",
                 "RELIABLE_TARGETS": json.dumps(
                     {
@@ -187,7 +199,14 @@ async def exercise(phase, origin):
     from app.integrations.wms_request import InvalidRequestPayload, wms_requests
     from app.integrations.wms_request.operation import lookup
     from app.main import app
-    from app.models import Base, Device, DeviceRoute, EcsCommand, TransportTask, WorkLinePosition
+    from app.models import (
+        Base,
+        Device,
+        DeviceRoute,
+        IntegrationExchange,
+        TransportTask,
+        WorkLinePosition,
+    )
     from app.tasks.business_tasks import advance_pending
     from tests.helpers import add_bound_device
 
@@ -246,9 +265,11 @@ async def exercise(phase, origin):
                     async with session_factory() as session:
                         commands = (
                             await session.scalars(
-                                select(EcsCommand).where(
-                                    EcsCommand.task_type.in_(results),
-                                    EcsCommand.delivery_status == "DONE",
+                                select(IntegrationExchange)
+                                .where(IntegrationExchange.role == "ECS_COMMAND")
+                                .where(
+                                    IntegrationExchange.task_type.in_(results),
+                                    IntegrationExchange.delivery_status == "DONE",
                                 )
                             )
                         ).all()
@@ -329,7 +350,9 @@ async def exercise(phase, origin):
                         if incoming:
                             assert (
                                 await session.scalars(
-                                    select(EcsCommand).where(EcsCommand.task_type == "PUT_TO_BIN")
+                                    select(IntegrationExchange)
+                                    .where(IntegrationExchange.role == "ECS_COMMAND")
+                                    .where(IntegrationExchange.task_type == "PUT_TO_BIN")
                                 )
                             ).first() is None
                             break

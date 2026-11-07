@@ -1,3 +1,4 @@
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 
 import pytest
@@ -5,8 +6,10 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.database import create_database_engine as create_async_engine
-from app.models import CallbackReceipt, CallbackSnapshot
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database, legacy_callback_tables
+
+receipts, _ = legacy_callback_tables()
 
 BASE = "a019d20261022"
 REVISION = "a020a20261022"
@@ -14,30 +17,24 @@ REVISION = "a020a20261022"
 
 @pytest.fixture(params=["sqlite", "pg"])
 async def callback_db(request, tmp_path):
-    url = (
-        f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}"
-        if request.param == "sqlite"
-        else request.getfixturevalue("pg_url")
-    )
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
 
-    async def migrate(command, revision):
-        return await run_alembic(url, command, revision)
+        async def migrate(command, revision):
+            return await run_alembic(url, command, revision)
 
-    upgraded = await migrate("upgrade", REVISION)
-    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
-    # 共享 PostgreSQL 库可能已在更新的 head 上:这里把库收敛到本迁移版本
-    targeted = await migrate("downgrade", REVISION)
-    assert targeted.returncode == 0, targeted.stdout + targeted.stderr
-    engine = create_async_engine(url)
-    try:
-        yield engine, migrate
-    finally:
-        async with engine.begin() as connection:
-            await connection.execute(CallbackSnapshot.__table__.delete())
-            await connection.execute(CallbackReceipt.__table__.delete())
-        await engine.dispose()
-        restored = await migrate("upgrade", "head")
-        assert restored.returncode == 0, restored.stdout + restored.stderr
+        upgraded = await migrate("upgrade", REVISION)
+        assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+        engine = create_async_engine(url)
+        try:
+            yield engine, migrate
+        finally:
+            await engine.dispose()
 
 
 async def test_receipt_identity_survives_refused_downgrade_and_empty_schema_roundtrips(callback_db):
@@ -45,7 +42,7 @@ async def test_receipt_identity_survives_refused_downgrade_and_empty_schema_roun
     factory = async_sessionmaker(engine)
     async with factory.begin() as session:
         await session.execute(
-            CallbackReceipt.__table__.insert().values(
+            receipts.insert().values(
                 operation="unknown@v1",
                 operation_id="01a13b00-cabd-7390-890a-0c093e7c07a1",
                 raw_digest="a" * 64,
@@ -60,9 +57,9 @@ async def test_receipt_identity_survives_refused_downgrade_and_empty_schema_roun
     refused = await migrate("downgrade", BASE)
     assert refused.returncode != 0 and "非空" in refused.stdout + refused.stderr
     async with factory.begin() as session:
-        assert await session.scalar(select(CallbackReceipt.status_code)) == 422
+        assert await session.scalar(select(receipts.c.status_code)) == 422
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
-        await session.execute(CallbackReceipt.__table__.delete())
+        await session.execute(receipts.delete())
     removed = await migrate("downgrade", BASE)
     assert removed.returncode == 0, removed.stdout + removed.stderr
     async with engine.connect() as connection:

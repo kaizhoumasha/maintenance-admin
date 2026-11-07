@@ -1,5 +1,5 @@
 import logging
-from datetime import UTC, datetime
+from dataclasses import asdict
 
 import pytest
 from sqlalchemy import event, select
@@ -12,8 +12,8 @@ from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback import snapshots
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.main import app
-from app.models import CallbackReceipt, CallbackSnapshot
-from tests.helpers import ecs_binding, legacy_ecs_receipt
+from app.models import IntegrationExchange, IntegrationRecord
+from tests.helpers import ecs_binding, legacy_ecs_receipt, read_diagnostic_snapshots, read_receipts
 
 PATH = "/api/v1/callback/event"
 WMS_PATH = "/api/v1/wms/events"
@@ -32,6 +32,10 @@ def body(**changes):
 
 async def rows(factory, model):
     async with factory() as session:
+        if model is IntegrationExchange:
+            return await read_receipts(session)
+        if model is IntegrationRecord:
+            return await read_diagnostic_snapshots(session)
         return list(await session.scalars(select(model).order_by(model.id)))
 
 
@@ -45,6 +49,75 @@ async def test_valid_event_is_acked(callback_client, callback_store):
     response = await callback_client.post(PATH, json=body())
     assert response.status_code == 200 and response.json() == ACK
     assert calls == ["D1"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "projected_type"),
+    [("UNKNOWN" + chr(0) + "EVENT", None), ("未注册事件", "未注册事件")],
+)
+async def test_unregistered_event_keeps_ack_and_original_bytes_with_safe_type_projection(
+    callback_client, callback_store, event_type, projected_type
+):
+    import json
+
+    from tests.helpers import read_history_body
+
+    raw = json.dumps(body(event_type=event_type)).encode()
+    first = await callback_client.post(PATH, content=raw)
+    replay = await callback_client.post(PATH, content=raw)
+    assert first.status_code == replay.status_code == 200
+    assert first.json() == ACK and replay.content == first.content
+    async with callback_store() as session:
+        receipts = list(
+            await session.scalars(
+                select(IntegrationExchange).where(IntegrationExchange.role == "RECEIPT")
+            )
+        )
+        assert len(receipts) == 1
+        receipt = receipts[0]
+        assert receipt.message_type == projected_type
+        assert receipt.diagnostic[0]["event_type"] == event_type
+        assert await read_history_body(session, receipt.request_record_id) == raw
+
+
+async def test_pure_replay_observation_failure_preserves_protocol_reply(
+    callback_client, callback_store, monkeypatch
+):
+    from app.integrations import history
+    from app.models import IntegrationExchange
+    from tests.helpers import read_history_body
+
+    calls = []
+
+    @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
+    async def handler(ctx, data):
+        calls.append(ctx.receipt_id)
+
+    first = await callback_client.post(PATH, json=body())
+    assert first.status_code == 200
+    failures = []
+    original = history.write_record
+
+    async def unavailable(session, *, draft):
+        if getattr(draft, "evidence_class", None) == "DIAGNOSTIC":
+            failures.append(draft.record_kind)
+            raise history.EvidencePersistenceError("diagnostic unavailable")
+        return await original(session, draft=draft)
+
+    monkeypatch.setattr(history, "write_record", unavailable)
+    replay = await callback_client.post(PATH, json=body())
+    assert replay.status_code == 200
+    assert replay.content == first.content
+    assert len(calls) == 1
+    assert failures
+    async with callback_store() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.operation == "ecs.event"
+            )
+        )
+        assert root.receipt_id == calls[0]
+        assert await read_history_body(session, root.current_response_record_id) == first.content
 
 
 async def test_validated_event_is_applied_once_on_replay(callback_client, callback_store):
@@ -64,7 +137,7 @@ async def test_validated_event_is_applied_once_on_replay(callback_client, callba
 
     [data] = applied
     assert isinstance(data, ScanData) and data.barcode == "BIN_104"
-    [receipt] = await rows(callback_store, CallbackReceipt)
+    [receipt] = await rows(callback_store, IntegrationExchange)
     assert receipt.diagnostic == [{"reason_code": "SCAN_APPLIED", "barcode": "BIN_104"}]
 
 
@@ -91,7 +164,7 @@ async def test_data_errors_keep_each_array_position_in_order(callback_client, ca
         {"field": "data.samples[2]", "code": "INVALID_TYPE", "expected": "number"},
     ]
     assert "SECRET" not in response.text
-    assert await rows(callback_store, CallbackReceipt) == []
+    assert await rows(callback_store, IntegrationExchange) == []
 
 
 async def test_masked_data_errors_merge_only_identical_issues(callback_client, callback_store):
@@ -114,14 +187,14 @@ async def test_masked_data_errors_merge_only_identical_issues(callback_client, c
         {"field": "data.barcode", "code": "FIELD_REQUIRED"},
     ]
     assert "SECRET" not in response.text
-    assert await rows(callback_store, CallbackReceipt) == []
+    assert await rows(callback_store, IntegrationExchange) == []
 
 
 async def test_oversize_is_413_with_json_body(callback_client, callback_store):
     response = await callback_client.post(PATH, content=b" " * (MAX_BODY_BYTES + 1))
     assert response.status_code == 413
     assert response.json() == {"code": 413, "message": "PAYLOAD_TOO_LARGE"}
-    assert await rows(callback_store, CallbackReceipt) == []
+    assert await rows(callback_store, IntegrationExchange) == []
 
 
 async def test_commit_failure_returns_503_and_logs_error_outcome(
@@ -138,7 +211,7 @@ async def test_commit_failure_returns_503_and_logs_error_outcome(
     response = await callback_client.post(PATH, json=body())
     assert response.status_code == 503
     assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
-    assert await rows(callback_store, CallbackReceipt) == []
+    assert await rows(callback_store, IntegrationExchange) == []
     finals = [r for r in caplog.records if hasattr(r, "outcome")]
     assert [r.outcome for r in finals] == ["error"]
     assert finals[0].event_type == "'SCAN_COMPLETED'" and finals[0].device_code == "'D1'"
@@ -187,7 +260,7 @@ async def test_snapshot_is_recorded_with_ecs_source_and_wms_quota_unaffected(
         assert (await callback_client.post(PATH, json=body(timestamp=n))).status_code == 200
     wms = dict(operation_id=str(uuid7()), operation="x@v1", timestamp=1, data={})
     await callback_client.post(WMS_PATH, json=wms)
-    sources = [s.source for s in await rows(callback_store, CallbackSnapshot)]
+    sources = [s.source for s in await rows(callback_store, IntegrationRecord)]
     assert sources.count("ecs") == 2 and sources.count(None) == 1
 
 
@@ -219,7 +292,7 @@ async def test_local_scan_example_validates_data_and_persists_one_note(
         ),
     )
     assert invalid.status_code == 400
-    assert await rows(callback_store, CallbackReceipt) == []
+    assert await rows(callback_store, IntegrationExchange) == []
 
     for _ in range(2):
         response = await callback_client.post(
@@ -231,7 +304,7 @@ async def test_local_scan_example_validates_data_and_persists_one_note(
             ),
         )
         assert response.status_code == 200 and response.json() == ACK
-    [receipt] = await rows(callback_store, CallbackReceipt)
+    [receipt] = await rows(callback_store, IntegrationExchange)
     assert receipt.diagnostic == [{"reason_code": "LOCAL_EXAMPLE", "barcode": "BIN-1"}]
 
 
@@ -240,8 +313,8 @@ async def test_legacy_unregistered_event_is_not_applied_after_upgrade(
     callback_client, callback_store, original_extra
 ):
     await legacy_ecs_receipt(callback_store, body(**original_extra))
-    [before] = await rows(callback_store, CallbackReceipt)
-    saved = {c.name: getattr(before, c.name) for c in CallbackReceipt.__table__.columns}
+    [before] = await rows(callback_store, IntegrationExchange)
+    saved = asdict(before)
 
     class ScanData(CallbackPayload):
         barcode: str
@@ -253,33 +326,22 @@ async def test_legacy_unregistered_event_is_not_applied_after_upgrade(
     for extra in ({}, {"is_debug": True}, {"is_debug": False}, {"is_debug": "extra"}):
         response = await callback_client.post(PATH, json=body(**extra))
         assert response.status_code == 200 and response.json() == ACK
-    [after] = await rows(callback_store, CallbackReceipt)
-    assert {c.name: getattr(after, c.name) for c in CallbackReceipt.__table__.columns} == saved
+    [after] = await rows(callback_store, IntegrationExchange)
+    assert asdict(after) == saved
 
 
 async def test_handler_failure_returns_503_without_receipt_or_business_write(
-    callback_client, callback_store
+    callback_client, callback_store, callback_effects
 ):
     @ecs_event("SCAN_COMPLETED", data=CallbackPayload, device_role="SCAN1")
     async def handler(ctx, data):
-        ctx.session.add(
-            CallbackSnapshot(
-                request_id="failed-business-write",
-                received_at=datetime.now(UTC),
-                body_b64="",
-                truncated=False,
-                http_status=200,
-                outcome="business",
-            )
-        )
+        await ctx.session.execute(callback_effects.insert().values(marker="failed-business-write"))
         await ctx.session.flush()
         raise RuntimeError("temporary failure")
 
     response = await callback_client.post(PATH, json=body(is_debug=True))
     assert response.status_code == 503
     assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
-    assert await rows(callback_store, CallbackReceipt) == []
-    assert all(
-        r.request_id != "failed-business-write"
-        for r in await rows(callback_store, CallbackSnapshot)
-    )
+    assert await rows(callback_store, IntegrationExchange) == []
+    async with callback_store() as session:
+        assert list(await session.scalars(select(callback_effects.c.marker))) == []

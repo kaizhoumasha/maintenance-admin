@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from app.businesses.runtime import BusinessRuntime, Capabilities
 from app.core.identifiers import uuid7
 from app.http_client import AsyncHttpClient, HttpClientConfig
+from app.integrations import history as history_records
 from app.integrations.ecs_command import (
     EcsCommands,
     RoleRoutes,
@@ -29,7 +30,7 @@ from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.wms_callback import Accepted, Conflict, Duplicate, Rejected
 from app.integrations.wms_request import Endpoint, RequestPayload, WmsRequests, request_operation
 from app.main import app
-from app.models import CallbackReceipt, Device, EcsCommand, EcsResultEvidence, WorkLine
+from app.models import Device, IntegrationExchange, WorkLine
 from app.reliable.config import TargetConfig
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore
@@ -363,7 +364,9 @@ async def mock_cycle_fixture(factory, monkeypatch):
             flow.rebuild = rebuild
             flow.runtime = rebuild()
             monkeypatch.setattr(app.state, "business_runtime", flow.runtime)
-            store = MessageStore(factory, lifecycles={"ecs-command": lifecycle})
+            store = MessageStore(
+                factory, lifecycles={"ecs-command": lifecycle}, records=history_records
+            )
             sender = Sender(
                 store,
                 flow.targets,
@@ -403,22 +406,6 @@ async def mock_cycle_fixture(factory, monkeypatch):
             finally:
                 flow.peer.release_ack.set()
                 await sender.aclose()
-                async with factory.begin() as session:
-                    codes = select(EcsCommand.command_code).where(
-                        EcsCommand.owner_domain == flow.owner.domain
-                    )
-                    digests = select(EcsResultEvidence.digest).where(
-                        EcsResultEvidence.command_code.in_(codes)
-                    )
-                    await session.execute(
-                        delete(CallbackReceipt).where(
-                            CallbackReceipt.operation == "ecs.result",
-                            CallbackReceipt.operation_id.in_(digests),
-                        )
-                    )
-                    await session.execute(
-                        delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
-                    )
 
 
 @pytest.fixture
@@ -495,7 +482,11 @@ async def coarse_scan(callback_store, monkeypatch):
         async with callback_store() as session:
             return (
                 await session.scalar(select(func.count()).select_from(ReliableMessage)),
-                await session.scalar(select(func.count()).select_from(EcsCommand)),
+                await session.scalar(
+                    select(func.count())
+                    .select_from(IntegrationExchange)
+                    .where(IntegrationExchange.role == "ECS_COMMAND")
+                ),
             )
 
     state.event, state.post, state.rows, state.outbound_counts = event, post, rows, outbound_counts
@@ -543,7 +534,7 @@ async def coarse_scan(callback_store, monkeypatch):
         bindings, annexes = catalog.validate_business_contracts()
         from app.services.device_routes import DeviceRoutes
 
-        outbox = Outbox({}, {})
+        outbox = Outbox({}, {}, records=history_records)
         commands = EcsCommands(
             outbox, "coarse-test", DeviceRoutes(bindings, annexes=annexes), annexes
         )
@@ -712,7 +703,9 @@ async def coarse_forward(coarse_scan, monkeypatch):
         adapters = {**ADAPTERS, **TRANSPORT_ADAPTERS, "ecs-command": EcsCommandAdapter()}
         commands = EcsCommands(None, "ecs-local", DeviceRoutes(bindings, annexes=annexes), annexes)
         lifecycle = EcsLifecycle(commands)
-        outbox = Outbox(targets, adapters, lifecycles={"ecs-command": lifecycle})
+        outbox = Outbox(
+            targets, adapters, lifecycles={"ecs-command": lifecycle}, records=history_records
+        )
         commands.outbox = outbox
         flow.commands, flow.outbox = commands, outbox
 
@@ -726,7 +719,9 @@ async def coarse_forward(coarse_scan, monkeypatch):
 
         rebuild()
         flow.rebuild = rebuild
-        store = MessageStore(flow.factory, lifecycles={"ecs-command": lifecycle})
+        store = MessageStore(
+            flow.factory, lifecycles={"ecs-command": lifecycle}, records=history_records
+        )
         sender = Sender(
             store,
             targets,
@@ -775,17 +770,6 @@ async def coarse_forward(coarse_scan, monkeypatch):
             flow.peer.release.set()
             await sender.aclose()
             async with flow.factory.begin() as session:
-                codes = select(EcsCommand.command_code).where(
-                    EcsCommand.device_code.in_([*flow.codes, *flow.conveyor_codes])
-                )
-                await session.execute(
-                    delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
-                )
-                await session.execute(
-                    delete(EcsCommand).where(
-                        EcsCommand.device_code.in_([*flow.codes, *flow.conveyor_codes])
-                    )
-                )
                 await session.execute(
                     delete(ReliableMessage).where(ReliableMessage.target.in_(targets))
                 )
@@ -805,7 +789,6 @@ async def direct(coarse_forward, monkeypatch):
     from app.integrations.registration import registration_source
     from app.integrations.wms_request import operation
     from app.main import app
-    from app.models import EcsCommand, EcsResultEvidence
     from app.services.device_routes import DeviceRoutes
 
     flow = coarse_forward
@@ -939,11 +922,6 @@ async def direct(coarse_forward, monkeypatch):
             )
             await session.execute(delete(flow.actions).where(flow.actions.c.job_id.in_(jobs)))
             await session.execute(delete(flow.table).where(flow.table.c.id.in_(jobs)))
-            codes = select(EcsCommand.command_code).where(EcsCommand.device_code == output)
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
-            )
-            await session.execute(delete(EcsCommand).where(EcsCommand.device_code == output))
             await session.execute(
                 delete(WorkLinePosition).where(WorkLinePosition.work_line_id == flow.line_ids[0])
             )

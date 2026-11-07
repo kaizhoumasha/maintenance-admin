@@ -8,7 +8,13 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import canonical_digest, json_object
-from app.integrations.wms_envelope import RESPONSE_COLUMNS, outgoing_message, stored_response
+from app.integrations import history
+from app.integrations.wms_envelope import (
+    outgoing_message,
+    response_projection,
+    response_row,
+    stored_response,
+)
 from app.models import ReliableMessage, TransportTask
 
 from .adapter import TransportSubmitAdapter
@@ -73,21 +79,32 @@ async def read_rows(
         return {}
     task, message = TransportTask.__table__, ReliableMessage.__table__
     match_identity = or_ if check_conflicts else and_
-    columns = (*RESPONSE_COLUMNS, "dispatch_started_at", "scope_owner")
+    message_join, columns = response_projection(message)
+    columns.update({n: message.c[n] for n in ("dispatch_started_at", "scope_owner")})
     if check_conflicts:
-        columns += ("delivery_snapshot",)
+        columns["delivery_snapshot"] = message.c.delivery_snapshot
     task_columns = [c for c in task.c if c.name != "submission_acceptance"]
     task_columns.append(task.c.submission_acceptance.is_not(None).label("has_acceptance"))
     if check_conflicts:
         task_columns.append(task.c.submission_acceptance)
+    acceptance_columns = {}
+    task_from = task
+    if check_conflicts:
+        for name, reference in (
+            ("acceptance_request", task.c.acceptance_request_record_id),
+            ("acceptance_response", task.c.acceptance_response_record_id),
+        ):
+            task_from, body_columns = history.body_projection(task_from, reference, name=name)
+            acceptance_columns.update(body_columns)
     query = (
         select(
             *[c.label("task_" + c.name) for c in task_columns],
-            *[message.c[n].label("submit_" + n) for n in columns],
+            *acceptance_columns.values(),
+            *[c.label("submit_" + n) for n, c in columns.items()],
         )
         .select_from(
-            task.outerjoin(
-                message,
+            task_from.outerjoin(
+                message_join,
                 and_(
                     message.c.operation == OPERATION,
                     match_identity(
@@ -105,9 +122,11 @@ async def read_rows(
     for row in rows:
         key = row["task_transport_task_id"]
         if key not in grouped:
-            grouped[key] = ({c.name: row["task_" + c.name] for c in task_columns}, [])
+            task_row = {c.name: row["task_" + c.name] for c in task_columns}
+            task_row.update({n: row[n] for n in acceptance_columns})
+            grouped[key] = (task_row, [])
         if row["submit_id"] is not None:
-            grouped[key][1].append({n: row["submit_" + n] for n in columns})
+            grouped[key][1].append(response_row({n: row["submit_" + n] for n in columns}))
     return grouped
 
 
@@ -368,7 +387,7 @@ def project(
     elif submissions:
         row = submissions[0]
         response = stored_response(outgoing_message(row), row, TransportSubmitAdapter())
-        raw = json_object(row["request_raw"])
+        raw = json_object(row["request_raw"]) if row["request_raw"] is not None else None
         valid = (
             raw is not None
             and raw.get("operation_id") == task["operation_id"]

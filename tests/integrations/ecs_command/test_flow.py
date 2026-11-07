@@ -4,8 +4,9 @@ import pytest
 from sqlalchemy import select
 
 from app.http_client import DeliveryState, HttpResult
-from app.models import EcsCommand, ReliableMessage
-from tests.helpers import EcsMove
+from app.integrations import history as history_records
+from app.models import IntegrationExchange, ReliableMessage
+from tests.helpers import EcsMove, read_history_body
 
 
 async def prepare(ecs, key="call"):
@@ -41,7 +42,115 @@ async def make_store(ecs):
     from app.integrations.ecs_command.protocol import PROTOCOL
     from app.reliable.store import MessageStore
 
-    return MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    return MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
+
+
+async def test_finished_nonacceptance_replaces_open_of_same_lease(ecs):
+    from datetime import UTC, datetime
+
+    from app.models import IntegrationExchange
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (first,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(first, ecs.targets["ecs"])
+    await store.finish(
+        first,
+        AttemptOutcome(
+            MessageStatus.PENDING,
+            result=HttpResult(DeliveryState.NOT_SENT, None, None, (), None),
+            next_attempt_at=datetime.now(UTC),
+        ),
+    )
+    async with ecs.factory() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code,
+                IntegrationExchange.role == "ECS_COMMAND",
+            )
+        )
+        assert root is not None
+        from app.integrations.ecs_command.lifecycle import get_attempt_conclusions
+
+        assert await get_attempt_conclusions(session, exchange_id=root.id) == {
+            first.lease_id: "NOT_RECEIVED"
+        }
+    (second,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(second, ecs.targets["ecs"])
+    async with ecs.factory() as session:
+        assert await get_attempt_conclusions(session, exchange_id=root.id) == {
+            first.lease_id: "NOT_RECEIVED",
+            second.lease_id: "OPEN_ATTEMPT",
+        }
+
+
+async def test_result_replay_survives_unified_history_cleanup(ecs):
+    from sqlalchemy import delete
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        original = await receive_ecs_result(session, raw, ecs.service)
+    from datetime import UTC, datetime, timedelta
+
+    from app.tasks.callback_tasks import run_history_cleanup, run_receipt_cleanup
+
+    async with ecs.factory.begin() as session:
+        await session.execute(delete(ReliableMessage))
+    future = datetime.now(UTC) + timedelta(days=100)
+    await run_receipt_cleanup(ecs.factory, 90, now=future)
+    await run_history_cleanup(ecs.factory, now=future)
+    ecs.service.annexes = {}
+    async with ecs.factory.begin() as session:
+        replay = await receive_ecs_result(session, raw, ecs.service)
+        assert replay.status_code == original.status_code == 200
+        assert replay.body == original.body
+        evidence = await session.scalar(
+            select(IntegrationRecord)
+            .join(IntegrationExchange, IntegrationExchange.id == IntegrationRecord.exchange_id)
+            .where(
+                IntegrationExchange.command_code == command.command_code,
+                IntegrationRecord.record_kind == "RESULT_EVIDENCE",
+            )
+        )
+        assert evidence is not None
+        assert evidence.effective_payload["data"] == {"qty": 1}
+
+
+async def test_frozen_request_reference_keeps_independent_integrity(ecs):
+    from hashlib import sha256
+
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code
+            )
+        )
+        assert root is not None
+        body = await session.get(IntegrationRecord, root.request_record_id)
+        body.raw_body = b"changed but internally consistent"
+        body.stored_bytes = len(body.raw_body)
+        body.body_sha256 = sha256(body.raw_body).hexdigest()
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(claim, ecs.targets["ecs"]) is None
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, claim.message_id)
+        assert message.status == "HELD"
+        assert message.pause_reason == "CONFIG_DRIFT"
 
 
 async def test_first_result_before_http_response_applies_once(ecs):
@@ -62,7 +171,7 @@ async def test_first_result_before_http_response_applies_once(ecs):
         )
         assert view.status == "SUCCEEDED" and not view.ack_received
         row = await session.scalar(select(ReliableMessage))
-        assert row.status == "DONE" and row.response_raw is None
+        assert row.status == "DONE" and row.terminal_response_record_id is None
 
 
 async def test_config_revocation_stops_sending_but_accepts_original_attempt_result(ecs):
@@ -100,7 +209,14 @@ async def test_config_revocation_stops_sending_but_accepts_original_attempt_resu
                 session, result_body(command.command_code), ecs.service
             )
             assert reply.status_code == 200
-            assert (await session.get(EcsCommand, command.command_code)).status == "SUCCEEDED"
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange).where(
+                        IntegrationExchange.role == "ECS_COMMAND",
+                        IntegrationExchange.command_code == command.command_code,
+                    )
+                )
+            ).status == "SUCCEEDED"
     finally:
         async with ecs.factory.begin() as session:
             await session.execute(delete(Device).where(Device.id == device_id))
@@ -199,7 +315,7 @@ async def test_sender_matrix_and_command_projection(ecs, code, message, expected
     async with ecs.factory() as session:
         row = await session.scalar(select(ReliableMessage))
         assert row.status == expected
-        assert seen == [row.request_raw]
+        assert seen == [(await read_history_body(session, (row).request_record_id))]
         view = await ecs.service.get_command(
             session, owner=ecs.owner, command_code=command.command_code
         )
@@ -273,7 +389,6 @@ async def test_definite_nonacceptance_result_is_persistently_conflicting(ecs):
 
 async def test_result_and_late_rejection_keep_result_and_evidence(ecs):
     from app.integrations.ecs_command.result import receive_ecs_result
-    from app.models import EcsSendEvidence
     from app.reliable.store import AttemptOutcome
     from app.reliable.types import FailReason, MessageStatus, Verdict, VerdictKind
 
@@ -297,14 +412,17 @@ async def test_result_and_late_rejection_keep_result_and_evidence(ecs):
             session, owner=ecs.owner, command_code=command.command_code
         )
         assert view.status == "SUCCEEDED" and view.needs_reconciliation
-        assert (await session.scalar(select(EcsSendEvidence))).response_raw is not None
+        from tests.helpers import ecs_attempt_evidence
+
+        assert (await ecs_attempt_evidence(session, command.command_code))[
+            0
+        ].response_raw is not None
 
 
 async def test_result_survives_receipt_and_delivery_cleanup(ecs):
     from sqlalchemy import delete
 
     from app.integrations.ecs_command.result import receive_ecs_result
-    from app.models import CallbackReceipt
     from app.reliable.store import AttemptOutcome
     from app.reliable.types import MessageStatus, Verdict, VerdictKind
 
@@ -326,8 +444,13 @@ async def test_result_survives_receipt_and_delivery_cleanup(ecs):
     async with ecs.factory.begin() as session:
         first = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
         assert first.status_code == 200
-    async with ecs.factory.begin() as session:
-        await session.execute(delete(CallbackReceipt))
+    from datetime import UTC, datetime, timedelta
+
+    from app.tasks.callback_tasks import run_history_cleanup, run_receipt_cleanup
+
+    future = datetime.now(UTC) + timedelta(days=100)
+    await run_receipt_cleanup(ecs.factory, 90, now=future)
+    await run_history_cleanup(ecs.factory, now=future)
     ecs.service.annexes = {}
     async with ecs.factory.begin() as session:
         assert (
@@ -441,7 +564,11 @@ async def test_bare_snapshot_settle_does_not_invent_command_acceptance(ecs):
             await ecs.outbox.settle(session, "ecs", "ecs.command", command.command_code)
     async with ecs.factory() as session:
         assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
-        assert (await session.scalar(select(EcsCommand))).status == "QUEUED"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "QUEUED"
 
 
 async def test_snapshot_mutation_without_lifecycle_is_rejected(ecs):
@@ -450,12 +577,16 @@ async def test_snapshot_mutation_without_lifecycle_is_rejected(ecs):
     command = await prepare(ecs)
     async with ecs.factory.begin() as session:
         with pytest.raises(ValueError):
-            await Outbox({}, {}).hold(
+            await Outbox({}, {}, records=history_records).hold(
                 session, "ecs", "ecs.command", command.command_code, reason="AUTHORIZATION_REVOKED"
             )
     async with ecs.factory() as session:
         assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
-        assert (await session.scalar(select(EcsCommand))).status == "QUEUED"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "QUEUED"
 
 
 async def test_revoked_old_origin_does_not_block_new_independent_command(ecs):
@@ -591,7 +722,7 @@ async def test_http_commit_failure_rolls_back_result_receipt_and_settlement(ecs)
     from sqlalchemy import event, func
 
     from app.controllers.ecs_result import router
-    from app.models import CallbackReceipt, EcsResultEvidence
+    from app.models import IntegrationRecord
 
     command = await prepare(ecs)
     store = await make_store(ecs)
@@ -621,10 +752,19 @@ async def test_http_commit_failure_rolls_back_result_receipt_and_settlement(ecs)
         )
         assert result.status_code == 503
     async with ecs.factory() as session:
-        for model in (EcsResultEvidence, CallbackReceipt):
-            assert await session.scalar(select(func.count()).select_from(model)) == 0
+        for model in (IntegrationRecord, IntegrationExchange):
+            statement = select(func.count()).select_from(model)
+            if model is IntegrationRecord:
+                statement = statement.where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+            elif model is IntegrationExchange:
+                statement = statement.where(IntegrationExchange.role == "RECEIPT")
+            assert await session.scalar(statement) == 0
         assert (await session.scalar(select(ReliableMessage))).status == "SENDING"
-        assert (await session.scalar(select(EcsCommand))).status == "DISPATCHING"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "DISPATCHING"
 
 
 @pytest.mark.parametrize("interruption", ["release", "expired-lease"])
@@ -692,7 +832,7 @@ async def test_failed_device_result_is_applied_and_queryable_without_ack(ecs):
         assert view.status == "FAILED" and view.result == core
         assert view.delivery_status == "DONE" and not view.ack_received
         message = await session.scalar(select(ReliableMessage))
-        assert message.status == "DONE" and message.response_raw is None
+        assert message.status == "DONE" and message.terminal_response_record_id is None
 
 
 async def test_missing_original_annex_returns_retryable_503_without_result_evidence(ecs):
@@ -701,7 +841,7 @@ async def test_missing_original_annex_returns_retryable_503_without_result_evide
     from sqlalchemy import func
 
     from app.controllers.ecs_result import router
-    from app.models import CallbackReceipt, EcsResultEvidence
+    from app.models import IntegrationRecord
 
     command = await prepare(ecs)
     store = await make_store(ecs)
@@ -721,10 +861,19 @@ async def test_missing_original_annex_returns_retryable_503_without_result_evide
         assert response.status_code == 503
         assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
         async with ecs.factory() as session:
-            for model in (EcsResultEvidence, CallbackReceipt):
-                assert await session.scalar(select(func.count()).select_from(model)) == 0
+            for model in (IntegrationRecord, IntegrationExchange):
+                statement = select(func.count()).select_from(model)
+                if model is IntegrationRecord:
+                    statement = statement.where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                elif model is IntegrationExchange:
+                    statement = statement.where(IntegrationExchange.role == "RECEIPT")
+                assert await session.scalar(statement) == 0
             assert (await session.scalar(select(ReliableMessage))).status == "SENDING"
-            assert (await session.scalar(select(EcsCommand))).status == "DISPATCHING"
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+                )
+            ).status == "DISPATCHING"
         ecs.service.annexes["test", "1"] = annex
         retried = await client.post(
             "/api/v1/callback/result", content=result_body(command.command_code)
@@ -750,7 +899,7 @@ async def test_loopback_command_result_and_reference_consumption(
     from app.integrations.ecs_command.clients import DynamicClients
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
-    from app.models import EcsResultEvidence
+    from app.models import IntegrationRecord
     from app.reliable.sender import Sender
     from app.reliable.store import MessageStore
 
@@ -784,7 +933,11 @@ async def test_loopback_command_result_and_reference_consumption(
                 async with ecs.factory.begin() as session:
                     await session.execute(update(reference.routes).values(origin=origin))
                     command = await reference.register(session, action_id=1)
-                store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+                store = MessageStore(
+                    ecs.factory,
+                    lifecycles={PROTOCOL: EcsLifecycle(ecs.service)},
+                    records=history_records,
+                )
                 sender = Sender(store, ecs.targets, ecs.adapters, {}, provider=DynamicClients())
                 try:
                     assert await sender.tick() == 1
@@ -824,15 +977,87 @@ async def test_loopback_command_result_and_reference_consumption(
                         )
                         assert (
                             await session.scalar(
-                                select(func.count()).select_from(EcsResultEvidence)
+                                select(func.count())
+                                .select_from(IntegrationRecord)
+                                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
                             )
                             == 1
                         )
-                        row = await session.scalar(select(EcsCommand))
-                        assert requests == [row.request_raw]
+                        row = await session.scalar(
+                            select(IntegrationExchange).where(
+                                IntegrationExchange.role == "ECS_COMMAND"
+                            )
+                        )
+                        assert requests == [
+                            (await read_history_body(session, (row).request_record_id))
+                        ]
                         assert row.route["origin"] == origin
                     assert received_results and all(
                         r == {"code": 200, "message": "ACK"} for r in received_results
                     )
                 finally:
                     await sender.aclose()
+
+
+async def test_original_gate_finish_and_result_cost_with_retained_history(ecs):
+    from time import perf_counter
+
+    from app.core.identifiers import uuid7
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import IntegrationRecord
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus, Verdict, VerdictKind
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code
+            )
+        )
+        await session.execute(
+            IntegrationRecord.__table__.insert(),
+            [
+                dict(
+                    id=uuid7(),
+                    exchange_id=root.id,
+                    record_kind="CALLBACK_RECEIVED",
+                    evidence_class="DIAGNOSTIC",
+                    event_key=f"cost:{n}",
+                    direction="INBOUND",
+                )
+                for n in range(5000)
+            ],
+        )
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    durations = {}
+    started = perf_counter()
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    durations["gate_ms"] = (perf_counter() - started) * 1000
+    started = perf_counter()
+    assert await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.DONE,
+            result=response(),
+            verdict=Verdict(VerdictKind.DELIVERED, response=response().body),
+        ),
+    )
+    durations["finish_ms"] = (perf_counter() - started) * 1000
+    started = perf_counter()
+    async with ecs.factory.begin() as session:
+        result = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert result.status_code == 200
+    durations["result_commit_ms"] = (perf_counter() - started) * 1000
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and view.ack_received
+    print(
+        "HISTORY_CORE_COST="
+        + json.dumps(
+            {"backend": ecs.factory.kw["bind"].dialect.name, "diagnostic_rows": 5000, **durations}
+        )
+    )

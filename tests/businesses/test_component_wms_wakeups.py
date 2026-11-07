@@ -9,6 +9,7 @@ from app.businesses import catalog
 from app.businesses.runtime import build_runtime
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
 from app.models import ReliableMessage
 from app.reliable import Outbox
@@ -97,7 +98,7 @@ async def wms_flow(callback_store, shared_wms_contract, monkeypatch):
         catalog.validate_business_contracts()
         target = TargetConfig("component-decisions", "http://example.test", DECISIONS_PROTOCOL)
         targets = {target.name: target}
-        outbox = Outbox(targets, ADAPTERS)
+        outbox = Outbox(targets, ADAPTERS, records=history_records)
         runtime = build_runtime(outbox=outbox, ecs_commands=None, session_factory=factory)
         notified = []
         monkeypatch.setattr(business_wakeups, "enqueue_business", notified.append)
@@ -137,6 +138,7 @@ async def test_shared_wms_result_wakes_and_advances_only_original_business(wms_f
         flow.factory,
         on_result=business_wakeups.wms_result_committed,
         on_delivered=business_wakeups.transport_submit_delivered,
+        records=history_records,
     )
     claims = await store.claim(2, flow.targets)
     claim = next(claim for claim in claims if claim.message.operation_id == identities["first"])

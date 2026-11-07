@@ -1,5 +1,7 @@
 # 部署到联调服务器(单机 Compose)
 
+本分支的 ECS / WMS 历史统一尚未执行真实上线切换。以下通用升级和旧镜像回退步骤不能直接用于已有数据的历史权威交接：必须按[统一历史 A / B 运行手册](integrations/integration-history.md#历史迁移与制品-a)，先用冻结的 authority-only 制品 A 完成真实停写、补录、最终对账和实际验收，再在独立维护窗口交付 contract 制品 B。最终源码 head 为 `integrationhistorycontract`，不可作为 A 的构建输入，也不可在旧库裸跑 `upgrade head` 后启动应用。本文保留的日期化部署记录不证明本次变更已部署。
+
 默认访问地址为 **[http://100.94.216.118:18080](http://100.94.216.118:18080)**，Swagger 为 **[http://100.94.216.118:18080/docs](http://100.94.216.118:18080/docs)**。客户端需能通过 Tailscale 访问该地址，不需要 SSH 转发；SSH 运维入口仍为 `ssh CANTAISYS@100.94.216.118`。本项目与现有 WES 共机独立运行。实际部署从[第 6 节](#6-发布准备与旧制品保存)开始，使用固定制品，不在联调服务器重新构建。第 1–5 节保留通用说明及本地构建演练命令；联调服务器上的应用操作统一使用第 6 节的 `dc` 函数，完整加载发布和站点配置。
 
 同一网页入口也开放在内网 **[http://10.24.199.219:18080](http://10.24.199.219:18080)**，Swagger 为 **[http://10.24.199.219:18080/docs](http://10.24.199.219:18080/docs)**。内网客户端使用该地址；PostgreSQL 和 Redis 仍仅通过 Tailscale 地址开放，不随网页入口扩展到内网。
@@ -287,6 +289,8 @@ scripts/backup_pg.sh
 
 在候选发布目录,先单独执行 migrate,成功后再启动应用。每条失败都应停止后续操作,不允许整段无条件继续:
 
+下列 `upgrade head` 仅适用于全新空库或已满足目标制品全部迁移前置条件的普通更新；已有历史库改造必须改用上述 A / B 手册的指定 revision、补录和证据门禁，不能把此通用命令块当作交接授权。`release_bundle.check` 不替代写入者库存与最终对账。
+
 ```bash
 dc run --rm --no-deps migrate alembic upgrade head
 dc up -d --no-build --pull never
@@ -468,6 +472,8 @@ scripts/backup_pg.sh
 
 备份失败保持应用停止，先排除故障，不继续升级。下面 `<新发布标识>` 替换后，在新目录逐条执行，任一步失败即停止后续操作：
 
+若本次更新涉及统一历史，先执行[分阶段维护窗口](integrations/integration-history.md#历史迁移与制品-a)的完整停写清单和最终对账，使用对应 A / B 制品与指定迁移命令；下列通用 `upgrade head` 不能跳过 authority 验收或提前执行 contract。
+
 ```bash
 cd '/srv/enterprise-backend/releases/<新发布标识>'
 python3 scripts/release_bundle.py load .
@@ -529,13 +535,13 @@ curl --noproxy '*' --fail --head http://100.94.216.118:18081/
 
 在鉴权方案落地前，网关必须限制 WMS 来源，禁止向公网无保护开放该接口。完成设计第 3 步并确认所有实例已加载实际 Transport 接收能力、所有任务创建者(API、worker、脚本)均已升级之前，不得启用真实回调；滚动升级时先暂停网关回调入口，全部实例就绪后再恢复，避免旧实例将合法业务消息永久记录为不支持。详细协议和后续启用条件见[回调接收设计](superpowers/specs/2026-10-22-transport-callback-design.md)。
 
-请求体上限为 256 KiB；独立诊断快照最多保存 64 KiB 的 base64 内容，按进程限量、尽力写入，不影响协议响应。`CALLBACK_SNAPSHOT_RETENTION_DAYS` 默认为 7，必须为正整数，由现有 Celery beat 每日清理过期快照；幂等收据不随快照清理,而是按 `RELIABLE_RETENTION_DAYS`（默认 90 天）由 beat 每日清理。`TRANSPORT_STUCK_ALERT_MINUTES`（默认 120，必须为正整数，按现场 SOP 调整）：beat 每 10 分钟扫描创建后超过该时长仍无确定终态的 Transport 任务，输出结构化告警日志 `transport task stuck`（含 `transport_task_id`、`cycle_id`、`reason`、`waiting_minutes`），不改任务状态；`reason` 为 `SUBMIT_NOT_DELIVERED`（提交已过期或被拒）、`RESULT_MISSING`（已提交无结果）、`RESULT_WAITING_FOR_POSITIONS`（料箱成功结果等不到位置事件）、`OUTCOME_UNKNOWN`。仍卡住的任务每次扫描都会重复告警，直到结果到达或任务创建超过 7 天（视为已搁置，不再告警）。上线前先迁移数据库，非空收据表禁止降级删除，以免丢失消息身份及首次响应。
+请求体上限为 256 KiB；独立诊断观察最多保存 48 KiB 的字节预览（原 base64 序列化预算为 64 KiB），按进程限量、尽力写入，不影响协议响应，统一存为 IntegrationRecord。`CALLBACK_SNAPSHOT_RETENTION_DAYS` 默认为 7，必须为正整数，由现有 Celery beat 每日清理过期诊断正文；原受理资格不随诊断正文清理，而是按 `RELIABLE_RETENTION_DAYS`（默认 90 天）管理，必要恢复证据继续保护。`INTEGRATION_HISTORY_RETENTION_DAYS` 默认90天，仅控制普通历史摘要与索引，详见[保留规则](integrations/integration-history.md#保留与清理)。`TRANSPORT_STUCK_ALERT_MINUTES`（默认 120，必须为正整数，按现场 SOP 调整）：beat 每 10 分钟扫描创建后超过该时长仍无确定终态的 Transport 任务，输出结构化告警日志 `transport task stuck`（含 `transport_task_id`、`cycle_id`、`reason`、`waiting_minutes`），不改任务状态；`reason` 为 `SUBMIT_NOT_DELIVERED`（提交已过期或被拒）、`RESULT_MISSING`（已提交无结果）、`RESULT_WAITING_FOR_POSITIONS`（料箱成功结果等不到位置事件）、`OUTCOME_UNKNOWN`。仍卡住的任务每次扫描都会重复告警，直到结果到达或任务创建超过 7 天（视为已搁置，不再告警）。非空统一历史拒绝自动降级，不能通过删除收据或证据绕过门禁。
 
 ### Schema 隔离
 
 PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 是两个独立概念，`DATABASE_URL` 仍连接原数据库。`app.database.create_database_engine` 统一给 API、可靠发送器及各 Celery 数据库连接设置会话 `search_path=enterprise_backend`，ORM 元数据也显式限定 schema。没有新增环境变量，不要对共享数据库执行全局 `ALTER DATABASE/ROLE ... SET search_path`。SQLite 测试通过 schema 映射继续使用无 schema 表。
 
-在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行历史迁移，版本表同时移入新 schema。历史 revision 不重写，schema 隔离的搬迁基线仍为 `a023a20261024`；本次部署 head 为 `a6d464b20ab7`，后续发布以 `uv run alembic heads` 核对。迁移白名单为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
+在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行所选制品的迁移，版本表同时移入新 schema。历史 revision 不重写，schema 隔离的搬迁基线仍为 `a023a20261024`；2026-10-27 部署记录的 head 为 `a6d464b20ab7`，当前最终源码 head 为 `integrationhistorycontract`，制品 A 则必须停在 `integrationhistoryauthority`。搬迁旧基线的白名单仍为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`，不代表最终运行模型仍包含旧收据/快照表。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
 
 - 仅自动搬迁版本为 `a023a20261024` 且白名单完整的旧 public 库。更早的旧库须先使用旧代码升级到该基线；不按完整白名单猜测历史版本的表归属。缺表、目标同名表冲突或等待锁超过 5 秒时整笔回滚，不覆盖、不合并、不清空。
 - 新库直接在独立 schema 建表。未知 revision 的 public 版本表视为其他系统所有，不读取为项目迁移进度、不移动；只读 `current`/`check` 不触发搬迁。已有项目 schema 版本表后不再扫描 public 同名表。
@@ -543,6 +549,8 @@ PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 
 - PostgreSQL 通过 Alembic CLI 在线执行，不支持 `--sql` 或没有 CLI 命令上下文的 Python API 调用：无法确定操作及在线检查归属和冲突时明确失败。`downgrade` 仅回退业务 revision，不把 schema 迁回 public；旧版应用不能直接连接迁移后的表。回退应用前须单独制定并批准反向迁移，禁止用 `stamp` 伪造完成。
 
 既有站点操作顺序：确认数据库和白名单归属 → 停本项目 API/worker/beat（不停止共享 PostgreSQL 或其他系统）→ 记录本项目和其他系统表的 OID、行数及内容摘要 → 用新版本运行 `uv run alembic upgrade head` → 对比迁移前后对象/数据及其他系统表不变 → 用新版本启动应用 → 检查 `alembic current`、`alembic check`、`/ready`、worker 响应和业务查询。只运行一个迁移进程；保留原数据卷、数据库名及连接凭证，不重跑管理员种子。
+
+上一段是 schema 隔离的原操作顺序；若同时交付统一历史，迁移步骤须替换为[制品 A / B 手册](integrations/integration-history.md#历史迁移与制品-a)的独立门禁与命令，不能按旧顺序直达最终 head。
 
 ### 数据库改名
 
@@ -570,6 +578,8 @@ PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 
 如需回退，先停止使用方，将数据库原地改回原名并恢复相应连接配置；不要仅启动仍连接旧库名的历史镜像。备份恢复属于数据损坏时的恢复手段，不是正常改名步骤。
 
 ### 使用旧镜像回退(禁止现场重建)
+
+统一历史权威交接后若已产生新事实，旧二进制不能直接恢复运行；非空最终结构也不允许自动降级。优先保全事实并使用兼容恢复版本或前向修复。以下备份恢复流程只在明确接受恢复点之后数据损失、且恢复库与旧镜像兼容的独立恢复决策下适用，不是 A / B 的默认回退方案。
 
 1. 停机前取回旧版本完整发布目录和正确恢复点,执行 `verify`、`load`,确认应用 image ID、平台及基础设施制品可用。首次给历史版本补档时,逐个记录正在运行的 api/worker/beat/migrate 的镜像 ID;若四者不同就分别打保留标签、`docker image save` 并保存原配置,不能只保存 API 镜像或从旧代码重建冒充原制品。
 2. 在当前版本目录停止 nginx/api/worker/beat,确认无写入。确认恢复点及其后的数据损失可接受,并在 shared/.env 换成全新 JWT 密钥。

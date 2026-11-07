@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.receiver import receive_ecs_event
 from app.integrations.wms_callback import CallbackPayload
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 from tests.helpers import ecs_binding
 
 
@@ -30,8 +30,12 @@ async def test_original_event_and_application_are_atomic_and_detached(callback_s
     }
     async with callback_store.begin() as session:
         await receive_ecs_event(session, json.dumps(envelope).encode(), resolve_binding=ecs_binding)
-        row = await session.scalar(select(CallbackReceipt))
-        event_id = row.id
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
+        event_id = row.receipt_id
         assert row.event_envelope == envelope
     async with callback_store() as session:
         event = await get_event(session, event_id=event_id)
@@ -50,7 +54,11 @@ async def test_original_event_and_application_are_atomic_and_detached(callback_s
         assert [record.event_id for record in events] == [event_id]
         assert (await get_event(session, event_id=event_id + 100)).availability == "NOT_FOUND"
     async with callback_store.begin() as session:
-        row = await session.get(CallbackReceipt, event_id)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_id == event_id
+            )
+        )
         row.event_envelope = None
     async with callback_store() as session:
         assert (await get_event(session, event_id=event_id)).availability == "UNAVAILABLE"

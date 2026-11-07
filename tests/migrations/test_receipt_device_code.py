@@ -1,10 +1,12 @@
 import os
+from contextlib import AsyncExitStack
 
 import pytest
 from sqlalchemy import inspect, text
 
 from app.database import create_database_engine
 from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
 
 BASE = "d7cf20261029"
 REVISION = "ea8b20261029"
@@ -19,21 +21,20 @@ async def receipt_migration(request, tmp_path):
         if not url:
             pytest.skip("requires a separate disposable RECEIPT_DEVICE_MIGRATION_DATABASE_URL")
 
-    async def migrate(command, revision):
-        return await run_alembic(url, command, revision, environment={"RELIABLE_TARGETS": "{}"})
+    async with AsyncExitStack() as databases:
+        if request.param == "postgres":
+            url, _ = await databases.enter_async_context(isolated_schema_database(url))
 
-    for command in ("upgrade", "downgrade"):
-        result = await migrate(command, BASE)
+        async def migrate(command, revision):
+            return await run_alembic(url, command, revision, environment={"RELIABLE_TARGETS": "{}"})
+
+        result = await migrate("upgrade", BASE)
         assert result.returncode == 0, result.stdout + result.stderr
-    engine = create_database_engine(url)
-    try:
-        yield engine, migrate
-    finally:
-        async with engine.begin() as connection:
-            await connection.execute(text("DELETE FROM callback_receipt"))
-        await engine.dispose()
-        restored = await migrate("upgrade", "head")
-        assert restored.returncode == 0, restored.stdout + restored.stderr
+        engine = create_database_engine(url)
+        try:
+            yield engine, migrate
+        finally:
+            await engine.dispose()
 
 
 async def test_upgrade_preserves_legacy_receipt_and_downgrade_protects_device(receipt_migration):

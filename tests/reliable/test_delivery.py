@@ -6,6 +6,7 @@ import pytest
 
 from app.http_client import DeliveryState, FailureKind, HttpResult
 from app.models import ReliableMessage
+from tests.helpers import message_history_view
 
 
 @pytest.mark.parametrize(
@@ -58,7 +59,9 @@ async def test_delivery_matrix_preserves_actual_evidence(
         uniform=lambda low, high: high,
     )
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, enqueued.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, enqueued.message_id)
+        )
         assert row.status == status and row.attempts == 1
         assert row.last_http_status == result.status_code
         assert row.last_failure_kind == failure
@@ -104,7 +107,9 @@ async def test_hint_over_local_cap_and_env_limit_and_unlimited_attempts(rig, cap
         requests.extend(client.requests)
         assert not await rig.store.claim(1, rig.targets)
         async with rig.factory() as session:
-            row = await session.get(ReliableMessage, enqueued.message_id)
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, enqueued.message_id)
+            )
             delay = (
                 row.next_attempt_at.replace(tzinfo=rig.clock().tzinfo) - rig.clock()
             ).total_seconds()
@@ -132,7 +137,9 @@ async def test_hint_over_local_cap_and_env_limit_and_unlimited_attempts(rig, cap
     requests.extend(client.requests)
     assert len(requests) == 11 and all(request == requests[0] for request in requests)
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, enqueued.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, enqueued.message_id)
+        )
         assert row.status == "DONE" and row.attempts == 11 and row.response_raw == b"done"
 
 
@@ -157,7 +164,9 @@ async def test_ttl_before_send_and_cancellation_and_save_failure(rig):
     )
     assert not client.requests
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, enqueued.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, enqueued.message_id)
+        )
         assert row.status == "EXPIRED" and row.attempts == 0
         await rig.outbox.enqueue(session, rig.draft("cancel"))
         await session.commit()
@@ -197,7 +206,9 @@ async def test_local_error_isolated_and_current_config_revalidated(rig):
     )
     assert not client.requests
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, message.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, message.message_id)
+        )
         assert row.status == "FAILED" and row.fail_reason == "LOCAL_ERROR"
 
 
@@ -228,7 +239,9 @@ async def test_classifier_error_keeps_http_evidence_without_terminal_response(ri
         uniform=lambda low, high: high,
     )
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, message.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, message.message_id)
+        )
         assert row.status == "FAILED" and row.fail_reason == "LOCAL_ERROR"
         assert row.last_http_status == 200 and row.last_response_raw == b"actual"
         assert row.response_raw is None
@@ -260,7 +273,9 @@ async def test_started_request_may_complete_after_ttl(rig):
         uniform=lambda low, high: high,
     )
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, result.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, result.message_id)
+        )
         assert row.status == "DONE" and row.response_raw == b"ok"
 
 
@@ -305,7 +320,9 @@ async def test_local_failure_reports_safe_phase_without_changing_evidence(rig, c
             uniform=uniform,
         )
     async with rig.factory() as session:
-        row = await session.get(ReliableMessage, message.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, message.message_id)
+        )
         assert row.status == "FAILED" and row.fail_reason == "LOCAL_ERROR"
         assert row.response_raw is None
         assert row.last_response_raw == (b"private_body" if phase == "classify_response" else None)

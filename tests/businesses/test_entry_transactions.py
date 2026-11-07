@@ -12,7 +12,7 @@ from app.integrations.ecs_callback import registry as ecs
 from app.integrations.wms_callback import Accepted, Conflict, Rejected
 from app.integrations.wms_callback import registry as wms
 from app.main import app
-from app.models import CallbackReceipt, Device, DeviceRoute, WorkLine
+from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine
 from app.services.device_bindings import resolve_binding
 from app.services.workline_service import business_configuration_issue
 from tests.helpers import add_bound_device, workline_business_definition
@@ -121,7 +121,14 @@ def request(kind, code, *, timestamp=1):
 
 async def stored(factory, state):
     async with factory() as session:
-        receipts = list(await session.scalars(select(CallbackReceipt)))
+        receipts = list(
+            await session.scalars(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+        )
         lines = list(
             await session.scalars(
                 select(WorkLine).where(WorkLine.id.in_(state["ids"])).order_by(WorkLine.id)
@@ -148,7 +155,7 @@ async def test_acceptance_never_starts_result_advancement(
         "accepted:" + receipt.operation_id for receipt in receipts
     }
     assert {line.zone_name for line in lines} == {
-        "pending:" + str(receipt.id) for receipt in receipts
+        "pending:" + str(receipt.receipt_id) for receipt in receipts
     }
 
 

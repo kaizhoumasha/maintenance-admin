@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.reliable import DuplicateMessage, InvalidMessage
+from tests.helpers import message_history_view
 
 
 async def test_caller_transaction_and_duplicate_contract(rig):
@@ -90,7 +91,9 @@ async def test_enqueue_returns_original_business_key_even_when_new_metadata_diff
             session, storage.draft(request_raw=b"B:payload", business_key="opaque:second")
         )
         assert again.message_id == first.message_id and again.business_key == "opaque:first"
-        row = await session.get(ReliableMessage, first.message_id)
+        row = await message_history_view(
+            session, await session.get(ReliableMessage, first.message_id)
+        )
         assert row.request_raw == b"A:payload" and row.business_key == "opaque:first"
 
 

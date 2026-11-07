@@ -6,12 +6,14 @@ import pytest
 from sqlalchemy import event, select
 
 from app.http_client import AsyncHttpClient, DeliveryState, HttpClientConfig, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_transport import Rack, RackPosition, TransportCaller
 from app.integrations.wms_transport.acceptance import submission_observer
 from app.models import ReliableMessage, TransportTask
 from app.reliable.sender import Sender
 from app.reliable.store import MessageStore, cleanup_terminal
 from app.reliable.testing import ScriptedHttpClient
+from tests.helpers import message_history_view
 
 
 def ack(raw, code):
@@ -28,7 +30,7 @@ def ack(raw, code):
 
 def sender_for(rig, client, **kwargs):
     return Sender(
-        MessageStore(rig.factory, clock=rig.clock),
+        MessageStore(rig.factory, clock=rig.clock, records=history_records),
         {rig.target.name: rig.target},
         rig.adapters,
         {rig.target.name: client},
@@ -47,8 +49,11 @@ async def test_scripted_ack_stops_delivery_of_frozen_request(transport_storage, 
     async with rig.factory() as session:
         handle = await rig.service.move_rack(session, **transport_request)
         await session.commit()
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            ),
         )
         raw = message.request_raw
     client = ScriptedHttpClient(
@@ -112,8 +117,11 @@ async def test_real_http_preserves_bytes_and_recovers_lost_response(
                 target_face=" 北 ",
             )
             await session.commit()
-            message = await session.scalar(
-                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            message = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                ),
             )
             raw, operation_id = message.request_raw, message.operation_id
 
@@ -126,8 +134,11 @@ async def test_real_http_preserves_bytes_and_recovers_lost_response(
             await deliver(sender)
             if lose_response:
                 async with rig.factory() as session:
-                    message = await session.scalar(
-                        select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                    message = await message_history_view(
+                        session,
+                        await session.scalar(
+                            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                        ),
                     )
                     assert message.status == "PENDING" and message.delivery_uncertain
                     assert message.not_received_count == 0
@@ -136,8 +147,11 @@ async def test_real_http_preserves_bytes_and_recovers_lost_response(
                 sender = new_sender()
                 await deliver(sender)
             async with rig.factory() as session:
-                message = await session.scalar(
-                    select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                message = await message_history_view(
+                    session,
+                    await session.scalar(
+                        select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                    ),
                 )
                 assert message.status == "DONE" and message.request_raw == raw
                 assert message.operation_id == operation_id
@@ -164,8 +178,11 @@ async def test_failed_evidence_or_finish_preserves_available_ack(
     rig.service.owner_domain = "original"
     async with rig.factory.begin() as session:
         handle = await rig.service.move_rack(session, **transport_request)
-        message = await session.scalar(
-            select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+        message = await message_history_view(
+            session,
+            await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            ),
         )
     calls = 0
     notices = []
@@ -218,7 +235,9 @@ async def test_failed_evidence_or_finish_preserves_available_ack(
                 client_request_id=handle.client_request_id,
                 caller=transport_request["caller"],
             )
-            state = await session.get(ReliableMessage, message.id)
+            state = await message_history_view(
+                session, await session.get(ReliableMessage, message.id)
+            )
             task = await session.scalar(
                 select(TransportTask).where(
                     TransportTask.transport_task_id == handle.transport_task_id

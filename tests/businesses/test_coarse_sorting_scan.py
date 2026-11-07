@@ -1,9 +1,10 @@
 """Coarse scans persist only facts and pending work in the receiver's transaction."""
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from app.models import CallbackReceipt, WorkLine
+from app.models import IntegrationExchange, WorkLine
+from tests.helpers import get_receipt_by_id
 
 
 @pytest.mark.parametrize(
@@ -35,7 +36,7 @@ async def test_scan_preserves_original_facts_and_pending_work(coarse_scan, chang
     assert row["pending"] is True
     assert row["wait_reason"] == "AWAITING_VALIDATION_STAGE"
     async with scan.factory() as session:
-        receipt = await session.get(CallbackReceipt, row["receipt_id"])
+        receipt = await get_receipt_by_id(session, row["receipt_id"])
         line = await session.get(WorkLine, scan.line_ids[0])
         assert row["event_digest"] == receipt.operation_id
         assert row["workline_code"] == line.line_code
@@ -60,7 +61,15 @@ async def test_invalid_scan_is_rejected_without_business_acceptance(coarse_scan,
     assert response.status_code == 400, response.text
     assert await scan.rows() == []
     async with scan.factory() as session:
-        assert await session.scalar(select(CallbackReceipt.id)) is None
+        assert (
+            await session.scalar(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            is None
+        )
 
 
 @pytest.mark.parametrize("timestamp,expected_count", [(1793206799000, 1), (1793206799001, 2)])
@@ -101,7 +110,15 @@ async def test_storage_failure_rolls_back_receipt_scan_and_pending(coarse_scan):
         event.remove(engine, "after_cursor_execute", fail_after_scan)
     assert await scan.rows() == []
     async with scan.factory() as session:
-        assert await session.scalar(select(CallbackReceipt.id)) is None
+        assert (
+            await session.scalar(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            is None
+        )
     assert (await scan.post(scan.event())).status_code == 200
     assert len(await scan.rows()) == 1
 
@@ -123,7 +140,11 @@ async def test_business_configuration_rejection_is_diagnostic_only(coarse_scan, 
     assert response.status_code == 200
     assert await scan.rows() == []
     async with scan.factory() as session:
-        receipt = await session.scalar(select(CallbackReceipt))
+        receipt = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
         assert receipt.diagnostic == [{"reason_code": reason}]
 
 
@@ -165,7 +186,7 @@ async def test_nonfinite_scan_measurement_is_rejected(coarse_scan, field):
 
 
 async def test_scan_survives_public_receipt_cleanup_and_service_rebuild(coarse_scan):
-    from sqlalchemy import delete, update
+    from sqlalchemy import update
 
     scan = coarse_scan
     body = scan.event()
@@ -176,7 +197,12 @@ async def test_scan_survives_public_receipt_cleanup_and_service_rebuild(coarse_s
             update(scan.table).values(pending=False, wait_reason="RETAINED_NEXT_STAGE_STATE")
         )
         await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.id == original["receipt_id"])
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+            .where(IntegrationExchange.receipt_id == original["receipt_id"])
         )
     retained = (await scan.rows())[0]
     scan.install()
@@ -184,7 +210,15 @@ async def test_scan_survives_public_receipt_cleanup_and_service_rebuild(coarse_s
     assert (await scan.post(replay)).status_code == 200
     assert await scan.rows() == [retained]
     async with scan.factory() as session:
-        assert await session.scalar(select(CallbackReceipt.id)) is not None
+        assert (
+            await session.scalar(
+                select(IntegrationExchange.receipt_id).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            is not None
+        )
 
 
 async def test_same_barcode_on_two_lines_has_separate_acceptance(coarse_scan):
@@ -200,7 +234,6 @@ async def test_same_barcode_on_two_lines_has_separate_acceptance(coarse_scan):
 
 
 async def test_old_scan_does_not_follow_reassigned_device_after_receipt_cleanup(coarse_scan):
-    from sqlalchemy import delete
 
     from app.models import Device
 
@@ -210,7 +243,12 @@ async def test_old_scan_does_not_follow_reassigned_device_after_receipt_cleanup(
     original = (await scan.rows())[0]
     async with scan.factory.begin() as session:
         await session.execute(
-            delete(CallbackReceipt).where(CallbackReceipt.id == original["receipt_id"])
+            update(IntegrationExchange)
+            .where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+            .values(receipt_active=False)
+            .where(IntegrationExchange.receipt_id == original["receipt_id"])
         )
         old = await session.get(WorkLine, scan.line_ids[0])
         new = await session.get(WorkLine, scan.line_ids[1])
@@ -260,7 +298,11 @@ async def test_unmatched_scan_acks_without_creating_business_work(coarse_scan, b
     assert (await scan.post(body)).status_code == 200
     assert await scan.rows() == []
     async with scan.factory() as session:
-        receipt = await session.scalar(select(CallbackReceipt))
+        receipt = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_active.is_(True)
+            )
+        )
         assert receipt.diagnostic[0]["reason_code"] == "UNREGISTERED_EVENT_TYPE"
 
 
@@ -297,9 +339,16 @@ async def test_concurrent_replays_wait_for_original_transaction(
     rows = await scan.rows()
     assert len(rows) == 1 and rows[0]["pending"] is True
     async with scan.factory() as session:
-        receipts = list(await session.scalars(select(CallbackReceipt)))
+        receipts = list(
+            await session.scalars(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+        )
         assert len(receipts) == 1
-        assert rows[0]["receipt_id"] == receipts[0].id
+        assert rows[0]["receipt_id"] == receipts[0].receipt_id
     assert (await scan.post(scan.event())).status_code == 200
     assert await scan.rows() == rows
 

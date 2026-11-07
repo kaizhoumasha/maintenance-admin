@@ -62,3 +62,33 @@ async def archive_old(session: AsyncSession, days: int) -> int:
     await session.commit()
     logger.info("审计日志归档完成: 搬运 %d 条", result.rowcount)
     return result.rowcount
+
+
+async def record_payload_read(
+    factory, *, user_id: int, record_id, trace_id: str, ip: str | None, user_agent: str | None
+) -> None:
+    """Audit only the authorized resource identity; payload bytes never enter this port."""
+    from app.diagnostics import log_exception
+
+    try:
+        async with factory() as session, session.begin():
+            session.add(
+                AuditLog(
+                    user_id=user_id,
+                    action="integration:payload:read",
+                    resource="integration_record",
+                    resource_id=None,
+                    trace_id=trace_id[:64],
+                    ip=ip[:45] if ip else None,
+                    user_agent=user_agent[:255] if user_agent else None,
+                    detail={
+                        "method": "GET",
+                        "route": "/api/v1/integrations/records/{record_id}/body",
+                        "record_id": str(record_id),
+                    },
+                )
+            )
+    except Exception as error:
+        log_exception(
+            logger, "payload read audit unavailable", error, component="audit", phase="payload_read"
+        )

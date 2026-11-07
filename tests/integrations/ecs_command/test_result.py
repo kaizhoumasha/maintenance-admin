@@ -3,9 +3,10 @@ import json
 import pytest
 from sqlalchemy import func, select
 
+from app.integrations import history as history_records
 from app.integrations.ecs_command.result import receive_ecs_result
-from app.models import CallbackReceipt, EcsCommand, EcsResultEvidence
-from tests.helpers import EcsMove
+from app.models import IntegrationExchange, IntegrationRecord
+from tests.helpers import EcsMove, read_history_body
 
 
 @pytest.mark.parametrize(
@@ -36,15 +37,35 @@ async def test_invalid_result_has_no_evidence(ecs, payload):
         reply = await receive_ecs_result(session, json.dumps(payload).encode(), ecs.service)
         assert reply.status_code == 400
         assert "secret" not in json.dumps(reply.body)
-        for model in (EcsCommand, EcsResultEvidence, CallbackReceipt):
-            assert await session.scalar(select(func.count()).select_from(model)) == 0
+        for model in (IntegrationExchange, IntegrationRecord):
+            statement = (
+                select(func.count())
+                .select_from(model)
+                .where(
+                    IntegrationExchange.role == "ECS_COMMAND"
+                    if model is IntegrationExchange
+                    else True
+                )
+            )
+            if model is IntegrationRecord:
+                statement = statement.where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+            elif model is IntegrationExchange:
+                statement = statement.where(IntegrationExchange.role == "ECS_COMMAND")
+            assert await session.scalar(statement) == 0
 
 
 async def test_unknown_result_does_not_negative_cache(ecs):
     raw = b'{"command_code":"x","device_code":"D","result":"SUCCESS","finish_time":1}'
     async with ecs.factory.begin() as session:
         assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 404
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "RECEIPT")
+            )
+            == 0
+        )
 
 
 async def test_result_receipts_keep_device_for_applied_and_conflicting_results(ecs):
@@ -61,7 +82,9 @@ async def test_result_receipts_keep_device_for_applied_and_conflicting_results(e
             timeout_ms=1000,
             command=EcsMove(qty=1),
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     await store.before_send(claim, ecs.targets["ecs"])
     body = dict(
@@ -78,7 +101,13 @@ async def test_result_receipts_keep_device_for_applied_and_conflicting_results(e
             )
             assert result.status_code == status
     async with ecs.factory() as session:
-        rows = list(await session.scalars(select(CallbackReceipt).filter_by(device_code="D1")))
+        rows = list(
+            await session.scalars(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.role == "RECEIPT", IntegrationExchange.device_code == "D1"
+                )
+            )
+        )
         assert len(rows) == 2
         assert {row.status_code for row in rows} == {200, 409}
         assert {row.operation for row in rows} == {"ecs.result"}
@@ -98,7 +127,9 @@ async def test_result_transaction_rollback_removes_evidence_and_projection(ecs):
             timeout_ms=1,
             command=EcsMove.model_validate({"qty": 1}),
         )
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     await store.before_send(claim, ecs.targets["ecs"])
     async with ecs.factory() as session:
@@ -114,8 +145,19 @@ async def test_result_transaction_rollback_removes_evidence_and_projection(ecs):
         assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 200
         await session.rollback()
     async with ecs.factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsResultEvidence)) == 0
-        assert (await session.scalar(select(EcsCommand))).status == "DISPATCHING"
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationRecord)
+                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+            )
+            == 0
+        )
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "DISPATCHING"
 
 
 async def test_nonfinite_result_extension_is_400_before_lookup(ecs):
@@ -216,11 +258,24 @@ async def test_shared_permissive_models_keep_original_result_contract(ecs):
             timeout_ms=30000,
             command=LegacyData.model_validate(params),
         )
-        row = await session.get(EcsCommand, command.command_code)
-        assert json.loads(row.request_raw)["params"] == {"qty": 1}
-        frozen = (row.request_raw, dict(row.route), row.expires_at)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
+        assert json.loads(await read_history_body(session, (row).request_record_id))["params"] == {
+            "qty": 1
+        }
+        frozen = (
+            (await read_history_body(session, (row).request_record_id)),
+            dict(row.route),
+            row.expires_at,
+        )
 
-    store = MessageStore(ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)})
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
     claim = (await store.claim(1, ecs.targets))[0]
     assert await store.before_send(claim, ecs.targets["ecs"])
     retained = configure_local_ecs(
@@ -256,6 +311,15 @@ async def test_shared_permissive_models_keep_original_result_contract(ecs):
         )
         assert view.status == "SUCCEEDED" and view.result["data"] == result["data"]
         assert "extension" not in view.result
-        row = await session.get(EcsCommand, command.command_code)
-        assert (row.request_raw, row.route, row.expires_at) == frozen
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == command.command_code,
+            )
+        )
+        assert (
+            (await read_history_body(session, (row).request_record_id)),
+            row.route,
+            row.expires_at,
+        ) == frozen
         assert row.route["annex_version"] == "1"

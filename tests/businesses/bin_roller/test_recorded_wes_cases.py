@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyChange
 from app.businesses._components.bin_roller.service import BinRoller
+from app.integrations import history as history_records
 from app.models import ReliableMessage, WorkLine
+from tests.helpers import read_history_body
 
 CASES = json.loads((Path(__file__).parent / "fixtures/wes_recorded_cases.json").read_text())
 GOOD = CASES["good"]
@@ -88,10 +90,11 @@ async def returned(flow, archived):
         frozen = await flow.record(session, "return_batch", batch["id"])
         assert frozen["manifest"]["moves"] == data["moves"]
         raw = await session.scalar(
-            select(ReliableMessage.request_raw).where(
+            select(ReliableMessage.request_record_id).where(
                 ReliableMessage.operation_id == frozen["transport_operation_id"]
             )
         )
+        raw = await read_history_body(session, raw)
     expected = [
         dict(
             container_id=m["bin_code"],
@@ -536,7 +539,11 @@ async def test_recorded_scan_replay_keeps_frozen_original_command(roller_scans, 
             await flow.roller.release_scan2(session, arrival_id=arrival["id"])
             arrival = await flow.record(session, "scan_arrival", arrival["id"])
         command = await flow.command(session, arrival["command_code"])
-        frozen = (command.command_code, command.expires_at, command.request_raw)
+        frozen = (
+            command.command_code,
+            command.expires_at,
+            await read_history_body(session, command.request_record_id),
+        )
     await flow.result(arrival["command_code"], point, finish_time=record["finish_time"])
     flow.rebuild()
     await flow.scan(point, record["raw"], timestamp=record["timestamp"])
@@ -544,7 +551,11 @@ async def test_recorded_scan_replay_keeps_frozen_original_command(roller_scans, 
         if point == "SCAN2":
             await flow.roller.release_scan2(session, arrival_id=arrival["id"])
         command = await flow.command(session, arrival["command_code"])
-        assert (command.command_code, command.expires_at, command.request_raw) == frozen
+        assert (
+            command.command_code,
+            command.expires_at,
+            await read_history_body(session, command.request_record_id),
+        ) == frozen
         assert (
             len([a for a in await flow.rows(session, "scan_arrival") if a["point"] == point]) == 1
         )
@@ -598,6 +609,7 @@ async def test_recorded_departure_native_ack_wakes_and_releases_without_result(
         flow.factory,
         on_result=business_wakeups.wms_result_committed,
         on_delivered=business_wakeups.transport_submit_delivered,
+        records=history_records,
     )
     transport = flow.roller.capabilities.transport
     claims = await store.claim(100, transport.outbox.targets)

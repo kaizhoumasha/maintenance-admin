@@ -44,7 +44,7 @@ async def test_position_observation_upgrade_preserves_original_tasks(backend, tm
                 )
             )
             original = (await connection.execute(select(original_table))).mappings().one()
-        assert (reply := await migrate("upgrade", "head")).returncode == 0, reply.stderr
+        assert (reply := await migrate("upgrade", "f0b220261031")).returncode == 0, reply.stderr
         async with engine.begin() as connection:
             columns = await connection.run_sync(lambda c: inspect(c).get_columns("transport_task"))
             assert any(c["name"] == "position_observation" and c["nullable"] for c in columns)
@@ -65,7 +65,7 @@ async def test_position_observation_upgrade_preserves_original_tasks(backend, tm
             }
             await connection.execute(current.update().values(position_observation=null()))
         assert (reply := await migrate("downgrade", before)).returncode == 0, reply.stderr
-        assert (reply := await migrate("upgrade", "head")).returncode == 0, reply.stderr
+        assert (reply := await migrate("upgrade", "f0b220261031")).returncode == 0, reply.stderr
         async with engine.begin() as connection:
             assert await connection.scalar(select(current.c.owner_domain)) == "original"
             assert await connection.scalar(select(current.c.position_observation)) is None

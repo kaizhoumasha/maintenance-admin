@@ -7,14 +7,16 @@ from sqlalchemy import func, select
 
 from app.businesses.smt_auto.models import AutoBinWork, AutoTask, AutoTaskRequest
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
 from app.models import ReliableMessage
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
+from tests.helpers import read_history_body
 
 
 async def complete_result(host, data, *, status=200, code="DECIDED"):
-    store = MessageStore(host.factory)
+    store = MessageStore(host.factory, records=history_records)
     claims = await store.claim(1, host.requests.outbox.targets)
     assert len(claims) == 1
     claim = claims[0]
@@ -215,12 +217,20 @@ async def test_unknown_response_recovers_original_message_bytes(direction_host, 
     async with direction_host.factory.begin() as session:
         await flow.advance(session, task_id="t", now_ms=20)
         message = await session.scalar(select(ReliableMessage))
-        identity = message.id, message.operation_id, message.request_raw
+        identity = (
+            message.id,
+            message.operation_id,
+            await read_history_body(session, (message).request_record_id),
+        )
     await complete_result(direction_host, {}, status=http_status, code=code)
     async with direction_host.factory.begin() as session:
         assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
         message = await session.scalar(select(ReliableMessage))
-        assert (message.id, message.operation_id, message.request_raw) == identity
+        assert (
+            message.id,
+            message.operation_id,
+            await read_history_body(session, (message).request_record_id),
+        ) == identity
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.businesses._components.bin_roller.ports import RollerWorkRef
 from app.core.identifiers import uuid7
 from app.database import create_database_engine
+from app.integrations import history as history_records
 
 
 async def test_waiting_pages_and_one_failure_do_not_starve_other_kinds(
@@ -235,6 +236,7 @@ async def test_ctu03_acceptance_wakes_original_owner_and_recovers_without_final_
         flow.factory,
         on_result=business_wakeups.wms_result_committed,
         on_delivered=business_wakeups.transport_submit_delivered,
+        records=history_records,
     )
     transport = flow.roller.capabilities.transport
     claims = await store.claim(100, transport.outbox.targets)

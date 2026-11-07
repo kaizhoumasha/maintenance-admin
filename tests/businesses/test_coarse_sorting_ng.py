@@ -13,7 +13,8 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import CoarseSortingAction, CoarseSortingJob
-from app.models import EcsCommand, EcsResultEvidence, ReliableMessage, WorkLine
+from app.models import IntegrationExchange, ReliableMessage, WorkLine
+from tests.helpers import clear_integration_history
 
 JOB = CoarseSortingJob.__table__
 ACTION = CoarseSortingAction.__table__
@@ -89,11 +90,17 @@ async def ng(coarse_forward):
                 delete(ACTION).where(ACTION.c.job_id.in_(select(JOB.c.id).where(jobs)))
             )
             await session.execute(delete(JOB).where(jobs))
-            codes = select(EcsCommand.command_code).where(EcsCommand.device_code.in_(flow.codes))
-            await session.execute(
-                delete(EcsResultEvidence).where(EcsResultEvidence.command_code.in_(codes))
+            roots = list(
+                await session.scalars(
+                    select(IntegrationExchange.id).where(
+                        IntegrationExchange.device_code.in_(flow.codes)
+                    )
+                )
             )
-            await session.execute(delete(EcsCommand).where(EcsCommand.device_code.in_(flow.codes)))
+            await session.execute(
+                delete(ReliableMessage).where(ReliableMessage.exchange_id.in_(roots))
+            )
+            await clear_integration_history(session, roots)
 
 
 async def accept_and_validate(flow, *, timestamp=1793206799000, changes=None):

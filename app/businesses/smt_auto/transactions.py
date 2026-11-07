@@ -4,6 +4,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.businesses._components.bin_roller.service import RackLockSetChanged
 from app.businesses.runtime import Capabilities
+from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 
 from .task_service import AutoTaskService
 
@@ -72,6 +73,6 @@ class AutoS1Transactions:
             except RackLockSetChanged:
                 if attempt == 2:
                     raise
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "40001" or attempt == 2:
+            except (DBAPIError, EvidencePersistenceError) as error:
+                if database_failure_code(error) != "40001" or attempt == 2:
                     raise

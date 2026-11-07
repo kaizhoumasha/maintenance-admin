@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from tests.helpers import read_history_body
+
 
 def test_roller_declares_one_scan_contract_and_exact_empty_directions():
     from pydantic import ValidationError
@@ -56,7 +58,10 @@ async def test_scan_direction_uses_only_local_suffix_and_current_task(
         assert command.task_type == want
         assert command.owner_domain == "first"
         assert command.device_code == flow.devices[point]
-        assert json.loads(command.request_raw)["params"] == {}
+        assert (
+            json.loads(await read_history_body(session, (command).request_record_id))["params"]
+            == {}
+        )
         assert (command.expires_at - command.created_at).total_seconds() == 300
         assert len(await flow.messages(session)) == 1
 

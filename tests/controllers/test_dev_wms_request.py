@@ -7,6 +7,7 @@ import pytest
 
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
 from app.integrations.wms_request import (
     ADAPTERS,
     DECISIONS_PROTOCOL,
@@ -27,7 +28,7 @@ def wms(monkeypatch):
     targets = {
         protocol: TargetConfig(protocol, "http://example.test", protocol) for protocol in PATHS
     }
-    monkeypatch.setattr(wms_requests, "_outbox", Outbox(targets, ADAPTERS))
+    monkeypatch.setattr(wms_requests, "_outbox", Outbox(targets, ADAPTERS, records=history_records))
 
 
 def trigger(operation, **extra):

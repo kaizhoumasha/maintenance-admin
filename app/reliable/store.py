@@ -1,9 +1,10 @@
 import logging
 import random
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from uuid import UUID
 
 from sqlalchemy import and_, bindparam, delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,6 +46,7 @@ class Claim:
     not_received_count: int = 0
     delivery_uncertain: bool = False
     dispatch_started_at: datetime | None = None
+    dispatch_origin: str | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class AttemptOutcome:
     not_received_count: int | None = None
     delivery_uncertain: bool | None = None
     pause_reason: str | None = None
+    observation_record_id: UUID | None = field(default=None, kw_only=True)
 
 
 def utc_datetime(value: datetime | None, *, known_sqlite_utc: bool = False) -> datetime | None:
@@ -75,6 +78,7 @@ class MessageStore:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
+        records,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         uniform: Callable[[float, float], float] = random.uniform,
         lease_id_factory: Callable[[], str] = lambda: uuid7().hex,
@@ -86,6 +90,7 @@ class MessageStore:
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
+        self.records = records
         self.clock = clock
         self.uniform = uniform
         self.lease_id_factory = lease_id_factory
@@ -101,12 +106,14 @@ class MessageStore:
     def _time(self, session, value):
         return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
-    def _claim(self, session, row, *, include_snapshot=True):
+    async def _claim(self, session, row, *, include_snapshot=True, bodies=None):
+        if bodies is None:
+            bodies = await self.records.requests(session, record_ids=(row.request_record_id,))
         message = OutgoingMessage(
             row.target,
             row.operation,
             row.operation_id,
-            row.request_raw,
+            bodies[row.request_record_id],
             row.business_key,
             row.trace_id,
             self._time(session, row.created_at),
@@ -117,6 +124,8 @@ class MessageStore:
             ScopeRef(row.scope_owner, row.scope_kind, row.scope_id)
             if row.scope_owner is not None
             else None,
+            exchange_id=row.exchange_id,
+            request_record_id=row.request_record_id,
         )
         return Claim(
             row.id,
@@ -159,6 +168,9 @@ class MessageStore:
                 .with_for_update(skip_locked=True)
             )
             rows = list(rows)
+            bodies = await self.records.requests(
+                session, record_ids=tuple(row.request_record_id for row in rows)
+            )
             if not rows:
                 self._skipped_claim_cursor = None
             claims = []
@@ -194,15 +206,17 @@ class MessageStore:
                 row.lease_until = now + timedelta(seconds=timeout + self.lease_margin_s)
                 row.last_attempt_at = now
                 row.updated_at = now
-                claims.append(self._claim(session, row))
+                claims.append(await self._claim(session, row, bodies=bodies))
         for claim in claims:
             self._log(claim.message, MessageStatus.PENDING, MessageStatus.SENDING)
         return tuple(claims)
 
     async def before_send(self, claim, target):
+        from .lifecycle import evidence_transaction
+
         if claim.message.delivery_snapshot is not None:
             return await self.snapshots.gate(claim, target)
-        async with self.session_factory() as session, session.begin():
+        async with evidence_transaction(self.session_factory) as session:
             row = await session.scalar(
                 select(ReliableMessage)
                 .where(
@@ -222,12 +236,17 @@ class MessageStore:
                 row.dispatch_started_at = row.dispatch_started_at or now
             until = now + timedelta(seconds=target.timeout_ms / 1000 + self.lease_margin_s)
             row.lease_until = until
+            await self.records.opened(
+                session, claim=replace(claim, dispatch_origin=target.base_url), at=now
+            )
             return until
 
     async def maintain_snapshots(self, limit, targets, deadline):
         return await self.snapshots.maintain(limit, targets, deadline)
 
     async def finish(self, claim: Claim, outcome: AttemptOutcome) -> bool:
+        from .lifecycle import evidence_transaction
+
         if claim.message.delivery_snapshot is not None:
             return await self.snapshots.finish(claim, outcome)
         if outcome.status not in (
@@ -281,7 +300,6 @@ class MessageStore:
             or claim.message.expires_at > now
         ):
             raise ValueError("expiry requires elapsed TTL and no send")
-        # DONE / 对端终态已把响应存入 response_raw,不再重复存一份 last_response_raw。
         keeps_final_response = verdict is not None and outcome.status in (
             MessageStatus.DONE,
             MessageStatus.FAILED,
@@ -297,13 +315,7 @@ class MessageStore:
             last_http_status=result.status_code if result else None,
             last_failure_kind=result.failure_kind if result else None,
             last_verdict=verdict.kind if verdict else None,
-            last_response_raw=None if keeps_final_response or not result else result.body,
         )
-        if outcome.verdict is not None and outcome.status in (
-            MessageStatus.DONE,
-            MessageStatus.FAILED,
-        ):
-            values["response_raw"] = result.body if result else None
         if outcome.next_attempt_at is not None:
             values["next_attempt_at"] = utc_datetime(outcome.next_attempt_at)
         if outcome.status == MessageStatus.STALLED:
@@ -312,7 +324,20 @@ class MessageStore:
             values["not_received_count"] = outcome.not_received_count
         if outcome.delivery_uncertain is not None:
             values["delivery_uncertain"] = outcome.delivery_uncertain
-        async with self.session_factory() as session, session.begin():
+        async with evidence_transaction(self.session_factory) as session:
+            row = await session.scalar(
+                select(ReliableMessage)
+                .where(ReliableMessage.id == claim.message_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            active = row is not None and row.lease_id == claim.lease_id and row.status == "SENDING"
+            observation = await self.records.finished(
+                session, claim=claim, outcome=outcome, at=now, late=not active
+            )
+            values["last_response_record_id"] = None if keeps_final_response else observation
+            if keeps_final_response:
+                values["terminal_response_record_id"] = observation
             changed = await session.scalar(
                 update(ReliableMessage)
                 .where(
@@ -357,7 +382,10 @@ class MessageStore:
                     .with_for_update(skip_locked=True)
                 )
             )
-            claims = [self._claim(session, row) for row in rows]
+            bodies = await self.records.requests(
+                session, record_ids=tuple(row.request_record_id for row in rows)
+            )
+            claims = [await self._claim(session, row, bodies=bodies) for row in rows]
             if claims:
                 # 行已被 FOR UPDATE 锁定,无需再带租约条件;一次批量执行代替逐行往返。
                 table = ReliableMessage.__table__
@@ -431,7 +459,7 @@ class MessageStore:
             last_http_status=None,
             last_failure_kind=None,
             last_verdict=None,
-            last_response_raw=None,
+            last_response_record_id=None,
             # 租约中断后请求可能已送达:一旦未知,预算不再适用(合同 §4.3)。
             delivery_uncertain=claim.delivery_uncertain
             or claim.dispatch_started_at is not None

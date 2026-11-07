@@ -1,5 +1,7 @@
 import pytest
 
+from tests.helpers import read_history_body, update_message_bodies
+
 
 async def test_successor_requires_original_completed_authority(
     manual_bins, manual_completion_tools
@@ -106,9 +108,9 @@ async def test_unassigned_scan4_reaches_drain_through_original_scan_pending(
 
     async with flow.factory() as session:
         message = await session.get(ReliableMessage, drains[0]["message_id"])
-        assert json.loads(message.request_raw)["data"] == dict(
-            workline_code="SMT-M1-1", required_slot_count=1
-        )
+        assert json.loads(await read_history_body(session, (message).request_record_id))[
+            "data"
+        ] == dict(workline_code="SMT-M1-1", required_slot_count=1)
     original = drains[0]["operation_id"]
     await flow.host.scan_pending(limit=1)
     assert [d["operation_id"] for d in await flow.rows("drain", component=True)] == [original]
@@ -202,22 +204,20 @@ async def test_cancelled_task_keeps_original_late_prepare_result(manual_host):
     ).status_code == 202
     assert await flow.host.scan_pending() == 0
     async with flow.factory.begin() as session:
-        await session.execute(
-            update(ReliableMessage)
-            .where(ReliableMessage.id == original["prepare_message_id"])
-            .values(
-                status="ABANDONED",
-                last_http_status=202,
-                last_verdict="DELIVERED",
-                response_raw=json.dumps(
-                    dict(
-                        operation_id=original["prepare_operation_id"],
-                        code="PREPARE_ACCEPTED",
-                        timestamp=110,
-                        data={},
-                    )
-                ).encode(),
-            )
+        await update_message_bodies(
+            session,
+            update(ReliableMessage).where(ReliableMessage.id == original["prepare_message_id"]),
+            status="ABANDONED",
+            last_http_status=202,
+            last_verdict="DELIVERED",
+            response_raw=json.dumps(
+                dict(
+                    operation_id=original["prepare_operation_id"],
+                    code="PREPARE_ACCEPTED",
+                    timestamp=110,
+                    data={},
+                )
+            ).encode(),
         )
     assert await flow.host.scan_pending() == 0
     current = (await flow.rows("task"))[0]

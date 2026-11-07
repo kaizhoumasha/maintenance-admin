@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy import update
 
 from app.models import Device, WorkLine
+from tests.helpers import set_message_bodies
 
 
 async def test_direct_pick_requires_original_rack_arrival(manual_racks):
@@ -402,16 +403,21 @@ async def test_proven_unsubmitted_entry_rejection_does_not_invent_arrival_report
         message.last_http_status = 409
         message.last_verdict = "PEER_TERMINAL"
         message.fail_reason = "CONFLICT"
-        message.response_raw = json.dumps(
-            dict(
-                operation_id=message.operation_id,
-                code="CONFLICT",
-                timestamp=100,
-                data=dict(
-                    reason_code="REFERENCE_CONFLICT", transport_task_id=entry["transport_task_id"]
-                ),
-            )
-        ).encode()
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="CONFLICT",
+                    timestamp=100,
+                    data=dict(
+                        reason_code="REFERENCE_CONFLICT",
+                        transport_task_id=entry["transport_task_id"],
+                    ),
+                )
+            ).encode(),
+        )
     assert await flow.rack_advance(entry["job_id"]) == "NOT_ARRIVED"
     assert not await flow.rows("rack_report")
     async with flow.factory() as session:

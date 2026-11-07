@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.database import create_database_engine as create_async_engine
 from app.http_client import DeliveryState, HttpRequest, HttpResult
+from app.integrations import history as history_records
 from app.reliable import Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 from app.reliable.delivery import send_one
@@ -25,6 +26,7 @@ async def main():
         async_sessionmaker(engine, expire_on_commit=False),
         clock=clock,
         uniform=lambda low, high: high,
+        records=history_records,
     )
     targets = {target.name: target}
 

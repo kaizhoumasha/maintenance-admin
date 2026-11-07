@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.receiver import receive_ecs_event
-from app.models import CallbackReceipt
+from app.models import IntegrationExchange
 
 
 class BinScan(CallbackPayload):
@@ -75,7 +75,17 @@ async def test_shared_event_dispatches_by_role_and_replays_before_binding_lookup
     async with callback_store.begin() as session:
         replay = await receive_ecs_event(session, raw, resolve_binding=forbidden)
         assert replay.outcome == "duplicate"
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 2
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            == 2
+        )
 
 
 async def test_unbound_receipt_does_not_apply_after_a_binding_is_added(callback_store, monkeypatch):
@@ -114,7 +124,17 @@ async def test_binding_failure_rolls_back_without_acknowledging(callback_store, 
             async with session.begin():
                 await receive_ecs_event(session, raw, resolve_binding=failed)
     async with callback_store() as session:
-        assert await session.scalar(select(func.count()).select_from(CallbackReceipt)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(
+                    IntegrationExchange.role == "RECEIPT",
+                    IntegrationExchange.receipt_active.is_(True),
+                )
+            )
+            == 0
+        )
 
 
 async def test_resolver_cannot_dispatch_another_devices_binding(callback_store, monkeypatch):

@@ -7,10 +7,11 @@ from pydantic import ConfigDict, create_model
 from sqlalchemy import func, select
 
 from app.core import get_current_user
+from app.integrations import history as history_records
 from app.main import app
-from app.models import EcsCommand, ReliableMessage
+from app.models import IntegrationExchange, ReliableMessage
 from app.reliable import Outbox
-from tests.helpers import reset_ecs_assembly
+from tests.helpers import read_history_body, reset_ecs_assembly
 
 BODY = {
     "client_request_id": "demo-1",
@@ -39,6 +40,7 @@ async def dev_ecs(admin, monkeypatch):
         ecs_runtime_config(settings, service).targets,
         app.state.reliable_adapters,
         lifecycles=app.state.reliable_lifecycles,
+        records=history_records,
     )
     monkeypatch.setattr(app.state, "outbox", service.outbox, raising=False)
     monkeypatch.setattr(
@@ -68,7 +70,14 @@ async def test_debug_creation_replays_original_identity_and_scopes_reads(client,
     answer = await client.get(f"/api/v1/dev/ecs/commands/{code}", headers=dev_ecs)
     assert answer.status_code == 200 and answer.json()["result"] is None
     async with app.state.audit_session_factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 1
     original = app.dependency_overrides.get(get_current_user)
     app.dependency_overrides[get_current_user] = lambda: type("User", (), {"id": 999})()
@@ -162,7 +171,14 @@ async def test_debug_commit_failure_leaves_no_command_or_obligation(client, dev_
     finally:
         app.dependency_overrides[get_session] = original
     async with app.state.audit_session_factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 0
 
 
@@ -237,8 +253,14 @@ async def test_selected_business_example_keeps_generic_debug_snapshot_and_identi
     )
     assert conflict.status_code == 409
     async with app.state.audit_session_factory() as session:
-        row = await session.get(EcsCommand, code)
-        assert json.loads(row.request_raw)["params"] == {"barcode": "RAW-001"}
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND", IntegrationExchange.command_code == code
+            )
+        )
+        assert json.loads(await read_history_body(session, row.request_record_id))["params"] == {
+            "barcode": "RAW-001"
+        }
         assert row.route["version"] == "3"
         assert (row.route["annex_id"], row.route["annex_version"]) == ("ecs.dev.protocol", "1")
         assert row.route["retry_window"] == 300
@@ -336,7 +358,14 @@ async def test_requests_select_dynamic_origins_without_device_registration(clien
     )
     assert denied.status_code == 200
     async with app.state.audit_session_factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 2
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 2
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 2
 
 
@@ -372,7 +401,14 @@ async def test_debug_rejects_invalid_origin_without_obligation(client, dev_ecs, 
     assert reply.status_code == 400, reply.text
     assert "password" not in reply.text.lower() and "token=secret" not in reply.text
     async with app.state.audit_session_factory() as session:
-        assert await session.scalar(select(func.count()).select_from(EcsCommand)) == 0
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 0
+        )
         assert await session.scalar(select(func.count()).select_from(ReliableMessage)) == 0
 
 
@@ -403,7 +439,11 @@ async def test_missing_protocol_policy_only_blocks_new_registration(
     a = await client.post("/api/v1/dev/ecs/commands", headers=dev_ecs, json=BODY)
     code = a.json()["command_code"]
     async with app.state.audit_session_factory.begin() as session:
-        row = await session.get(EcsCommand, code)
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND", IntegrationExchange.command_code == code
+            )
+        )
         row.route = {**row.route, "version": version}
     from dataclasses import replace
     from datetime import timedelta
@@ -445,7 +485,7 @@ async def test_network_registration_requires_permission_and_replay_survives_revo
     result = await client.post("/api/v1/dev/ecs/commands", headers=bearer(user), json=body)
     assert result.status_code == (200 if permitted else 403), result.text
     async with app.state.audit_session_factory.begin() as session:
-        for table in (EcsCommand, ReliableMessage):
+        for table in (IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == permitted
         if permitted:
             role_id = await session.scalar(select(Role.id).where(Role.name == "r"))
@@ -478,7 +518,7 @@ async def test_debug_enforces_protocol_types(client, dev_ecs, change):
     reply = await client.post("/api/v1/dev/ecs/commands", headers=dev_ecs, json={**BODY, **change})
     assert reply.status_code == 400
     async with app.state.audit_session_factory() as session:
-        for table in (EcsCommand, ReliableMessage):
+        for table in (IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
 
 
@@ -547,8 +587,15 @@ async def test_debug_accepts_unregistered_actions_with_generic_json(
     )
     assert answer.status_code == 200, answer.text
     async with app.state.audit_session_factory() as session:
-        row = await session.get(EcsCommand, answer.json()["command_code"])
-        assert json.loads(row.request_raw)["params"] == params
+        row = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.role == "ECS_COMMAND",
+                IntegrationExchange.command_code == answer.json()["command_code"],
+            )
+        )
+        assert (
+            json.loads(await read_history_body(session, row.request_record_id))["params"] == params
+        )
         assert row.route["version"] == "3"
         assert row.route["retry_window"] == 300
 
@@ -565,7 +612,7 @@ async def test_debug_rejects_nonfinite_json_without_obligation(client, dev_ecs, 
     )
     assert answer.status_code == 400
     async with app.state.audit_session_factory() as session:
-        for table in (EcsCommand, ReliableMessage):
+        for table in (IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
 
 
@@ -577,7 +624,7 @@ async def test_debug_rejects_oversized_frozen_envelope(client, dev_ecs):
     )
     assert answer.status_code == 400
     async with app.state.audit_session_factory() as session:
-        for table in (EcsCommand, ReliableMessage):
+        for table in (IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 0
 
 
@@ -597,5 +644,5 @@ async def test_missing_or_malformed_protocol_policy_is_configuration_error(
     assert denied.status_code == 503
     assert "PROTOCOL_RETRY_WINDOW" in denied.json()["message"]
     async with app.state.audit_session_factory() as session:
-        for table in (EcsCommand, ReliableMessage):
+        for table in (IntegrationExchange, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(table)) == 1

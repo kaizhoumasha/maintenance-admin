@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from typing import Protocol
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.diagnostics import log_exception
@@ -16,6 +18,36 @@ from app.models.reliable import ReliableMessage
 from .types import MessageStatus, VerdictKind
 
 logger = logging.getLogger(__name__)
+
+
+class EvidencePersistenceError(Exception):
+    pass
+
+
+class EvidenceIntegrityError(EvidencePersistenceError):
+    pass
+
+
+def database_failure_code(error):
+    original = error.__cause__ if isinstance(error, EvidencePersistenceError) else error
+    return getattr(original.orig, "sqlstate", None) if isinstance(original, DBAPIError) else None
+
+
+class DeliveryRecords(Protocol):
+    async def register(self, session, *, message, protocol, exchange_id=None): ...
+    async def requests(self, session, *, record_ids): ...
+    async def link_message(self, session, *, exchange_id, message_id, at): ...
+    async def opened(self, session, *, claim, at): ...
+    async def finished(self, session, *, claim, outcome, at, late): ...
+
+
+@asynccontextmanager
+async def evidence_transaction(factory):
+    try:
+        async with factory() as session, session.begin():
+            yield session
+    except SQLAlchemyError as error:
+        raise EvidencePersistenceError("integration transaction unavailable") from error
 
 
 class DeliveryLifecycle(Protocol):
@@ -73,7 +105,7 @@ class SnapshotTransactions:
         return port, context, row, authorization
 
     async def gate(self, claim, target):
-        async with self.store.session_factory() as session, session.begin():
+        async with evidence_transaction(self.store.session_factory) as session:
             port, context, row, authorization = await self.locked(session, claim, authorize=True)
             now = self.store.clock()
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
@@ -103,6 +135,16 @@ class SnapshotTransactions:
                     if row.scope_owner is not None:
                         row.dispatch_started_at = row.dispatch_started_at or now
                     row.lease_until = until
+                    await self.store.records.opened(
+                        session,
+                        claim=replace(
+                            claim,
+                            dispatch_origin=target.effective(
+                                claim.message.delivery_snapshot
+                            ).base_url,
+                        ),
+                        at=now,
+                    )
                     return until
                 outcome = AttemptOutcome(
                     MessageStatus.HELD, pause_reason=reason, delivery_uncertain=None
@@ -139,10 +181,14 @@ class SnapshotTransactions:
             or outcome.fail_reason != outcome.verdict.reason
         ):
             raise ValueError("FAILED requires matching rejection evidence")
-        async with self.store.session_factory() as session, session.begin():
+        async with evidence_transaction(self.store.session_factory) as session:
             port, context, row, _ = await self.locked(session, claim)
             outcome = self._interruption(row, outcome)
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
+                observation = await self.store.records.finished(
+                    session, claim=claim, outcome=outcome, at=self.store.clock(), late=True
+                )
+                outcome = replace(outcome, observation_record_id=observation)
                 await port.observe_late(session, context, claim, outcome)
                 return False
             await self.apply(session, port, context, row, claim, outcome)
@@ -163,6 +209,10 @@ class SnapshotTransactions:
     async def apply(self, session, port, context, row, claim, outcome):
         outcome = self._interruption(row, outcome)
         now = self.store.clock()
+        observation = await self.store.records.finished(
+            session, claim=claim, outcome=outcome, at=now, late=False
+        )
+        outcome = replace(outcome, observation_record_id=observation)
         row.status = outcome.status
         row.pause_reason = outcome.pause_reason
         row.fail_reason = outcome.fail_reason
@@ -177,16 +227,16 @@ class SnapshotTransactions:
         if outcome.not_received_count is not None:
             row.not_received_count = outcome.not_received_count
         if outcome.result:
+            row.last_response_record_id = observation
             row.last_http_status = outcome.result.status_code
             row.last_failure_kind = outcome.result.failure_kind
-            row.last_response_raw = outcome.result.body
         if outcome.verdict:
             row.last_verdict = outcome.verdict.kind
             if (
                 outcome.verdict.kind == VerdictKind.DELIVERED
                 or outcome.status == MessageStatus.FAILED
             ):
-                row.response_raw = outcome.result.body
+                row.terminal_response_record_id = observation
         await port.apply_transition(session, context, claim, outcome)
 
     async def release(self, claim):
@@ -249,9 +299,11 @@ class SnapshotTransactions:
                                 continue
                             reason = None
                             try:
-                                claim = self.store._claim(session, row)
+                                claim = await self.store._claim(session, row)
                             except (TypeError, ValueError):
-                                claim = self.store._claim(session, row, include_snapshot=False)
+                                claim = await self.store._claim(
+                                    session, row, include_snapshot=False
+                                )
                                 reason = "CONFIG_DRIFT"
                             if not reason and row.status == "SENDING":
                                 if self.store._time(session, row.lease_until) > now:
