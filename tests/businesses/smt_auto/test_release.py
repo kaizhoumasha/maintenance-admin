@@ -84,6 +84,7 @@ async def test_original_no_work_releases_only_after_actual_public_success(
         await host.work_plans.consume_bin(
             session, work_line_id=line, arrival_id=work.arrival_id, now_ms=30
         )
+        assert await flow.advance(session, task_id="t", now_ms=30) == "WAITING"
         assert (
             await flow.release_bin(
                 session, work_line_id=line, arrival_id=work.arrival_id, now_ms=31
@@ -107,6 +108,7 @@ async def test_original_no_work_releases_only_after_actual_public_success(
             )
             == 1
         )
+        assert await flow.advance(session, task_id="t", now_ms=33) == "CONFIRMING"
     response = await host.result(command, status=status)
     assert response.status_code == 200
     async with host.factory.begin() as session:
@@ -128,14 +130,14 @@ async def test_original_no_work_releases_only_after_actual_public_success(
             == "WAITING"
         )
 
-        assert await flow.advance(session, task_id="t", now_ms=100) == (
-            "CONFIRMING" if status == "SUCCESS" else "WAITING"
-        )
+        assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
 
-    if status == "SUCCESS":
-        await no_work(host, {"result": "COMPLETED"})
-        async with host.factory.begin() as session:
-            assert await flow.advance(session, task_id="t", now_ms=110) == "COMPLETED"
+    await no_work(host, {"result": "COMPLETED"})
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=110) == "COMPLETED"
+        assert bool(
+            await flow.original_inprocess(session, work_line_id=line, bin_code=work.bin_code)
+        ) == (status != "SUCCESS")
 
 
 async def test_terminal_cleanup_preserves_original_bin_closure(s5_roller):

@@ -230,15 +230,14 @@ async def direction_host(monkeypatch):
     monkeypatch.setattr(catalog, "entries", lambda: (entry,))
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(registry, "_registry", {})
-    completion_module = (
-        "app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1"
-    )
-    if completion_module in sys.modules:
-        registry.request_operation(
-            "sorting.task.completion_confirm@v1", registry.Endpoint.DECISIONS
-        )(sys.modules[completion_module].CompletionConfirm)
-    else:
-        importlib.import_module(completion_module)
+    for name, model in (("prepare", "Prepare"), ("completion_confirm", "CompletionConfirm")):
+        module = f"app.businesses._components.sorting_task.request.sorting_task_{name}_v1"
+        if module in sys.modules:
+            registry.request_operation(f"sorting.task.{name}@v1", registry.Endpoint.DECISIONS)(
+                getattr(sys.modules[module], model)
+            )
+        else:
+            importlib.import_module(module)
     for suffix in (
         "putaway_work_plan_v1",
         "outbound_bin_work_plan_v1",
@@ -446,7 +445,7 @@ async def s5_roller(direction_host, monkeypatch):
             business_code="smt_auto",
         )
 
-    async def scan(*, timestamp=10):
+    async def scan(*, timestamp=10, bin_code="A000000001-C"):
         async with host.factory.begin() as session:
             result = await receive_ecs_event(
                 session,
@@ -455,7 +454,7 @@ async def s5_roller(direction_host, monkeypatch):
                         "device_code": "SCAN2",
                         "event_type": "SCAN_COMPLETED",
                         "timestamp": timestamp,
-                        "data": {"bin_code": "A000000001-C"},
+                        "data": {"bin_code": bin_code},
                     }
                 ).encode(),
                 resolve_binding=binding,
@@ -464,7 +463,9 @@ async def s5_roller(direction_host, monkeypatch):
             )
             assert result.status_code == 200
             return await session.scalar(
-                select(AutoBinWork).where(AutoBinWork.bin_code == "A000000001")
+                select(AutoBinWork).where(
+                    AutoBinWork.raw_bin_code == bin_code, AutoBinWork.scanned_at == timestamp
+                )
             )
 
     async def result(command_code, *, status="SUCCESS", device="SCAN2"):

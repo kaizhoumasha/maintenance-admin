@@ -296,9 +296,9 @@ async def test_partial_member_cancellation_continues_remaining_original_face_wor
 )
 @pytest.mark.parametrize("consume", [True, False])
 async def test_mixed_plan_target_cancellation_vetoes_completed_real_supply(
-    manual_supply, status, consume
+    manual_production_supply, status, consume
 ):
-    flow = manual_supply
+    flow = manual_production_supply
     await flow.ready()
     await flow.bin_plan(target_rack=dict(rack_id="TRANSFER", rack_face="B"))
     await flow.reconcile()
@@ -311,6 +311,10 @@ async def test_mixed_plan_target_cancellation_vetoes_completed_real_supply(
             session, work_line_id=flow.lines[0], task_id="T1"
         )
         assert progress[0].feed_complete and not progress[0].pending
+    await flow.scan()
+    arrival = (await flow.rows("manual_bin"))[0]["arrival_id"]
+    await flow.decision(dict(result="NO_WORK"))
+    await flow.advance("bin", arrival)
     cancelled = status.startswith("CANCELLED")
     if status != "PENDING":
         assert (

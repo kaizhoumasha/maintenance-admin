@@ -12,7 +12,7 @@ from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
 from app.models import ReliableMessage
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
-from tests.helpers import read_history_body
+from tests.helpers import read_history_body, set_message_bodies
 
 
 async def complete_result(host, data, *, status=200, code="DECIDED"):
@@ -37,7 +37,7 @@ async def complete_result(host, data, *, status=200, code="DECIDED"):
     verdict = ADAPTERS[DECISIONS_PROTOCOL].classify_response(claim.message, response)
     outcome = (
         AttemptOutcome(MessageStatus.DONE, result=response, verdict=verdict)
-        if status == 200 and code == "DECIDED"
+        if (status, code) in ((200, "DECIDED"), (202, "PREPARE_ACCEPTED"))
         else AttemptOutcome(
             MessageStatus.PENDING,
             result=response,
@@ -72,6 +72,325 @@ async def empty_task(host, *, revision=1):
                     applied_plan_revision=1,
                 )
             )
+
+
+async def completed_supply(host, *, count):
+    """Recover a closed feed checkpoint with its original registered WMS decision."""
+    import importlib
+
+    from app.businesses import catalog
+    from app.businesses._components.bin_roller.composition import COMPONENT
+    from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyChange
+    from app.businesses.smt_auto.models import AutoSupplyMember, AutoTaskInput
+    from app.core.identifiers import uuid7
+    from app.integrations.wms_request import operation as registry
+
+    host.entry.COMPONENTS = (host.entry.COMPONENTS[0], COMPONENT)
+    catalog._validated_entries = None
+    module = importlib.import_module(
+        "app.businesses._components.bin_roller.request.bin_inbound_batch_v1"
+    )
+    if registry.lookup("bin.inbound_batch@v1") is None:
+        registry.request_operation("bin.inbound_batch@v1", registry.Endpoint.DECISIONS)(
+            module.InboundBatch
+        )
+    await empty_task(host)
+    feed_operation_id = str(uuid7())
+    async with host.factory.begin() as session:
+        plan = await session.scalar(select(AutoTaskInput))
+        plan.effective_request = {
+            "target_rack": {"rack_id": "TARGET", "rack_face": "90"},
+            "added_bin_source_racks": [{"rack_id": "R", "rack_face": ["90"]}],
+        }
+        session.add(
+            AutoSupplyMember(
+                task_id="t",
+                plan_input_id=plan.id,
+                plan_revision=1,
+                rack_id="R",
+                rack_face="90",
+                rack_array_index=0,
+                face_array_index=0,
+                supply_change_id=plan.operation_id,
+            )
+        )
+        await host.roller.apply_supply_change(
+            session, SupplyChange(1, "t", plan.operation_id, (SourceFaceRef(1, "R", "90"),), ())
+        )
+        message = await host.requests.send(
+            session,
+            module.InboundBatch(task_id="t", rack_id="R", rack_face="90"),
+            operation_id=feed_operation_id,
+        )
+        repo = host.roller.repository(1)
+        face = (await session.execute(select(host.roller.tables["face_work"]))).mappings().one()
+        await repo.update(
+            session,
+            "face_work",
+            face["id"],
+            phase="RETURN_WINDOW",
+            feed_cursor=count,
+            feed_operation_id=feed_operation_id,
+            feed_message_id=message.message_id,
+        )
+        await repo.close(session, "face_work", face["id"], "COMPLETED")
+    decision = (
+        {"result": "RACK_FACE_DONE"}
+        if not count
+        else {
+            "result": "READY",
+            "bins": [
+                {
+                    "bin_code": f"A{i + 1:09}",
+                    "source_locator": {
+                        "type": "RACK_BIN_SLOT",
+                        "rack_id": "R",
+                        "rack_face": "90",
+                        "slot_id": f"S{i + 1}",
+                    },
+                }
+                for i in range(count)
+            ],
+        }
+    )
+    await complete_result(host, decision)
+
+
+async def terminal_bin(host, flow, *, index=0, now=110):
+    work = await host.scan(timestamp=now, bin_code=f"A{index + 1:09}-C")
+    await complete_result(host, {"result": "NO_WORK"})
+    async with host.factory.begin() as session:
+        await host.work_plans.consume_bin(
+            session, work_line_id=1, arrival_id=work.arrival_id, now_ms=now + 10
+        )
+        assert (
+            await flow.release_bin(
+                session, work_line_id=1, arrival_id=work.arrival_id, now_ms=now + 20
+            )
+            == "RELEASING"
+        )
+        work = await session.get(AutoBinWork, work.id)
+        return work
+
+
+@pytest.mark.parametrize("count", [1, 2])
+async def test_successful_supply_waits_for_bins_to_enter_production(s5_roller, count):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=count)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=100) == "WAITING"
+        assert (await session.get(AutoTask, "t")).status == "EXECUTING"
+        assert not await session.scalar(
+            select(AutoTaskRequest).where(AutoTaskRequest.purpose == "COMPLETION")
+        )
+    for index in range(count):
+        now = 110 + 100 * index
+        work = await terminal_bin(host, flow, index=index, now=now)
+        command_code = work.release_command_code
+        async with host.factory.begin() as session:
+            assert await flow.advance(session, task_id="t", now_ms=now + 40) == (
+                "CONFIRMING" if index + 1 == count else "WAITING"
+            )
+        # A late tail Result must not change the already-saved confirmation basis.
+        if index + 1 < count:
+            assert (await host.result(command_code)).status_code == 200
+            async with host.factory.begin() as session:
+                assert (
+                    await flow.consume_release(
+                        session, work_line_id=1, arrival_id=work.arrival_id, now_ms=now + 50
+                    )
+                    == "RELEASED"
+                )
+    await complete_result(host, {"result": "COMPLETED"})
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=400) == "COMPLETED"
+        task = await session.get(AutoTask, "t")
+        assert await flow.retention_basis(session, task, now_ms=401) is None
+        assert await flow.original_inprocess(session, work_line_id=1, bin_code=work.bin_code)
+    assert (await host.result(command_code)).status_code == 200
+    async with host.factory.begin() as session:
+        assert (
+            await flow.consume_release(
+                session, work_line_id=1, arrival_id=work.arrival_id, now_ms=410
+            )
+            == "RELEASED"
+        )
+        task = await session.get(AutoTask, "t")
+        assert await flow.retention_basis(session, task, now_ms=420) == task.confirmation_basis
+        assert not await flow.original_inprocess(session, work_line_id=1, bin_code=work.bin_code)
+
+
+@pytest.mark.parametrize("missing", ["decision", "command", "owner", "production"])
+async def test_completion_requires_original_release_intent(s5_roller, missing):
+    from sqlalchemy import update
+
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=1)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    work = await terminal_bin(host, flow)
+    async with host.factory.begin() as session:
+        if missing == "decision":
+            (await session.get(AutoBinWork, work.id)).release_decided_at_ms = None
+        else:
+            table = host.roller.tables["bin_passage"]
+            key = {
+                "command": "release_command_code",
+                "owner": "scope_id",
+                "production": "production_record_id",
+            }[missing]
+            await session.execute(update(table).values({key: "OTHER"}))
+        assert await flow.advance(session, task_id="t", now_ms=200) == "WAITING"
+
+
+async def test_saved_result_based_confirmation_remains_recoverable(s5_roller):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=1)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    work = await terminal_bin(host, flow)
+    assert (await host.result(work.release_command_code)).status_code == 200
+    async with host.factory.begin() as session:
+        await flow.consume_release(session, work_line_id=1, arrival_id=work.arrival_id, now_ms=150)
+        assert await flow.advance(session, task_id="t", now_ms=160) == "CONFIRMING"
+        task = await session.get(AutoTask, "t")
+        saved = await session.get(AutoBinWork, work.id)
+        task.confirmation_basis = {
+            **task.confirmation_basis,
+            "bins": [[saved.id, saved.release_result_ref]],
+        }
+    await complete_result(host, {"result": "COMPLETED"})
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=200) == "COMPLETED"
+        task = await session.get(AutoTask, "t")
+        assert await flow.retention_basis(session, task, now_ms=210) == task.confirmation_basis
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_inbound_retention_waits_for_original_tail_result(s5_roller, cancelled):
+    from types import SimpleNamespace
+
+    from app.businesses._components.sorting_task.contracts import Cancel
+    from app.businesses._components.sorting_task.request.sorting_task_prepare_v1 import Prepare
+    from app.businesses.smt_auto.archive import RETENTION_MS, Archive
+    from app.businesses.smt_auto.rack_ports import AutoRackPorts
+    from app.businesses.smt_auto.task_flow import TaskFlow
+    from app.businesses.smt_auto.task_service import AutoTaskService
+    from app.core.identifiers import uuid7
+
+    host = s5_roller
+    await empty_task(host, revision=0 if cancelled else 1)
+    service = AutoTaskService(wms=host.requests)
+    async with host.factory.begin() as session:
+        task = await session.get(AutoTask, "t")
+        task.business_type = "inbound"
+        task.status = "PREPARING" if cancelled else "EXECUTING"
+        prepare_id = str(uuid7())
+        message = await host.requests.send(
+            session, Prepare(task_id="t", workline_code="LINE"), operation_id=prepare_id
+        )
+        prepare = await session.scalar(select(AutoTaskRequest))
+        prepare.operation_id = prepare_id
+        prepare.message_id, prepare.unresolved = message.message_id, True
+    await complete_result(host, {}, status=202, code="PREPARE_ACCEPTED")
+    async with host.factory.begin() as session:
+        await service.advance_prepare(session, task_id="t", now_ms=10)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    work = await terminal_bin(host, flow)
+    if cancelled:
+        async with host.factory.begin() as session:
+            await service.accept_task_cancel(
+                SimpleNamespace(
+                    session=session,
+                    operation="sorting.task.cancel@v1",
+                    operation_id="cancel",
+                    timestamp=160,
+                    parsed={},
+                ),
+                Cancel(task_id="t", cancel_scope="TASK"),
+            )
+            await service.advance_prepare(session, task_id="t", now_ms=160)
+    else:
+        async with host.factory.begin() as session:
+            assert await flow.advance(session, task_id="t", now_ms=160) == "CONFIRMING"
+        await complete_result(host, {"result": "COMPLETED"})
+        async with host.factory.begin() as session:
+            assert await flow.advance(session, task_id="t", now_ms=170) == "COMPLETED"
+    archive = Archive(flow, AutoRackPorts(host.dispatch))
+    async with host.factory.begin() as session:
+        task = await session.get(AutoTask, "t")
+        late = task.closed_at_ms + RETENTION_MS + 100
+        assert not await archive.clean(session, task_id="t", now_ms=late)
+    assert (await host.result(work.release_command_code)).status_code == 200
+    async with host.factory.begin() as session:
+        assert (
+            await flow.consume_release(
+                session, work_line_id=1, arrival_id=work.arrival_id, now_ms=late
+            )
+            == "RELEASED"
+        )
+        assert not await archive.clean(session, task_id="t", now_ms=late + RETENTION_MS - 1)
+        assert await archive.clean(session, task_id="t", now_ms=late + RETENTION_MS)
+
+
+async def test_explicit_empty_supply_can_confirm_without_production(s5_roller):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=0)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
+
+
+async def test_saved_original_supply_confirmation_can_complete_and_retain(s5_roller):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=0)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
+        progress = await host.roller.get_supply_progress(session, work_line_id=1, task_id="t")
+        task = await session.get(AutoTask, "t")
+        task.confirmation_basis = {
+            "plan_revision": 1,
+            "inputs": ["plan"],
+            "bins": [],
+            "supply": [[1, "R", "90", list(progress[0].original_ids)]],
+        }
+    await complete_result(host, {"result": "COMPLETED"})
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=200) == "COMPLETED"
+        task = await session.get(AutoTask, "t")
+        assert await flow.retention_basis(session, task, now_ms=300) is not None
+
+
+@pytest.mark.parametrize("confirmation_sent", [False, True])
+async def test_missing_original_supply_decision_cannot_close_task(s5_roller, confirmation_sent):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=0)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    if confirmation_sent:
+        async with host.factory.begin() as session:
+            assert await flow.advance(session, task_id="t", now_ms=100) == "CONFIRMING"
+        await complete_result(host, {"result": "COMPLETED"})
+    async with host.factory.begin() as session:
+        feed = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation == "bin.inbound_batch@v1")
+        )
+        await set_message_bodies(session, feed, response_raw=None)
+        assert await flow.advance(session, task_id="t", now_ms=200) == (
+            "CONFLICT" if confirmation_sent else "WAITING"
+        )
+        assert (await session.get(AutoTask, "t")).status == "EXECUTING"
 
 
 async def test_original_completion_recovery_uses_one_outbox_and_consumes_once(direction_host):

@@ -51,9 +51,34 @@ async def test_completed_started_withdrawal_uses_actual_progress(manual_supply):
         )
         assert progress[0].feed_complete and not progress[0].pending
     await flow.confirm()
-    assert len(await flow.confirmations()) == 1
+    assert await flow.confirmations() == []
     assert (await flow.rows("member"))[0]["status"] == "CANCELLED"
     assert (await flow.rows("rack_cycle", component=True))[0]["pending"]
+
+
+@pytest.mark.parametrize("count", [1, 2])
+async def test_all_supplied_bins_must_close_production_before_confirmation(
+    manual_production_supply, count
+):
+    flow = manual_production_supply
+    await flow.ready()
+    await flow.bin_plan()
+    demand_id = await flow.start_supply(feed=True)
+    await flow.withdraw_supply()
+    await flow.feed_success(demand_id, count=count)
+    await flow.confirm()
+    assert await flow.confirmations() == []
+    for index in range(count):
+        assert (await flow.scan(f"A{index + 1:09}-C", timestamp=10 + index)).status_code == 200
+        arrival = (await flow.rows("manual_bin"))[-1]["arrival_id"]
+        await flow.decision(dict(result="NO_WORK"))
+        await flow.advance("bin", arrival)
+        await flow.confirm()
+        assert len(await flow.confirmations()) == (1 if index + 1 == count else 0)
+    original = (await flow.rows("manual_bin"))[-1]
+    await flow.result(original["command_code"])
+    await flow.confirmation_response(dict(result="COMPLETED"))
+    assert await flow.confirm() == "COMPLETED"
 
 
 @pytest.mark.parametrize("missing", ["progress", "withdrawal", "association", "orphan"])
