@@ -1150,7 +1150,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | `data.result` | string | 是 | 固定为 `READY`，授权处理返回的单个料格 |
 | `data.cell_id` | string | 是 | WMS 料格业务编码，按 `BIN_ID + INDEX` 编码；匹配正则 `[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}` |
 | `data.cell_index` | integer | 是 | 料格在料箱内的定位号，枚举 `1..7`；独立于 `cell_id` 提供 |
-| `data.bin_type` | integer | 是 | 料箱类型，枚举 `2`、`3`、`6` |
+| `data.bin_type` | integer / string | 是 | WMS 配置的料箱类型编码，接受整数或非空字符串；保留原输入类型，ECS 统一转字符串，WES 不维护箱型白名单 |
 | `data.reel_layer` | integer | 是 | 料盘层数 |
 | `data.reel_thickness` | number | 是 | 单盘厚度，单位毫米；有限数值 |
 | `data.reel_diameter` | number | 是 | 料盘直径，单位毫米；有限数值 |
@@ -1554,7 +1554,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | `data.next_source_action` | object | 条件 | 有下一盘或下一 Cell 时提供；无后继时省略 |
 | `data.next_source_action.cell_id` | string | 条件 | 后继料格业务编码 |
 | `data.next_source_action.cell_index` | integer | 条件 | 后继料格定位号，枚举 `1..7` |
-| `data.next_source_action.bin_type` | integer | 条件 | 料箱类型，枚举 `2`、`3`、`6` |
+| `data.next_source_action.bin_type` | integer / string | 条件 | WMS 配置的料箱类型编码，接受整数或非空字符串；保留原输入类型，ECS 统一转字符串，WES 不维护箱型白名单 |
 | `data.next_source_action.reel_layer` | integer | 条件 | 后继取料的料盘层数 |
 | `data.next_source_action.reel_thickness` | number | 条件 | 后继取料的单盘厚度，单位毫米；有限数值 |
 | `data.next_source_action.reel_diameter` | number | 条件 | 后继取料的料盘直径，单位毫米；有限数值 |
@@ -3407,7 +3407,7 @@ params 如下。source 为扫码台 STATION_SCAN，target 为 SCAN2 对应的 EC
 | ECS 参数 | 来源及映射 |
 | --- | --- |
 | `source.location_id`、`target.location_id` | 固定为 STATION_WORK1、STATION_SCAN；对应位置类型分别为 BIN、SCAN_PLATFORM |
-| `source.bin_type` | WMS `READY.bin_type` 的字符串形式，`2`、`3`、`6` 原编号直接转换 |
+| `source.bin_type` | WMS `READY.bin_type` 整数或非空字符串编码的字符串形式，原编号直接转换，不限定配置值集合 |
 | `source.bin_cell_location` | WMS `READY.cell_index` 的原 JSON 整数，范围 `1..7`；不转字符串、不拆解 `cell_id` |
 | `source.reel_layer` | WMS `READY.reel_layer` 的原 JSON 整数 |
 | `source.reel_thickness`、`source.reel_diameter` | 厚度取 WMS 毫米原值；直径由 WMS 毫米值换算为英寸档位，见 §7.7.1 |
@@ -3575,7 +3575,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 
 三格箱、六格箱、二格箱的编码对应、可用格位、设备支持及本线是否可执行，由上游 WMS 配置/分配和决定接口保证。WES 不建立箱型×格位矩阵、不额外判断某箱型允许哪些格位，不按 PDF 图示校验或改写 WMS 结果，也不为二格箱增加改型/旁路/拒绝分支。
 
-WES 沿原协议处理：bin_type 仍是 WMS 的整数枚举 2/3/6，发送 ECS 时仅转换为字符串 "2"/"3"/"6"；cell_index 仍为 WMS 提供的 1..7 JSON 整数，原值传入 bin_cell_location。不拆 cell_id、不按箱型重编号、不用未知字段补位置。原必填字段/类型/枚举/范围和原授权/执行关联校验保持，不新增业务组合校验；ECS 拒绝、FAILED/未知仍沿原公共合同及 [异常处置](#putaway-ng)，不据参数组合伪造完成或换号重做。
+WES 沿原协议处理：bin_type 是 WMS 配置的整数或非空字符串编码，原授权保留输入类型，发送 ECS 时统一转换为同值字符串；2/3/6 只是示例，WES 不维护箱型白名单；cell_index 仍为 WMS 提供的 1..7 JSON 整数，原值传入 bin_cell_location。不拆 cell_id、不按箱型重编号、不用未知字段补位置。原必填字段、类型、格位范围和原授权/执行关联校验保持，不新增业务组合校验；ECS 拒绝、FAILED/未知仍沿原公共合同及 [异常处置](#putaway-ng)，不据参数组合伪造完成或换号重做。
 
 完整传递示例：PUTAWAY-001 当前箱 A000001568 的本盘原 material.decide …e871 收到以下 WMS HTTP 200 响应。本例仅展示 WMS 给定值的传递，不构成三格箱允许格位表：
 
@@ -4191,7 +4191,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | --- | --- |
 | task_id、rack_id、target_bin_code、bin_code、cell_id、location_code、zone_code | Identifier：整个字符串匹配 `[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}`，不裁剪或转换大小写 |
 | source_racks | 必填数组，0～2 项；项必填 rack_id/location_code，架号及工作位分别不得重复；顺序不表示取料优先级 |
-| bin_type / cell_index | 既定整数枚举 2/3/6、1～7；仅沿原协议校验类型/枚举/范围，不新增箱型×格位组合校验；具体对应及可用组合由 WMS 保证，不按 cell_id 推算 |
+| bin_type / cell_index | bin_type 为 WMS 配置的整数或非空字符串编码；cell_index 为 1～7；仅校验类型及格位范围，不新增箱型×格位组合校验；具体对应及可用组合由 WMS 保证，不按 cell_id 推算 |
 | 来源 bin_location | 字符串枚举 A/B/C/D，表示单层架上的箱位，不是架面或左右工作位 |
 | 来源 / 目标 reel_layer | JSON 整数；来源至少 1、目标至少 0 的业务有效性由 WMS 保证，目标为放盘前已占用层数；WES 不增加范围校验 |
 | reel_thickness / reel_diameter | 有限 JSON 数值，WMS 单位均为 mm；正值/物理规格及数值精度由 WMS 保证，直径在 ECS 边界按 §7.7.1 转换，其他数值按类型原值传递 |

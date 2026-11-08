@@ -360,7 +360,7 @@ WMS 已掌握工作点位的货架在位信息，通过请求的 `workline_code`
 | `bin_location` | 料箱在单层货架上的位置，取值为 `A`、`B`、`C`、`D` |
 | `cell_id` | WMS 返回的完整料格储位编码，原样保存并用于完成反馈 |
 | `cell_index` | WMS 直接返回的料箱内格位，JSON 整数 `1`～`7`，与 `cell_id` 成对必填 |
-| `bin_type`            | `"3"` 为三格箱，`"6"` 为六格箱                                                                                           |
+| `bin_type`            | WMS 配置的整数或非空字符串箱型编码；原授权保留输入类型，ECS 统一转字符串；`"3"`、`"6"` 仅为示例，WES 不维护箱型白名单                                                                                           |
 | `reel_totalthickness` | 数值类型；料格内当前已存储物料的总高度，不包含本次待放入物料                                                                 |
 
 例如料格内当前已存储物料的总高度为 120、本盘厚度为 20，响应仍为数值 `120`，不返回 `140`。WES 不自行累加或推导当前物理高度。
@@ -1006,7 +1006,7 @@ ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 co
 }
 ```
 
-固定取料位和出料位置由 ECS 管理。箱位、箱型及格内当前总高度沿用原 WMS 响应，`bin_cell_location` 直接使用原 `cell_index` 的 JSON 整数。WES 保存 `bin_code` 和成对的 `cell_id / cell_index` 用于完成反馈。`reel_totalthickness` 保持数值类型，WES 不计算装箱后高度。
+固定取料位和出料位置由 ECS 管理。箱位及格内当前总高度沿用原 WMS 响应，箱型接受整数或非空字符串并统一转字符串下发 ECS，`bin_cell_location` 直接使用原 `cell_index` 的 JSON 整数。WES 保存 `bin_code` 和成对的 `cell_id / cell_index` 用于完成反馈。`reel_totalthickness` 保持数值类型，WES 不计算装箱后高度。
 
 <a id="ecs-put-to-bin-result"></a>
 
