@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.businesses._components.sorting_task.contracts import Face, Identifier, NonNegative
+from app.businesses.bin_types import EcsBinType
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
@@ -23,7 +24,7 @@ class ScanPlatform(Data):
 
 
 class Reel(Data):
-    bin_type: Literal["2", "3", "6"]
+    bin_type: EcsBinType
     bin_cell_location: int
     reel_layer: int
     reel_thickness: Number

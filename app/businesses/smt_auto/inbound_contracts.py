@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field, model_validator
 
 from app.businesses._components.sorting_task.contracts import Identifier, NonNegative
+from app.businesses.bin_types import BinType
 
 from .work_plan_contracts import Data, Number
 
@@ -20,7 +21,7 @@ class Source(Data):
 class Target(Data):
     bin_code: Identifier
     cell_id: Identifier
-    bin_type: Literal[2, 3, 6]
+    bin_type: BinType
     cell_index: Annotated[int, Field(ge=1, le=7)]
     reel_layer: int
     reel_thickness: Number

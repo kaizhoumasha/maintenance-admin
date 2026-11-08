@@ -1217,7 +1217,7 @@ class CoarseSortingService:
                 or decision.workline_code != row["workline_code"]
                 or decision.bin_location != original.bin_location
                 or decision.cell_index != original.bin_cell_location
-                or decision.bin_type != original.bin_type
+                or str(decision.bin_type) != original.bin_type
                 or decision.reel_totalthickness != original.reel_totalthickness
             ):
                 return await save("PUT_RECONCILIATION_REQUIRED")

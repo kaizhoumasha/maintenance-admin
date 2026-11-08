@@ -77,3 +77,11 @@ SQL 管理查询可使用 `integration_exchange_summary` 与 `integration_record
 事件名称兼容修复由四项 HTTP 回归验证：NUL / 正常中文 × SQLite / PostgreSQL，先有2失败、2通过，修复后4通过（0.79秒），并纳入本轮全套。未注册事件仍 ACK，只有含 NUL 的可选 message_type 投影为空；原请求字节、摘要、诊断和先查重顺序不变，普通中文保留原值，非法代理字符仍沿原 Pydantic 校验返回400。
 
 本轮主审及独立本机全分支零修改复审均未确认剩余 P1 / P2 / P3。分组覆盖评估为25/30（83%），是有上限的路径组证据评估，不是实测行或分支覆盖率；两组元数据、正文及引用的直接负例仍缺，另三组为真实对端/设备串联、现场 A→B 交接及生产容量/恢复验收。外部 Claude CLI 不存在，未完成跨模型审查。真实 broker 与独立 worker/Beat 的重启串联、实际部署写入者排空和 A/B 交接仍待验证；最终 CORE 保护后的可比时延与竞争锁成本仍未补齐，保留 PARTIAL。
+
+## 迁移复制证明与停写门禁分离
+
+PR #67 的 PostgreSQL 复制用例曾在最终对账时收到 `writer_status=RUNNING`，但原 CI 未记录当时的事务来源。后续在独立 PostgreSQL 中将 autovacuum 检查间隔设为 1 秒做诊断，复现同一断言失败，并在原门禁谓词命中时捕获到 `autovacuum worker` 正在执行 `VACUUM ANALYZE pg_catalog.pg_constraint`；这证明后台目录维护足以触发该用例失败，不反推原 CI 瞬间必然只有该进程。
+
+该用例验证命令、Result 和原租约结论的复制及切换后读取，现使用 `precopy` 核对身份错误、字节错误和缺失引用均为零，并确认预复制不具备切换资格。独立的活跃数据库事务用例仍要求最终对账返回 `RUNNING` 且拒绝切换；生产停写检查、锁、迁移和 autovacuum 均未修改，也未通过测试重试绕过门禁。
+
+使用与 CI 相同镜像复核整份脚本测试时，另两个既有用例也因预期 `UNKNOWN`、实际 `RUNNING` 而失败。PostgreSQL 已观察到活跃事务时，原实现会用更确定的 `RUNNING` 覆盖操作者的 `UNKNOWN`；这两个断言现接受该合法优先级，同时继续要求禁止切换。SQLite 的精确状态断言保持，生产判断未改。

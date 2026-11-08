@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.businesses.bin_types import BinType
 from app.integrations.ecs_callback import CallbackPayload
 
 
@@ -62,7 +63,6 @@ REPORT = "inbound.coarse_sorting.execution_report@v1"
 Reference = Annotated[str, StringConstraints(min_length=1, pattern=r"^[^\x00]*[^\s\x00][^\x00]*$")]
 BinLocation = Literal["A", "B", "C", "D"]
 CellIndex = Annotated[int, Field(ge=1, le=7)]
-BinType = Literal["3", "6"]
 ReelHeight = Annotated[int, Field(ge=0)] | Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 

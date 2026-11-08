@@ -11,6 +11,7 @@ from app.integrations.ecs_command import CommandOwner
 from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.models import WorkLine
 
+from ._execution_facts import arrival_is_open, observe_arm_result, read_decision
 from .ecs_command import ArmResult, PickAndPut
 from .inbound_contracts import Reject, Retry, Scan, SourceAbsent, Target
 from .locking import lock_line
@@ -142,20 +143,6 @@ class Inbound:
         await ctx.session.flush()
         return Accepted()
 
-    async def _observe(self, session, plate, phase):
-        view = await self.ecs.get_by_call(
-            session, owner=OWNER, call_key=getattr(plate, f"{phase}_call_key")
-        )
-        if (
-            view is None
-            or view.command_code != getattr(plate, f"{phase}_command_code")
-            or view.result is None
-        ):
-            return
-        result = ResultEnvelope.model_validate(view.result).model_dump()
-        setattr(plate, f"{phase}_result_snapshot", result)
-        setattr(plate, f"{phase}_result_ref", canonical_digest(result))
-
     async def _result(self, session, plate, phase):
         code = getattr(plate, f"{phase}_command_code")
         key = getattr(plate, f"{phase}_call_key")
@@ -194,23 +181,6 @@ class Inbound:
             return None
         return result
 
-    async def _response(self, session, round_):
-        result = await self.requests.get_result(
-            session,
-            message_id=round_.message_id,
-            operation=round_.operation,
-            operation_id=round_.operation_id,
-        )
-        if (
-            (result.message_id, result.operation, result.operation_id)
-            != (round_.message_id, round_.operation, round_.operation_id)
-            or result.availability != "FOUND"
-            or result.response_state != "VALID"
-            or (result.http_status, result.response_code) != (200, "DECIDED")
-        ):
-            return None
-        return result
-
     async def _ready_to_pick(self, session, work, plate, grant):
         round_ = grant
         while True:
@@ -238,7 +208,7 @@ class Inbound:
                 or round_.consumed_at_ms < previous.next_eligible_at_ms
             ):
                 return False
-            response = await self._response(session, previous)
+            response = await read_decision(self.requests, session, previous)
             if response is None or response.response_data != (previous.response_snapshot or {}).get(
                 "data"
             ):
@@ -255,22 +225,6 @@ class Inbound:
             ):
                 return False
             round_ = previous
-
-    async def _arrival(self, session, work):
-        if self.roller is None:
-            return False
-        original = await self.roller.original_arrival(session, work.arrival_id)
-        return (
-            original.get("work_line_id") == work.work_line_id
-            and original.get("task_id") == work.task_id
-            and original.get("bin_code") == work.bin_code
-            and original.get("raw_bin_code") == work.raw_bin_code
-            and original.get("device_code") == work.device_code
-            and original.get("scanned_at") == work.scanned_at
-            and original.get("closed_at") is None
-            and original.get("scan2_event_id") is not None
-            and original.get("release_command_code") is None
-        )
 
     async def advance(self, session, *, work_line_id, plate_id, now_ms):
         bindings = await lock_line(session, self.dispatch, work_line_id)
@@ -305,7 +259,7 @@ class Inbound:
                 or task.status != "EXECUTING"
                 or work.production_hold_reason
                 or work.terminal_basis
-                or not await self._arrival(session, work)
+                or not await arrival_is_open(self.roller, session, work)
             ):
                 return plate
             frozen = plate.source_arrival_snapshot.get("source")
@@ -339,7 +293,7 @@ class Inbound:
                 and not await self._ready_to_pick(session, work, plate, grant)
             ):
                 return plate
-            response = await self._response(session, grant)
+            response = await read_decision(self.requests, session, grant)
             expected = (
                 (
                     response.response_data.get("source")
@@ -412,7 +366,7 @@ class Inbound:
                     params=params,
                 ),
             }
-        await self._observe(session, plate, "pick")
+        await observe_arm_result(self.ecs, session, plate, "pick", owner=OWNER)
         empty = await self._empty_result(session, plate)
         if empty is not None:
             await self._empty(session, plate, work, task, empty, now_ms, allow_continue=enabled)
@@ -461,7 +415,7 @@ class Inbound:
             due = await self._material_continuation_due(session, plate, round_)
             if due is None or now_ms < due:
                 return plate
-            response = await self._response(session, round_)
+            response = await read_decision(self.requests, session, round_)
             if response is None:
                 return plate
             data = response.response_data
@@ -496,7 +450,7 @@ class Inbound:
                     or now_ms < round_.next_eligible_at_ms
                     or task.status not in ("EXECUTING", "CANCELLED")
                     or work.terminal_basis is not None
-                    or not await self._arrival(session, work)
+                    or not await arrival_is_open(self.roller, session, work)
                 ):
                     return plate
                 retry = True
@@ -562,7 +516,7 @@ class Inbound:
             await self._next(session, plate, round_, work, data)
         if plate.put_command_code is None:
             role = next((b for b in bindings.values() if b and b.device_role == "BIN_ARM"), None)
-            if not enabled or role is None or not await self._arrival(session, work):
+            if not enabled or role is None or not await arrival_is_open(self.roller, session, work):
                 return plate
             params = dict(
                 source=SCAN,
@@ -601,7 +555,7 @@ class Inbound:
                     params=params,
                 ),
             }
-        await self._observe(session, plate, "put")
+        await observe_arm_result(self.ecs, session, plate, "put", owner=OWNER)
         put = await self._result(session, plate, "put")
         if put is None:
             return plate
@@ -706,7 +660,7 @@ class Inbound:
             due = await self._material_continuation_due(session, plate, round_)
             if due is None or now_ms < due:
                 return
-            response = await self._response(session, round_)
+            response = await read_decision(self.requests, session, round_)
             if response is None:
                 return
             data = response.response_data
@@ -810,7 +764,7 @@ class Inbound:
             return
         if plate.put_command_code is None:
             role = next((b for b in bindings.values() if b and b.device_role == "BIN_ARM"), None)
-            if not enabled or role is None or not await self._arrival(session, work):
+            if not enabled or role is None or not await arrival_is_open(self.roller, session, work):
                 return
             params = dict(
                 source=SCAN, target=dict(location_id="STATION_NG", location_type="SCAN_NG")
@@ -834,7 +788,7 @@ class Inbound:
                     params=params,
                 ),
             }
-        await self._observe(session, plate, "put")
+        await observe_arm_result(self.ecs, session, plate, "put", owner=OWNER)
         result = await self._result(session, plate, "put")
         if result is None:
             return
@@ -849,7 +803,9 @@ class Inbound:
         await session.flush()
 
     async def _continue(self, session, plate, work, now_ms) -> bool:
-        if not await self.closed(session, plate) or not await self._arrival(session, work):
+        if not await self.closed(session, plate) or not await arrival_is_open(
+            self.roller, session, work
+        ):
             return False
         # Independent normal reports do not prevent a new source evaluation.
         for other in await session.scalars(
@@ -988,7 +944,7 @@ class Inbound:
                 return due
             if round_.unresolved:
                 return None
-            response = await self._response(session, round_)
+            response = await read_decision(self.requests, session, round_)
             if response is None or round_.response_snapshot != {
                 "http_status": 200,
                 "code": "DECIDED",
@@ -1022,7 +978,7 @@ class Inbound:
             and not round_.unresolved
             and await self._material_continuation_due(session, plate, round_) is not None
         ):
-            response = await self._response(session, round_)
+            response = await read_decision(self.requests, session, round_)
             data = response.response_data if response else None
             if data == (round_.response_snapshot or {}).get("data") and isinstance(data, dict):
                 try:
@@ -1069,7 +1025,7 @@ class Inbound:
             or await self._material_continuation_due(session, plate, round_) is None
         ):
             return None
-        response = await self._response(session, round_)
+        response = await read_decision(self.requests, session, round_)
         if response is None or response.response_data != (round_.response_snapshot or {}).get(
             "data"
         ):
@@ -1206,7 +1162,7 @@ class Inbound:
                 )
             ):
                 return False
-            response = await self._response(session, round_)
+            response = await read_decision(self.requests, session, round_)
             if response is None or response.response_data != (round_.response_snapshot or {}).get(
                 "data"
             ):

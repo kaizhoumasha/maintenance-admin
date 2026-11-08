@@ -128,15 +128,33 @@ assert 'app.core.database' not in sys.modules
 
 
 @pytest.mark.parametrize("location", ["A", "B", "C", "D"])
-def test_candidate_put_accepts_rack_bin_locations_and_original_index(location):
+@pytest.mark.parametrize("bin_type", ["3", "2", "008", "WMS-CUSTOM", 2, 42])
+def test_candidate_put_accepts_rack_bin_locations_and_original_index(location, bin_type):
     from app.businesses.coarse_sorting.ecs_command import PutToBin
 
     command = PutToBin(
         barcode="RAW-1",
         bin_location=location,
-        bin_type="3",
+        bin_type=bin_type,
         bin_cell_location=7,
         reel_totalthickness=120,
     )
     assert command.bin_location == location
     assert command.bin_cell_location == 7
+    assert command.bin_type == str(bin_type)
+
+
+@pytest.mark.parametrize("bin_type", [None, True, 3.0, ""])
+def test_put_bin_type_rejects_invalid_codes(bin_type):
+    from pydantic import ValidationError
+
+    from app.businesses.coarse_sorting.ecs_command import PutToBin
+
+    with pytest.raises(ValidationError):
+        PutToBin(
+            barcode="RAW-1",
+            bin_location="A",
+            bin_type=bin_type,
+            bin_cell_location=1,
+            reel_totalthickness=0,
+        )

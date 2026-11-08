@@ -275,7 +275,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             result="READY",
             cell_id="C1",
             cell_index=1,
-            bin_type=3,
+            bin_type=8,
             reel_layer=2,
             reel_thickness=15.3,
             reel_diameter=179,
@@ -306,6 +306,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             == 30.6
         )
         raw = json.loads(await read_history_body(session, command.request_record_id))
+        assert raw["params"]["source"]["bin_type"] == "8"
         assert raw["params"]["source"]["reel_diameter"] == (179 if legacy_diameter else 7)
         assert plate.source_params["reel_diameter"] == 179
     assert (await host.arm_result(pick_code, scan=True)).status_code == 200

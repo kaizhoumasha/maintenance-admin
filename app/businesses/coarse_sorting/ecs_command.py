@@ -4,10 +4,11 @@ from typing import Annotated, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
+from app.businesses.bin_types import EcsBinType
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 
-from .contracts import BinLocation, BinType, CellIndex, ReelHeight, Reference
+from .contracts import BinLocation, CellIndex, ReelHeight, Reference
 
 
 class MoveForwardResult(BaseModel):
@@ -93,5 +94,5 @@ class PutToBin(BaseModel):
     barcode: Annotated[str, Field(min_length=1)]
     bin_location: BinLocation
     bin_cell_location: CellIndex
-    bin_type: BinType
+    bin_type: EcsBinType
     reel_totalthickness: ReelHeight

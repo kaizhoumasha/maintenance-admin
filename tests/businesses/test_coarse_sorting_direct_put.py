@@ -40,9 +40,10 @@ async def finish_put(flow, row, put):
     assert await flow.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
 
 
-async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct):
+@pytest.mark.parametrize("bin_type", ["3", "2", "WMS-CUSTOM", 42])
+async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct, bin_type):
     flow = direct
-    flow.peer.allocate = allocated(flow)
+    flow.peer.allocate = allocated(flow, bin_type=bin_type)
     row = await reach_allocate(flow)
     scan_id = row["id"]
     assert await flow.service.advance(scan_id) == "AWAITING_PUT_RESULT"
@@ -53,7 +54,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         "barcode": row["payload"]["barcode"],
         "bin_location": "B",
         "bin_cell_location": 7,
-        "bin_type": "3",
+        "bin_type": str(bin_type),
         "reel_totalthickness": 120,
     }
     assert await flow.service.advance(scan_id) == "AWAITING_PUT_RESULT"
