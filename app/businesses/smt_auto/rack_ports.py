@@ -27,6 +27,7 @@ from app.models import WorkLine
 from app.reliable import ScopeRef
 from app.services.device_bindings import resolve_binding
 
+from ._execution_facts import read_decision
 from .archive import archived_facts
 from .locking import lock_line
 from .models import (
@@ -543,7 +544,7 @@ class AutoRackPorts:
             if self.outbound is not None:
                 if not await self.outbound._grant(session, row):
                     return None
-                response = await self.outbound._response(session, round_)
+                response = await read_decision(self.outbound.requests, session, round_)
                 pick = await self.outbound._result(session, row, "pick")
                 request = {key: value for key, value in row.source_locator.items() if key != "type"}
                 request.update(

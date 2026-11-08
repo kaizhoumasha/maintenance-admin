@@ -7,11 +7,11 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.identifiers import uuid7
-from app.core.strict_json import canonical_digest
 from app.integrations.ecs_command import CommandOwner
 from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.models import WorkLine
 
+from ._execution_facts import arrival_is_open, observe_arm_result, read_decision
 from .ecs_command import ArmResult, PickAndPut
 from .inbound import PhysicalSettings
 from .inbound_contracts import Scan
@@ -52,20 +52,6 @@ class Outbound:
         self.work_plans = WorkPlans(requests, dispatch)
         self.work_plans.outbound = self
 
-    async def _observe(self, session, plate, phase):
-        view = await self.ecs.get_by_call(
-            session, owner=OWNER, call_key=getattr(plate, f"{phase}_call_key")
-        )
-        if (
-            view is None
-            or view.command_code != getattr(plate, f"{phase}_command_code")
-            or view.result is None
-        ):
-            return
-        result = ResultEnvelope.model_validate(view.result).model_dump()
-        setattr(plate, f"{phase}_result_snapshot", result)
-        setattr(plate, f"{phase}_result_ref", canonical_digest(result))
-
     async def _result(self, session, plate, phase, *, empty=False):
         code = getattr(plate, f"{phase}_command_code")
         key = getattr(plate, f"{phase}_call_key")
@@ -103,39 +89,6 @@ class Outbound:
         ):
             return None
         return result
-
-    async def _response(self, session, round_):
-        result = await self.requests.get_result(
-            session,
-            message_id=round_.message_id,
-            operation=round_.operation,
-            operation_id=round_.operation_id,
-        )
-        if (
-            (result.message_id, result.operation, result.operation_id)
-            != (round_.message_id, round_.operation, round_.operation_id)
-            or result.availability != "FOUND"
-            or result.response_state != "VALID"
-            or (result.http_status, result.response_code) != (200, "DECIDED")
-        ):
-            return None
-        return result
-
-    async def _arrival(self, session, work):
-        if self.roller is None:
-            return False
-        original = await self.roller.original_arrival(session, work.arrival_id)
-        return (
-            original.get("work_line_id") == work.work_line_id
-            and original.get("task_id") == work.task_id
-            and original.get("bin_code") == work.bin_code
-            and original.get("raw_bin_code") == work.raw_bin_code
-            and original.get("device_code") == work.device_code
-            and original.get("scanned_at") == work.scanned_at
-            and original.get("closed_at") is None
-            and original.get("scan2_event_id") is not None
-            and original.get("release_command_code") is None
-        )
 
     async def _grant(self, session, plate, *, new_pick=False):
         if plate.grant_kind == "RETRY":
@@ -230,7 +183,7 @@ class Outbound:
                 return False
         elif not await self._grant(session, parent, new_pick=new_pick):
             return False
-        result = await self._response(session, grant)
+        result = await read_decision(self.requests, session, grant)
         if (
             result is None
             or result.response_data != expected
@@ -297,7 +250,7 @@ class Outbound:
                 and work.business_type == "outbound"
                 and not work.production_hold_reason
                 and not work.terminal_basis
-                and await self._arrival(session, work)
+                and await arrival_is_open(self.roller, session, work)
             )
         member = await session.get(AutoOutboundSourceMember, plate.source_member_id)
         if (
@@ -446,7 +399,7 @@ class Outbound:
                     device_code=role.device_code, timeout_ms=timeout, params=command.model_dump()
                 ),
             }
-        await self._observe(session, plate, "pick")
+        await observe_arm_result(self.ecs, session, plate, "pick", owner=OWNER)
         pick = await self._result(session, plate, "pick")
         if pick is None:
             empty = await self._result(session, plate, "pick", empty=True)
@@ -488,7 +441,7 @@ class Outbound:
             ):
                 return plate
             if previous:
-                original = await self._response(session, previous)
+                original = await read_decision(self.requests, session, previous)
                 wait = (previous.response_snapshot or {}).get("data", {})
                 if (
                     original is None
@@ -502,7 +455,7 @@ class Outbound:
             previous = item
         retry = False
         if current:
-            result = await self._response(session, current)
+            result = await read_decision(self.requests, session, current)
             if result is None:
                 return plate
             data = result.response_data
@@ -614,7 +567,7 @@ class Outbound:
                     params=params,
                 ),
             }
-        await self._observe(session, plate, "put")
+        await observe_arm_result(self.ecs, session, plate, "put", owner=OWNER)
         put = await self._result(session, plate, "put")
         if put is None:
             return plate
@@ -694,7 +647,7 @@ class Outbound:
         return rounds
 
     async def _recorded_wait(self, session, round_):
-        response = await self._response(session, round_)
+        response = await read_decision(self.requests, session, round_)
         snapshot = round_.response_snapshot or {}
         data = snapshot.get("data", {})
         if (
@@ -733,7 +686,7 @@ class Outbound:
             or plate.physical_closure_basis != self._empty_basis(plate, round_)
         ):
             return None
-        response = await self._response(session, round_)
+        response = await read_decision(self.requests, session, round_)
         data = (round_.response_snapshot or {}).get("data")
         if response is None or response.response_data != data:
             return None
@@ -776,7 +729,7 @@ class Outbound:
                 ):
                     return
             else:
-                response = await self._response(session, round_)
+                response = await read_decision(self.requests, session, round_)
                 if response is None:
                     return
                 data = response.response_data
@@ -977,7 +930,7 @@ class Outbound:
             or round_.unresolved
         ):
             return None
-        response = await self._response(session, round_)
+        response = await read_decision(self.requests, session, round_)
         data = response.response_data if response else None
         if (
             not isinstance(data, dict)
@@ -1020,7 +973,7 @@ class Outbound:
             ):
                 return None
             if previous:
-                response = await self._response(session, previous)
+                response = await read_decision(self.requests, session, previous)
                 wait = (previous.response_snapshot or {}).get("data", {})
                 if (
                     previous.unresolved
@@ -1252,7 +1205,7 @@ class Outbound:
             or round_.request_data != request
         ):
             return False
-        response = await self._response(session, round_)
+        response = await read_decision(self.requests, session, round_)
         return bool(
             response
             and response.response_data == {"result": "NO_WORK"}
