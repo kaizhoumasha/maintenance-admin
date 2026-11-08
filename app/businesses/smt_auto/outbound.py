@@ -427,7 +427,7 @@ class Outbound:
                     reel_thickness=params["reel_thickness"],
                     reel_diameter=params["reel_diameter"],
                 )
-            command = PickAndPut(source=source, target=SCAN)
+            command = PickAndPut.from_millimeters(source=source, target=SCAN)
             timeout = (
                 settings.bin_arm_timeout_ms if plate.bin_work_id else settings.rack_arm_timeout_ms
             )
@@ -594,13 +594,15 @@ class Outbound:
                 )
                 timeout_ms = settings.rack_arm_timeout_ms
             plate.put_call_key = f"auto:{task.task_id}:outbound:{plate.id}:put"
+            command = PickAndPut.from_millimeters(**params)
+            params = command.model_dump()
             view = await self.ecs.create(
                 session,
                 owner=OWNER,
                 call_key=plate.put_call_key,
                 device_code=role.device_code,
                 timeout_ms=timeout_ms,
-                command=PickAndPut(**params),
+                command=command,
             )
             plate.put_command_code = view.command_code
             # Keep the exact target locator available to the public rack authority reader.
@@ -1082,7 +1084,7 @@ class Outbound:
             or action.target_face != target["rack_face"]
         ):
             return None
-        if command != dict(
+        expected = dict(
             source=SCAN,
             target=dict(
                 location_id="STATION_A",
@@ -1092,7 +1094,9 @@ class Outbound:
                 rack_column=str(target["rack_column"]),
                 **{k: plate.source_params[k] for k in ("reel_thickness", "reel_diameter")},
             ),
-        ):
+        )
+        # Previously frozen millimeter commands keep their original parameters.
+        if command not in (expected, PickAndPut.from_millimeters(**expected).model_dump()):
             return None
         return dict(
             task_id=plate.task_id,

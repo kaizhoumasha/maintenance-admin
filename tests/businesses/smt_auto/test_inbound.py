@@ -296,7 +296,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
-        reel_diameter=15,
+        reel_diameter=381,
         reel_totalthickness=20,
     )
     async with host.factory.begin() as session:
@@ -322,6 +322,9 @@ async def test_one_normal_plate_original_public_physical_report_chain(
                 IntegrationExchange.command_code == pick_code,
             )
         )
+        raw = json.loads(await read_history_body(session, command.request_record_id))
+        assert raw["params"]["source"]["reel_diameter"] == 15
+        assert plate.source_params["reel_diameter"] == 381
         assert json.loads(await read_history_body(session, (command).request_record_id))[
             "timeout"
         ] == arm_timeouts.get("rack_arm_timeout_ms", 0)
@@ -338,7 +341,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         cell_index=2,
         reel_layer=0,
         reel_thickness=20,
-        reel_diameter=15,
+        reel_diameter=330.2,
         reel_totalthickness=0,
     )
     decision = dict(result="ACCEPT", target=target)
@@ -362,6 +365,8 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         assert raw["params"]["target"]["reel_layer"] == 0
         assert raw["params"]["target"]["reel_totalthickness"] == 0
         assert raw["params"]["target"]["bin_type"] == "3"
+        assert raw["params"]["target"]["reel_diameter"] == 13
+        assert plate.target_snapshot["target"]["reel_diameter"] == 330.2
     assert (
         await host.arm_result(put_code, status="FAILED" if put_failed else "SUCCESS")
     ).status_code == 200

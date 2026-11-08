@@ -947,7 +947,7 @@ AUTO/outbound 首版仅含 `target_rack` 时，即使目标架已经到位，只
     "bin_type": 3,
     "reel_layer": 1,
     "reel_thickness": 20,
-    "reel_diameter": 15
+    "reel_diameter": 381
   }
 }
 ```
@@ -1051,7 +1051,7 @@ HTTP 200 / DECIDED 的 READY（本例为左架最后一个非空料格的最后�
       "cell_index": 1,
       "reel_layer": 1,
       "reel_thickness": 20,
-      "reel_diameter": 15,
+      "reel_diameter": 381,
       "reel_totalthickness": 20
     }
   }
@@ -1140,7 +1140,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
     "bin_type": 3,
     "reel_layer": 1,
     "reel_thickness": 20,
-    "reel_diameter": 15
+    "reel_diameter": 381
   }
 }
 ```
@@ -1153,7 +1153,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | `data.bin_type` | integer | 是 | 料箱类型，枚举 `2`、`3`、`6` |
 | `data.reel_layer` | integer | 是 | 料盘层数 |
 | `data.reel_thickness` | number | 是 | 单盘厚度，单位毫米；有限数值 |
-| `data.reel_diameter` | number | 是 | 料盘直径，单位寸；有限数值 |
+| `data.reel_diameter` | number | 是 | 料盘直径，单位毫米；有限数值 |
 
 `READY` 不发送 `retry_after_ms`；返回单个 `cell_id`，不发送 `cell_ids` 数组。
 
@@ -1270,7 +1270,7 @@ HTTP `200 / DECIDED`，公共字段见[公共响应说明](#protocol-envelope)�
     "rack_layer": 2,
     "rack_column": 3,
     "reel_thickness": 15.3,
-    "reel_diameter": 7
+    "reel_diameter": 177.8
   }
 }
 ```
@@ -1284,7 +1284,7 @@ HTTP `200 / DECIDED`，公共字段见[公共响应说明](#protocol-envelope)�
 | `data.rack_layer` | integer | 是 | WMS 提供的本次来源储位层号，不是目标层号；设备映射见 §7.4.2 |
 | `data.rack_column` | integer | 是 | WMS 提供的本次来源储位列号，不从 slot_id 推算，不猜列数上限 |
 | `data.reel_thickness` | number | 是 | WMS 在取盘前提供的本盘厚度，毫米；有限数值 |
-| `data.reel_diameter` | number | 是 | WMS 在取盘前提供的本盘直径，寸；有限数值 |
+| `data.reel_diameter` | number | 是 | WMS 在取盘前提供的本盘直径，毫米；有限数值 |
 
 READY 同时给出本次逻辑来源及四项完整来源参数，均由 WMS 在取盘前权威提供；沿用现有字段名、类型和单位，不另造查询接口。缺失、null 或类型非法的必需字段不形成可执行授权，不创建取盘命令，也不从 slot_id、目标坐标、BIN 或历史盘补齐；完整设备映射见 [RackSlot 来源取盘](#rack-pick-params)。
 
@@ -1386,7 +1386,7 @@ HTTP 200 / DECIDED 正常响应（本例是左架末盘）：
       "cell_index": 2,
       "reel_layer": 6,
       "reel_thickness": 20,
-      "reel_diameter": 15,
+      "reel_diameter": 381,
       "reel_totalthickness": 120
     },
     "source_rack_exhausted": true,
@@ -1400,7 +1400,7 @@ HTTP 200 / DECIDED 正常响应（本例是左架末盘）：
       "cell_index": 3,
       "reel_layer": 3,
       "reel_thickness": 20,
-      "reel_diameter": 15,
+      "reel_diameter": 381,
       "reel_totalthickness": 60
     }
   }
@@ -1415,7 +1415,7 @@ HTTP 200 / DECIDED 正常响应（本例是左架末盘）：
 
 取尽字段没有肯定事实时省略；不发送 null。正常 ACCEPT **省略 next_source_action 即明确结束当前接料箱本次作业**，不是“暂缺下一盘，稍后再问”。省略取尽字段不表示取尽；两种结束分别记录。
 
-target 的尺寸/放盘前已占用层数/深度由 WMS 按本盘和精确目标统一保证，WES 按类型原值传递，不自行核算容量、预留/增减层数深度或据前盘结果重算参数。本盘放盘只使用本次 target，不借用 next_source_action。后继由 WMS 授权，机器人2取下一盘与机器人1放本盘分别登记命令，PLC 决定实际运动；前盘 FAILED 不成为 WES 阻断下一盘的条件。WMS 的业务决定及既有同源同码规则不改为 WES 自建并发/容量校验，详见 [双臂流水与报告](#grant-consumption)。
+target 的尺寸/放盘前已占用层数/深度由 WMS 按本盘和精确目标统一保证，WES 保留原授权值，直径按 §7.7.1 在 ECS 边界换算，其他参数按类型原值传递，不自行核算容量、预留/增减层数深度或据前盘结果重算参数。本盘放盘只使用本次 target，不借用 next_source_action。后继由 WMS 授权，机器人2取下一盘与机器人1放本盘分别登记命令，PLC 决定实际运动；前盘 FAILED 不成为 WES 阻断下一盘的条件。WMS 的业务决定及既有同源同码规则不改为 WES 自建并发/容量校验，详见 [双臂流水与报告](#grant-consumption)。
 
 WAIT 示例只含 result=WAIT、retry_after_ms，不带 target、后继或取尽事实；它表示**当前已扫码盘**因目标、身份、容量或同源同码前序等条件尚不能形成最终决定。不能仅因未来后继暂不可用，把一个已能确定本盘合法目标的决定挂为 WAIT：若无合法后继，正常 ACCEPT 省略后继并结束本箱，避免末盘被扣在扫码台，延误本盘放盘/反馈和本箱放行。本合同不提供“本盘已 ACCEPT，但本箱留站等待将来补架再续取”的隐藏分支。
 
@@ -1535,7 +1535,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
       "bin_type": 3,
       "reel_layer": 1,
       "reel_thickness": 20,
-      "reel_diameter": 15
+      "reel_diameter": 381
     }
   }
 }
@@ -1557,7 +1557,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | `data.next_source_action.bin_type` | integer | 条件 | 料箱类型，枚举 `2`、`3`、`6` |
 | `data.next_source_action.reel_layer` | integer | 条件 | 后继取料的料盘层数 |
 | `data.next_source_action.reel_thickness` | number | 条件 | 后继取料的单盘厚度，单位毫米；有限数值 |
-| `data.next_source_action.reel_diameter` | number | 条件 | 后继取料的料盘直径，单位寸；有限数值 |
+| `data.next_source_action.reel_diameter` | number | 条件 | 后继取料的料盘直径，单位毫米；有限数值 |
 | `data.target_preparation` | string | 条件 | 枚举 `ROTATE`、`REPLACE`；目标需要换面或换架时提供，无需准备时省略 |
 
 `rack_id`、`slot_id`、`cell_id` 使用与请求业务编码相同的正则约束。
@@ -1731,7 +1731,7 @@ HTTP `200 / DECIDED`，公共字段见[公共响应说明](#protocol-envelope)�
       "rack_layer": 4,
       "rack_column": 2,
       "reel_thickness": 20,
-      "reel_diameter": 13
+      "reel_diameter": 330.2
     }
   }
 }
@@ -1755,7 +1755,7 @@ HTTP `200 / DECIDED`，公共字段见[公共响应说明](#protocol-envelope)�
 | `data.next_source_action.rack_layer` | integer | 条件 | WMS 提供的下一来源储位层号，不使用本盘 target_locator 的层号 |
 | `data.next_source_action.rack_column` | integer | 条件 | WMS 提供的下一来源储位列号，不从 slot_id 推算 |
 | `data.next_source_action.reel_thickness` | number | 条件 | WMS 在后继取盘前提供的该盘厚度，毫米；有限数值 |
-| `data.next_source_action.reel_diameter` | number | 条件 | WMS 在后继取盘前提供的该盘直径，寸；有限数值 |
+| `data.next_source_action.reel_diameter` | number | 条件 | WMS 在后继取盘前提供的该盘直径，毫米；有限数值 |
 
 `next_source_action` 出现时，上述七个子字段全部必填，自包含本次后继的逻辑来源及 WMS 在取盘前提供的层/列、厚度/直径；缺失、null 或类型非法不形成可执行后继，不消费授权、不创建后继取盘命令。不得引用前一次请求、本盘 target_locator、旧盘或 BIN 参数补齐。该对象只授权下一盘，不改变本盘已冻结的取盘参数或本盘后续放盘尺寸；完整映射见 [RackSlot 来源取盘](#rack-pick-params)。后继授权仅消费一次。
 后继只能是当前货架、当前已到位面上的下一储位，不允许跨面或跨架。`ACCEPT` 明确省略该字段表示当前面本轮确定无后继，不表示下一来源尚未算出；完成本盘及当前面的相关义务后，按[架面结束与换面换架](#rackslot-completion)推进。不得重新授权已有未决取盘动作或本轮已完成的储位。
@@ -2583,7 +2583,7 @@ WMS 依据自己保存的最终 REJECT/source_disposition 或 SOURCE_ABSENT 决�
       "cell_index": 3,
       "reel_layer": 3,
       "reel_thickness": 20,
-      "reel_diameter": 15,
+      "reel_diameter": 381,
       "reel_totalthickness": 60
     }
   }
@@ -2672,7 +2672,7 @@ NO_WORK 明确结束本箱取料链，停止续问；已有取放动作、正常
     "bin_type": 3,
     "reel_layer": 2,
     "reel_thickness": 15.3,
-    "reel_diameter": 7
+    "reel_diameter": 177.8
   }
 }
 ```
@@ -2724,7 +2724,7 @@ NO_WORK 明确结束本箱取料链，停止续问；已有取放动作、正常
     "rack_layer": 4,
     "rack_column": 2,
     "reel_thickness": 20,
-    "reel_diameter": 13
+    "reel_diameter": 330.2
   }
 }
 ```
@@ -2899,7 +2899,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | --- | --- | --- |
 | 初始目标资源 | `plan_delta.data.target_rack = {rack_id, rack_face}` | AUTO/outbound 首版安排转运接料架及面，业务角色 TRANSFER、工作位 TRANSFER_RACK；不指定单盘储位，不能直接据此创建单盘放盘命令 |
 | 本盘最终授权 | 两类 `material.decide` 的 `ACCEPT.target_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id/rack_layer/rack_column` | WMS 预留本盘唯一目标储位；目标换面/换架按同响应的 `target_preparation`，不固定套用首版旧架面；`slot_id` 为业务储位，整数层/列由 WMS 同次明确提供，不相互推算 |
-| 设备执行 | 货架侧臂（KT11 ARM02 / KT14 ARM04）`PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id=STATION_A`，对应本线左侧 TRANSFER_RACK；现场 OUT61/OUT63 仍用于 WMS/RCS。架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度/直径用本盘原取盘冻结的 JSON 数值（毫米/寸）。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
+| 设备执行 | 货架侧臂（KT11 ARM02 / KT14 ARM04）`PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id=STATION_A`，对应本线左侧 TRANSFER_RACK；现场 OUT61/OUT63 仍用于 WMS/RCS。架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度用本盘原授权的毫米值，直径按 §7.7.1 从本盘原授权毫米值转换为英寸档位。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
 | 实际位置报告 | `movement_report.data.to_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id` | 本盘确定放置成功且实际位置与最终授权一致后，报告原业务目标四字段；不报告设备层/列，不用报告 ACK 证明物理成功，不改变原报告匹配与去重规则 |
 
 依据为现有 WMS 自动拣料合同 §8.1、§10.3、§12.4（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md`）、[自动机械臂附录 §3/§4.2.2/§4.3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿已确认的 `params` 信封、`rack_face`、整数层列转设备字符串及尺寸数值规则，不复制旧示例的顶层 source/target、rack_side 或尺寸字符串。
@@ -3199,6 +3199,8 @@ TRANSFER是否仍需留在本点，由原完整目标授权、待接料/未决�
 Command/ACK/Result、派发证据、冻结身份/期限与防重放沿[公共ECS合同](ecs-command.md)。下面只保留一份公共字段和正常Result定义，位置/参数按实际动作分支明确。两臂参数由宿主单份严格合同联合声明，不各注册冲突PICK_AND_PUT，也不以宽松字典吞掉分支差异。所有严格附录及签认仍是交付前置。
 
 <a id="ecs-envelope"></a>
+**料盘直径单位（2026-11-07 修正）：** SMT AUTO 的 WMS 首盘、后继及目标授权中，`reel_diameter` 均使用毫米，原授权及业务快照保留毫米值。仅组装新的 ECS 取料/放料指令时，按 `1 inch = 25.4 mm` 换算，并选择最接近的 `7 / 13 / 15` 英寸档位；距离相等取较大档位。例如 `179 → 7`、`330.2 → 13`、`381 → 15`，分界点为 `254 → 13`、`355.6 → 15`。来源和目标一致执行该规则，厚度、总厚度和层数不受影响。已创建指令继续使用其冻结原值，不改写、不换号重发；原结果和报告恢复兼容旧毫米指令。粗分业务已有的英寸参数不适用此换算。
+
 ### 7.1 Command / ACK / Result 共用字段
 
 WMS 业务参数取 §4 对应原授权，实际设备及工作位取 §6.1 的工作线绑定；来源取盘、目标放盘、原成功 Result 和箱型映射分别见 §7.4.1～§7.6。以下保留公共指令、接纳及回传字段，异常分支统一见 §7.10.2。
@@ -3319,7 +3321,7 @@ ECS须持久保留原command_code、原盘/参数/冻结目标及实际阶段，
 | source.bin_location | 同一原授权 bin_location 原值，实例 B 为架内箱位，不是左右架位 |
 | source.bin_cell_location | 同一原授权 cell_index 原 JSON 整数，实例 1，不转字符串、不拆 cell_id |
 | source.reel_layer | 同一原授权取盘前已占用层数的原 JSON 整数，包含本盘；实例 1 |
-| source.reel_thickness / reel_diameter | 同一原授权尺寸的原 JSON 数值，单位保持 mm/寸，实例 20/15 |
+| source.reel_thickness / reel_diameter | 厚度保持原授权毫米值；直径由原授权毫米值换算为英寸档位，本例 20/15，见 §7.7.1 |
 | source.reel_totalthickness | 同一原授权取盘前当前总厚度的原 JSON 数值，实例 20；由 WMS 提供，不相乘估算 |
 | target.location_id / location_type | 固定 STATION_SCAN / SCAN_PLATFORM |
 
@@ -3358,7 +3360,7 @@ params 如下。source 为扫码台 STATION_SCAN，target 为 SCAN2 对应的 EC
 | target.bin_type | 本盘 ACCEPT.target.bin_type 转设备字符串，本例 3 → "3" |
 | target.bin_cell_location | 本盘 ACCEPT.target.cell_index 原 JSON 整数，本例 1，不转字符串或拆 cell_id |
 | target.reel_layer | 本盘 ACCEPT.target.reel_layer 原 JSON 整数，表示放盘前已占用层数，本例 15 |
-| target.reel_thickness / reel_diameter | 本盘 ACCEPT.target 同名原 JSON 数值，单位 mm/寸，本例 20/15 |
+| target.reel_thickness / reel_diameter | 厚度取本盘 ACCEPT.target 毫米原值；直径按 §7.7.1 转换为英寸档位，本例 20/15 |
 | target.reel_totalthickness | 本盘 ACCEPT.target.reel_totalthickness 原 JSON 数值，表示放盘前当前已占用深度 mm，本例 300；不按层数×厚度计算 |
 
 本例 15 层、300 mm 分别由 WMS 给出，保持同一目标格放盘前快照，不加一，也不因数值恰好可相乘而改用估算。目标为空仍沿层数/深度 0/0 口径，精度、单位和业务/设备范围由 WMS 保证，WES 按 §7.7.1 原值传递。
@@ -3408,7 +3410,7 @@ params 如下。source 为扫码台 STATION_SCAN，target 为 SCAN2 对应的 EC
 | `source.bin_type` | WMS `READY.bin_type` 的字符串形式，`2`、`3`、`6` 原编号直接转换 |
 | `source.bin_cell_location` | WMS `READY.cell_index` 的原 JSON 整数，范围 `1..7`；不转字符串、不拆解 `cell_id` |
 | `source.reel_layer` | WMS `READY.reel_layer` 的原 JSON 整数 |
-| `source.reel_thickness`、`source.reel_diameter` | WMS 对应参数的原 JSON 数值，厚度毫米、直径寸 |
+| `source.reel_thickness`、`source.reel_diameter` | 厚度取 WMS 毫米原值；直径由 WMS 毫米值换算为英寸档位，见 §7.7.1 |
 | `source.reel_totalthickness` | 本例按厚度×层数得到 JSON 数值 `20`，即 `20 × 1 = 20`，不转字符串、不引入浮点尾差或额外取整 |
 
 <a id="rack-pick-params"></a>
@@ -3425,19 +3427,19 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 | `params.source.location_type` | 已本方确认沿供应商场景5，固定为 FIVE_LAYER_RACK |
 | `params.source.rack_id`、`params.source.rack_face` | 本次 READY 或 next_source_action 的原授权值；rack_face 沿已确认字段原样传递，不复制原文旧 rack_side |
 | `params.source.rack_layer`、`params.source.rack_column` | 本次 READY 或 next_source_action 的整数来源层/列映射为设备字符串，不使用目标层列或拆解 slot_id |
-| `params.source.reel_thickness`、`params.source.reel_diameter` | WMS 在本次 READY 或 next_source_action 中提供的本盘厚度/直径；JSON 数值，单位毫米/寸，不借 BIN、旧盘或下一盘参数 |
+| `params.source.reel_thickness`、`params.source.reel_diameter` | 厚度取本次 READY 或 next_source_action 的毫米原值；直径按 §7.7.1 转换为英寸档位，不借 BIN、旧盘或下一盘参数 |
 | `params.target.location_id` | 固定 STATION_SCAN |
 | `params.target.location_type` | `SCAN_PLATFORM` |
 
 货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)，沿本系统公共信封、rack_face 及数值类型，不复制原文的顶层 source/target、旧 rack_side 或数字字符串尺寸。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
 
-**P03 已本方确认。** rack_layer、rack_column、reel_thickness、reel_diameter 均由 WMS 在本次取盘前提供：首盘置于 return_rack.work_plan.READY，后继置于 RackSlot material.decide 的 next_source_action，沿现有字段名、类型和单位。WMS 负责原授权储位与本盘参数的正确对应；WES 不从 slot_id 推算层列、不借用 BIN 参数，不增加本地储位/尺寸映射、查询 API 或参数兜底流程。
+**P03 已本方确认。** rack_layer、rack_column、reel_thickness、reel_diameter 均由 WMS 在本次取盘前提供：首盘置于 return_rack.work_plan.READY，后继置于 RackSlot material.decide 的 next_source_action，WMS 原授权直径使用毫米，ECS 直径按 §7.7.1 转换为英寸档位，其他字段沿现有类型和单位。WMS 负责原授权储位与本盘参数的正确对应；WES 不从 slot_id 推算层列、不借用 BIN 参数，不增加本地储位/尺寸映射、查询 API 或参数兜底流程。
 
 | 来源参数 | 权威输入及设备映射 |
 | --- | --- |
 | rack_layer、rack_column | 取本次首盘/后继原授权的整数来源层/列，映射为 ECS 字符串；层沿既有设备1～5，不猜列数上限，不取 ACCEPT.target_locator 的目标坐标 |
 | reel_thickness | 取本次原授权的有限 JSON 数值，单位毫米，按本系统命令使用 JSON 数值传递，不换算、估算或借旧盘值 |
-| reel_diameter | 取本次原授权的有限 JSON 数值，单位寸，按本系统命令使用 JSON 数值传递，不换算或借 BIN 值 |
+| reel_diameter | 取本次原授权的毫米值，按 §7.7.1 转换为最接近的 7/13/15 英寸档位，不借 BIN 值 |
 
 本确认明确了来源取盘参数的时序：WMS 在首盘/后继授权时已具备并提供四项所需值。旧参考合同中“到扫码台后才取得实际尺寸”的叙述不再作为本文取盘参数等待条件；本盘取出后的扫码及去向决定仍按原流程进行，不以扫码后数据倒填已创建的取盘命令。
 
@@ -3511,7 +3513,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 | `target.location_type` | 正常目标货架固定为 `FIVE_LAYER_RACK` |
 | `target.rack_id`、`target.rack_face` | 本盘最终 `ACCEPT.target_locator` 的原值；面向不做 A/B 转换 |
 | `target.rack_layer`、`target.rack_column` | 本盘最终 `ACCEPT.target_locator` 的整数转字符串；设备货架层为 `"1".."5"`，不猜列数上限 |
-| `target.reel_thickness`、`target.reel_diameter` | 本盘原取盘指令已冻结的尺寸参数；不使用下一盘 `next_source_action` 的尺寸 |
+| `target.reel_thickness`、`target.reel_diameter` | 本盘原授权厚度/直径，直径按 §7.7.1 转换为英寸档位；不使用下一盘 `next_source_action` 的尺寸 |
 
 两类来源正常放盘均复用上表及供应商场景4/6，投放至本盘授权的转运货架储位，字段链见[§6.1 正常目标映射](#rack-role-mapping)。目标保持 `FIVE_LAYER_RACK` 及现有必填字段，不用来源箱参数或供应商场景2的 `BIN` 目标替代。
 
@@ -3591,7 +3593,7 @@ WES 沿原协议处理：bin_type 仍是 WMS 的整数枚举 2/3/6，发送 ECS 
       "cell_index": 7,
       "reel_layer": 15,
       "reel_thickness": 20,
-      "reel_diameter": 15,
+      "reel_diameter": 381,
       "reel_totalthickness": 300
     }
   }
@@ -3633,9 +3635,9 @@ WES 将本盘 target 按 §7.3 组装为以下完整 params；设备位置由本
 | 单层架取盘：bin_type、bin_location | READY.source 或 next_source_action 同名字段 | 使用本次来源架的本盘参数，不自行查当前箱码位置回填历史动作 |
 | 单层架取盘：rack_id、bin_id、cell_id | source.rack_id、source.bin_code、source.cell_id | 按原授权身份原样传递，按 §7.2 固定发送；bin_id 与 cell_id 不相互推导 |
 | 单层架取盘：bin_cell_location | source.cell_index | 保留原 JSON 整数，示例 1；完整 cell_id 另行原样传递，不能拆字符串猜设备格位 |
-| 单层架取盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | READY.source 或 next_source_action 同名字段 | 全部由 WMS 给出，下一次取料也必须有独立完整授权 |
+| 单层架取盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | READY.source 或 next_source_action 同名字段 | 全部由 WMS 给出，直径在 ECS 边界按 §7.7.1 转换；下一次取料也必须有独立完整授权 |
 | SCAN2 放盘：bin_type、bin_cell_location | material.decide.target.bin_type / cell_index | 箱型转设备字符串，格位保持 JSON 整数，见 §7.3；不使用来源箱型或后继箱格参数 |
-| SCAN2 放盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | material.decide.target 同名字段 | 由 WMS 分别给出，层数保持 JSON 整数，尺寸/深度保持 JSON 数值；层数/深度为本次放盘前占用，不在请求或完成报告中要求 WES 自报 |
+| SCAN2 放盘：reel_layer、reel_thickness、reel_diameter、reel_totalthickness | material.decide.target 同名字段 | 由 WMS 分别给出，直径在 ECS 边界按 §7.7.1 转换，层数保持 JSON 整数，尺寸/深度保持 JSON 数值；层数/深度为本次放盘前占用，不在请求或完成报告中要求 WES 自报 |
 | 两段动作的 location_id、location_type | §1.2 的本线现场架位到 ECS 常量映射及动作合同 | 左右单层来源为 STATION_A/B + ONE_LAYER_RACK，扫码台为 STATION_SCAN + SCAN_PLATFORM，料箱为 STATION_WORK1 + BIN；固定位置不逐盘向 WMS 索要，不直接传 OUTxx 或扫码设备码 |
 | device_code、command_code、priority、timeout、timestamp | 原设备绑定及统一命令合同 | 由 WES 生成并冻结，与库存/箱格动态参数分别负责 |
 
@@ -3643,20 +3645,20 @@ BIN 目标响应必须提供本节全部动态参数，不能仅返回 cell_id �
 
 PDF 将 reel_totalthickness 标为“料盘总厚度(mm)”，未完整界定放盘前/后计数时点。**目标 reel_layer 与 reel_totalthickness 分别表示放盘前本格已占用层数和已占用深度，均不含当前待放盘**。已有六层、已占用 120 mm 时返回 6 和 120，不返回本盘放置层号 7；空格两项均为 0。两项必须来自同一目标格、同一放盘前状态，由 WMS 分别给出；盘厚可能不同，WES 不用层数乘厚度或深度除厚度互相推算，也不加一后传给 ECS。设备附录须保持上述放盘前计数口径。
 
-本文 WMS 响应及两段 ECS params 的格位、层数、厚度、直径、总厚度统一采用 JSON 数值，其中格位/层数为整数；bin_type 继续用字符串，示例为 "3"，不改成 PDF 的中文箱型。取盘、放盘分别见 PDF §7.2/PDF §7.3；三格/六格/二格的箱型编码、格位对应及设备可用组合由 WMS 负责，WES 不维护矩阵或据 PDF 拦截；数值精度、单位及物理/业务范围由 WMS 保证，按 PDF §7.6 原值传递。ECS 顶层信封、公共时间戳、ACK 及取消/重试语义沿[公共 ECS 合同](ecs-command.md)。
+本文 WMS 响应及两段 ECS params 的格位、层数、厚度、直径、总厚度统一采用 JSON 数值，其中格位/层数为整数；bin_type 继续用字符串，示例为 "3"，不改成 PDF 的中文箱型。取盘、放盘分别见 PDF §7.2/PDF §7.3；三格/六格/二格的箱型编码、格位对应及设备可用组合由 WMS 负责，WES 不维护矩阵或据 PDF 拦截；数值精度、单位及物理/业务范围由 WMS 保证，直径按 §7.7.1 在 ECS 边界转换，其余参数按 PDF §7.6 原值传递。ECS 顶层信封、公共时间戳、ACK 及取消/重试语义沿[公共 ECS 合同](ecs-command.md)。
 
 <a id="putaway-numeric"></a>
 #### 7.7.1 数值精度、单位、业务范围与原值传递
 
-WMS 保证本盘参数精度、单位、业务范围和设备适用性；WES 只按本节字段类型原值传递，不增加设备数值上下限、固定小数位、步进或层数/厚度/深度关系等业务校验，不建立数值规格表。
+WMS 保证本盘参数精度、单位、业务范围和设备适用性；WES 保留原授权值，直径仅在新 ECS 指令边界按本章规则转换为英寸档位，其余字段按类型原值传递，不增加设备数值上下限、固定小数位、步进或层数/厚度/深度关系等业务校验。
 
 | 参数 | 已定类型和单位 |
 | --- | --- |
 | bin_cell_location / reel_layer | JSON 整数，格位/层数 |
 | reel_thickness / reel_totalthickness | 有限 JSON 数值，mm |
-| reel_diameter | 有限 JSON 数值，寸 |
+| reel_diameter | WMS 原授权为有限 JSON 数值，毫米；新 ECS 指令为最接近的 7/13/15 英寸档位，中点取较大档位 |
 
-来源层数/深度包含待取盘，目标层数/深度为放盘前当前占用，空目标 0/0 等既定语义不变，由 WMS 保证取值有效。WES 不四舍五入、截断、补默认值、单位换算或按层数×盘厚/深度÷盘厚推算；传入的数值无需满足 WES 自建的盘厚、层数或设备规格规则。bin_type 仍按已有协议转换为字符串，不改变上述五字段数值类型，不新增单位/精度字段。
+来源层数/深度包含待取盘，目标层数/深度为放盘前当前占用，空目标 0/0 等既定语义不变，由 WMS 保证取值有效。除上述直径档位换算外，WES 不四舍五入、截断、补默认值、单位换算或按层数×盘厚/深度÷盘厚推算；传入的数值无需满足 WES 自建的盘厚、层数或设备规格规则。bin_type 仍按已有协议转换为字符串，不改变上述五字段数值类型，不新增单位/精度字段。
 
 本边界不放宽既定报文结构、必填、类型及合法 JSON 要求；数字不接受字符串或布尔值，数值不接受非有限值。非法报文、ECS 拒绝、FAILED/未知继续沿[明确失败 Result](#ecs-failures)及[错误处理](#ecs-unknown) 及 [双臂流水与报告](#grant-consumption)/[异常处置](#putaway-ng) 报告/异常边界，不修正数值绕过错误或换号重做。WES 仍保存原授权/执行/Result/报告过程关联，业务判断及最终结果归 WMS。
 
@@ -4192,11 +4194,11 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | bin_type / cell_index | 既定整数枚举 2/3/6、1～7；仅沿原协议校验类型/枚举/范围，不新增箱型×格位组合校验；具体对应及可用组合由 WMS 保证，不按 cell_id 推算 |
 | 来源 bin_location | 字符串枚举 A/B/C/D，表示单层架上的箱位，不是架面或左右工作位 |
 | 来源 / 目标 reel_layer | JSON 整数；来源至少 1、目标至少 0 的业务有效性由 WMS 保证，目标为放盘前已占用层数；WES 不增加范围校验 |
-| reel_thickness / reel_diameter | 有限 JSON 数值，单位分别为 mm、寸；正值/物理规格及数值精度由 WMS 保证，WES 按类型原值传递 |
+| reel_thickness / reel_diameter | 有限 JSON 数值，WMS 单位均为 mm；正值/物理规格及数值精度由 WMS 保证，直径在 ECS 边界按 §7.7.1 转换，其他数值按类型原值传递 |
 | 来源 / 目标 reel_totalthickness | 有限 JSON 数值；来源大于 0、目标至少 0 及空目标格 0/0 等业务有效性由 WMS 保证，WES 不校验相互关系、不推算 |
 | source_rack_exhausted | 有整架取尽肯定事实时发送布尔 true，否则省略；仅正常 material.decide ACCEPT 或 empty_decide SOURCE_ABSENT 可携带，归原 source 及原到位 |
 
-以上source_racks及来源/目标占用口径只适用于putaway分支。WMS保证业务/物理范围、精度、单位、箱型×格位、正值/空格关系及适用性；WES按本表类型原值传递，不增加尺寸上下限、小数位/步进、舍入/截断/换算或关系校验，不据cell_id/层数反推动态参数。outbound BIN/RackSlot参数继续沿4/7章自己的严格定义，不套入库总厚度算法。
+以上source_racks及来源/目标占用口径只适用于putaway分支。WMS保证业务/物理范围、精度、单位、箱型×格位、正值/空格关系及适用性；WES保留本表原值，直径仅在ECS边界按§7.7.1换算；其余参数不增加尺寸上下限、小数位/步进、舍入/截断/换算或关系校验，不据cell_id/层数反推动态参数。outbound BIN/RackSlot参数继续沿4/7章自己的严格定义，不套入库总厚度算法。
 
 <a id="task-field-policy"></a>
 #### 9.2.2 六类任务的字段策略
@@ -4352,9 +4354,9 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A44 | 共同（按方向合同） | WMS 在执行中因不同业务原因追加合法来源，原动作尚未收口 | WES 按来源/版本合同处理，不因“异常补足”要求另发任务，不自行补料、重授或重建动作；原终态限制、RackSlot 同面一次及未决原义务保持 |
 | A45 | outbound | 计划同时涉及料箱供箱、RackSlot 来源架和物料目标架准备 | 各资源按 §6.1 映射，RackSlot 仍调用 return_rack.work_plan，目标准备仍取本盘 ACCEPT；不误建料箱 Feed/drain，不让公共 feed_complete 关闭逐盘生产面 |
 | A46 | outbound | 三类货架进场/换面/离场及同角色恢复 | 供箱架使用 CTU01/CTU02/CTU03，RETURN/TRANSFER 使用 F01/CK04/F01；同物理层数不改变业务角色，恢复不替换模板/绑定；CTU03/F01的DEPART按原有效接纳完成，包含TRANSFER_RACK直送生产线RACK_POSITION，后到失败仅备查；ENTER/ROTATE仍等原到位结果；真实prepare新动作已登记Transport提交意图，调用前校验/回滚保护；等待该准备的授权自身不永久阻架，旧面A盘PUT未闭则后盘不得ROTATE/REPLACE。旧job离场严格接纳后才建同点新job，当前准备失败/未决/面已变时不能借历史成功action PUT |
-| A47 | outbound | RackSlot 首盘 READY 含来源层2/列3、厚度15.3毫米、直径7寸，slot_id=A-03；本盘目标为另一层/列 | 首盘 ARM02 来源坐标取 WMS 授权的2/3并映射为字符串，尺寸按原数值及单位传递；不按 SLOT 文本推算。后续 PUT 坐标取本盘 ACCEPT 目标，尺寸仍为本盘原取盘的15.3/7 |
+| A47 | outbound | RackSlot 首盘 READY 含来源层2/列3、厚度15.3毫米、直径177.8毫米，slot_id=A-03；本盘目标为另一层/列 | 首盘 ARM02 来源坐标取 WMS 授权的2/3并映射为字符串，厚度按原数值传递，直径转换为7英寸；不按 SLOT 文本推算。后续 PUT 坐标取本盘 ACCEPT 目标，尺寸仍为本盘原取盘的15.3/7 |
 | A48 | outbound | RackSlot 正常末盘 ACCEPT 明确无后继，但另一原盘仍有 NG/空取前序事实、WAIT/RETRY、未知动作或未确认报告 | 保存本面取料终局，不登记异常续问重开本面；原义务继续收口，未结清不补认面完成/整单确认。按§6.3.2区分需本架参与的直接责任和独立报告；仅独立报告未收妥不永久占架，其他物理/授权未决仍保护原架，不额外要求再取得NO_WORK |
-| A49 | outbound | 后继 next_source_action 提供层4/列2、厚度20毫米、直径13寸，与当前盘参数不同 | 下一盘只按该后继完整七字段创建一次原取盘命令，使用4/2和20/13；当前盘 PUT 仍用自己的原尺寸，不被后继覆盖，不借用 BIN 或前一盘参数 |
+| A49 | outbound | 后继 next_source_action 提供层4/列2、厚度20毫米、直径330.2毫米，与当前盘参数不同 | 下一盘只按该后继完整七字段创建一次原取盘命令，使用4/2和20/13；当前盘 PUT 仍用自己的原尺寸，不被后继覆盖，不借用 BIN 或前一盘参数 |
 | A50 | outbound | 首盘 READY 或后继对象中，四项参数任一缺失、null、类型错误；或完整参数仅存在于旧盘/BIN/目标对象 | 不将不完整对象认作有效取盘授权，不消费该授权或创建其取盘命令；按原合同保留请求/响应及关联，不补值、不查询推算、不以别处存在同名字段代替 |
 | A51 | outbound | WMS 返回 NO_WORK/WAIT，或本盘最终 ACCEPT 明确省略 next_source_action | 按各自分支处理，不从原参数、默认值或后续扫码构造取盘；WAIT 到期求值仍沿原规则，无后继不复用旧来源开启下一盘 |
 | A52 | 共同（按方向合同） | 首盘/后继授权响应丢失、原请求重放或命令登记后重启，WMS 后续另有新授权参数 | 同身份恢复首次完整授权及原命令正文，包含所属合同的完整来源及尺寸参数；不刷新已冻结参数、不按最新授权重新组装。只有独立合法后继才用其自己的值及新动作身份 |
