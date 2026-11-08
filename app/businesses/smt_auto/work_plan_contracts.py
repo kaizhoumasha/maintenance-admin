@@ -2,22 +2,16 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from app.businesses._components.sorting_task.contracts import Face, Identifier
+from app.businesses.bin_types import BinType
 
 Number = Annotated[float, Field(allow_inf_nan=False)]
 
 
 class Data(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
-
-    @field_validator("bin_type", mode="before", check_fields=False)
-    @classmethod
-    def integer_bin_type(cls, value):
-        if type(value) is not int:
-            raise ValueError("bin_type must be a JSON integer")
-        return value
 
 
 class NoWork(Data):
@@ -33,7 +27,7 @@ class BinReady(Data):
     result: Literal["READY"]
     cell_id: Identifier
     cell_index: Annotated[int, Field(ge=1, le=7)]
-    bin_type: Literal[2, 3, 6]
+    bin_type: BinType
     reel_layer: int
     reel_thickness: Number
     reel_diameter: Number
@@ -56,7 +50,7 @@ class InboundSource(Data):
     bin_code: Identifier
     bin_location: str
     cell_id: Identifier
-    bin_type: Literal[2, 3, 6]
+    bin_type: BinType
     cell_index: Annotated[int, Field(ge=1, le=7)]
     reel_layer: int
     reel_thickness: Number

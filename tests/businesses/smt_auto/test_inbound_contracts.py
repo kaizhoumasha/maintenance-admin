@@ -38,3 +38,43 @@ def test_normal_commands_have_one_shared_strict_declaration():
             source={"location_id": "STATION_SCAN", "location_type": "SCAN_PLATFORM"},
             target={"location_id": "STATION_NG", "location_type": "NG_ZONE"},
         )
+
+
+@pytest.mark.parametrize("bin_type", [None, True, 3.0, ""])
+def test_arm_bin_type_rejects_invalid_codes(bin_type):
+    from app.businesses.smt_auto.ecs_command import PickAndPut
+
+    with pytest.raises(ValidationError):
+        PickAndPut(
+            source=dict(
+                location_id="STATION_WORK1",
+                location_type="BIN",
+                bin_type=bin_type,
+                bin_cell_location=1,
+                reel_layer=1,
+                reel_thickness=20,
+                reel_diameter=7,
+                reel_totalthickness=20,
+            ),
+            target=dict(location_id="STATION_SCAN", location_type="SCAN_PLATFORM"),
+        )
+
+
+@pytest.mark.parametrize("bin_type", [8, "8", "008", "WMS-CUSTOM"])
+def test_arm_bin_type_uses_string_wire_code(bin_type):
+    from app.businesses.smt_auto.ecs_command import PickAndPut
+
+    command = PickAndPut(
+        source=dict(
+            location_id="STATION_WORK1",
+            location_type="BIN",
+            bin_type=bin_type,
+            bin_cell_location=1,
+            reel_layer=1,
+            reel_thickness=20,
+            reel_diameter=7,
+            reel_totalthickness=20,
+        ),
+        target=dict(location_id="STATION_SCAN", location_type="SCAN_PLATFORM"),
+    )
+    assert command.model_dump()["source"]["bin_type"] == str(bin_type)

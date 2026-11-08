@@ -65,7 +65,8 @@ def test_outbound_member_retains_original_first_round_and_terminal_facts():
     )
 
 
-def test_ready_bin_type_requires_json_integer():
+@pytest.mark.parametrize("bin_type", [True, 2.0, None, ""])
+def test_ready_bin_type_rejects_invalid_codes(bin_type):
     from app.businesses.smt_auto.work_plan_contracts import DECISIONS
 
     with pytest.raises(ValidationError):
@@ -74,9 +75,42 @@ def test_ready_bin_type_requires_json_integer():
                 "result": "READY",
                 "cell_id": "B1",
                 "cell_index": 1,
-                "bin_type": 2.0,
+                "bin_type": bin_type,
                 "reel_layer": 1,
                 "reel_thickness": 1,
                 "reel_diameter": 1,
             }
         )
+
+
+@pytest.mark.parametrize("bin_type", [8, 42, "8", "008", "WMS-CUSTOM"])
+def test_work_plan_preserves_wms_configured_bin_type(bin_type):
+    from app.businesses.smt_auto.inbound_contracts import Target
+    from app.businesses.smt_auto.work_plan_contracts import BinReady, InboundSource
+
+    source = dict(
+        rack_id="R",
+        location_code="L",
+        bin_code="B",
+        bin_location="A",
+        cell_id="C",
+        bin_type=bin_type,
+        cell_index=1,
+        reel_layer=1,
+        reel_thickness=20,
+        reel_diameter=179,
+        reel_totalthickness=20,
+    )
+    assert InboundSource(**source).bin_type == bin_type
+    target = {
+        key: value
+        for key, value in source.items()
+        if key not in {"rack_id", "location_code", "bin_location"}
+    }
+    assert Target(**target).bin_type == bin_type
+    ready = {
+        key: value
+        for key, value in target.items()
+        if key not in {"bin_code", "reel_totalthickness"}
+    }
+    assert BinReady(result="READY", **ready).bin_type == bin_type

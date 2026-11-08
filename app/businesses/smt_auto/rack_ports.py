@@ -9,6 +9,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Literal
 
+from pydantic import TypeAdapter
 from sqlalchemy import select
 
 from app.businesses._components.rack_dispatch.contracts import (
@@ -20,6 +21,7 @@ from app.businesses._components.rack_dispatch.contracts import (
     PointRef,
 )
 from app.businesses._components.sorting_task.contracts import PrepareAccepted
+from app.businesses.bin_types import BinType
 from app.core.strict_json import canonical_digest
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.wms_transport.types import validate_face
@@ -53,6 +55,9 @@ class RackAuthorization:
     @property
     def source_ref(self) -> str:
         return f"{self.kind}:{self.record_id}"
+
+
+_BIN_TYPE_ADAPTER = TypeAdapter(BinType)
 
 
 SOURCES = (
@@ -146,13 +151,16 @@ def _ready(data, *, bin_source):
         for key in codes
     ):
         return False
-    integers = (
-        ("cell_index", "bin_type", "reel_layer") if bin_source else ("rack_layer", "rack_column")
-    )
+    integers = ("cell_index", "reel_layer") if bin_source else ("rack_layer", "rack_column")
     if not all(type(data[key]) is int for key in integers):
         return False
-    if bin_source and (data["cell_index"] not in range(1, 8) or data["bin_type"] not in (2, 3, 6)):
+    if bin_source and data["cell_index"] not in range(1, 8):
         return False
+    if bin_source:
+        try:
+            _BIN_TYPE_ADAPTER.validate_python(data["bin_type"])
+        except ValueError:
+            return False
     if not bin_source:
         try:
             validate_face(data["rack_face"])

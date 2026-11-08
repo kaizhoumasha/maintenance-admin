@@ -293,6 +293,10 @@ async def test_prepare_and_original_references_roll_back_together(rack_host):
         ]
     ]
     + [
+        ("BIN_CELL", case)
+        for case in ("BIN_TYPE_BOOL", "BIN_TYPE_FLOAT", "BIN_TYPE_EMPTY", "BIN_TYPE_NULL")
+    ]
+    + [
         ("RACK_SLOT", case)
         for case in (
             "SOURCE_FAILED",
@@ -353,7 +357,7 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             "result": "READY",
             "cell_id": "B1",
             "cell_index": 1,
-            "bin_type": 3,
+            "bin_type": "TYPE-8",
             "reel_layer": 1,
             "reel_thickness": 20,
             "reel_diameter": 15,
@@ -518,7 +522,13 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
         # Public unknown original result leaves no applied current position proof.
         await apply_outcome(db, view.actions[-1], "FAILED", revision=2)
         await ports.advance(db, job_id=job, now_ms=4)
-    invalid = old_obligation in (
+    invalid_bin_types = {
+        "BIN_TYPE_BOOL": True,
+        "BIN_TYPE_FLOAT": 3.0,
+        "BIN_TYPE_EMPTY": "",
+        "BIN_TYPE_NULL": None,
+    }
+    invalid = old_obligation in invalid_bin_types or old_obligation in (
         "WAIT",
         "NO_WORK",
         "WRONG_OPERATION",
@@ -533,7 +543,11 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
         "INCOMPLETE_TARGET",
         "WRONG_TARGET_TYPE",
     )
-    if old_obligation in ("WAIT", "NO_WORK"):
+    if old_obligation in invalid_bin_types:
+        data = {**ready, "bin_type": invalid_bin_types[old_obligation]}
+        grant.response_snapshot = {**grant.response_snapshot, "data": data}
+        plate.grant_snapshot = data
+    elif old_obligation in ("WAIT", "NO_WORK"):
         data = {"result": old_obligation}
         if old_obligation == "WAIT":
             data["retry_after_ms"] = 1000

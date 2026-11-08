@@ -292,7 +292,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         bin_code="SOURCE",
         bin_location="B",
         cell_id="CELL",
-        bin_type=3,
+        bin_type="TYPE-A",
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
@@ -324,6 +324,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         )
         raw = json.loads(await read_history_body(session, command.request_record_id))
         assert raw["params"]["source"]["reel_diameter"] == 15
+        assert raw["params"]["source"]["bin_type"] == "TYPE-A"
         assert plate.source_params["reel_diameter"] == 381
         assert json.loads(await read_history_body(session, (command).request_record_id))[
             "timeout"
@@ -337,7 +338,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
     target = dict(
         bin_code="A000000001",
         cell_id="DEST",
-        bin_type=3,
+        bin_type=9,
         cell_index=2,
         reel_layer=0,
         reel_thickness=20,
@@ -364,7 +365,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         assert raw["timeout"] == arm_timeouts.get("bin_arm_timeout_ms", 0)
         assert raw["params"]["target"]["reel_layer"] == 0
         assert raw["params"]["target"]["reel_totalthickness"] == 0
-        assert raw["params"]["target"]["bin_type"] == "3"
+        assert raw["params"]["target"]["bin_type"] == "9"
         assert raw["params"]["target"]["reel_diameter"] == 13
         assert plate.target_snapshot["target"]["reel_diameter"] == 330.2
     assert (
