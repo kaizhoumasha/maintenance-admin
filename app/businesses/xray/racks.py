@@ -36,15 +36,25 @@ class Slot(Strict):
 class RackPoint(Strict):
     location_code: Identifier
     location_id: Identifier
-    templates: dict[Literal["ENTER", "ROTATE", "DEPART"], Identifier]
+    templates: dict[Literal["ENTER", "ROTATE", "DEPART"], Identifier] = Field(default_factory=dict)
     slots: dict[Face, dict[Identifier, Slot]]
+    fixed_test_rack: Identifier | None = None
 
     @model_validator(mode="after")
     def complete_mapping(self) -> Self:
-        if set(self.templates) != {"ENTER", "ROTATE", "DEPART"} or set(self.slots) != {"A", "B"}:
-            raise ValueError("X-Ray rack requires three templates and both faces")
-        if self.templates["DEPART"] not in {"F01", "CTU03"}:
-            raise ValueError("X-Ray departure needs a template with the shared acceptance rule")
+        if self.fixed_test_rack:
+            if self.templates or len(self.slots) != 1:
+                raise ValueError(
+                    "Fixed X-Ray test rack requires one face and no transport templates"
+                )
+        else:
+            if set(self.templates) != {"ENTER", "ROTATE", "DEPART"} or set(self.slots) != {
+                "A",
+                "B",
+            }:
+                raise ValueError("X-Ray rack requires three templates and both faces")
+            if self.templates["DEPART"] not in {"F01", "CTU03"}:
+                raise ValueError("X-Ray departure needs a template with the shared acceptance rule")
         for slots in self.slots.values():
             positions = {(slot.rack_layer, slot.rack_column) for slot in slots.values()}
             if not slots or len(positions) != len(slots):
@@ -68,9 +78,15 @@ class PointState:
 
 
 class XrayRacks:
-    def __init__(self, dispatch: RackDispatch, configs: dict[str, RackPoint]):
+    def __init__(self, dispatch: RackDispatch, configs: dict[str, RackPoint], mock_targets=None):
         self.dispatch = dispatch
         self.configs = configs
+        self.mock_targets = mock_targets or {}
+        if any(
+            config.fixed_test_rack and line not in self.mock_targets
+            for line, config in configs.items()
+        ):
+            raise ValueError("Fixed X-Ray test racks require the local X-Ray WMS mock")
 
     async def lock_point(self, session, line, arm):
         if not line or not line.is_enabled or line.business_code != OWNER:
@@ -104,7 +120,7 @@ class XrayRacks:
             "line_version": line.version,
             "point_id": point.id,
             "arm": [arm.id, arm.version] if arm else None,
-            "config": canonical_digest(config.model_dump(mode="json")),
+            "config": canonical_digest(config.model_dump(mode="json", exclude_none=True)),
         }
         return PointState(config, binding, latest)
 
@@ -162,7 +178,7 @@ class XrayRacks:
         )
         return ready[0] if len(ready) == 1 else None
 
-    async def target(self, session, reel, point, intent, now_ms):
+    async def target(self, session, reel, point, intent, now_ms, *, barcode):
         """Return a rack target, a reason to wait, or the need for a fresh WMS decision."""
         if point is None:
             return "RACK_POINT_UNCONFIGURED", None
@@ -181,7 +197,20 @@ class XrayRacks:
             return "RACK_REDECIDE", None
 
         code = point.config.location_code
-        if plan["result"] == "REPLENISH_REQUIRED":
+        fixed = point.config.fixed_test_rack
+        if fixed:
+            if (
+                plan["result"] != "ACCEPT"
+                or location["rack_id"] != fixed
+                or plan != self.mock_targets[reel.workline_code].get(barcode)
+            ):
+                return "FIXED_TEST_RACK_TARGET_MISMATCH", None
+            if await self.dispatch.has_conflicting_responsibility(
+                session, point=code, rack_id=fixed
+            ) or await self.dispatch.has_position_conflict(session, point=code):
+                return "RACK_POSITION_CONFLICT", None
+            job = None
+        elif plan["result"] == "REPLENISH_REQUIRED":
             rack_id = plan["incoming_rack"]["rack_id"]
             existing = await self.dispatch.jobs(
                 session,
@@ -211,9 +240,9 @@ class XrayRacks:
 
         if plan["result"] == "ACCEPT":
             face = location["rack_face"]
-            slot = point.config.slots[face].get(location["slot_id"])
+            slot = point.config.slots.get(face, {}).get(location["slot_id"])
             if (
-                job.actual_face != face
+                (job is not None and job.actual_face != face)
                 or not slot
                 or slot.model_dump()
                 != {
@@ -238,17 +267,17 @@ class XrayRacks:
                 reel_diameter=plan["reel_diameter"],
                 reel_thickness=plan["reel_thickness"],
             )
-            action = job.actions[-1]
-            return "READY", (
-                target.model_dump(mode="json"),
-                {
-                    "rack_locator": location,
-                    "rack_point": code,
-                    "rack_job_id": job.id,
-                    "rack_action_id": action.id,
-                    "rack_position_revision": action.position_revision,
-                },
-            )
+            context = {"rack_locator": location, "rack_point": code}
+            if job is not None:
+                action = job.actions[-1]
+                context.update(
+                    {
+                        "rack_job_id": job.id,
+                        "rack_action_id": action.id,
+                        "rack_position_revision": action.position_revision,
+                    }
+                )
+            return "READY", (target.model_dump(mode="json"), context)
         if plan["result"] == "ROTATE_REQUIRED" and job.actual_face == plan["target_face"]:
             return "RACK_FACE_ALREADY_CURRENT", None
         if job and job.origin.resources.get("templates") != point.config.templates:

@@ -17,6 +17,12 @@ DEFINITION = BusinessDefinition(
             display_name="五层退料架工作位",
             required=False,
         ),
+        PositionSlot(
+            position_type="HANDOFF_POSITION",
+            slot_key="TRANSIT_BIN",
+            display_name="单层通箱架工作位",
+            required=False,
+        ),
     ),
     initial_entries=(InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role=XRAY),),
 )

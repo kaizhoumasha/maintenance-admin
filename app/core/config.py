@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     COARSE_SORTING_NG_LOCATIONS: dict[str, str] = Field(default_factory=dict)
     XRAY_TRANSIT_TARGETS: dict[str, dict[str, dict]] = Field(default_factory=dict)
     XRAY_RETURN_RACKS: dict[str, dict] = Field(default_factory=dict)
+    XRAY_WMS_MOCK_TARGETS: dict[str, dict[str, dict]] = Field(default_factory=dict)
 
     @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", "SMT_AUTO_FIRST_PLAN_WAIT_MS", mode="before")
     @classmethod
@@ -77,6 +78,10 @@ class Settings(BaseSettings):
     def _check_jwt_secret(self) -> "Settings":
         if self.COARSE_SORTING_TAIL_ENABLED and self.ENVIRONMENT != "local":
             raise ValueError("Coarse sorting tail is available only in the local integration mode")
+        if self.XRAY_WMS_MOCK_TARGETS and self.ENVIRONMENT != "local":
+            raise ValueError("X-Ray WMS mock is available only in the local integration mode")
+        if self.XRAY_WMS_MOCK_TARGETS and len(self.JWT_SECRET_KEY) < 32:
+            raise ValueError("X-Ray WMS mock requires JWT_SECRET_KEY with at least 32 characters")
         if self.ENVIRONMENT != "local" and len(self.JWT_SECRET_KEY) < 32:
             raise ValueError("JWT_SECRET_KEY 在非 local 环境至少 32 个字符(openssl rand -hex 32)")
         return self
