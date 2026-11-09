@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -11,6 +12,17 @@ from app.integrations import history as history_records
 from app.reliable import MessageDraft, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 from app.reliable.testing import FakeClock
+from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def pg_url(pg_url):
+    # Maintenance scans the whole store, including rows belonging to other targets.
+    async with isolated_schema_database(pg_url) as (url, _):
+        result = await run_alembic(url, "upgrade", "head")
+        assert result.returncode == 0, result.stdout + result.stderr
+        yield url
 
 
 def make_rig(factory, engine, name):
