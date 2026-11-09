@@ -3551,18 +3551,18 @@ ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `ti
 
 ```json
 {
-  "device_code": "SCANNER_001",
+  "device_code": "PLATFORM_SCANNER_EXAMPLE",
   "event_type": "SCAN_COMPLETED",
   "timestamp": 1786064900100,
   "data": {
     "location": "SCAN_PLATFORM",
-    "barcode": "P032-0561-000HF,Q3000,M0805S106K160CT,D260505,L100R028291,S72052872716100149602",
+    "barcode": "REEL-EXAMPLE-001",
     "previous_command_code": "019f3408-1a12-71ab-8cde-123456789001"
   }
 }
 ```
 
-在工作线配置中，将实际扫码平台设备绑定到 `PLATFORM_SCANNER`。新 BIN 取盘需有此绑定，WES 保存原指令对应的扫码设备。绑定更新后，将 `SMT_AUTO_WORKLINES` 中对应的 `work_line_version` 同步到工作线的新版本。Result 与事件可以乱序到达。重复事件只应用一次，关联错误或扫码值冲突的事件保留诊断，原扫码值继续保留。 如果已保存扫码事实而取盘结果报告空取，保留两条事实，暂停该盘推进。旧指令可凭带原指令号的真实扫码事件继续，已带完整扫码字段的历史 Result 也可继续使用。此前未携带原指令号的事件需要 ECS 以原扫码事实补报，按时间接近无法可靠关联。
+在工作线配置中，将实际扫码平台设备绑定到 `PLATFORM_SCANNER`。新 BIN 取盘需有此绑定，WES 保存原指令对应的扫码设备。绑定更新后，将 `SMT_AUTO_WORKLINES` 中对应的 `work_line_version` 同步到工作线的新版本。Result 与事件可以乱序到达。重复事件只应用一次，关联错误或扫码值冲突的事件保留诊断，原扫码值继续保留。如果已保存扫码事实而取盘结果报告空取，保留两条事实，暂停该盘推进。旧指令可凭带原指令号的真实扫码事件继续，已带完整扫码字段的历史 Result 也可继续使用。此前未携带原指令号的事件需要 ECS 以原扫码事实补报，按时间接近无法可靠关联。
 
 先升级所有 WES 回调实例并完成扫码设备绑定，再让 ECS 发送或补报新格式。旧实例收到事件会返回 ACK 并记录为未注册，同一事件随后重报会走收据去重。
 
