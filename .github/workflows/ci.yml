@@ -9,12 +9,12 @@ concurrency:
 
 jobs:
   pytest:
-    name: pytest (lane ${{ matrix.lane }}/6)
+    name: pytest (lane ${{ matrix.lane }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        lane: [1, 2, 3, 4, 5, 6]
+        lane: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     services:
       postgres:
         # 与 docker-compose.yml 同一镜像
@@ -45,8 +45,11 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      - name: Run Ruff checks once
+        if: matrix.lane == 1
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
       - name: Quiesce background maintenance in the disposable PostgreSQL service
         env:
           TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
@@ -76,7 +79,7 @@ jobs:
 
           asyncio.run(prepare())
           PY
-      - run: uv run pytest --test-lane=${{ matrix.lane }}/6 -ra --durations=30 --junitxml=test-results.xml
+      - run: uv run pytest --test-lane=${{ matrix.lane }}/${{ strategy.job-total }} -ra --durations=30 --junitxml=test-results.xml
 
   test:
     runs-on: ubuntu-24.04

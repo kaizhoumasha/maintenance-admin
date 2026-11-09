@@ -1,13 +1,13 @@
 # 并行测试分道
 
 完整测试仍使用 `uv run pytest`。不传 `--test-lane` 时，收集范围和执行顺序保持不变。
-CI 将完整收集结果分到六个独立任务，各任务继续运行 Ruff 和所属测试：
+CI 将完整收集结果分到十个独立任务。第一道额外运行一次 Ruff 检查。
 
 ```sh
-uv run pytest --test-lane=1/6 -ra --durations=30 --junitxml=test-results.xml
+uv run pytest --test-lane=1/10 -ra --durations=30 --junitxml=test-results.xml
 ```
 
-其余任务把 `1/6` 改为 `2/6` 至 `6/6`，六个任务全部通过才算完整验证通过。
+其余任务把 `1/10` 改为 `2/10` 至 `10/10`，十个任务全部通过才算完整验证通过。
 `N/T` 要求 `1 <= N <= T`；非法参数在执行测试前失败。
 
 ## 分配规则
@@ -25,11 +25,11 @@ uv run pytest --test-lane=1/6 -ra --durations=30 --junitxml=test-results.xml
 
 ```sh
 uv run pytest --collect-only -q
-uv run pytest --collect-only -q --test-lane=1/6
+uv run pytest --collect-only -q --test-lane=1/10
 ```
 
 分道以 pytest 的 deselected 机制报告其他道的用例，不改动任何测试的跳过条件、超时或断言。
-应合并六道结果，确认原完整收集中的每个 node ID 恰好出现一次，并核对实际跳过原因。
+应合并所有分道结果，确认原完整收集中的每个 node ID 恰好出现一次，并核对实际跳过原因。
 
 ## 独立存储
 
