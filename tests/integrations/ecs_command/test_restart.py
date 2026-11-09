@@ -9,12 +9,14 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from app.http_client import DeliveryState, HttpResult
+from app.http_client import DeliveryState, FailureKind, HttpResult
 from app.integrations import history as history_records
 from app.integrations.ecs_command.clients import DynamicClients
 from app.integrations.ecs_command.dev import DevEcsRoutes
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import PROTOCOL
+from app.integrations.ecs_command.result import receive_ecs_result
+from app.integrations.ecs_command.service import CommandOwner
 from app.models import IntegrationExchange, ReliableMessage
 from app.reliable import lifecycle
 from app.reliable.sender import Sender
@@ -41,6 +43,9 @@ async def restart(ecs, request):
     clock = FakeClock()
     ecs.service.clock = ecs.outbox.clock = clock
     historical_window = getattr(request, "param", None)
+    xray = historical_window == "xray"
+    if xray:
+        ecs.owner = CommandOwner("xray")
     if historical_window is None:
         ecs.service.annexes = ecs_protocol_annexes()
         ecs.service.routes = DevEcsRoutes().for_origin("http://127.0.0.1:8000")
@@ -74,7 +79,7 @@ async def restart(ecs, request):
                 timeout_ms=30000,
                 command=EcsMove(qty=1),
             )
-    if historical_window is not None:
+    if historical_window is not None and not xray:
         # A pre-upgrade formal snapshot fixture; no old dev policy is sent.
         async with ecs.factory.begin() as session:
             row = await session.scalar(
@@ -237,6 +242,98 @@ async def assert_safe_restart(ecs, restart, stage, expired):
     if not expired:
         assert second_client.requests[0].body == saved["frozen"]["request_raw"]
     assert await first.tick() == 0
+
+
+@pytest.mark.parametrize("restart", ["xray"], indirect=True)
+@pytest.mark.parametrize("rejection", [503, 422])
+async def test_xray_ack_timeout_retries_frozen_command_and_accepts_late_result(
+    ecs, restart, rejection
+):
+    clock, start = restart
+    first_client = ScriptedHttpClient(
+        HttpResult(DeliveryState.DELIVERY_UNKNOWN, FailureKind.READ_TIMEOUT, None, (), None)
+    )
+    first = start(first_client)
+    await dispatch_one(first)
+    pending = await state(ecs)
+    assert pending["status"] == "PENDING"
+    assert pending["not_received"] == 0
+    assert [outcome for _, outcome, _ in pending["evidence"]] == ["UNKNOWN"]
+    assert pending["next"] > clock()
+    await first.aclose()
+
+    message = "TEMPORARILY_UNAVAILABLE" if rejection == 503 else "ANNEX_VALIDATION_FAILED"
+    second_client = ScriptedHttpClient(reply(rejection, message))
+    second = start(second_client)
+    assert await second.tick() == 0
+    clock.advance((pending["next"] - clock()).total_seconds())
+    await dispatch_one(second)
+    assert second_client.requests == first_client.requests
+
+    clock.advance(300)
+    assert await second.tick() == 0
+    stopped = await state(ecs)
+    assert stopped["status"] == "HELD"
+    assert stopped["frozen"] == pending["frozen"]
+    assert len(second_client.requests) == 1
+    code = pending["frozen"]["command_code"]
+    async with ecs.factory.begin() as session:
+        assert not await ecs.service.is_delivery_proven_unaccepted(
+            session, owner=ecs.owner, command_code=code
+        )
+        result = await receive_ecs_result(
+            session,
+            json.dumps(
+                dict(
+                    command_code=code,
+                    device_code="D1",
+                    result="SUCCESS",
+                    finish_time=1,
+                    data={"qty": 1},
+                )
+            ).encode(),
+            ecs.service,
+        )
+        assert result.status_code == 200
+    assert (await state(ecs))["command_status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("restart", "failure_kind", "http_status"),
+    [
+        ("xray", FailureKind.TOTAL_TIMEOUT, None),
+        ("xray", FailureKind.READ_TIMEOUT, 500),
+        (None, FailureKind.READ_TIMEOUT, None),
+    ],
+    indirect=["restart"],
+)
+async def test_other_unknown_delivery_stays_held(ecs, restart, failure_kind, http_status):
+    _, start = restart
+    client = ScriptedHttpClient(
+        HttpResult(DeliveryState.DELIVERY_UNKNOWN, failure_kind, http_status, (), None)
+    )
+    await dispatch_one(start(client))
+    assert (await state(ecs))["status"] == "HELD"
+
+
+@pytest.mark.parametrize("restart", ["xray"], indirect=True)
+async def test_delivery_proof_requires_closed_original_and_all_attempts_unaccepted(ecs, restart):
+    clock, start = restart
+    sender = start(ScriptedHttpClient(reply(503, "TEMPORARILY_UNAVAILABLE")))
+    await dispatch_one(sender)
+    code = (await state(ecs))["frozen"]["command_code"]
+
+    async def proven(owner):
+        async with ecs.factory() as session:
+            return await ecs.service.is_delivery_proven_unaccepted(
+                session, owner=owner, command_code=code
+            )
+
+    assert not await proven(ecs.owner)
+    clock.advance(301)
+    await wait_for_expiry(ecs, sender)
+    assert await proven(ecs.owner)
+    assert not await proven(CommandOwner("other"))
 
 
 @pytest.mark.parametrize("restart", [600], indirect=True)

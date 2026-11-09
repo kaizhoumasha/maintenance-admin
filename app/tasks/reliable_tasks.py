@@ -24,10 +24,12 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
     )
     from app.businesses.coarse_sorting.retention import wms_message_references as coarse_references
     from app.businesses.smt_auto.retention import wms_message_references as auto_references
+    from app.businesses.xray.retention import message_references as xray_references
 
     async def wms_message_references(session, **scope):
         return (
             *await auto_references(session, **scope),
+            *await xray_references(session, **scope),
             *await coarse_references(session, **scope),
         )
 

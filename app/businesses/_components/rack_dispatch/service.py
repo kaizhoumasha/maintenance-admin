@@ -25,7 +25,7 @@ from app.integrations.wms_transport import (
     TransportTaskResult,
     Zone,
 )
-from app.integrations.wms_transport.types import validate_face
+from app.integrations.wms_transport.types import validate_face, validate_text
 from app.models import WorkLine, WorkLinePosition
 from app.reliable import ScopeRef
 
@@ -44,6 +44,8 @@ from .models import RackAction, RackJob
 
 AUTO_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
 COARSE_SOURCES = ("COARSE_INCOMING", "COARSE_WMS_PRESENT")
+XRAY_SOURCES = ("XRAY_RETURN",)
+STRICT_SOURCES = (*AUTO_SOURCES, *COARSE_SOURCES, *XRAY_SOURCES)
 TEMPLATES = {
     "COARSE_INCOMING": {"ENTER": "F01", "DEPART": "F01"},
     "COARSE_WMS_PRESENT": {"DEPART": "F01"},
@@ -55,6 +57,12 @@ TEMPLATES = {
     "AUTO_OUTBOUND_RETURN": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
     "AUTO_OUTBOUND_TARGET": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
 }
+
+
+def _templates(job):
+    if job.source_kind in XRAY_SOURCES:
+        return (job.resources or {}).get("templates", {})
+    return TEMPLATES[job.source_kind]
 
 
 def _id():
@@ -213,7 +221,7 @@ class RackDispatch:
         )
         if not all(identity.values()) or not origin.cycle_id:
             raise ValueError("incomplete rack origin")
-        if origin.source_kind not in TEMPLATES:
+        if origin.source_kind not in TEMPLATES and origin.source_kind not in XRAY_SOURCES:
             raise ValueError("unsupported rack source")
         if origin.source_kind in COARSE_SOURCES:
             if not (
@@ -249,6 +257,24 @@ class RackDispatch:
                 )
             ):
                 raise ValueError("incomplete AUTO rack origin")
+        if origin.source_kind in XRAY_SOURCES:
+            resources = origin.resources
+            if not (
+                self.owner_domain == "xray"
+                and origin.workline_code
+                and origin.point
+                and origin.caller == TransportCaller(origin.workline_code, origin.point)
+                and origin.task_id is None
+                and origin.initial_face in ("A", "B")
+                and isinstance(resources, dict)
+                and resources.get("positions") == {"RETURN_RACK": origin.point}
+                and isinstance(resources.get("templates"), dict)
+                and set(resources["templates"]) == {"ENTER", "ROTATE", "DEPART"}
+                and resources["templates"]["DEPART"] in ("F01", "CTU03")
+            ):
+                raise ValueError("incomplete X-Ray rack origin")
+            for template in resources["templates"].values():
+                validate_text(template)
         if scope is not None and scope.owner_domain != self.owner_domain:
             raise ValueError("rack scope owner mismatch")
         values = asdict(origin)
@@ -279,10 +305,10 @@ class RackDispatch:
         ).one()
         if any(getattr(job, key) != value for key, value in tags.items()):
             raise ValueError("original rack scope cannot change")
-        if origin.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and any(
+        if origin.source_kind in STRICT_SOURCES and any(
             getattr(job, key) != value for key, value in values.items()
         ):
-            raise ValueError("original AUTO rack origin cannot change")
+            raise ValueError("original rack origin cannot change")
         # A drain candidate can acquire its original approved resources exactly once.
         if (
             job.state == "ACTIVE"
@@ -337,12 +363,20 @@ class RackDispatch:
             await self._release_unused_scope(session, job, actions, unix_ms(datetime.now(UTC)))
         await session.flush()
 
-    async def get_point_preparations(self, session, *, work_line_id: int, point: str):
+    async def get_point_preparations(
+        self,
+        session,
+        *,
+        work_line_id: int,
+        point: str,
+        source_kinds: tuple[str, ...] = ("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+    ):
         jobs = await self.jobs(
             session,
             work_line_id=work_line_id,
-            source_kinds=("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+            source_kinds=source_kinds,
             pending=True,
+            point=point,
         )
         eligible = []
         if await self.has_position_conflict(session, point=point):
@@ -382,6 +416,7 @@ class RackDispatch:
                     or result.outcome_revision != original.outcome_revision
                     or result.outcome != original.outcome
                     or result.position_observation != original.position_observation
+                    or (job.origin.source_kind in XRAY_SOURCES and not result.arrival_face_reported)
                 ):
                     valid = False
                     break
@@ -402,10 +437,13 @@ class RackDispatch:
         task_id: str | None = None,
         source_ref: str | None = None,
         pending: bool | None = None,
+        point: str | None = None,
     ) -> tuple[RackProgress, ...]:
         query = self._jobs.where(
             RackJob.work_line_id == work_line_id, RackJob.source_kind.in_(source_kinds)
         )
+        if point is not None:
+            query = query.where(RackJob.point == point)
         if source_ref is not None:
             query = query.where(RackJob.source_ref == source_ref)
         if task_id is not None:
@@ -671,6 +709,14 @@ class RackDispatch:
         )
         if not line or not line.is_enabled or line.business_code != self.owner_domain or not config:
             return False
+        if job.source_kind in XRAY_SOURCES:
+            return (
+                line.line_code == job.workline_code
+                and line.position_bindings.get("RETURN_RACK") == job.point
+                and not await self.has_conflicting_responsibility(
+                    session, point=job.point, rack_id=job.rack_id, exclude_job_id=job.id
+                )
+            )
         if job.source_kind in AUTO_SOURCES and job.workline_code != line.line_code:
             return False
         if job.source_kind in COARSE_SOURCES:
@@ -762,15 +808,17 @@ class RackDispatch:
         job = await self._job(session, job_id, lock=True)
         if not job or job.state == "CLOSED_BY_SCOPE":
             return None
-        if kind not in TEMPLATES[job.source_kind]:
+        if kind not in _templates(job):
             return None
-        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and face is not None:
+        if job.source_kind in XRAY_SOURCES and face not in ("A", "B"):
+            return None
+        if job.source_kind in STRICT_SOURCES and face is not None:
             try:
                 validate_face(face)
             except ValueError:
                 return None
-        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and (
-            kind not in TEMPLATES[job.source_kind] or (kind == "ENTER" and face != job.initial_face)
+        if job.source_kind in STRICT_SOURCES and (
+            kind not in _templates(job) or (kind == "ENTER" and face != job.initial_face)
         ):
             return None
         actions = await self._actions(session, job, lock=True)
@@ -801,7 +849,10 @@ class RackDispatch:
                 return (
                     last.id
                     if (last.kind, last.target, last.target_face) == (kind, target, face)
-                    and (job.source_kind not in AUTO_SOURCES or last.source_ref == source_ref)
+                    and (
+                        job.source_kind not in (*AUTO_SOURCES, *XRAY_SOURCES)
+                        or last.source_ref == source_ref
+                    )
                     else None
                 )
             if kind != "ROTATE" or not applied:
@@ -820,7 +871,7 @@ class RackDispatch:
         return action.id
 
     async def _move(self, session, job, actions, kind, source_ref, target, face):
-        template = TEMPLATES[job.source_kind][kind]
+        template = _templates(job)[kind]
         source = (
             {"kind": "RACK", "location_code": job.rack_id} if kind == "ENTER" else _point(job.point)
         )
@@ -853,8 +904,8 @@ class RackDispatch:
     @staticmethod
     def _auto_move_matches(job, action):
         return (
-            action.kind in TEMPLATES[job.source_kind]
-            and action.template == TEMPLATES[job.source_kind][action.kind]
+            action.kind in _templates(job)
+            and action.template == _templates(job)[action.kind]
             and action.caller == job.caller
             and action.source
             == (
@@ -867,10 +918,8 @@ class RackDispatch:
         )
 
     async def _bind_move(self, session, job, action):
-        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and not self._auto_move_matches(
-            job, action
-        ):
-            raise ValueError("original AUTO rack move mismatch")
+        if job.source_kind in STRICT_SOURCES and not self._auto_move_matches(job, action):
+            raise ValueError("original rack move mismatch")
         caller = _caller(action)
         args = dict(
             client_request_id=action.client_request_id,
@@ -941,7 +990,7 @@ class RackDispatch:
             or result.kind != ("RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE")
         ):
             return None
-        if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES) and (
+        if job.source_kind in STRICT_SOURCES and (
             not self._auto_move_matches(job, action)
             or result.frozen
             != {
@@ -975,7 +1024,7 @@ class RackDispatch:
             and action.source == {"kind": "RACK", "location_code": job.rack_id}
             and action.target == _point(job.point)
             and action.caller == job.caller
-            and action.template == TEMPLATES[job.source_kind]["ENTER"]
+            and action.template == _templates(job)["ENTER"]
             and result.frozen
             == {
                 "kind": "RACK_MOVE",
@@ -985,8 +1034,7 @@ class RackDispatch:
                 "target": action.target,
                 **(
                     {}
-                    if job.source_kind in (*AUTO_SOURCES, *COARSE_SOURCES)
-                    and action.target_face is None
+                    if job.source_kind in STRICT_SOURCES and action.target_face is None
                     else {"target_face": action.target_face}
                 ),
             }
@@ -1213,6 +1261,12 @@ class RackDispatch:
                 )
             ):
                 action.phase, reason = "REVIEW", "POSITION_CONFLICT"
+            elif (
+                job.source_kind in XRAY_SOURCES
+                and outcome["status"] == "SUCCEEDED"
+                and not result.arrival_face_reported
+            ):
+                action.phase, reason = "REVIEW", "ARRIVAL_FACE_UNPROVED"
             else:
                 action.phase = "APPLIED"
         if reason is None:
@@ -1471,7 +1525,8 @@ class RackDispatch:
                 and move.outcome["status"] in ("FAILED", "CANCELLED")
                 # Coarse ENTER still owns the original failed move while awaiting resolution.
                 and not (
-                    job.source_kind == "COARSE_INCOMING" and move.outcome["status"] == "FAILED"
+                    job.source_kind in ("COARSE_INCOMING", *XRAY_SOURCES)
+                    and move.outcome["status"] == "FAILED"
                 )
                 and known_demand
                 and demand.state in ("CONTINUE", "NONE")
@@ -1689,7 +1744,7 @@ class RackDispatch:
             or ready.kind != "DEPARTURE_DECIDE"
             or ready.phase != "READY"
             or not ready.decision
-            or action.template != TEMPLATES[job.source_kind]["DEPART"]
+            or action.template != _templates(job)["DEPART"]
             or action.source != _point(job.point)
             or action.target_face is not None
             or action.caller != job.caller
@@ -1776,7 +1831,7 @@ async def pending_message_references(session, *, candidate_ids):
         .join(RackAction, RackAction.job_id == RackJob.id)
         .where(
             RackJob.pending.is_(True),
-            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN"))
+            RackJob.source_kind.in_(("ROLLER_ORDINARY", "ROLLER_DRAIN", *XRAY_SOURCES))
             | (
                 (RackJob.owner_domain == "coarse_sorting") & RackJob.source_kind.in_(COARSE_SOURCES)
             ),

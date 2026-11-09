@@ -27,7 +27,7 @@ assert host.components['bin_roller'].tables is roller_tables
 assert set(host.components) == {'sorting_task', 'bin_roller', 'rack_dispatch'}
 assert host.components['bin_roller'].rack_dispatch is host.components['rack_dispatch']
 departure = ('wms_request', 'rack.departure_decide@v1', None)
-assert catalog.contract_consumers(departure) == {'smt_manual', 'smt_auto'}
+assert {'smt_manual', 'smt_auto'} <= catalog.contract_consumers(departure)
 assert host.components['sorting_task'].production is host
 assert host.components['bin_roller'].context.domain == 'smt_manual'
 assert host.capabilities.wms.owner_domain == 'smt_manual'

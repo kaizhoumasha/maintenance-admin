@@ -47,6 +47,20 @@ jobs:
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - name: Quiesce background maintenance in the disposable PostgreSQL service
+        env:
+          TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$TEST_POSTGRES_CONTAINER" psql -X -U admin -d enterprise_backend_test \
+            -v ON_ERROR_STOP=1 -c 'ALTER SYSTEM SET autovacuum = off' -c 'SELECT pg_reload_conf()'
+          for attempt in {1..10}; do
+            if test "$(docker exec "$TEST_POSTGRES_CONTAINER" psql -XAt -U admin \
+              -d enterprise_backend_test -c 'SHOW autovacuum')" = off; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
       - name: Prepare isolated migration stores
         run: |
           uv run python - <<'PY'

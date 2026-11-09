@@ -21,7 +21,7 @@ from app.models import Menu, ReliableMessage, TransportTask
 from app.reliable import InvalidMessage
 from tests.helpers import message_history_view
 
-from .helpers import counts
+from .helpers import counts, frozen_requests
 
 SCENARIOS = ["enter_rack", "rotate_rack", "depart_rack"]
 
@@ -284,13 +284,14 @@ async def test_steps_of_one_cycle_share_a_local_group_key_that_never_reaches_the
         await other.enter(session, client_request_id=str(uuid7()), target=RackPosition("P1"))
         await session.commit()
     async with rig.factory() as session:
-        tasks = list(await session.scalars(select(TransportTask).order_by(TransportTask.id)))
-        from tests.helpers import read_history_body
-
-        raw = [
-            await read_history_body(session, identity)
-            for identity in await session.scalars(select(ReliableMessage.request_record_id))
-        ]
+        tasks = list(
+            await session.scalars(
+                select(TransportTask)
+                .where(TransportTask.workline_id == caller.workline_id)
+                .order_by(TransportTask.id)
+            )
+        )
+        raw = await frozen_requests(session, rig)
     assert [t.cycle_id for t in tasks] == [cycle.cycle_id, cycle.cycle_id, other.cycle_id]
     assert all(cycle.cycle_id.encode() not in body for body in raw)
     assert all("cycle_id" not in json.loads(body)["data"] for body in raw)
@@ -309,7 +310,13 @@ async def test_a_later_step_can_rebuild_the_handle_with_the_saved_group_key(
         await first.enter(session, client_request_id=str(uuid7()), target=RackPosition("P1"))
         await later.depart(session, client_request_id=str(uuid7()), target=Zone("Z1"))
         await session.commit()
-        keys = set(await session.scalars(select(TransportTask.cycle_id)))
+        keys = set(
+            await session.scalars(
+                select(TransportTask.cycle_id).where(
+                    TransportTask.workline_id == caller.workline_id
+                )
+            )
+        )
     assert keys == {first.cycle_id}
 
 
@@ -330,7 +337,13 @@ async def test_replay_under_a_rebuilt_handle_keeps_the_first_group_key(
             == original
         )
         await session.commit()
-        keys = list(await session.scalars(select(TransportTask.cycle_id)))
+        keys = list(
+            await session.scalars(
+                select(TransportTask.cycle_id).where(
+                    TransportTask.workline_id == caller.workline_id
+                )
+            )
+        )
     assert keys == [first.cycle_id]
 
 

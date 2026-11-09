@@ -15,7 +15,7 @@ from datetime import timedelta
 from enum import StrEnum
 from functools import cached_property
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from app.integrations.registration import (
     RegistrationSource,
@@ -56,6 +56,7 @@ class Registered:
     ttl: timedelta | None
     registration_source: RegistrationSource
     requires_business_owner: bool = False
+    decision_data: TypeAdapter | None = None
 
     @cached_property
     def payload_schema(self) -> dict:
@@ -89,6 +90,7 @@ def request_operation(
     title: str | None = None,
     ttl: timedelta | None = None,
     requires_business_owner: bool = False,
+    decision_data: TypeAdapter | None = None,
 ):
     def register(cls):
         source = operation_source(name, cls)
@@ -104,7 +106,13 @@ def request_operation(
             )
         if not (isinstance(cls, type) and issubclass(cls, RequestPayload)):
             raise TypeError(f"{source.location}: 修复: 装饰 RequestPayload 模型")
-        item = Registered(name, endpoint, cls, title, ttl, source, requires_business_owner)
+        if decision_data is not None and (
+            endpoint is not Endpoint.DECISIONS or not isinstance(decision_data, TypeAdapter)
+        ):
+            raise TypeError(f"{source.location}: decision_data requires a decisions TypeAdapter")
+        item = Registered(
+            name, endpoint, cls, title, ttl, source, requires_business_owner, decision_data
+        )
         if (example := item.example) is not None:
             try:  # 示例不合法要在导入期暴露,不能等到有人打开 Swagger
                 cls.model_validate_json(json.dumps(example, allow_nan=False))

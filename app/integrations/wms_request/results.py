@@ -1,10 +1,12 @@
 """Read-only original-message results; no delivery or business-completion side effects."""
 
 from dataclasses import dataclass
+from datetime import UTC
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clock import unix_ms
 from app.core.strict_json import json_object
 from app.integrations.wms_envelope import (
     outgoing_message,
@@ -34,6 +36,7 @@ class WmsRequestResult:
     response_code: str | None = None
     response_timestamp: int | None = None
     response_data: dict | None = None
+    response_received_at_ms: int | None = None
 
 
 async def get_result(
@@ -63,6 +66,9 @@ async def get_result(
         return WmsRequestResult(**identity, availability="INVALID")
     registered = lookup(operation)
     adapter = ADAPTERS[PROTOCOL_OF[registered.endpoint]] if registered else None
+    received_at = row["terminal_occurred_at"]
+    if received_at is not None and received_at.tzinfo is None:
+        received_at = received_at.replace(tzinfo=UTC)
     return WmsRequestResult(
         **identity,
         availability="FOUND",
@@ -71,5 +77,6 @@ async def get_result(
         delivery_terminal=row["status"] in {"DONE", "FAILED", "EXPIRED", "ABANDONED"},
         delivery_uncertain=row["delivery_uncertain"],
         fail_reason=row["fail_reason"],
+        response_received_at_ms=unix_ms(received_at) if received_at is not None else None,
         **stored_response(outgoing_message(row), row, adapter),
     )

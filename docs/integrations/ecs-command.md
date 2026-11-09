@@ -28,7 +28,7 @@ Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_
 
 configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.state.ecs_commands，保留原WMS映射并拒绝重复/冲突装配。主应用lifespan将统一ECS逻辑通道加入原有Sender配置，并关联同一个outbox；启动完成前不可调用create，不再启动第二个Sender。local Swagger由框架自动调用联调装配；可信启动模块可按[角色接入](ecs-roles.md)一次组合正式角色与调试路由，不重复装配服务。低层EcsCommands(outbox, target, routes, annexes)仍供独立运行时/测试注入使用，不是主应用的手工配置步骤。
 
-自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。当前快照仅接受已实现的 HOLD，快照 RETRY 明确拒绝；STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
+自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。正式 X-Ray 命令冻结为 RETRY_ACK_TIMEOUT，其余命令沿用原快照的 HOLD，快照 RETRY 仍拒绝；STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
 
 实际接入时按[真实ECS接入清单](ecs-acceptance-checklist.md)确认参数合同、错误矩阵、跨重启去重及保留期、窗口、路由授权和回调来源控制。本文不提供真实地址或开箱即用的设备命令。
 
@@ -42,6 +42,8 @@ owner 来自受信任业务装配，不能由外部请求任意选择；没有�
 同业务调用键、同原输入返回旧命令；不同输入冲突。创建先查旧命令，再解析路由并生成一次 UUIDv7、时间和原始请求。回滚不留下命令/出站消息。技术重试保持 command_code、时间、字节和冻结 origin，不按设备历史失败封锁新独立意图。
 
 `get_command(session, owner=..., command_code=...)` 和 `get_by_call(session, owner=..., call_key=...)` 返回只读 DTO，区分 command status、delivery status、实际 ACK、已应用结果、暂停原因和对账标记。查询不返回可靠层 ORM。消费方须在自己的事务中保证一次推进：一动作一命令、一个固定消费者、同库副作用时，可将原命令关联、冻结业务绑定/版本和消费标记合入业务动作行，通过受保护的WAITING_RESULT→SUCCEEDED/FAILED转换完成；多消费者等场景仍需按实际需求设计各自消费唯一性。不能凭 ACK/DONE 推断物理完成，也不自动撤销已应用业务。
+
+`is_delivery_proven_unaccepted(session, owner=..., command_code=...)` 在调用方的一致性读事务中检查原命令及其投递证据。只有原投递已终止，且证据证明从未开始投递或每一次尝试均明确未接纳，才返回 `True`。证据缺失、仍在投递、可能已接纳或待对账均返回 `False`。返回值只证明原命令的投递情况，新动作仍须满足当前业务许可。
 
 调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。通用 Status 查询已实现，所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，详见[通用 Status](ecs-status.md)；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
 
@@ -133,7 +135,7 @@ Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久
 
 新旧owner同键同输入同规范化地址只读找回原身份，异输入/换址409；并发唯一赢家返回后、提交前比较持久origin，输家零发送。编号、字节、合同、窗口及deadline冻结，命令/outbox/快照仍同事务，URL/策略版本不进入调用键或wire。历史Result继续依赖原附录和发送证据，不以通用合同宽松解释旧严格结果；尚无持久结果证据且缺原附录时503、零副作用；已有持久重复结果沿用原响应。不承诺未发送/已围栏命令的Result可应用。
 
-专用权限只管新登记，撤权不暂停既有可识别v3命令。停止后续发送须停止全部相关Sender并防止自动拉起；ECS/WMS共享主应用lifespan，停宿主影响两者出站及HTTP/Result。有界关闭、在途可能交付、shutdown unconfirmed、租约中断及合法迟到结果规则不变。恢复覆盖首次未发送、NOT_SENT及合法503/有效429判定NOT_RECEIVED后的PENDING，保留原退避、Retry-After、next_attempt_at、计数/证据和deadline；到期前不发，超期按原TTL，不重算或延长。UNKNOWN/HELD与无效/超限Retry-After不因重启、换址/换键或Status恢复而解封。
+专用权限只管新登记，撤权不暂停既有可识别v3命令。停止后续发送须停止全部相关Sender并防止自动拉起；ECS/WMS共享主应用lifespan，停宿主影响两者出站及HTTP/Result。有界关闭、在途可能交付、shutdown unconfirmed、租约中断及合法迟到结果规则不变。恢复覆盖首次未发送、NOT_SENT、合法503/有效429判定NOT_RECEIVED，以及符合下文条件的 X-Ray ACK 读取超时后的PENDING，保留原退避、Retry-After、next_attempt_at、计数/证据和deadline；到期前不发，超期按原TTL，不重算或延长。UNKNOWN/HELD与无效/超限Retry-After不因重启、换址/换键或Status恢复而解封。
 
 自动化测试通过现有夹具保护测试库和网络出口，直接断言非用例目标TCP零调用；这些不是Swagger或业务接入配置。新命令仍使用W=300秒，两条许可、两个P2、P3及消费竞争覆盖保留，测试通过不证明供应商D或跨重启保证。
 
@@ -151,7 +153,7 @@ Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久
 
 ## 发送与结果
 
-POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已接纳；合法 503、有效 429 和可证明 NOT_SENT 可按原身份退避。UNKNOWN、409 身份冲突或租约中断进入 HELD，不自动重放；HELD 不支持普通 resume，不由 TTL 或终态保留清理。快照公共 hold/settle 必须注入原冻结协议的生命周期；ECS 裸 settle 在没有可应用的持久结果时被拒绝，不能凭基础设施 API 伪造接纳。STATIC 的空配置 settle 保持原行为。ECS Retry-After 不截短，超本地等待范围暂停；WMS 保留原截短与重试规则。
+POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已接纳；合法 503、有效 429 和可证明 NOT_SENT 可按原身份退避。收到 409 身份冲突、租约中断或出现未知交付时，通常进入 HELD。冻结为 RETRY_ACK_TIMEOUT 的正式 X-Ray 命令，在请求发出后等待读取 ACK 超时且未收到状态码或仅收到 200 时，在原 300 秒窗口内沿用原命令号、原报文字节和原地址退避重发。后续明确未接纳的响应不覆盖较早的未知尝试。窗口到期或后续响应要求停止发送时，保留原命令，等待可应用的原 Result；HELD 不支持普通 resume，不由 TTL 或终态保留清理。快照公共 hold/settle 必须注入原冻结协议的生命周期；ECS 裸 settle 在没有可应用的持久结果时被拒绝，不能凭基础设施 API 伪造接纳。STATIC 的空配置 settle 保持原行为。ECS Retry-After 不截短，超本地等待范围暂停；WMS 保留原截短与重试规则。
 
 
 门禁提交当前尝试依据后才发 HTTP；首次或后续尝试仍可能交付时，Result 可先于 ACK 应用。历次均明确未接纳且没有新在途尝试的结果只保存冲突。提前 Result 封锁并撤销租约；封锁不由迟到结果解除。迟到响应只保存证据与必要的对账标记，不降级已应用结果。

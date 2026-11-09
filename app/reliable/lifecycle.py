@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.diagnostics import log_exception
 from app.models.reliable import ReliableMessage
 
-from .types import MessageStatus, VerdictKind
+from .types import RETRY_ACK_TIMEOUT, MessageStatus, VerdictKind
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +208,23 @@ class SnapshotTransactions:
 
     async def apply(self, session, port, context, row, claim, outcome):
         outcome = self._interruption(row, outcome)
+        snapshot = claim.message.delivery_snapshot
+        if (
+            snapshot
+            and snapshot.unknown_policy == RETRY_ACK_TIMEOUT
+            and row.delivery_uncertain
+            and (
+                outcome.status in (MessageStatus.EXPIRED, MessageStatus.FAILED)
+                or outcome.pause_reason == "CONTRACT_NON_COMPLIANT"
+            )
+        ):
+            # Stop sending without treating a prior uncertain attempt as rejected.
+            outcome = replace(
+                outcome,
+                status=MessageStatus.HELD,
+                fail_reason=None,
+                pause_reason="DELIVERY_UNKNOWN",
+            )
         now = self.store.clock()
         observation = await self.store.records.finished(
             session, claim=claim, outcome=outcome, at=now, late=False

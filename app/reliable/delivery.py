@@ -3,13 +3,20 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 
 from app.diagnostics import log_exception
-from app.http_client import DeliveryState, HttpClient, HttpResult, validate_request
+from app.http_client import DeliveryState, FailureKind, HttpClient, HttpResult, validate_request
 
 from .config import TargetConfig
 from .lifecycle import EvidencePersistenceError
 from .policy import retry_delay_s
 from .store import AttemptOutcome, Claim, MessageStore, utc_datetime
-from .types import FailReason, MessageStatus, ProtocolAdapter, Verdict, VerdictKind
+from .types import (
+    RETRY_ACK_TIMEOUT,
+    FailReason,
+    MessageStatus,
+    ProtocolAdapter,
+    Verdict,
+    VerdictKind,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +253,21 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                     next_attempt_at=now + timedelta(seconds=delay),
                     not_received_count=claim.not_received_count + 1,
                 )
+        elif (
+            claim.message.delivery_snapshot.unknown_policy == RETRY_ACK_TIMEOUT
+            and result.delivery_state == DeliveryState.DELIVERY_UNKNOWN
+            and result.failure_kind == FailureKind.READ_TIMEOUT
+            and result.status_code in (None, 200)
+            and claim.message.expires_at is not None
+            and (now := utc_datetime(clock())) < claim.message.expires_at
+        ):
+            outcome = AttemptOutcome(
+                MessageStatus.PENDING,
+                result=result,
+                next_attempt_at=now
+                + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, uniform)),
+                delivery_uncertain=True,
+            )
         else:
             outcome = AttemptOutcome(
                 MessageStatus.HELD,
