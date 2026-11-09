@@ -1063,6 +1063,8 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
 | target.reel_thickness / reel_diameter | number / 可选 | 本盘厚度为正毫米数，直径为 7／13／15 英寸。 |
 | target.reel_totalthickness | number / 可选 | 放入前已有物料总高度，非负毫米数，不是放入后的总高度。 |
 
+单层架和通箱实物由人工管理，WES 的调度对象是本盘及固定箱位 A／B／C／D。现行 ECS 附录 §6.4.1 要求 `rack_id`、`bin_id` 随命令传递，WES 将它们作为 ECS 提供的固定接口映射，随原命令冻结并用于结果核对。固定映射能否随人工换箱继续使用，由 ECS 确认。若 ECS 支持仅按站点及箱位定位，可共同更新命令与 Result 合同，简化这两个字段。
+
 四个 reel_* 控制字段均可选，本通箱样例均省略。不提供时 ECS 必须具备已冻结的控制配方或可信设备参数；实际所需参数无法确定时明确未接纳，不猜测、不拿上一盘缓存或用 0 补缺。
 
 **推进条件。** WES 保存原随机箱位及完整目标。ECS 能安全保留原取放时，持久接纳 `PUT_TO_BIN`。满箱、缺箱等可恢复的等待由工人在设备端处理。条件恢复后，ECS 核对本盘、原目标及实时安全条件，继续原动作，并按原 `command_code` 回报实际终态。WES 保留原任务并等待 Result，沿用原箱位。
@@ -1669,7 +1671,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | ECS 服务 | `http://10.24.209.33:18080`，Status 查询路径为 `/api/v1/device/status`。 |
 | X-Ray、出口机械臂 | 工作线绑定键为 `XRAY`、`XRAY_OUTPUT_ARM`，设备编码示例为 XRAY01、ARM01。 |
 | 机内和正常出口 | 机内封闭且无人工介入位。正常出口为机械臂固定取盘源。机内保持及安全互锁由 ECS 负责，等待异常使用最小排料请求，正常出口实际可取使用 MATERIAL_ARRIVED。 |
-| 通箱中转架 | 四个位置 A/B/C/D，WES 创建取放意图时等概率随机选一位并持久保存。用 `XRAY_TRANSIT_TARGETS` 按 `workline_code → A/B/C/D → target` 配置 2.11.2 定义的七个固定目标字段。静态映射不填写随实际物料变化的 reel_* 控制字段。未配置时保留本盘选位及出口等待，ECS 负责实际可放性和安全互锁。 |
+| 通箱中转架 | 工作线可用 `TRANSIT_BIN` 登记单层架工作位。四个位置 A/B/C/D，WES 创建取放意图时等概率随机选一位并持久保存。用 `XRAY_TRANSIT_TARGETS` 按 `workline_code → A/B/C/D → target` 配置 2.11.2 定义的七个固定目标字段。静态映射不填写随实际物料变化的 reel_* 控制字段。未配置时保留本盘选位及出口等待，ECS 负责实际可放性和安全互锁。 |
 | 五层退料架 | 工作线绑定 `RETURN_RACK`。用 `XRAY_RETURN_RACKS` 按 workline_code 配置 `location_code`（与绑定一致）、ECS `location_id`、`templates`（ENTER、ROTATE、DEPART）及 `slots`（A/B → slot_id → rack_layer、rack_column）。原搬运结果须实际报告匹配的架号、工作位和面向。 |
 | 模板 | 使用 ECS／X-Ray 本地模板和 WMS 原十变量。模板实物、标识及变量长度属于设备配置。 |
 | 诊断 | Status 供观察设备状态。逐盘推进依赖已关联的原 Event、Result 和业务决定。 |
@@ -1692,6 +1694,59 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 ## 5. 本地开发验收
 
 使用隔离配置及模拟对端，通过公共入口验证以下场景。验收结果另行记录。
+
+### 5.1 X-Ray 专用 Mock WMS
+
+仅在 `ENVIRONMENT=local` 启用。复用现有 `POST /api/v1/wes/decisions`，在 Mock WMS 模式为 `accept` 时按下表返回。匹配以扫描到的完整原码为准，保留原始大小写和内容。
+
+| 入料 | 清点与贴标 | 正常出口 |
+| --- | --- | --- |
+| `PTEST-PART-01,Q3000,MTEST-MPN-01,D260101,LTEST-LOT-01,STEST-SERIAL-01` | 清点，标签 `QQTYPC` 取 ECS 上报的 `actual_qty`，CCD 核对本盘测试 `SPKG`。 | 五层退料架，使用第一盘配置的架位。 |
+| `PTEST-PART-02,Q50000,MTEST-MPN-02,D260102,LTEST-LOT-02,STEST-SERIAL-02` | 清点，标签数量同样使用 ECS 实测值。CCD 读错盘码或未读出时返回 `NG`。 | 同架同面，使用第二盘配置的架位。 |
+| 其他有效原码 | 免清点。 | 通箱，WES 按 `XRAY_TRANSIT_TARGETS` 选位。 |
+
+`XRAY_WMS_MOCK_TARGETS` 是 JSON 对象，默认空。结构为 `workline_code → 完整原码 → RackAccept`，每个 `RackAccept` 使用 [2.9](#xray-target) 的 `ACCEPT / RACK_SLOT` 报文 `data`。两盘使用同架同面的两个不同空位，工作位和坐标须与 `XRAY_RETURN_RACKS` 一致，盘径和厚度按实物填写。使用搬运架时，空工作位先返回 `REPLENISH_REQUIRED`，有在途准备时返回 `WAIT`。RackDispatch 确认原搬运任务已完成且指定架号、工作位、面向均匹配后，新的 Operation 才返回架位。
+
+现场已摆放测试架时，在该联调工作线的 `XRAY_RETURN_RACKS` 配置中填写 `fixed_test_rack` 为实物架号，仅配置当前可用的一面及格位，省略搬运模板。WES 核对指定架号、工作位、面向、格位及公共搬运责任后直接向 ECS 下发 `PUT_TO_RACK`。ECS 核验实际可放性并回传原放盘结果。固定架仅适用于启用本地 X-Ray Mock 的工作线。
+
+#### XRAY-DEMO 固定测试数据
+
+合成固定值收录于 [专用 MOCK 配置](../../deploy/xray-wms-mock.example.env)，仅用于 `XRAY-DEMO` 接口联调。五层固定架为 `DEMO-RACK`，WES 工作位和 MOCK 的 `PUT_TO_RACK.target.location_id` 均为 `DEMO-RACK-POINT`。厚度和格位坐标为测试输入。
+
+| 完整原码 | `reel_diameter` | `reel_thickness` | `rack_face` | `slot_id` | `rack_layer` | `rack_column` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `PTEST-PART-01,Q3000,MTEST-MPN-01,D260101,LTEST-LOT-01,STEST-SERIAL-01` | 7 | 8.1 mm | A | A-03 | 2 | 3 |
+| `PTEST-PART-02,Q50000,MTEST-MPN-02,D260102,LTEST-LOT-02,STEST-SERIAL-02` | 7 | 9.2 mm | A | A-04 | 2 | 4 |
+
+| 接口 | 联调值 |
+| --- | --- |
+| 出口臂 | `DEMO-OUTPUT-ARM`。使用现场 ECS 时，以设备 Status 登记该编码，命令与 Result 沿用同一编码。 |
+| 通箱 `PUT_TO_BIN` | 固定 `location_id=DEMO-BIN-POINT`、`rack_id=DEMO-BIN-POINT`，A/B/C/D 各用 `DEMO-BIN-POINT-A` / `DEMO-BIN-POINT-B` / `DEMO-BIN-POINT-C` / `DEMO-BIN-POINT-D` 作为 `bin_id`。通箱实物及换箱由人工管理。 |
+| 通箱固定字段 | `location_type=ONE_LAYER_RACK`、`bin_type="1"`、`bin_cell_location=8`，`bin_location` 为 WES 选定的 A/B/C/D。ECS 的成功 Result 按原目标回报 `actualTarget`。 |
+| ECS 回调 | WES 联调地址为 `http://wes.example.test`，Event 发送到 `/api/v1/callback/event`，Result 发送到 `/api/v1/callback/result`。 |
+
+该配置只在 `XRAY_WMS_MOCK_TARGETS` 登记 `XRAY-DEMO`。现场配置独立维护，实际搬运沿用原 WMS。
+
+共享联调环境在 `RELIABLE_TARGETS.targets` 追加以下两个专用目标，`base_url` 使用 WES API 的内网地址。只有 `XRAY_WMS_MOCK_TARGETS` 中登记的工作线会把四个 X-Ray 决策和 `put_report`、`ng_report` 发往 Mock。其他工作线、业务及 Transport 继续使用原目标。已登记的请求按原目标完成恢复。
+
+```json
+{
+  "xray-mock-wms-decisions": {
+    "protocol": "wms-decisions",
+    "base_url": "http://api:8000",
+    "explicit_only": true
+  },
+  "xray-mock-wms-facts": {
+    "protocol": "wms-facts",
+    "base_url": "http://api:8000",
+    "explicit_only": true
+  }
+}
+```
+
+联调 API 保持单 worker，原决定重放和测试架位占用记录保存在进程内。专用决策端验证 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。启停 MOCK 或改动架位参数前，先收口该线的在途料盘和报告。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
+
+### 5.2 回归场景
 
 | 场景 | 核对重点 |
 | --- | --- |
