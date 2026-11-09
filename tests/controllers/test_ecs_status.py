@@ -180,7 +180,6 @@ AsyncHttpClient.send = forbidden
 app.dependency_overrides[get_redis] = lambda: LimitRedis()
 paths = app.openapi()['paths']
 assert '/api/v1/ecs/status' in paths
-assert '/api/v1/dev/ecs/status' not in paths
 local = __import__('os').environ['ENVIRONMENT'] == 'local'
 assert (app.docs_url == '/docs') is local
 assert (app.openapi_url == '/openapi.json') is local

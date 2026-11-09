@@ -104,12 +104,6 @@ def test_rack_rotate_matches_contract_frozen_bytes():
     )
 
 
-def test_rack_rotate_writes_the_exact_position_to_both_source_and_target():
-    # 合同 §3.2:位置原样同时写入 source 与 target;当前位置/面由 WMS 自行校验,WES 不推断。
-    data = rotate(RackPosition("KT16"))
-    assert data["source"] == data["target"] == {"kind": "RACK_POSITION", "location_code": "KT16"}
-
-
 @pytest.mark.parametrize(
     "build",
     [

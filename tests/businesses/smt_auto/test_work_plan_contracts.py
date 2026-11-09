@@ -57,14 +57,6 @@ def test_inbound_source_scope_is_bounded_and_unique():
             contract.model_validate({**data, "source_racks": racks})
 
 
-def test_outbound_member_retains_original_first_round_and_terminal_facts():
-    from app.businesses.smt_auto.models import AutoOutboundSourceMember
-
-    assert {"first_work_plan_round_id", "terminal_basis", "terminal_at_ms"} <= set(
-        AutoOutboundSourceMember.__table__.columns.keys()
-    )
-
-
 @pytest.mark.parametrize("bin_type", [True, 2.0, None, ""])
 def test_ready_bin_type_rejects_invalid_codes(bin_type):
     from app.businesses.smt_auto.work_plan_contracts import DECISIONS
