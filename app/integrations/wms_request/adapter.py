@@ -1,9 +1,11 @@
 """Classify common decisions and facts envelopes and declared decision data."""
 
 import re
+from hmac import digest
 
 from pydantic import ValidationError
 
+from app.core import get_settings
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import HttpRequest, HttpResult
 from app.integrations.wms_envelope import UNKNOWN, read_ack
@@ -11,6 +13,15 @@ from app.reliable import FailReason, OutgoingMessage, Verdict, VerdictKind
 from app.reliable.config import TargetConfig
 
 from .operation import Endpoint, lookup
+
+MOCK_DECISIONS_TARGET = "xray-mock-wms-decisions"
+MOCK_SIGNATURE_HEADER = "x-wes-mock-signature"
+
+
+def mock_signature(body: bytes) -> bytes:
+    secret = get_settings().JWT_SECRET_KEY.encode()
+    return digest(secret, b"xray-wms-mock\0" + body, "sha256").hex().encode()
+
 
 CONFLICT_REASONS = frozenset(
     {
@@ -41,10 +52,13 @@ class WmsEndpointAdapter:
             or registered.endpoint != self.endpoint
         ):
             raise ValueError("frozen request does not match this endpoint")
+        headers = (("accept", "application/json"), ("content-type", "application/json"))
+        if target.explicit_only and target.name == MOCK_DECISIONS_TARGET:
+            headers += ((MOCK_SIGNATURE_HEADER, mock_signature(message.request_raw).decode()),)
         return HttpRequest(
             method="POST",
             path=self.path,
-            headers=(("accept", "application/json"), ("content-type", "application/json")),
+            headers=headers,
             body=message.request_raw,
         )
 

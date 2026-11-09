@@ -7,9 +7,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, inspect, select
 
 from app.businesses.coarse_sorting import composition
+from app.database import SCHEMA
 from app.integrations.ecs_command import CommandOwner
 from app.models import Device, IntegrationExchange, WorkLine
 from app.tasks.reliable_tasks import run_cleanup
@@ -355,13 +356,27 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
         )
 
         def remigrate(connection):
-            with Operations.context(MigrationContext.configure(connection)):
+            source_kind = next(
+                check
+                for check in inspect(connection).get_check_constraints(
+                    "rack_dispatch_job", schema=SCHEMA
+                )
+                if check["name"] == "rack_dispatch_job_source_kind_check"
+            )
+            with Operations.context(MigrationContext.configure(connection)) as operations:
                 rack_migration["downgrade"]()
                 ng_migration["downgrade"]()
                 migration["downgrade"]()
                 migration["upgrade"]()
                 ng_migration["upgrade"]()
                 rack_migration["upgrade"]()
+                # The historical upgrade omits sources introduced by later migrations.
+                operations.drop_constraint(
+                    source_kind["name"], "rack_dispatch_job", type_="check", schema=SCHEMA
+                )
+                operations.create_check_constraint(
+                    source_kind["name"], "rack_dispatch_job", source_kind["sqltext"], schema=SCHEMA
+                )
 
         async with engine.begin() as connection:
             await connection.run_sync(remigrate)

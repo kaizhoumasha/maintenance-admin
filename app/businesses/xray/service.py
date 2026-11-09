@@ -14,6 +14,7 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import EventApplicationRef
 from app.integrations.ecs_command.service import CommandOwner
+from app.integrations.wms_request.adapter import MOCK_DECISIONS_TARGET
 from app.models import Device, WorkLine
 from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 from app.services.workline_service import business_configuration_issue
@@ -42,15 +43,19 @@ from .models import RackPreparation, Reel, ReelEvent, ReelOperation
 OWNER = CommandOwner(DEFINITION.code)
 COMMANDS = {"ENTRY": ApplyPkgDecision, "COUNT": ApplyCountDecision, "VERIFY": ApplyVerifyDecision}
 TIMEOUTS = {"COUNT_REQUIRED": 70000, "BYPASS_COUNT": 25000, "NG": 20000}
+MOCK_FACTS_TARGET = "xray-mock-wms-facts"
 logger = logging.getLogger(__name__)
 
 
 class XrayService:
-    def __init__(self, capabilities: Capabilities, transit_targets, requests, racks):
+    def __init__(
+        self, capabilities: Capabilities, transit_targets, requests, racks, mock_worklines=()
+    ):
         self.capabilities = capabilities
         self.transit_targets = transit_targets
         self.requests = requests
         self.racks = racks
+        self.mock_worklines = frozenset(mock_worklines)
         self.components = {"rack_dispatch": racks.dispatch}
         self.clock = lambda: datetime.now(UTC)
 
@@ -290,6 +295,7 @@ class XrayService:
             "RACK_CONFIGURATION_CHANGED",
             "RACK_POSITION_CONFLICT",
             "RACK_SLOT_MISMATCH",
+            "FIXED_TEST_RACK_TARGET_MISMATCH",
             "PUT_UNRESOLVED",
         }:
             logger.warning(
@@ -557,7 +563,12 @@ class XrayService:
             target = None
         else:
             reason, rack = await self.racks.target(
-                session, reel, point, intent, unix_ms(self.clock())
+                session,
+                reel,
+                point,
+                intent,
+                unix_ms(self.clock()),
+                barcode=source.payload["barcode"],
             )
             if reason == "RACK_REDECIDE":
                 return await self._request_decision(session, reel, "OUTLET", source, intent, point)
@@ -669,7 +680,12 @@ class XrayService:
         rack_basis=None,
     ):
         identity = str(uuid7())
-        reference = await self.capabilities.wms.send(session, payload, operation_id=identity)
+        explicit_target = None
+        if reel.workline_code in self.mock_worklines:
+            explicit_target = MOCK_FACTS_TARGET if stage == "REPORT" else MOCK_DECISIONS_TARGET
+        reference = await self.capabilities.wms.send(
+            session, payload, operation_id=identity, explicit_target=explicit_target
+        )
         session.add(
             ReelOperation(
                 operation_id=identity,

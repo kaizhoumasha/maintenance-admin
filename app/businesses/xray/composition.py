@@ -31,6 +31,8 @@ COMPONENTS = (RACK_DISPATCH,)
 def build_service(capabilities):
     from app.businesses._components.rack_dispatch.service import RackDispatch
     from app.core import get_settings
+    from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+    from app.integrations.wms_request.adapter import MOCK_DECISIONS_TARGET
 
     from .contracts import BinActual
     from .racks import RackPoint, XrayRacks
@@ -40,7 +42,7 @@ def build_service(capabilities):
     from .request import inbound_xray_put_report_v1 as put_report
     from .request import inbound_xray_put_target_decide_v1 as put_target_decide
     from .request import inbound_xray_verify_decide_v1 as verify_decide
-    from .service import XrayService
+    from .service import MOCK_FACTS_TARGET, XrayService
 
     mappings = {}
     for line, targets in get_settings().XRAY_TRANSIT_TARGETS.items():
@@ -58,11 +60,17 @@ def build_service(capabilities):
         "PUT_REPORT": (put_report.OPERATION, put_report.PutReport),
         "NG_REPORT": (ng_report.OPERATION, ng_report.NgReport),
     }
+    settings = get_settings()
+    mock_targets = settings.XRAY_WMS_MOCK_TARGETS if settings.ENVIRONMENT == "local" else {}
+    if mock_targets:
+        capabilities.wms.target(DECISIONS_PROTOCOL, explicit=MOCK_DECISIONS_TARGET)
+        capabilities.wms.target(FACTS_PROTOCOL, explicit=MOCK_FACTS_TARGET)
     racks = XrayRacks(
         RackDispatch(DEFINITION.code, capabilities),
         {
             line: RackPoint.model_validate(config)
-            for line, config in get_settings().XRAY_RETURN_RACKS.items()
+            for line, config in settings.XRAY_RETURN_RACKS.items()
         },
+        mock_targets,
     )
-    return XrayService(capabilities, mappings, requests, racks)
+    return XrayService(capabilities, mappings, requests, racks, mock_worklines=mock_targets)

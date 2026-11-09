@@ -88,7 +88,12 @@ def include_dev_routers(
     items = scenarios()
     if items:
         app.include_router(_submit_router(items), prefix=prefix)
-    # Mock WMS 是 Transport 协议专用的,显式挂载,不走场景自动扫描;以后别的协议要 mock 再加一行
+    if settings.XRAY_WMS_MOCK_TARGETS:
+        from app.businesses.xray.mock_wms import XrayWmsMock
+
+        app.state.xray_wms_mock = XrayWmsMock(
+            settings.XRAY_WMS_MOCK_TARGETS, settings.XRAY_RETURN_RACKS
+        )
     app.include_router(mock_wms_router, prefix=prefix)
     app.include_router(callback_router, prefix=prefix)
     app.include_router(registry_router, prefix=prefix)
