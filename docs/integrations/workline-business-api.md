@@ -21,7 +21,7 @@
 
 ## 1. 核对基线和“已存在”的含义
 
-- 本系统：`a1eccce7bf35fafb82ca408a07ff834d31324e36`（PR #28 合入 develop 后）。已有业务声明、工作线绑定、入口装配、通信与结果读取接缝；**该基线的正式业务清单为空**。当前增量已登记粗分扫码、验证及首个 MOVE_FORWARD / Result 阶段，其他业务仍按各自草案实施。
+- 本系统历史基线为 `a1eccce7bf35fafb82ca408a07ff834d31324e36`（PR #28 合入 develop 后）。该时点已有业务声明、工作线绑定、入口装配、通信和结果读取接缝，正式业务清单为空。当前公共离场的注册与消费范围见[共用离场合同](#rack-departure-confirmed-wire)。
 - wes_backend：人工业务相关文件核对到 `c45e3ca7be52ad6afc30b22e0b09406eefcb5714`。本地检查使用的 HEAD 为 `8b558912ccd04873556582b70fa62163d7f45cfe`，本次引用的人工子包与相关合同/wire 文件相对该 develop 基线无差异。
 - “参考合同”表示旧系统中有出处，不能据此宣称本系统已注册，也不能替代对端版本、设备附录和现场确认。
 - 旧文档标题中的“人工出库”不限制 `business_type`：新合同允许 MANUAL 任务区分 `inbound/outbound`，仍用同一套任务生命周期。以较新合同与 wire 为准，旧 README 的“仅出库”说明已落后。
@@ -59,14 +59,23 @@ WMS 出站路径为合同默认路径；Transport 提交路径可按其既有合
 
 不同协议的 HTTP/code 联合不同：Transport submit 不定义 `429/BUSY`；通用 WMS request 支持的组合不自动成为每个业务 operation 的合同。当前人工线 API 也不定义 BUSY，不能从通用能力推导对端接受它。
 
-### 货架离场决定的拟议共用合同
+<a id="legacy-wms-request-recovery"></a>
+### 旧 Operation 的请求恢复边界
 
-人工、粗分和自动线草案统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `workline_code`、`rack_id`、`current_location`、`current_face`；`workline_code` 为原业务保存的非空工作线编码，须与货架及工作点位上下文一致；当前位置为已确认的 `RACK_POSITION`，面向不适用或无法确认时显式为 `null`。粗分架位不涉及面向，使用 `current_face=null`；人工及自动线仍按各自业务要求核对面向。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
+历史请求及已保存的响应保留原 Operation、operation_id、时间戳、冻结正文和关联。对尚未闭合的请求，当前发送端仅在原 Operation 仍注册且与原端点匹配时，才具备按原报文继续投递的条件，仍须遵守原投递期限和恢复规则。原 Operation 未注册时，发送适配器会在发出 HTTP 前拒绝该旧报文；该拒绝无法证明对端此前是否接纳。此类未结义务须按原身份核对已有响应及对端受理事实，禁止改写旧正文或仅为绕过注册校验而换号重发。
 
-这是本系统**本方已确认的共用目标合同，严格组件声明与本地实现已完成，正式消费业务尚未注册，仍需对端签认及现场验证**。旧系统来源基线的离场 operation 带 `outbound` 前缀，且要求 `task_id` 字段存在（可为 null）；本文改名和字段裁剪不表示旧 DTO 已支持。人工、粗分及自动线采用下述同一目标合同，不增加兼容入口或自动上架私有离场接口；历史来源说明不改变第 1 节的核对基线。
+当前未注册的旧名包括 `outbound.bin.inbound_batch@v1`、`outbound.bin.return_batch@v1`、`outbound.manual_bin.work_admission_decide@v1` 和 `outbound.picking_task.prepare@v1`。现行 Operation 用于按现行合同登记的新业务意图。
+
+<a id="货架离场决定的拟议共用合同"></a>
+### 货架离场共用合同
 
 <a id="rack-departure-confirmed-wire"></a>
-#### 已确认：共用离场决定、重放与唯一搬离
+
+RackDispatch 统一使用 `rack.departure_decide@v1`，通过 `POST /api/v1/wes/decisions` 请求。`data` 仅含必填的 `workline_code`、`rack_id`、`current_location`、`current_face`；`workline_code` 为原业务保存的非空工作线编码，须与货架及工作点位上下文一致；当前位置为已确认的 `RACK_POSITION`，面向不适用或无法确认时显式为 `null`。粗分架位不涉及面向，使用 `current_face=null`；人工及自动线仍按各自业务要求核对面向。任务和计划关联由各业务内部保存，不加入此共用请求。完整 READY / WAIT 示例见[粗分离场决定](coarse-sorting-api-draft.md#wms-rack-departure)。
+
+当前正式合同由 RackDispatch 唯一注册，默认正式目录的消费者为 `smt_manual`、`smt_auto` 和 `xray`。BIN_Roller 经宿主复用，粗分尾段在启用本地隔离装配时复用。对端签认及现场验证另行确认。旧系统来源基线的离场 Operation 带 `outbound` 前缀且要求提供 `task_id`（可为 null）。现行四字段合同未注册旧 DTO 兼容入口。
+
+#### 已确认的报文、重放与唯一搬离
 
 本方 P11-01 已确认。WES → WMS，POST /api/v1/wes/decisions；四个 data 字段均必填，不增加 task_id/外部到位号。仅在本架满足所属业务交出条件时请求，当前位置/面向必须沿原可靠事实，单层架面向不适用为 null。完整请求：
 
@@ -118,7 +127,13 @@ READY 的 rack_destination 支持 ZONE/RACK_POSITION，沿 Transport 位置结�
 }
 ```
 
-retry_after_ms 为整数 1～60000。保存有效 WAIT 和固定到期点，到期或出现与本次离场相关的新业务事实时用新 operation_id/timestamp 求值；重复唤醒/相同旧事实不另建请求。同次在位最多一条未决离场求值。响应未知或 503 只恢复原身份/完整正文；这里的“到期或新事实”是共用离场 WAIT，不改变逐盘物料 WAIT 的最早续问时点。
+<a id="rack-departure-wait"></a>
+`retry_after_ms` 为整数 1～60000。首次消费有效 WAIT 时保存固定到期点。同次在位最多一条未决离场求值。原作业仍满足离场条件时，到期可用新 `operation_id` 和时间戳续问。到期前仅 `MANUAL_*` 来源可提前续问，并且须满足以下任一条件。
+
+- 上次求值已记录原位置动作及其已应用结果版本，本次核对发现位置动作 ID 或已应用结果版本变化。
+- 上次和本次都能确认原任务状态，且状态发生变化。
+
+其他来源只按原到期点续问。重复唤醒、相同旧事实或一般业务变化不构成提前续问依据。响应未知或 503 时只恢复原身份及完整正文，逐盘物料 WAIT 继续遵循所属 Operation 的时点规则。
 
 | HTTP / code | data 与处理 |
 | --- | --- |
@@ -171,7 +186,7 @@ READY 对应的唯一 RACK_MOVE 示例，WES → WMS，POST /api/v1/wes/transpor
 
 F01 仅为该示例模板，模板选择仍沿业务架型/动作映射；本条不单独冻结其它架型模板。WES 内部将原架同次在位、本次离场意图、原 READY 和原 Transport 关联，保存消费及唯一出站意图，重复推进只取得原 transport_task_id/submit 身份，不增加 wire 关联字段。不以 rack_id 全局唯一代替本次在位关联。
 
-Transport 提交未知继续原任务/原正文，不重新申请去向或换号搬架。READY只授去向。新统一目标规则：原DEPART/RACK_MOVE、CTU03或F01，且原意图为离开当前工作线货架工作位时，原有效202/RECEIVED或200/DUPLICATE提交接纳即完成WES调度，可安排合法后继；最终回调仅备查，失败/未知/原地终位不重开或阻塞后继，不自动重搬。它不证明实际搬离，不生成物理终位。去生产线等其他RACK_POSITION工作位的DEPART同样按接纳完成；进场/换面仍须真实到位，不按目的地类型推断动作。旧回调只属于旧过程，不能搬走或清空新架；现场排队互锁归WMS/RCS/ECS。完整范围见[公共调度§4](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md#4-离场成功接纳即完成)。
+Transport 提交未知继续原任务/原正文，不重新申请去向或换号搬架。READY 只授予原去向。使用 CTU03 或 F01 的原 DEPART/RACK_MOVE 离开当前工作线货架工作位时，原有效 `202 / RECEIVED` 或 `200 / DUPLICATE` 提交接纳即完成 WES 调度，可安排合法后继；最终回调仅备查，失败/未知/原地终位不重开或阻塞后继，不自动重搬。它不证明实际搬离，不生成物理终位。去生产线等其他RACK_POSITION工作位的DEPART同样按接纳完成；进场/换面仍须真实到位，不按目的地类型推断动作。旧回调只属于旧过程，不能搬走或清空新架；现场排队互锁归WMS/RCS/ECS。完整范围见[公共调度§4](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md#4-离场成功接纳即完成)。
 
 <a id="sorting-task-contract"></a>
 ### 任务统一命名与参考合同的差异
@@ -280,7 +295,7 @@ Python 集中声明描述“这个业务需要什么”；静态 catalog 与简�
 
 每个业务至少给出：流程及结束条件、完整 API 字段及联合分支、原身份/业务经过身份、角色附录、工作线资源表、异常等待/核对路径、受理与推进边界、孤立环境测试清单。接口草案必须由 WMS/ECS 责任方确认后，才转为正式注册。
 
-人工的旧系统流程参考见其专页；人工、粗分和自动线的业务未决项各自在文末列出，公共回流语义冲突只在[公共文档](workline-bin-return-api.md#return-pending)维护。统一任务命名和共用离场调整以本文草案说明为准。公共协议细节以[注册](registration.md)、[ECS](ecs-command.md)、[Transport](wms-transport.md)及[出站结果](outbound-results.md)为准。
+人工的旧系统流程参考见其专页；人工、粗分和自动线的业务未决项各自在文末列出，公共回流语义冲突只在[公共文档](workline-bin-return-api.md#return-pending)维护。统一任务命名见[任务合同索引](#sorting-task-contract)，共用离场以[正式合同](#rack-departure-confirmed-wire)为准。公共协议细节以[注册](registration.md)、[ECS](ecs-command.md)、[Transport](wms-transport.md)及[出站结果](outbound-results.md)为准。
 
 
 ## 工作位配置与单任务接纳
