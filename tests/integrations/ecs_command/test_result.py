@@ -56,16 +56,15 @@ async def test_invalid_result_has_no_evidence(ecs, payload):
 
 async def test_unknown_result_does_not_negative_cache(ecs):
     raw = b'{"command_code":"x","device_code":"D","result":"SUCCESS","finish_time":1}'
+    receipt_count = (
+        select(func.count())
+        .select_from(IntegrationExchange)
+        .where(IntegrationExchange.role == "RECEIPT")
+    )
     async with ecs.factory.begin() as session:
+        before = await session.scalar(receipt_count)
         assert (await receive_ecs_result(session, raw, ecs.service)).status_code == 404
-        assert (
-            await session.scalar(
-                select(func.count())
-                .select_from(IntegrationExchange)
-                .where(IntegrationExchange.role == "RECEIPT")
-            )
-            == 0
-        )
+        assert await session.scalar(receipt_count) == before
 
 
 async def test_result_receipts_keep_device_for_applied_and_conflicting_results(ecs):
