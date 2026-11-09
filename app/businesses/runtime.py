@@ -28,8 +28,14 @@ class BusinessRuntime:
     progressions: Mapping[str, Callable[[], Awaitable[int]]] = field(default_factory=dict)
 
 
-def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
+def build_runtime(
+    *, outbox, ecs_commands, session_factory, business_code: str | None = None
+) -> BusinessRuntime:
     entries = catalog.validated_entries()
+    if business_code is not None:
+        entries = tuple(entry for entry in entries if entry.DEFINITION.code == business_code)
+        if not entries:
+            raise KeyError(business_code)
     if not entries:
         return BusinessRuntime(definitions={}, services={})
     if outbox is None:
@@ -84,7 +90,7 @@ def build_runtime(*, outbox, ecs_commands, session_factory) -> BusinessRuntime:
                 ) from error
             progressions[entry.DEFINITION.code] = pending
     return BusinessRuntime(
-        definitions={d.code: d for d in catalog.definitions()},
+        definitions={d.code: d for d in catalog.definitions() if d.code in services},
         services=services,
         progressions=progressions,
     )

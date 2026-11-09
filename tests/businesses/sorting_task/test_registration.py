@@ -25,7 +25,6 @@ def test_two_consumers_share_one_task_registration(task_flow):
                     target = catalog.input_target(owner, (kind, name, None))
                     assert target.source == registered.registration_source
                     assert target.component_key == "sorting_task"
-    assert f.component.model_modules == ()
     assert f.component.commands == ()
     assert f.component.requires_progression
     assert f.component.required_methods == ("read_task_owner", "accept", "recheck")

@@ -1684,7 +1684,7 @@ async def formal_manual_fixture(
         }
         state.target_config = {"targets": targets}
         monkeypatch.setattr(get_settings(), "RELIABLE_TARGETS", state.target_config)
-        state.runtime = _runtime(factory)
+        state.runtime = _runtime(factory, None)
         state.host = state.runtime.services["smt_manual"]
         state.roller = state.host.components["bin_roller"]
         commands = state.host.capabilities.ecs

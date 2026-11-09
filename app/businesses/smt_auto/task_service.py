@@ -5,18 +5,16 @@ import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyChange
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import PrepareAccepted, validate_task_branch
 from app.businesses._components.sorting_task.ports import TaskOwnerRef
-from app.businesses._components.sorting_task.request.sorting_task_prepare_v1 import Prepare
+from app.businesses._components.sorting_task.queue import insert_issued, prepare_next, queue_changes
 from app.core.clock import unix_ms
-from app.core.identifiers import uuid7
 from app.integrations.wms_callback import Accepted, Conflict, Duplicate, Rejected, Unavailable
 from app.models import WorkLine
-from app.reliable import ScopeRef
 
 from .archive import archive_guard
 from .models import (
@@ -73,49 +71,28 @@ class AutoTaskService:
         line = await session.get(
             WorkLine, work_line_id, with_for_update=True, populate_existing=True
         )
-        if line is None or not line.is_enabled or line.business_code != "smt_auto":
-            return None
-        if await session.scalar(
-            select(AutoTask.task_id).where(
-                AutoTask.work_line_id == work_line_id,
-                AutoTask.status.in_(("PREPARING", "EXECUTING")),
-            )
-        ):
-            return None
-        task = await session.scalar(
-            select(AutoTask)
-            .where(
-                AutoTask.work_line_id == work_line_id,
-                AutoTask.workline_code == line.line_code,
-                AutoTask.status == "QUEUED",
-                or_(AutoTask.not_before_ms.is_(None), AutoTask.not_before_ms <= now_ms),
-            )
-            .order_by(AutoTask.dispatch_sequence, AutoTask.issued_timestamp, AutoTask.task_id)
-            .limit(1)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        if task is None:
-            return None
-        operation_id = str(uuid7())
-        payload = Prepare(task_id=task.task_id, workline_code=task.workline_code)
-        message = await self.wms.send(
+        prepared = await prepare_next(
             session,
-            payload,
-            operation_id=operation_id,
-            scope=ScopeRef("smt_auto", "TASK", task.task_id),
+            AutoTask.__table__,
+            line=line,
+            owner_domain="smt_auto",
+            now_ms=now_ms,
+            wms=self.wms,
         )
+        if prepared is None:
+            return None
+        payload, operation_id, message_id = prepared
+        task = await session.get(AutoTask, payload.task_id, populate_existing=True)
         session.add(
             AutoTaskRequest(
                 task_id=task.task_id,
                 purpose="PREPARE",
                 operation="sorting.task.prepare@v1",
                 operation_id=operation_id,
-                message_id=message.message_id,
+                message_id=message_id,
                 request_data=payload.model_dump(mode="json"),
             )
         )
-        task.status = "PREPARING"
         await session.flush()
         return task.task_id
 
@@ -236,24 +213,11 @@ class AutoTaskService:
             raise Conflict({"reason_code": "REFERENCE_CONFLICT"})
         if not line.is_enabled or line.business_code != "smt_auto":
             raise Conflict({"reason_code": "STATE_CONFLICT"})
-        task = AutoTask(
-            task_id=payload.task_id,
-            task_type=payload.task_type,
-            business_type=payload.business_type,
-            work_line_id=line.id,
-            workline_code=payload.workline_code,
-            issued_operation_id=ctx.operation_id,
-            issued_timestamp=ctx.timestamp,
-            issued_data=payload.model_dump(mode="json"),
-            queue_revision=payload.queue_revision,
-            dispatch_sequence=payload.dispatch_sequence,
-            not_before_ms=payload.not_before,
-            plan_revision=0,
-        )
-        session.add(task)
+        if not await insert_issued(ctx, AutoTask.__table__, payload, work_line_id=line.id):
+            raise Conflict({"reason_code": "STATE_CONFLICT"})
         session.add(
             AutoTaskInput(
-                task=task,
+                task_id=payload.task_id,
                 operation=ctx.operation,
                 operation_id=ctx.operation_id,
                 request_timestamp=ctx.timestamp,
@@ -281,8 +245,6 @@ class AutoTaskService:
             ):
                 return Duplicate({"task_id": payload.task_id})
             raise Conflict({"reason_code": "IDEMPOTENCY_CONFLICT"})
-        if task.status != "QUEUED":
-            raise Conflict({"reason_code": "STATE_CONFLICT"})
         line = await ctx.session.get(WorkLine, task.work_line_id)
         if (
             line is None
@@ -291,13 +253,20 @@ class AutoTaskService:
             or line.line_code != task.workline_code
         ):
             raise Conflict({"reason_code": "STATE_CONFLICT"})
-        if payload.queue_revision != task.queue_revision + 1:
-            raise Conflict({"reason_code": "REVISION_CONFLICT"})
+        values = queue_changes(
+            payload,
+            status=task.status,
+            queue_revision=task.queue_revision,
+            dispatch_sequence=task.dispatch_sequence,
+            not_before=task.not_before_ms,
+        )
+        if isinstance(values, Conflict):
+            raise values
         task.queue_revision = payload.queue_revision
-        if payload.dispatch_sequence is not None:
-            task.dispatch_sequence = payload.dispatch_sequence
-        if "not_before" in payload.model_fields_set:
-            task.not_before_ms = payload.not_before
+        if "dispatch_sequence" in values:
+            task.dispatch_sequence = values["dispatch_sequence"]
+        if "not_before" in values:
+            task.not_before_ms = values["not_before"]
         session = ctx.session
         session.add(
             self._input_row(ctx, task, payload, applied_queue_revision=payload.queue_revision)

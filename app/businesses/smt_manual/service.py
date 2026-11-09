@@ -45,7 +45,7 @@ class SmtManualService(SmtManualTaskFlow):
         self.manual_bins = ManualBinFlow(capabilities, roller, repository=repository)
         self.ports.manual_bins = self.manual_bins
         self.components = {
-            "sorting_task": SortingTask("smt_manual", self),
+            "sorting_task": SortingTask("smt_manual", self, task_table=repository.tables["task"]),
             "bin_roller": roller,
             "rack_dispatch": self.rack_dispatch,
         }
@@ -73,6 +73,7 @@ class SmtManualService(SmtManualTaskFlow):
             self.repository.tables[key] for key in ("task", "input", "request")
         )
         return select(task.c.task_id).where(
+            task.c.task_type == "MANUAL",
             or_(
                 task.c.status.in_(("QUEUED", "PREPARING", "EXECUTING")),
                 select(notice.c.operation_id)
@@ -82,7 +83,7 @@ class SmtManualService(SmtManualTaskFlow):
                     notice.c.state == "PENDING",
                 )
                 .exists(),
-            )
+            ),
         )
 
     def _pending_owner(self, kind):

@@ -173,7 +173,6 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
     from datetime import UTC, datetime
 
     from app.businesses._components.rack_dispatch.models import RackAction, RackJob
-    from app.businesses.smt_manual.models import ManualTask
     from app.models import TransportTask
     from tests.migration_helpers import source_table
 
@@ -200,6 +199,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
     try:
         async with store.engine.begin() as conn:
             reliable = await source_table(conn, "reliable_message")
+            manual_task = await source_table(conn, "smt_manual_task")
             line = await conn.scalar(
                 text(
                     "INSERT INTO work_lines (line_code,line_name,business_code,position_bindings) "
@@ -208,7 +208,7 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
                 {"bindings": json.dumps({"RETURN_RACK": "ORIGINAL_POINT"})},
             )
             await conn.execute(
-                ManualTask.__table__.insert().values(
+                manual_task.insert().values(
                     task_id="POS_TASK",
                     task_type="MANUAL",
                     business_type="outbound",
@@ -219,6 +219,10 @@ async def test_original_intents_survive_upgrade_and_order_uses_registration_sequ
                     issued_data={},
                     queue_revision=1,
                     dispatch_sequence=1,
+                    status="QUEUED",
+                    plan_revision=0,
+                    prepare_accepted=False,
+                    received_work=[],
                 )
             )
             # Deliberately reverse lexical job/action IDs against original Transport registration.

@@ -46,9 +46,9 @@ async def test_smt_auto_migration_has_all_tables_constraints_and_indexes(state_m
                     "constrained_columns"
                 ] == [column.name for column in table.primary_key.columns]
             indexes = {
-                item["name"] for item in inspector.get_indexes("smt_auto_task", schema=schema)
+                item["name"] for item in inspector.get_indexes(TABLES["task"].name, schema=schema)
             }
-            assert {"smt_auto_task_queue", "smt_auto_task_execution_slot"} <= indexes
+            assert {"sorting_task_queue", "sorting_task_execution_slot"} <= indexes
 
         await connection.run_sync(check)
 
@@ -90,7 +90,7 @@ async def test_auto_foundation_upgrade_and_downgrade_preserve_existing_worklines
 )
 async def test_auto_rack_fact_downgrade_preserves_original_association_evidence(state_migration):
     store = state_migration
-    await store.migrate("upgrade", "head")
+    await store.migrate("upgrade", "smtautofirstplan")
     async with store.engine.begin() as connection:
         await connection.execute(
             text(
@@ -126,7 +126,7 @@ async def test_auto_rack_fact_downgrade_preserves_original_association_evidence(
 @pytest.mark.parametrize("evidence", ["terminal", "arrival"])
 async def test_first_work_plan_downgrade_refuses_original_face_evidence(state_migration, evidence):
     store = state_migration
-    await store.migrate("upgrade", "head")
+    await store.migrate("upgrade", "smtautosourcearrival")
     async with store.engine.begin() as connection:
         for sql in (
             "INSERT INTO smt_auto_task (task_id,business_type,work_line_id,workline_code,"
@@ -157,7 +157,7 @@ async def test_first_work_plan_downgrade_refuses_original_face_evidence(state_mi
 )
 async def test_deadline_downgrade_preserves_original_configuration_evidence(state_migration):
     store = state_migration
-    await store.migrate("upgrade", "head")
+    await store.migrate("upgrade", "smtautofirstdeadline")
     async with store.engine.begin() as connection:
         await connection.execute(
             text(
@@ -190,16 +190,17 @@ async def test_barcode_migration_preserves_unicode_and_refuses_lossy_downgrade(s
         AutoBinWork,
         AutoInboundDecisionRound,
         AutoInboundPlate,
-        AutoTask,
     )
+    from tests.migration_helpers import source_table
 
     store = state_migration
-    await store.migrate("upgrade", "head")
+    await store.migrate("upgrade", "xray_pending_due")
     barcode = "原始料盘," * 60
     factory = async_sessionmaker(store.engine, expire_on_commit=False)
     async with factory.begin() as session:
-        session.add(
-            AutoTask(
+        task = await source_table(await session.connection(), "smt_auto_task")
+        await session.execute(
+            task.insert().values(
                 task_id="original",
                 business_type="inbound",
                 work_line_id=12,
@@ -210,7 +211,6 @@ async def test_barcode_migration_preserves_unicode_and_refuses_lossy_downgrade(s
                 dispatch_sequence=1,
             )
         )
-        await session.flush()
         work = AutoBinWork(
             work_line_id=12,
             arrival_id="arrival",

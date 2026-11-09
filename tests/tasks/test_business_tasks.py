@@ -9,8 +9,11 @@ from celery.beat import Scheduler
 from kombu import Connection
 from kombu.exceptions import OperationalError
 from kombu.transport.memory import Transport
+from sqlalchemy import delete
 
+from app.businesses.smt_manual.models import ManualRequest, ManualTask
 from app.core.identifiers import uuid7
+from app.models import ReliableMessage, WorkLine
 
 
 @pytest.fixture
@@ -110,6 +113,57 @@ def test_celery_entry_uses_task_factory_and_fixed_schedule(monkeypatch):
     assert tasks.advance_business_pending.run("coarse_sorting") == 7
     assert calls[0][0] == tasks.get_settings().DATABASE_URL
     assert "app.tasks.business_tasks" in celery_app.conf.include
+
+
+async def test_invalid_xray_configuration_does_not_block_manual_pending(callback_db, monkeypatch):
+    from app.tasks import business_tasks as tasks
+
+    settings = tasks.get_settings()
+    monkeypatch.setattr(settings, "XRAY_TRANSIT_TARGETS", {"XRAY-01": {"A": {}}})
+    monkeypatch.setattr(
+        settings,
+        "RELIABLE_TARGETS",
+        {"targets": {"wms": {"base_url": "http://127.0.0.1:1", "protocol": "wms-decisions"}}},
+    )
+    task_id = str(uuid7())
+    line_code = f"SMT-{task_id}"
+    async with callback_db.begin() as session:
+        line = WorkLine(line_code=line_code, line_name=line_code, business_code="smt_manual")
+        session.add(line)
+        await session.flush()
+        line_id = line.id
+        session.add(
+            ManualTask(
+                task_id=task_id,
+                task_type="MANUAL",
+                business_type="outbound",
+                work_line_id=line_id,
+                workline_code=line_code,
+                issued_operation_id=str(uuid7()),
+                issued_timestamp=1,
+                issued_data={},
+                queue_revision=1,
+                dispatch_sequence=1,
+            )
+        )
+
+    try:
+        with pytest.raises(ValueError, match="XRAY_TRANSIT_TARGETS"):
+            await tasks.advance_pending(callback_db, "xray")
+
+        await tasks.advance_pending(callback_db, "smt_manual")
+        async with callback_db() as session:
+            task = await session.get(ManualTask, task_id)
+            assert task.status == "PREPARING"
+            message = await session.get(ReliableMessage, task.prepare_message_id)
+            assert message.operation == "sorting.task.prepare@v1"
+            assert message.operation_id == task.prepare_operation_id
+            assert message.business_key == "business:smt_manual"
+    finally:
+        async with callback_db.begin() as session:
+            await session.execute(delete(ManualRequest).where(ManualRequest.task_id == task_id))
+            await session.execute(delete(ManualTask).where(ManualTask.task_id == task_id))
+            await session.execute(delete(WorkLine).where(WorkLine.id == line_id))
 
 
 def assert_business_message_queued(app):

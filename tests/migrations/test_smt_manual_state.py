@@ -49,7 +49,7 @@ async def test_manual_state_matches_models_and_preserves_platform_data(state_mig
                     if item.__class__.__name__ == "UniqueConstraint"
                 }
             indexes = inspector.get_indexes(TABLES["task"].name, schema=schema)
-            assert any(i["name"] == "smt_manual_execution_slot" and i["unique"] for i in indexes)
+            assert any(i["name"] == "sorting_task_execution_slot" and i["unique"] for i in indexes)
 
         await connection.run_sync(check)
     async with store.engine.begin() as connection:

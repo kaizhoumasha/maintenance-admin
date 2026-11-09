@@ -203,7 +203,7 @@ from app.tasks.business_tasks import _runtime
 async def deliver(factory):
     async with factory.begin() as session:
         response = await receive(
-            session, os.environ["AUTO_RECEIPT"].encode(), runtime=_runtime(factory),
+            session, os.environ["AUTO_RECEIPT"].encode(), runtime=_runtime(factory, None),
             on_business_committed=notify_business_committed,
         )
         assert response.status_code == 202, response.body
@@ -280,7 +280,7 @@ from app.tasks._db import run_with_factory
 from app.tasks.business_tasks import _runtime
 
 async def deliver(factory):
-    runtime = _runtime(factory)
+    runtime = _runtime(factory, "smt_auto")
     async with factory.begin() as session:
         await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         response = await receive_ecs_event(
@@ -340,7 +340,7 @@ from app.tasks.business_tasks import _runtime
 async def deliver(factory):
     async with factory.begin() as session:
         response = await receive(
-            session, os.environ["AUTO_CANCEL"].encode(), runtime=_runtime(factory),
+            session, os.environ["AUTO_CANCEL"].encode(), runtime=_runtime(factory, None),
             on_business_committed=notify_business_committed,
         )
         assert response.status_code == 202, response.body
@@ -364,7 +364,7 @@ from app.tasks._db import run_with_factory
 from app.tasks.business_tasks import _runtime
 
 async def deliver(factory):
-    runtime = _runtime(factory)
+    runtime = _runtime(factory, "smt_auto")
     host = runtime.services["smt_auto"]
     commands = host.capabilities.ecs
     outbox = commands.outbox

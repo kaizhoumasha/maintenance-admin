@@ -313,7 +313,7 @@ async def xray(callback_store, monkeypatch):
             )
             store.on_result = notifications.wms_result_committed
 
-            def runtime(_factory):
+            def runtime(_factory, _business):
                 return SimpleNamespace(
                     progressions={"xray": lambda: service.scan_pending(limit=page_size)}
                 )

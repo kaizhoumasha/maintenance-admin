@@ -14,6 +14,7 @@ COMPONENT = ComponentDefinition(
         "app.businesses._components.sorting_task.request.sorting_task_prepare_v1",
         "app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1",
     ),
+    model_modules=("app.businesses._components.sorting_task.models",),
     required_methods=("read_task_owner", "accept", "recheck"),
     requires_progression=True,
 )

@@ -577,6 +577,18 @@ PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 
 
 如需回退，先停止使用方，将数据库原地改回原名并恢复相应连接配置；不要仅启动仍连接旧库名的历史镜像。备份恢复属于数据损坏时的恢复手段，不是正常改名步骤。
 
+### SMT 任务主表切换
+
+有存量 SMT 任务的站点分两次迁移。清理命令缺少验收参数时，普通 `upgrade head` 会拒绝升级到清理版本。
+
+1. 停止 API、Worker、Beat 和所有仍写旧任务表的进程并完成备份。先执行 `uv run alembic upgrade sorting_task_authority`。迁移会复制任务状态和恢复字段、切换 AUTO 明细外键并保留两张旧表。出现重复任务号或同一工作线有多个进行中任务时，先核对原任务归属与执行事实。
+2. 启动新版服务。核对任务归属与恢复字段，验证进行中的任务消费原 `prepare`，原收据可重放，归档任务不能重开。
+3. 验收通过后，在独立维护窗口暂停写入，执行 `uv run alembic -x sorting_task_cleanup_verified=true upgrade sorting_task_cleanup`。迁移会核对原任务身份和外键，再删除两张旧表。空库可直接迁移到 `head`。
+
+使用发布包时，沿用站点的 Compose 文件组合。第一次迁移用 `dc run --rm --no-deps migrate alembic upgrade sorting_task_authority`，然后用 `dc up -d --no-deps --no-build --pull never --force-recreate api worker beat` 启动新版服务，避免 Compose 自动推进到清理版本。验收后用 `dc run --rm --no-deps migrate alembic -x sorting_task_cleanup_verified=true upgrade sorting_task_cleanup` 执行清理。
+
+恢复写入后，旧表快照会落后于主表。在清理前尝试回退时，主表切换迁移会检查差异并拒绝可能丢失新事实的降级。
+
 ### 使用旧镜像回退(禁止现场重建)
 
 统一历史权威交接后若已产生新事实，旧二进制不能直接恢复运行；非空最终结构也不允许自动降级。优先保全事实并使用兼容恢复版本或前向修复。以下备份恢复流程只在明确接受恢复点之后数据损失、且恢复库与旧镜像兼容的独立恢复决策下适用，不是 A / B 的默认回退方案。

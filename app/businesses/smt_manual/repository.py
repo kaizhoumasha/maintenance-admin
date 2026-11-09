@@ -32,7 +32,7 @@ class TaskRepository:
         self, session: AsyncSession, task_id: str, *, lock: bool = False
     ) -> RowMapping | None:
         table = self.tables["task"]
-        query = select(table).where(table.c.task_id == task_id)
+        query = select(table).where(table.c.task_id == task_id, table.c.task_type == "MANUAL")
         if lock:
             query = query.with_for_update()
         return (await session.execute(query)).mappings().one_or_none()
@@ -94,6 +94,7 @@ class TaskRepository:
         tasks = self.tables["task"]
         active = select(tasks.c.task_id).where(
             tasks.c.work_line_id == work_line_id,
+            tasks.c.task_type == "MANUAL",
             tasks.c.status.in_(("QUEUED", "PREPARING", "EXECUTING"))
             | tasks.c.task_id.in_(task_ids),
         )
@@ -131,7 +132,11 @@ class TaskRepository:
 
     async def save_task(self, session: AsyncSession, task_id: str, **values) -> None:
         table = self.tables["task"]
-        await session.execute(table.update().where(table.c.task_id == task_id).values(**values))
+        await session.execute(
+            table.update()
+            .where(table.c.task_id == task_id, table.c.task_type == "MANUAL")
+            .values(**values)
+        )
 
     async def input(
         self, session: AsyncSession, operation: str, operation_id: str
