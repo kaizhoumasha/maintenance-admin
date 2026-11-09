@@ -12,9 +12,11 @@ from sqlalchemy import delete, select
 
 from app.businesses import catalog
 from app.businesses.runtime import build_runtime
+from app.businesses.xray.mock_wms import XrayWmsMock
+from app.controllers.dev_mock_wms import decide_request
 from app.core import get_settings
 from app.core.identifiers import uuid7
-from app.http_client import AsyncHttpClient, HttpClientConfig
+from app.http_client import AsyncHttpClient
 from app.integrations import history
 from app.integrations.ecs_command import EcsCommands
 from app.integrations.ecs_command.clients import DynamicClients
@@ -38,6 +40,10 @@ from tests.helpers import (
 )
 
 TEMPLATE = "XX123456789"
+MOCK_BARCODES = (
+    "PTEST-PART-01,Q3000,MTEST-MPN-01,D260101,LTEST-LOT-01,STEST-SERIAL-01",
+    "PTEST-PART-02,Q50000,MTEST-MPN-02,D260102,LTEST-LOT-02,STEST-SERIAL-02",
+)
 LABEL = {
     "ID": TEMPLATE,
     "PHHPN": "part",
@@ -68,14 +74,20 @@ def test_xray_registers_in_formal_catalog():
 async def xray(callback_store, monkeypatch):
     factory = callback_store
     decisions, requests, commands, facts = {}, [], [], []
+    mock_facts = []
     transports = []
     replies = {}
     peer = FastAPI()
+    mock_peer = FastAPI()
 
+    @mock_peer.post("/api/v1/wes/decisions")
     @peer.post("/api/v1/wes/decisions")
     async def decide(req: Request):
         body = await req.json()
         requests.append(body)
+        if req.app is mock_peer:
+            async with factory() as session:
+                return await decide_request(req, session)
         op = body["operation"].split(".")[-1].split("@")[0]
         data = decisions[op]
         return {
@@ -85,10 +97,13 @@ async def xray(callback_store, monkeypatch):
             "data": data(body) if callable(data) else data,
         }
 
+    @mock_peer.post("/api/v1/wes/facts")
     @peer.post("/api/v1/wes/facts")
     async def report(req: Request):
         body = await req.json()
         facts.append(body)
+        if req.app is mock_peer:
+            mock_facts.append(body)
         return {
             "operation_id": body["operation_id"],
             "code": "RECORDED",
@@ -117,7 +132,7 @@ async def xray(callback_store, monkeypatch):
         status, message = replies.get(body["params"].get("decision"), (200, "ACK"))
         return JSONResponse({"code": status, "message": message}, status_code=status)
 
-    async with loopback_app(peer) as origin:
+    async with loopback_app(peer) as origin, loopback_app(mock_peer) as mock_origin:
         device, arm = f"XRAY-{uuid4().hex}", f"ARM-{uuid4().hex}"
         point = f"RACK-{uuid4().hex}"
         async with factory.begin() as session:
@@ -146,7 +161,10 @@ async def xray(callback_store, monkeypatch):
                     "location_id": "ECS-RACK-POINT",
                     "templates": {"ENTER": "F01", "ROTATE": "CK04", "DEPART": "F01"},
                     "slots": {
-                        "A": {"A-03": {"rack_layer": 2, "rack_column": 3}},
+                        "A": {
+                            "A-03": {"rack_layer": 2, "rack_column": 3},
+                            "A-04": {"rack_layer": 2, "rack_column": 4},
+                        },
                         "B": {"B-03": {"rack_layer": 2, "rack_column": 3}},
                     },
                 }
@@ -177,6 +195,9 @@ async def xray(callback_store, monkeypatch):
             "xray-transport": TargetConfig("xray-transport", origin, "wms-transport"),
             "xray-ecs": TargetConfig("xray-ecs", None, "ecs-command", address_mode="SNAPSHOT"),
         }
+        for protocol in ("wms-decisions", "wms-facts"):
+            name = f"xray-mock-{protocol}"
+            targets[name] = TargetConfig(name, mock_origin, protocol, explicit_only=True)
         adapters = {**ADAPTERS, **TRANSPORT_ADAPTERS, "ecs-command": EcsCommandAdapter()}
         clock = FakeClock()
         ecs = EcsCommands(
@@ -197,6 +218,7 @@ async def xray(callback_store, monkeypatch):
             service = runtime.services["xray"]
             service.clock = clock
             monkeypatch.setattr(app.state, "business_runtime", runtime, raising=False)
+            mock_peer.state.business_runtime = runtime
             return service
 
         service = rebuild()
@@ -206,10 +228,11 @@ async def xray(callback_store, monkeypatch):
             targets,
             adapters,
             {
-                name: AsyncHttpClient(HttpClientConfig(origin, name))
-                for name in ("xray-decisions", "xray-facts", "xray-transport")
+                name: AsyncHttpClient(target.http_config())
+                for name, target in targets.items()
+                if target.address_mode == "STATIC"
             },
-            provider=DynamicClients(factory=simulator_client_factory([origin])),
+            provider=DynamicClients(factory=simulator_client_factory([origin, mock_origin])),
             clock=clock,
             monotonic=clock.monotonic,
         )
@@ -346,12 +369,27 @@ async def xray(callback_store, monkeypatch):
                 },
             )
 
+        def use_mock(*targets, fixed=False):
+            nonlocal service
+            mock_targets = {line.line_code: dict(zip(MOCK_BARCODES, targets, strict=True))}
+            settings = get_settings()
+            if fixed:
+                point_settings = dict(settings.XRAY_RETURN_RACKS[line.line_code])
+                point_settings.pop("templates")
+                point_settings["slots"] = {"A": point_settings["slots"]["A"]}
+                point_settings["fixed_test_rack"] = "RACK-A"
+                monkeypatch.setattr(settings, "XRAY_RETURN_RACKS", {line.line_code: point_settings})
+            monkeypatch.setattr(settings, "XRAY_WMS_MOCK_TARGETS", mock_targets)
+            mock_peer.state.xray_wms_mock = XrayWmsMock(mock_targets, settings.XRAY_RETURN_RACKS)
+            service = rebuild()
+
         try:
             yield SimpleNamespace(
                 decisions=decisions,
                 requests=requests,
                 commands=commands,
                 facts=facts,
+                mock_facts=mock_facts,
                 replies=replies,
                 transports=transports,
                 transport_result=transport_result,
@@ -366,6 +404,7 @@ async def xray(callback_store, monkeypatch):
                 change_binding=change_binding,
                 dispatch=dispatch,
                 restart=restart,
+                use_mock=use_mock,
                 clock=clock,
                 barcode=original,
                 dialect=factory.kw["bind"].dialect.name,
@@ -462,6 +501,7 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
         await x.drain()
     assert len(x.facts) == 1
     assert x.facts[0]["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
+    assert not x.mock_facts
 
 
 async def test_wait_ng_request_stops_normal_decision_and_reports_once(xray):
@@ -741,6 +781,79 @@ def rack_slot(x, rack="RACK-A", face="A", **changes):
         "reel_diameter": 13,
         "reel_thickness": 15.3,
     }
+
+
+@pytest.mark.parametrize("fixed", [False, True], ids=["transport-rack", "fixed-test-rack"])
+async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(xray, fixed):
+    x = xray
+    targets = (
+        rack_slot(x) | {"reel_diameter": 7, "reel_thickness": 8.1},
+        rack_slot(x, slot_id="A-04", rack_column=4) | {"reel_diameter": 7, "reel_thickness": 9.2},
+    )
+    x.use_mock(*targets, fixed=fixed)
+    for index, barcode in enumerate(MOCK_BARCODES, 3):
+        reel_id = str(uuid4())
+        await x.entry(barcode=barcode, reel_id=reel_id)
+        await x.drain()
+        first = x.commands[-1]
+        assert first["params"]["decision"] == "COUNT_REQUIRED"
+        await x.event(
+            "XRAY_COUNT_COMPLETED",
+            reel_id=reel_id,
+            barcode=barcode,
+            templateId=TEMPLATE,
+            countStatus="OK",
+            qty=index,
+        )
+        await x.result(first, decision="COUNT_REQUIRED", qty=index)
+        await x.drain()
+        label_cmd = x.commands[-1]
+        label = label_cmd["params"]["label"]["variables"]
+        assert label["QQTYPC"] == str(index)
+        await x.result(label_cmd, decision="OK", labelStatus="APPLIED")
+        await x.event(
+            "SCAN_COMPLETED",
+            reel_id=reel_id,
+            scanStage="VERIFY",
+            scanStatus="OK",
+            barcode=barcode,
+            new_barcode=label["SPKG"],
+        )
+        await x.drain()
+        await x.result(x.commands[-1], decision="OK", mode="COUNTED")
+        await x.event(
+            "MATERIAL_ARRIVED",
+            reel_id=reel_id,
+            barcode=barcode,
+            new_barcode=label["SPKG"],
+            mode="COUNTED",
+            readyForPick=True,
+        )
+        await x.drain()
+        if not fixed:
+            (enter,) = x.transports
+            if index == 3:
+                assert x.commands[-1]["task_type"] == "APPLY_VERIFY_DECISION"
+                await x.transport_result(enter)
+                await x.drain()
+        put = x.commands[-1]
+        assert put["task_type"] == "PUT_TO_RACK"
+        assert put["params"]["target"]["slot_id"] == f"A-0{index}"
+        assert put["params"]["target"]["reel_thickness"] == targets[index - 3]["reel_thickness"]
+        await placed(x, put)
+        await x.drain()
+        assert x.facts[-1]["data"]["to_locator"]["slot_id"] == f"A-0{index}"
+
+    await outlet(x)
+    await x.drain()
+    put = x.commands[-1]
+    assert put["task_type"] == "PUT_TO_BIN"
+    await placed(x, put)
+    await x.drain()
+    assert x.facts[-1]["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
+    assert len(x.facts) == 3 and x.mock_facts == x.facts
+    if fixed:
+        assert not x.transports
 
 
 async def test_replenish_waits_for_original_enter_then_redecides(xray):

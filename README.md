@@ -226,7 +226,9 @@ RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000
 
 回调侧:`POST /api/v1/dev/transport/{transport_task_id}/callbacks` 选 `succeeded` 或 `position_unknown`,按该任务的冻结事实构造样例回调并走真实接收管线,返回每条的响应与诊断;`GET /api/v1/dev/transport/{transport_task_id}` 看任务状态。
 
-WMS 请求端点(decisions、facts)的联调在 `/api/v1/dev/wms/requests`:`GET /operations` 是已注册 operation 的目录(端点、标题、TTL、Payload Schema、示例);`POST` 在 Examples 下拉选 operation 触发,走真实的 `WmsRequests.send` 入队;`GET /status/{operation_id}` 看投递状态与请求、响应原文。同一 `operation_id` 同 Payload 重复触发返回同一条消息,Payload 不同返回 409。Mock WMS 同时认识 `/api/v1/wes/facts`、`/api/v1/wes/decisions`,模式开关同一个(`PUT /dev/mock-wms/mode`,新增 `busy` 与仅 decisions 生效的 `prepare_accepted`);decisions 的 `DECIDED` 响应 `data` 恒为 `{}`,不模拟真实业务数据。两个端点各需一个目标,同样指向本应用自身:
+WMS 请求端点(decisions、facts)的联调在 `/api/v1/dev/wms/requests`:`GET /operations` 是已注册 operation 的目录(端点、标题、TTL、Payload Schema、示例);`POST` 在 Examples 下拉选 operation 触发,走真实的 `WmsRequests.send` 入队;`GET /status/{operation_id}` 看投递状态与请求、响应原文。同一 `operation_id` 同 Payload 重复触发返回同一条消息,Payload 不同返回 409。Mock WMS 同时认识 `/api/v1/wes/facts`、`/api/v1/wes/decisions`,两者共用 `PUT /api/v1/dev/mock-wms/mode` 切换响应模式。通用 Mock 的 `DECIDED` 响应返回空 `data`。启用专用 Mock 后，配置的 X-Ray 工作线可凭 WES 请求签名取得模拟业务决定，配置见 [X-Ray 专用 Mock WMS](docs/integrations/xray-api.md#51-x-ray-专用-mock-wms)。
+
+通用联调为两个 WMS 请求端点各配置一个目标，指向本应用自身。
 
 ```bash
 RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"},"wms-facts":{"base_url":"http://127.0.0.1:8000","protocol":"wms-facts"},"wms-decisions":{"base_url":"http://127.0.0.1:8000","protocol":"wms-decisions"}}}'

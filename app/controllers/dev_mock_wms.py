@@ -11,12 +11,14 @@ from typing import Any
 
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import get_current_user
+from app.core import SessionDep, get_current_user
 from app.core.clock import unix_ms
 from app.core.routing import new_router
 from app.integrations.wms_request import ADAPTERS as REQUEST_ADAPTERS
 from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+from app.integrations.wms_request.adapter import MOCK_SIGNATURE_HEADER
 from app.integrations.wms_transport.protocol import DEFAULT_SUBMIT_PATH
 from app.schemas.dev_console import MockWmsMode, MockWmsModeBody
 
@@ -53,8 +55,10 @@ async def _answer(
     request: Request,
     success: dict[MockWmsMode, tuple[int, str]],
     echo: Callable[[dict], dict] = lambda data: {},
+    *,
+    decision_session: AsyncSession | None = None,
 ) -> Response:
-    """三个接收端共用:按全局模式响应,只回显 operation_id 与 `echo` 指定的 data 字段。
+    """三个接收端共用:按全局模式响应，配置的 X-Ray 决策可返回业务数据。
 
     `success` 给出该端点在 accept、duplicate、prepare_accepted 下的成功状态码;失败模式全端点一致。
     """
@@ -66,22 +70,35 @@ async def _answer(
     if mode in (MockWmsMode.garbage, MockWmsMode.hang):
         return PlainTextResponse("not json")
     try:
-        sent: Any = json.loads(await request.body())
+        raw = await request.body()
+        sent: Any = json.loads(raw)
         operation_id, echoed = sent["operation_id"], echo(sent["data"])
         if not isinstance(sent["data"], dict):
             raise TypeError("data must be an object")
     except (ValueError, KeyError, TypeError):
         return Response(status_code=400)  # 合同:无法解析的信封返回空 400
+    timestamp = unix_ms(datetime.now(UTC))
     if mode in success:
         status_code, code = success[mode]
         extra = {}
+        mock = getattr(request.app.state, "xray_wms_mock", None)
+        if code == "DECIDED" and decision_session is not None and mock is not None:
+            answer = await mock.answer(
+                request.app,
+                decision_session,
+                sent,
+                raw,
+                request.headers.get(MOCK_SIGNATURE_HEADER, ""),
+            )
+            if answer is not None:
+                status_code, code, extra, timestamp = answer
     else:
         status_code, code, extra = _FAILURES[mode]
     return JSONResponse(
         {
             "operation_id": operation_id,
             "code": code,
-            "timestamp": unix_ms(datetime.now(UTC)),
+            "timestamp": timestamp,
             "data": {**echoed, **extra},
         },
         status_code=status_code,
@@ -114,8 +131,10 @@ async def record_fact(request: Request) -> Response:
 
 
 @router.post(REQUEST_ADAPTERS[DECISIONS_PROTOCOL].path.removeprefix(_API_PREFIX))
-async def decide_request(request: Request) -> Response:
+async def decide_request(request: Request, session: SessionDep) -> Response:
     """模拟 WMS 的 decisions 接收端;同身份重放返回首次决定,所以 duplicate 仍是 DECIDED。"""
     return await _answer(
-        request, _success((200, "DECIDED"), (200, "DECIDED"), (202, "PREPARE_ACCEPTED"))
+        request,
+        _success((200, "DECIDED"), (200, "DECIDED"), (202, "PREPARE_ACCEPTED")),
+        decision_session=session,
     )

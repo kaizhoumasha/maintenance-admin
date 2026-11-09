@@ -32,10 +32,13 @@ class TargetConfig:
     max_not_received_attempts: int | None = None
     fixed_retry_interval_s: float | None = None
     address_mode: str = "STATIC"
+    explicit_only: bool = False
 
     def __post_init__(self):
         if not isinstance(self.protocol, str) or not self.protocol:
             raise ValueError("protocol is required")
+        if not isinstance(self.explicit_only, bool):
+            raise TypeError("explicit_only must be a boolean")
         for name in (
             "timeout_ms",
             "alert_after_attempts",
@@ -171,7 +174,11 @@ def parse_reliable_config(settings: "Settings") -> ReliableConfig:
 
 
 def targets_for_protocol(targets: Mapping[str, TargetConfig], protocol: str) -> list[str]:
-    return [name for name, item in targets.items() if item.protocol == protocol]
+    return [
+        name
+        for name, item in targets.items()
+        if item.protocol == protocol and not item.explicit_only
+    ]
 
 
 def target_config_hint(targets: Mapping[str, TargetConfig], protocol: str) -> str:

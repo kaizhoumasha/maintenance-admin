@@ -44,7 +44,19 @@ class WmsRequests:
             self._outbox = Outbox(targets, ADAPTERS, clock=self.clock, records=history_records)
         return self._outbox
 
-    def target(self, protocol: str) -> str:
+    def target(self, protocol: str, *, explicit: str | None = None) -> str:
+        if explicit is not None:
+            config = self.outbox.targets.get(explicit)
+            if (
+                config is None
+                or config.protocol != protocol
+                or not config.explicit_only
+                or config.address_mode != "STATIC"
+            ):
+                raise ValueError(
+                    f"Expected explicit-only static target {explicit!r} for {protocol}"
+                )
+            return explicit
         names = targets_for_protocol(self.outbox.targets, protocol)
         if len(names) != 1:
             raise RuntimeError(
@@ -67,6 +79,7 @@ class WmsRequests:
         *,
         operation_id: str,
         scope=None,
+        explicit_target: str | None = None,
     ) -> EnqueueResult:
         if scope is not None and scope.owner_domain != self.owner_domain:
             raise InvalidRequestPayload("request scope owner mismatch")
@@ -108,7 +121,7 @@ class WmsRequests:
         except ValueError as error:  # 含 pydantic ValidationError 与 UnicodeError
             raise InvalidRequestPayload(str(error)) from None
         draft = MessageDraft(
-            self.target(PROTOCOL_OF[registered.endpoint]),
+            self.target(PROTOCOL_OF[registered.endpoint], explicit=explicit_target),
             operation,
             operation_id,
             raw,
