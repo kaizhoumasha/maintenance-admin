@@ -18,8 +18,8 @@ from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
-def _runtime(factory):
-    bindings, annexes = catalog.validate_business_contracts()
+def _runtime(factory, business: str):
+    bindings, annexes = catalog.validated_command_contracts()
     commands = EcsCommands(
         None,
         TARGET,
@@ -39,11 +39,12 @@ def _runtime(factory):
         outbox=outbox,
         ecs_commands=commands,
         session_factory=factory,
+        business_code=business,
     )
 
 
 async def advance_pending(factory, business: str) -> int:
-    runtime = _runtime(factory)
+    runtime = _runtime(factory, business)
     return await runtime.progressions[business]()
 
 

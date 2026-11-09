@@ -47,6 +47,8 @@ class _CatalogSnapshot:
     consumers: dict[tuple[str, str, str | None], frozenset[str]]
     targets: dict[tuple[str, tuple[str, str, str | None]], InputTarget]
     commands: dict[tuple[str, str], type]
+    bindings: tuple["CommandBinding", ...]
+    annexes: dict[tuple[str, str], "DeviceAnnex"]
 
 
 def components(entry) -> tuple[ComponentDefinition, ...]:
@@ -230,6 +232,14 @@ def validated_entries() -> tuple[ModuleType, ...]:
     ):
         raise RuntimeError("Business catalog must be validated before runtime assembly")
     return current
+
+
+def validated_command_contracts() -> tuple[
+    tuple["CommandBinding", ...], dict[tuple[str, str], "DeviceAnnex"]
+]:
+    """Use the command contracts compiled at startup, including other owners' annexes."""
+    validated_entries()
+    return _validated_entries.bindings, dict(_validated_entries.annexes)
 
 
 def progressions() -> dict[str, str]:
@@ -442,6 +452,8 @@ def validate_business_contracts() -> tuple[
         {key: frozenset(value) for key, value in consumers.items()},
         targets,
         {key: value.source for key, value in compiled_by_key.items()},
+        tuple(commands),
+        dict(annexes),
     )
     _registration_guard_enabled = True
     return tuple(commands), annexes
