@@ -11,6 +11,7 @@ COMPONENTS = (SORTING_TASK, BIN_ROLLER, RACK_DISPATCH)
 COMMANDS = (PickAndPut,)
 MODEL_MODULES = ("app.businesses.smt_auto.models",)
 ENTRY_MODULES = (
+    "app.businesses.smt_auto.ecs_event.scan_completed",
     "app.businesses.smt_auto.callback.putaway_source_rack_exhausted_v1",
     "app.businesses.smt_auto.request.putaway_work_plan_v1",
     "app.businesses.smt_auto.request.putaway_material_decide_v1",

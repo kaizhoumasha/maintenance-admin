@@ -8,6 +8,7 @@ DEFINITION = BusinessDefinition(
     device_roles=(
         DeviceRole(role_key="BIN_ARM", display_name="料箱侧机械臂"),
         DeviceRole(role_key="RACK_ARM", display_name="货架侧机械臂"),
+        DeviceRole(role_key="PLATFORM_SCANNER", display_name="扫码平台", required=False),
     ),
     position_slots=tuple(
         PositionSlot(position_type="RACK_POSITION", slot_key=key, display_name=name, required=False)
@@ -18,5 +19,8 @@ DEFINITION = BusinessDefinition(
             ("TRANSFER_RACK", "出库转运架"),
         )
     ),
-    initial_entries=(InitialEntry(kind="wms_callback", name="putaway.source.rack_exhausted@v1"),),
+    initial_entries=(
+        InitialEntry(kind="wms_callback", name="putaway.source.rack_exhausted@v1"),
+        InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="PLATFORM_SCANNER"),
+    ),
 )

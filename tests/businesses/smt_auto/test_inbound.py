@@ -91,7 +91,10 @@ async def inbound_host(s5_roller, request, monkeypatch, arm_timeouts):
             else:
                 importlib.import_module(module)
 
-    host.entry.DEFINITION = DEFINITION
+    host.entry.DEFINITION = replace(
+        DEFINITION,
+        initial_entries=tuple(e for e in DEFINITION.initial_entries if e.kind == "wms_callback"),
+    )
     host.entry.COMMANDS = (PickAndPut,)
     host.entry.PROGRESSION = "scan_pending"
     name = "app.businesses.smt_auto.callback.putaway_source_rack_exhausted_v1"
