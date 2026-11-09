@@ -1,8 +1,8 @@
 # SMT 手工分拣、入库业务子包实施计划
 
-> 2026-11-02 新目标决定：[公共货架调度设计](../specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+> 历史设计决定（2026-11-02）。[公共货架调度设计](../specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和验收保留原时点含义。公共调度在该时点尚未实施。
 
-2026-11-02 后续增量：原 M/B 任务和下文数字保持原日期范围；[模型收敛与额度实施计划](2026-11-02-smt-persistence-and-capacity-implementation.md) Task1～3 已本地实现并通过分项独立复审。当前 SMT/BIN_Roller 为 7/10 张表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit` 单 head；管理字段 `five_rack_request_limit` 与开始前 WITHDRAWN 服务的兼容边界见[当前设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。永久 KT16/KT18 专项已 12 passed / 0 skipped，当前最终全仓及整体复核待执行；[当前结果和旧失败](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)分开保存。无提交或部署。
+历史交付快照（2026-11-02 后续增量）。原 M/B 任务和下文数字保持原日期范围；[模型收敛与额度实施计划](2026-11-02-smt-persistence-and-capacity-implementation.md) Task1～3 已本地实现并通过分项独立复审。当前 SMT/BIN_Roller 为 7/10 张表，`0177313880f9 → smtmanualcompact → binrollercompact → fiveracklimit` 单 head；管理字段 `five_rack_request_limit` 与开始前 WITHDRAWN 服务的兼容边界见[当前设计](../specs/2026-11-02-smt-bin-roller-persistence-design.md)。永久 KT16/KT18 专项已 12 passed / 0 skipped，当前最终全仓及整体复核待执行；[当前结果和旧失败](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)分开保存。无提交或部署。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or superpowers:subagent-driven-development only after implementation authorization. M1～M6已按后续授权完成本地实现及分项复核；当前软件证据和最终全仓门槛见[统一验收](../../testing/smt-manual.md)，M1/M2原数字分别保留在历史页。共享ST1/ST2与BIN_Roller复用已合入源码；手工增量不提交、不推送、不部署、不操作运行库或真实发送。
 
@@ -14,6 +14,10 @@
 
 **Spec:** [SMT 手工设计](../specs/2026-10-31-smt-manual-business-design.md)、[人工线 API](../../integrations/manual-picking-api.md)、[共享 sorting_task 计划](2026-10-31-sorting-task-implementation.md)、[统一自动API任务接口](../../integrations/smt-auto-api.md#tasks)、[BIN_Roller 设计](../specs/2026-10-30-bin-roller-capability-design.md)及[B1～B7 计划](2026-10-30-bin-roller-implementation.md)。
 
+## 现行合同对照（2026-11-09）
+
+M1～M6 的约束和文件清单保留原交付名称。后续代码将架面直接取料完成注册为 `manual_rack.direct_pick_completed@v1`，入口为 `callback/manual_rack_direct_pick_completed_v1.py`。[`smtmanualoprename` 迁移](../../../migrations/versions/2026-11-04_smt_manual_operation_rename.py)同步更新已保存的手工业务输入及其约束。架面完成、整架截止版本完成和到位报告仍仅用于出库，后两项保留 `outbound.return_rack.*`。生产架调度现复用[公共 RackDispatch 合同](../../integrations/workline-business-api.md#rack-departure-confirmed-wire)。
+
 ## Global Constraints
 
 - code/owner_domain 固定 smt_manual，WMS business_key 为 business:smt_manual，组件使用 CommandOwner("smt_manual")；方向和组件不是独立运行主体。
@@ -23,7 +27,7 @@
 - 四点及 MOVE_FORWARD/MOVE_RIGHT/MOVE_LEFT 由已合并 bin_roller.COMPONENT 单份声明；宿主 COMMANDS=()，不建 ECS 扫码入口/方向命令/机械臂/PDA/库存/箱架绑定账。
 - 接收事实、业务状态及合法意图使用 receiver 原事务；独立结果消费用公开读口，进度/消费身份/下一 Outbox 原子。组件方法只用调用方 session，不提交或发 HTTP。独立 advance 沿既有锁序 WorkLine → Device按ID升序 → 原业务动作；只读定位可先查，持锁后重验原归属和状态，不新增业务锁或占位。
 - 原plan重验消费[共享1.1收据保护](2026-10-31-sorting-task-implementation.md#sorting-task-recheck)：receiver先锁定/刷新原收据，再按WorkLine→Devices按ID→原业务动作写入，锁持有到外层结束；宿主advance不反向锁收据。公共并发机制归ST1，M1验证真实成员/版本/意图原子性。首次正式接入前四分支齐备，后到宿主遵守[1.4冻结兼容](2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，不收紧已发布@v1或重解析旧输入。
-- 沿 BIN_Roller 专项范围在首 SQL 前设置相关单条 advance 的 SERIALIZABLE，40001 最多3次新会话整事务重试含 commit；已有无关纯生产 REPEATABLE READ，receiver/短扫描/其他业务不整体升级。不新增隔离选择器、手工锁、预占、租约、调度表或第二 Sender。
+- 沿 BIN_Roller 专项范围在首 SQL 前设置相关单条 advance 的 SERIALIZABLE，`40001`（含 commit）整事务最多尝试 3 次，含首次，每次重试新建会话；已有无关纯生产 REPEATABLE READ，receiver/短扫描/其他业务不整体升级。不新增隔离选择器、手工锁、预占、租约、调度表或第二 Sender。
 - WAIT 固定原到期点，retry_after_ms 为严格整数1～60000；到期一次合法新求值保留原 task/arrival/bin/scanned_at。未知/503只恢复原请求，不用 WmsRequests.send 的不存在 not_before 参数或另建延迟队列。
 - 已完成作业可靠保存原释放决定/命令即可参与人工整单确认，不等 SCAN2 Result/FIFO清空/全部回架/全部架离场。新到箱确认暂缓、供箱撤销进度和合并后的C07沿设计，不新增全线门槛。
 - 不自动补绑早到完工，不迁移 wes_backend 数据或复制旧锁/容量窗口；不新增手工7天归档政策。原任务终态/当前任务切换不停止旧 pending 或改挂原责任。

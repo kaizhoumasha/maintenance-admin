@@ -1,12 +1,14 @@
 # SMT 手工分拣、入库业务子包设计
 
-> 2026-11-02 新目标决定：[公共货架调度设计](2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+> 历史设计决定（2026-11-02）。[公共货架调度设计](2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和验收保留原时点含义。公共调度在该时点尚未实施。
 
-2026-11-02 后续交付：按[共同收敛设计](2026-11-02-smt-bin-roller-persistence-design.md)及[实施计划](../plans/2026-11-02-smt-persistence-and-capacity-implementation.md)，当前已是 SMT 7 + BIN_Roller 10 张业务表，顺序 revision 为 `smtmanualcompact → binrollercompact → fiveracklimit`。每线可空请求额度及开始前撤销服务已实现，原公开 ports、六种 RollerWorkRef、wire 和冻结身份保持；永久 KT16/KT18 专项 12 passed / 0 skipped。旧 28 表、4933/52 与 11 PASS/1 FAIL 仅为各自历史时点，当前最终全仓/整体复核待执行，见[当前专项证据](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)。未提交、未部署。
+历史交付快照（2026-11-02 后续交付）。按[共同收敛设计](2026-11-02-smt-bin-roller-persistence-design.md)及[实施计划](../plans/2026-11-02-smt-persistence-and-capacity-implementation.md)，当前已是 SMT 7 + BIN_Roller 10 张业务表，顺序 revision 为 `smtmanualcompact → binrollercompact → fiveracklimit`。每线可空请求额度及开始前撤销服务已实现，原公开 ports、六种 RollerWorkRef、wire 和冻结身份保持；永久 KT16/KT18 专项 12 passed / 0 skipped。旧 28 表、4933/52 与 11 PASS/1 FAIL 仅为各自历史时点，当前最终全仓/整体复核待执行，见[当前专项证据](../../testing/smt-manual-kt16-kt18.md#current-factory-profile)。未提交、未部署。
 
-设计基线：2026-10-31；交付状态核对：2026-11-01。**手工 M1～M6 已完成本地实现及分项独立复核，最终软件门槛进展见统一验收记录，正式 catalog、唯一推进与组件/宿主状态迁移已交付；统一证据见[SMT 手工验收](../../testing/smt-manual.md)。** sorting_task ST1/ST2 复用已合入 PR #44/380aeba，BIN_Roller 复用已合入组件；手工增量未提交、未部署、未执行运行库迁移或真实发送。文档与软件验证不代表 WMS/ECS/RCS 对端签认、联调或现场物理验收。
+历史设计基线为 2026-10-31，原交付核对日期为 2026-11-01。**手工 M1～M6 已完成本地实现及分项独立复核，最终软件门槛进展见统一验收记录，正式 catalog、唯一推进与组件/宿主状态迁移已交付；统一证据见[SMT 手工验收](../../testing/smt-manual.md)。** sorting_task ST1/ST2 复用已合入 PR #44/380aeba，BIN_Roller 复用已合入组件；手工增量未提交、未部署、未执行运行库迁移或真实发送。文档与软件验证不代表 WMS/ECS/RCS 对端签认、联调或现场物理验收。
 
 实施顺序与验收见[SMT 手工实施计划](../plans/2026-10-31-smt-manual-implementation.md)；任务合同/可信分派按[sorting_task 共享计划](../plans/2026-10-31-sorting-task-implementation.md)独立交付一次，手工与自动宿主复用。共享 ST1/ST2 已合入；手工 M1～M6 按后续授权依次实施，当前保持未提交、未部署。
+
+现行合同对照（2026-11-09）。后续代码将架面直接取料完成注册为 `manual_rack.direct_pick_completed@v1`，入口为 `callback/manual_rack_direct_pick_completed_v1.py`。[`smtmanualoprename` 迁移](../../../migrations/versions/2026-11-04_smt_manual_operation_rename.py)同步更新已保存的手工业务输入及其约束。整架截止版本完成和到位报告仍为 `outbound.return_rack.task_completed@v1`、`outbound.return_rack.arrival_report@v1`。三项均仅用于出库。现行架调度和报文见[公共 RackDispatch 合同](../../integrations/workline-business-api.md#rack-departure-confirmed-wire)和[人工线 API](../../integrations/manual-picking-api.md)。下文的原设计名称和文件清单保留历史基线。
 
 ## 1. 目标与依据
 
@@ -108,7 +110,7 @@ TASK 只含 task_id/cancel_scope，仅 QUEUED/PREPARING 且尚未应用首版计
 
 本设计采用新名称 `manual_bin.work_admission_decide@v1`、`manual_bin.work_completed@v1`，同时服务 MANUAL/inbound 和 MANUAL/outbound。两者归 smt_manual，sorting_task 不承接人工准入或完工。新名称与对端的签认、注册及部署属于后续交付，不因本稿产生真实可用接口。
 
-不批量改名直接取料架 operation；出库专属的 `outbound.manual_rack.direct_pick_completed@v1`、`outbound.return_rack.task_completed@v1`、`outbound.return_rack.arrival_report@v1` 沿人工 API 的出库专属合同，入库不能调用这些分支。
+原设计的出库专属操作为 `outbound.manual_rack.direct_pick_completed@v1`、`outbound.return_rack.task_completed@v1`、`outbound.return_rack.arrival_report@v1`。入库不调用这三个分支。
 
 ### 5.2 manual_bin.work_admission_decide@v1
 

@@ -1,17 +1,19 @@
 # SMT 手工分拣、入库 WES 与 WMS API 对接文档
 
+当前代码核对（2026-11-09）。`smt_manual` 已组合 `sorting_task`、`BIN_Roller` 和 `RackDispatch`；当前业务持久化为 SMT 手工 5 表、BIN_Roller 4 表及公共货架调度 2 表。本文接口名称、字段和当前流程以现有正式注册及服务实现为准；以下带日期的交付状态、表数量和测试数字保留为历史快照，不用于判断当前部署或现场验收状态。
+
 2026-11-03 更新：BIN_Roller 当前检查点采用[四表设计](../superpowers/specs/2026-11-03-bin-roller-four-table-design.md)。原 TASK 完成/取消即停止其后续调度，独立 LINE 回流只按自身责任继续；WAIT_FACT 不重发旧动作。旧八表历史不迁移。本文既往表数量/中间实体和运行快照保留为历史证据，当前软件验证见[本轮验收](../testing/2026-11-03-bin-roller-four-table-acceptance.md)；WMS/ECS wire 与现场验收边界不因此改变。
 
 
-> 2026-11-02 新目标决定：[公共货架调度设计](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)统一手工、自动、BIN_Roller、粗分及后续业务的货架调度实体/推进服务，生产条件仍归原业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的目标规则及私有架调度表/装配规划由新设计覆盖；已合入实现和旧验收保留原时点含义，新公共能力尚未实施，当前代码不会因文档更新自动改变。
+> 手工生产架和 BIN_Roller 复用已实现的 [RackDispatch](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)，生产条件仍归各自业务。原动作是离开当前工作线货架工作位的DEPART/RACK_MOVE、模板为CTU03或F01时，有效提交接纳即完成调度；目标可为库区ZONE或不同的生产线等RACK_POSITION工作位，不按是否库区判定离场；最终回调仅保留终位/失败备查，不回退、不阻塞后继、不自动重搬。本点位无其他可由原过程承接的有效需求时，直接执行责任可安全交出就安排原架离场，不等父任务终态或独立报告ACK；未知不作无需求，原业务完成/报告义务仍独立保留。本文中与此冲突的旧规则及私有架调度表/装配规划由公共实现覆盖；旧验收保留原时点含义，不据此推定当前部署或现场通过。
 
-2026-11-02 后续交付：SMT / BIN_Roller 已按[共同设计](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)收敛至 7 + 10 张业务表，新增可省略的[每线 CTU01 请求额度](#manual-request-limit)，原任务/operation/owner 和冻结身份保持。永久 KT16/KT18 配置专项为 12 passed / 0 skipped，最终全仓/整体复核待执行；[当前证据](../testing/smt-manual-kt16-kt18.md#current-factory-profile)与下文旧 M1～M6 软件快照分开记录。未提交、未部署。
+历史快照（2026-11-02 后续交付）。SMT / BIN_Roller 已按[共同设计](../superpowers/specs/2026-11-02-smt-bin-roller-persistence-design.md)收敛至 7 + 10 张业务表，新增可省略的[每线 CTU01 请求额度](#manual-request-limit)，原任务/operation/owner 和冻结身份保持。永久 KT16/KT18 配置专项为 12 passed / 0 skipped，最终全仓/整体复核待执行；[该阶段证据](../testing/smt-manual-kt16-kt18.md#current-factory-profile)与下文旧 M1～M6 软件快照分开记录。未提交、未部署。
 
-状态核对：2026-11-01。**SMT 手工 M1～M6 已完成本地实现及分项独立复核，最终软件门槛进展见统一验收记录；当前统一证据见[SMT 手工验收](../testing/smt-manual.md)。** 一个 smt_manual 业务承接 MANUAL 入库/出库，以不可变 business_type 区分方向；正式 catalog 复用已合入的 sorting_task 与 BIN_Roller，已交付组件/宿主状态迁移。AUTO 两方向的 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md) 仍待实施。手工增量未提交、未部署、未升级运行库，未执行真实 WMS/ECS/RCS 请求或现场验收；本地真实 worker/Beat 证据不代表对端签认或物理完成。
+历史状态核对：2026-11-01。**SMT 手工 M1～M6 已完成本地实现及分项独立复核，最终软件门槛进展见统一验收记录；统一证据见[SMT 手工验收](../testing/smt-manual.md)。** 一个 smt_manual 业务承接 MANUAL 入库/出库，以不可变 business_type 区分方向；正式 catalog 复用已合入的 sorting_task 与 BIN_Roller，已交付组件/宿主状态迁移。该时点 AUTO 两方向的 [smt_auto](../superpowers/specs/2026-10-31-smt-auto-business-design.md) 仍待实施，手工增量未提交、未部署、未升级运行库，未执行真实 WMS/ECS/RCS 请求或现场验收；这些是原时点状态，本地真实 worker/Beat 证据不代表对端签认或物理完成。
 
 本文统一采用[统一自动线文档](smt-auto-api.md)的组织方式。公共信封和平台边界见[工作线交互索引](workline-business-api.md)；**SCAN3 → SCAN4 → FIFO → Return_Batch、回架和尾箱清退由[公共料箱回流能力](workline-bin-return-api.md)统一描述**，不再由人工线维护第二套规则。
 
-本文新任务报文统一采用 `sorting.task.*@v1`，公共规则引用[自动 API 3 节](smt-auto-api.md#tasks)，人工资源联合及完成条件在本文细化。人工箱级准入/完工统一为 `manual_bin.work_admission_decide@v1`、`manual_bin.work_completed@v1`，同时用于入库/出库；出库直接取料架等专属 operation 保留其 outbound 名称，公共供箱/回流名称也不批量替换。历史冻结的 outbound.picking_task.*、outbound.manual_bin.* 请求仍沿原合同、身份和正文履约，不因本文改写、换号或增加兼容入口。所有报文均为对接示例；共享声明与手工正式宿主已本地接入，仍不表示已部署、对端签认或现场通过。
+本文新任务报文统一采用 `sorting.task.*@v1`，公共规则引用[自动 API 3 节](smt-auto-api.md#tasks)，人工资源联合及完成条件在本文细化。人工箱级准入/完工统一为 `manual_bin.work_admission_decide@v1`、`manual_bin.work_completed@v1`，同时用于入库/出库；直接取料架面完成采用 `manual_rack.direct_pick_completed@v1`，仍仅用于出库。整架截止版本完成和到位报告保留 `outbound.return_rack.*` 名称，公共供箱/回流采用 `bin.inbound_batch@v1`、`bin.return_batch@v1`，不按业务方向批量替换前缀。旧 `outbound.picking_task.*`、`outbound.manual_bin.*` 及改名前的公共供箱和回流请求按[旧请求恢复边界](workline-business-api.md#legacy-wms-request-recovery)保留原证据。现行发送端仅按已注册的原 Operation 重发。所有报文均为对接示例；共享声明与手工正式宿主已本地接入，仍不表示已部署、对端签认或现场通过。
 
 实现归属约定：sorting_task 只提供六类任务合同、单份注册和可信分派，任务表/状态/队列/推进归 smt_manual。BIN_Roller 唯一受理四点扫码并执行公共箱流、五层架流；本文“WES 创建/登记 SCAN2 MOVE_FORWARD”表示生产业务按原本次到位决定释放，再调用组件登记并履约唯一原命令，不另注册 SCAN2 事件或发送路径。一个业务只有一个 scan_pending，公平推进生产与组件原待办。
 
@@ -86,7 +88,7 @@ flowchart TD
     G --> L["本地完成前提满足；请求 completion_confirm"]
     H --> L
     L --> M["COMPLETED：任务完成"]
-    M --> N["转运架按自己的条件申请离场"]
+    F --> N["转运架无后续需求且直接责任可交出时申请离场"]
     J --> O["公共 FIFO / 回架 / 尾箱清退独立履约"]
 ```
 
@@ -322,13 +324,13 @@ WMS → WES 均为 `POST {{WES_BASE_URL}}/api/v1/wms/events`；WES → WMS 的�
 | 项目 | 值 |
 | --- | --- |
 | 方向 / 端点 | WES → WMS，`POST /api/v1/wes/decisions` |
-| operation | `outbound.bin.inbound_batch@v1` |
+| operation | `bin.inbound_batch@v1` |
 | 触发 | 实际来源架面到位、仍有有效需求，且满足原批次及直接运输准入 |
 
 ```json
 {
   "operation_id": "019f3401-4a10-7b1a-aab5-f2df785324d6",
-  "operation": "outbound.bin.inbound_batch@v1",
+  "operation": "bin.inbound_batch@v1",
   "timestamp": 1793376005000,
   "data": {"task_id": "PICK-001", "rack_id": "SOURCE-01", "rack_face": "90"}
 }
@@ -393,7 +395,7 @@ READY 可超过 4 箱，在 Body 上限内保存完整清单，再按原顺序�
 | 200 / DECIDED | `{"result":"NO_WORK"}` | 保存正常直通决定，创建唯一原 SCAN2 MOVE_FORWARD |
 | 200 / DECIDED | `{"result":"WAIT","retry_after_ms":1000}` | 保持等待；不早于原到期点用新 operation_id 求值，原 task_id/bin_code/scanned_at 保持，不重复扫码重置计时 |
 
-NO_WORK 不表示 NG。WORK_REQUIRED.task_id 不匹配、响应字段非法或响应未知时不释放、不改绑任务；未知继续原请求身份恢复。同箱本次未闭合准入不因重复扫码创建第二份请求。源入口允许没有 SCAN1 passage 的合法直达 SCAN2，由人工业务核对本次合法上下文；原扫码由组件先存，业务关联不变成组件的投箱结果等待门槛。这里不使用自动线 bin.work_plan，也不返回 Cell 或取盘参数。
+NO_WORK 不表示 NG。WORK_REQUIRED.task_id 不匹配、响应字段非法或响应未知时不释放、不改绑任务；未知继续原请求身份恢复。同箱本次未闭合准入不因重复扫码创建第二份请求。源入口允许没有 SCAN1 passage 的合法直达 SCAN2，由人工业务核对本次合法上下文；原扫码由组件先存，业务关联不变成组件的投箱结果等待门槛。这里不使用自动出库的 `outbound.bin.work_plan@v1`，也不返回 Cell 或取盘参数。
 
 <a id="manual-completed"></a>
 ### 2.8 人工料箱完成通知
@@ -434,13 +436,13 @@ WES 保存消息后，在任务所属工作线中唯一匹配已取得 WORK_REQU
 | 项目 | 值 |
 | --- | --- |
 | 方向 / 端点 | WMS → WES，`POST /api/v1/wms/events` |
-| operation | `outbound.manual_rack.direct_pick_completed@v1` |
+| operation | `manual_rack.direct_pick_completed@v1` |
 | 首次响应 | `202 / RECEIVED`，可靠保存后按版本应用 |
 
 ```json
 {
   "operation_id": "019f3401-4a10-7b1a-aab5-f2df785324d9",
-  "operation": "outbound.manual_rack.direct_pick_completed@v1",
+  "operation": "manual_rack.direct_pick_completed@v1",
   "timestamp": 1793376020000,
   "data": {"task_id": "PICK-001", "plan_revision": 1, "rack_id": "DIRECT-01", "rack_face": "A", "completed_at": 1793376019900}
 }
@@ -544,14 +546,16 @@ PLAN_REVISION_STALE 的 current_plan_revision 必须大于请求版本；版本�
 
 | 交互 | 方向与端点 | 权威描述 |
 | --- | --- | --- |
-| `rack.departure_decide@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [拟议共用离场合同](workline-business-api.md#货架离场决定的拟议共用合同)及[完整请求/响应示例](coarse-sorting-api-draft.md#wms-rack-departure) |
-| `outbound.bin.return_batch@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [公共回架分配](workline-bin-return-api.md#return-batch) |
+| `rack.departure_decide@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [共用离场合同](workline-business-api.md#rack-departure-confirmed-wire)及[完整请求/响应示例](coarse-sorting-api-draft.md#wms-rack-departure) |
+| `bin.return_batch@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [公共回架分配](workline-bin-return-api.md#return-batch) |
 | `workline.return_buffer.drain_rack_decide@v1` | WES → WMS，`POST /api/v1/wes/decisions` | [公共尾箱清退](workline-bin-return-api.md#return-drain) |
 | SCAN3 / SCAN4 | ECS → WES Event、原命令与 Result | [公共设备交互](workline-bin-return-api.md#return-ecs) |
 
-共用离场的完整请求、正常/冲突响应及唯一 RACK_MOVE 关联已按[本方 P11-01](workline-business-api.md#rack-departure-confirmed-wire)固定，未注册/实施及对端签认状态分别记录。离场请求四个字段 `workline_code/rack_id/current_location/current_face` 必须存在；位置使用已确认 RACK_POSITION，面向不适用或无法确认时显式 null，不使用计划面代替。READY 只授予冻结目的地的离场许可；新公共目标统一五层CTU03及RETURN/TRANSFER F01的DEPART原有效接纳即完成WES调度/释放，去向包括库区和生产线等不同RACK_POSITION工作位，不等最终位置/Result，后续失败只备查且不阻后继；进场/换面仍需原匹配结果，目的地运输由WMS/RCS管理；WAIT 保存固定到期点，到期/新事实可新身份求值，响应未知保持原身份。
+共用离场的完整请求、正常/冲突响应及唯一 RACK_MOVE 关联已按[本方 P11-01](workline-business-api.md#rack-departure-confirmed-wire)固定，当前由公共 RackDispatch 正式注册并实现；对端签认及现场验收另行核对。离场请求四个字段 `workline_code/rack_id/current_location/current_face` 必须存在；位置使用已确认 RACK_POSITION，面向不适用或无法确认时显式 null，不使用计划面代替。READY 只授予冻结目的地的离场许可；公共实现统一五层CTU03及RETURN/TRANSFER F01的DEPART原有效接纳即完成WES调度/释放，去向包括库区和生产线等不同RACK_POSITION工作位，不等最终位置/Result，后续失败只备查且不阻后继；进场/换面仍需原匹配结果，目的地运输由WMS/RCS管理；有效 WAIT 按[共用续问规则](workline-business-api.md#rack-departure-wait)处理。手工生产架只有在原位置动作、其已应用结果版本或原任务状态发生符合条件的变化时才可提前续问。BIN_Roller 按原到期点续问。响应未知保持原身份。
 
-### 进场取消与离场收口（2026-11-02 已实现）
+### 进场取消与离场收口（2026-11-02 历史实现与验收）
+
+本小节保留 `064b5c8` 及其专项验收快照，其中私有 rack/action、角色预留及等待 DEPART 最终结果的描述不代表当前实现。当前以公共 RackJob/RackAction 保存原身份，DEPART 按严格匹配的原提交接纳收口；任务终态关闭本 TASK 调度，原 pending 仅保留事实消费、责任解除及保留期处理，不再创建新动作。独立 LINE 回流按自身责任继续。
 
 Transport 的 `CANCELLED` 是原搬运应用结果，不等于 `sorting.task.cancel@v1` 的 PLAN_MEMBERS 精确撤销，也不等于 TASK 取消。TASK 仍只适用于尚未应用首版计划的 QUEUED/PREPARING；成员撤销只处理可撤销的 PENDING，STARTED 保留为有效剩余作业，阻止提前退架/跨面旋转，并允许原完成通知将其完成。取消不制造到位、作业完成或设备停止。
 
@@ -651,13 +655,13 @@ Result 必须匹配原 command_code、device_code 并通过原冻结合同验证
 
 field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信封仍回显原 operation_id；不自行引入 BUSY/429。可选字段无值省略，**除字段表明确允许外禁止 null**，包括显式允许的共用离场 current_face=null 例外。
 
-额外字段策略不得一概合并：direct_pick_completed 的 data、来源 inbound_batch 的请求 data 按对应严格合同拒绝额外字段；drain 的严格层级见公共文档；其他既有 operation 按对应 wire 读取已定义字段并忽略冗余字段，最终逐接口冻结见 M10。幂等有效字段与原始收据的保存规则分别遵守原协议，不重算历史身份。
+额外字段策略按方向及模型区分：所有 WES → WMS 请求 data 及其嵌套 RequestPayload 都严格拒绝额外字段，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 通知中，direct_pick_completed.data 和 sorting.task.cancel.data 严格拒绝额外字段；manual_bin.work_completed、outbound.return_rack.task_completed 忽略未知字段，其他任务通知另按下段规则。响应 data 按各自模型校验，不沿用通知的宽松策略。幂等有效字段与原始收据的保存规则分别遵守原协议，不重算历史身份。
 
 统一 sorting.task.* 目标的[任务族冗余字段](smt-auto-api.md#task-field-policy)已本方确认：cancel.data 严格，其他层级按各接口忽略真正未知字段；明确禁用或跨模式/分支/选择器的业务字段拒绝，不扩大范围，不重算历史有效内容。此处不改变上段非任务族接口的严格层级，也不表示旧 operation 已切换。
 
 统一任务目标的[工作线准入](smt-auto-api.md#workline-admission)已本方确认：首次不存在/停用/业务不匹配分别按引用或状态冲突拒绝；在制停用限制新增计划和执行，取消/合法原结果及历史确认继续，不重绑任务或自动解除 HELD/UNKNOWN。此处沿原任务范围收口，不表示历史 wire 或旧实现已迁移。
 
-受理使用接收器原事务保存收据、业务事实和持久待办，不在事务内访问 WMS/ECS。独立推进使用公开结果读口与调用方 Repeatable Read 事务，消费身份/版本、进度及下一 Outbox 意图原子提交。唤醒、Beat 和序列化重试沿[平台规则](workline-business-api.md#5-结果读取和事务规则)，不另建 Sender、Celery 任务或轮询器。
+受理使用接收器原事务保存收据、业务事实和持久待办，不在事务内访问 WMS/ECS。独立推进使用公开结果读口；PostgreSQL 下 TASK、MANUAL_BIN、MANUAL_COMPLETION、MANUAL_RACK 及公共 PASSAGE/RETURN/FACE/RACK_CYCLE/DRAIN 使用 SERIALIZABLE，RACK_REPORT、SCAN2_RELEASE 和只读候选扫描使用 REPEATABLE READ，均在首条 SQL 前设置隔离级别。消费身份/版本、进度及下一 Outbox 意图原子提交；`40001`（含提交阶段）按完整事务计算，含首次在内最多尝试三次。每次重试新建会话，最多重试两次，耗尽后保留原待办。唤醒及 Beat 沿[平台规则](workline-business-api.md#5-结果读取和事务规则)，不另建 Sender、Celery 任务或轮询器。
 
 <a id="manual-request-limit"></a>
 ### 4.2 工作位进场请求额度
@@ -736,7 +740,7 @@ RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个�
 <a id="manual-pending"></a>
 ## 5. 规则状态与交付依赖
 
-以下区分已查明参考基线、本系统适配和真正待确认的业务差异。M01/M03 沿已实现入口/原完工逻辑适配，不再笼统列为新未决；用户已确认首版沿该基线且不做早到完工自动补绑；这些不再保留待选分支，也不宣称本系统已经实现。
+以下区分已查明参考基线、本系统实现和真正待确认的业务差异。M01/M03 已在当前人工业务入口和原完工处理中实现，不再笼统列为新未决；用户已确认首版沿该基线且不做早到完工自动补绑；这些不再保留待选分支，软件实现不代表现场验收通过。
 
 | 编号 | 责任方 | 已定规则与交付依赖 | 适配与实施边界 |
 | --- | --- | --- | --- |
@@ -755,7 +759,7 @@ RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个�
 
 组合和目录归属见 [SMT 设计](../superpowers/specs/2026-10-31-smt-manual-business-design.md)：人工业务组合 sorting_task（任务合同/分派）与 BIN_Roller（四点/供箱/回流/统一架流），注入自己的任务/供箱/接续及 SCAN2 生产适配；任务状态和推进、命令/请求/Transport 的原 owner 均归 smt_manual，由唯一 scan_pending 推进。组件无独立 owner/progression，不新增锁/占位。Transport 提交接纳落库与实际结果应用均经原 after_commit 唤醒原业务，5 秒 Beat 兜底；接纳不等于物理完成。
 
-已直接修正：inbound_batch wire 不含 plan_revision；补全取消选择器及范围；首版仅直接取料来源也是有效计划；不再将旧版本/来源取消一概等同无新执行资格；公共 null 规则显式保留字段例外。来源为本地 wes_backend 的 `wms-outbound-picking-task-integration-requirements.md`、`wms-manual-outbound-picking-integration-requirements.md` 及相应 wire；这些参考不代表本系统已实现。
+已直接修正：inbound_batch wire 不含 plan_revision；补全取消选择器及范围；首版仅直接取料来源也是有效计划；不再将旧版本/来源取消一概等同无新执行资格；公共 null 规则显式保留字段例外。合同参考来源为本地 wes_backend 的 `wms-outbound-picking-task-integration-requirements.md`、`wms-manual-outbound-picking-integration-requirements.md` 及相应 wire；当前实现以本仓库正式注册和服务为准，这些参考不代表对端签认或现场通过。
 
 <a id="manual-acceptance"></a>
 ## 6. MOCK 与内部验收场景
