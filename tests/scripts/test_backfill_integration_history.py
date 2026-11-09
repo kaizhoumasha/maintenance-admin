@@ -735,14 +735,20 @@ async def test_backfill_cannot_restore_old_response_after_new_authority(legacy, 
 
 
 async def test_cleanup_preserves_uncut_sources_and_only_removes_verified_old_copies(
-    legacy, state_migration
+    legacy, state_migration, monkeypatch
 ):
     from datetime import timedelta
 
+    from app.businesses.smt_auto import retention as auto_retention
     from app.tasks.callback_tasks import run_cleanup, run_history_cleanup, run_receipt_cleanup
     from app.tasks.reliable_tasks import run_cleanup as reliable_cleanup
     from scripts.backfill_integration_history import SOURCES, backfill_batch
 
+    async def no_auto_references(*args, **kwargs):
+        return ()
+
+    # This fixture stops at the historical receipt cutover, before the current SMT task schema.
+    monkeypatch.setattr(auto_retention, "wms_message_references", no_auto_references)
     old = NOW - timedelta(days=100)
     async with legacy.begin() as session:
         connection = await session.connection()

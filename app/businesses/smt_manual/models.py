@@ -3,41 +3,12 @@
 from sqlalchemy import JSON, BigInteger, CheckConstraint, Index, String, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.businesses._components.sorting_task.models import SortingTaskRecord
 from app.models.base import Base
 
 
-class ManualTask(Base):
-    __tablename__ = "smt_manual_task"
-    __table_args__ = (
-        Index(
-            "smt_manual_execution_slot",
-            "work_line_id",
-            unique=True,
-            postgresql_where=text("status IN ('PREPARING', 'EXECUTING')"),
-            sqlite_where=text("status IN ('PREPARING', 'EXECUTING')"),
-        ),
-    )
-    task_id: Mapped[str] = mapped_column(String(100), primary_key=True)
-    task_type: Mapped[str]
-    business_type: Mapped[str]
-    work_line_id: Mapped[int]
-    workline_code: Mapped[str]
-    issued_operation_id: Mapped[str]
-    issued_timestamp: Mapped[int] = mapped_column(BigInteger)
-    issued_data: Mapped[dict] = mapped_column(JSON)
-    queue_revision: Mapped[int] = mapped_column(BigInteger)
-    dispatch_sequence: Mapped[int] = mapped_column(BigInteger)
-    not_before: Mapped[int | None] = mapped_column(BigInteger)
-    status: Mapped[str] = mapped_column(default="QUEUED")
-    plan_revision: Mapped[int] = mapped_column(BigInteger, default=0)
-    prepare_operation_id: Mapped[str | None]
-    prepare_message_id: Mapped[int | None] = mapped_column(BigInteger)
-    prepare_accepted: Mapped[bool] = mapped_column(default=False)
-    prepare_response_timestamp: Mapped[int | None] = mapped_column(BigInteger)
-    prepare_accepted_at_ms: Mapped[int | None] = mapped_column(BigInteger)
-    confirmation_operation_id: Mapped[str | None]
-    received_work: Mapped[list] = mapped_column(JSON, default=list)
-    target_rack: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+class ManualTask(SortingTaskRecord):
+    __mapper_args__ = {"polymorphic_identity": "MANUAL"}
 
 
 BIN_COMPLETION_OPERATION = "manual_bin.work_completed@v1"

@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from sqlalchemy import select
+from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.businesses import catalog
@@ -28,9 +28,12 @@ _METHODS = {
 
 
 class SortingTask:
-    def __init__(self, business_code: str, production: TaskHost):
+    def __init__(
+        self, business_code: str, production: TaskHost, *, task_table: Table | None = None
+    ):
         self.business_code = business_code
         self.production = production
+        self.task_table = task_table
 
     async def read_task_owner(self, session: AsyncSession, *, task_id: str) -> TaskOwnerRef | None:
         return await self.production.read_task_owner(session, task_id=task_id)
@@ -54,13 +57,31 @@ class SortingTask:
         return None if guard is None else await guard(ctx, payload)
 
 
+async def read_shared_task_owner(
+    session: AsyncSession, table: Table, *, task_id: str
+) -> TaskOwnerRef | None:
+    task = table.c
+    result = await session.execute(
+        select(
+            task.task_id,
+            task.owner_domain,
+            task.task_type,
+            task.business_type,
+            task.work_line_id,
+            task.workline_code,
+        ).where(task.task_id == task_id)
+    )
+    row = result.one_or_none()
+    return None if row is None else TaskOwnerRef(*row)
+
+
 async def _resolve(ctx: CallbackContext, payload, *, validate_branch: bool = True) -> SortingTask:
     from app.businesses.runtime import bind_callback_business, require_component, require_runtime
 
     runtime = require_runtime(ctx)
     key = ("wms_callback", ctx.operation, None)
     consumers = catalog.contract_consumers(key)
-    owners = []
+    components = {}
     for business in sorted(consumers):
         target = catalog.input_target(business, key)
         parts = getattr(runtime.services.get(business), "components", None)
@@ -72,17 +93,28 @@ async def _resolve(ctx: CallbackContext, payload, *, validate_branch: bool = Tru
             or "sorting_task" not in parts
         ):
             raise Unavailable()
-        owner = await parts["sorting_task"].read_task_owner(ctx.session, task_id=payload.task_id)
-        if owner is not None:
-            if (
-                not isinstance(owner, TaskOwnerRef)
-                or owner.task_id != payload.task_id
-                or owner.business_code != business
-                or owner.task_type not in {"MANUAL", "AUTO"}
-                or owner.business_type not in {"inbound", "outbound"}
-            ):
-                raise Unavailable()
-            owners.append(owner)
+        components[business] = parts["sorting_task"]
+    stores = {getattr(part, "task_table", None) for part in components.values()}
+    if len(stores) == 1 and None not in stores:
+        owner = await read_shared_task_owner(ctx.session, stores.pop(), task_id=payload.task_id)
+        if owner is not None and owner.business_code not in components:
+            raise Unavailable()
+        owners = [owner] if owner is not None else []
+    else:
+        owners = []
+        for business, part in components.items():
+            owner = await part.read_task_owner(ctx.session, task_id=payload.task_id)
+            if owner is not None:
+                if not isinstance(owner, TaskOwnerRef) or owner.business_code != business:
+                    raise Unavailable()
+                owners.append(owner)
+    for owner in owners:
+        if (
+            owner.task_id != payload.task_id
+            or owner.task_type not in {"MANUAL", "AUTO"}
+            or owner.business_type not in {"inbound", "outbound"}
+        ):
+            raise Unavailable()
     if len(owners) > 1:
         raise Unavailable()
     if not owners and ctx.original_response is not None:

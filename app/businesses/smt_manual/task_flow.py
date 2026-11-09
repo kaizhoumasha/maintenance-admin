@@ -3,8 +3,6 @@
 from collections.abc import Mapping, Sequence
 
 from sqlalchemy import or_, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,11 +11,10 @@ from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyCha
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import CompletionDecision
 from app.businesses._components.sorting_task.ports import TaskOwnerRef
-from app.businesses._components.sorting_task.queue import queue_changes
+from app.businesses._components.sorting_task.queue import insert_issued, prepare_next, queue_changes
 from app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1 import (
     CompletionConfirm,
 )
-from app.businesses._components.sorting_task.request.sorting_task_prepare_v1 import Prepare
 from app.businesses.runtime import Capabilities
 from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
@@ -94,20 +91,7 @@ class SmtManualTaskFlow:
         if await self.repository.task(ctx.session, payload.task_id, lock=True) is not None:
             return Conflict({"reason_code": "STATE_CONFLICT"})
         table = self.repository.tables["task"]
-        insert = pg_insert if ctx.session.get_bind().dialect.name == "postgresql" else sqlite_insert
-        created = await ctx.session.scalar(
-            insert(table)
-            .values(
-                **payload.model_dump(mode="json"),
-                work_line_id=line.id,
-                issued_operation_id=ctx.operation_id,
-                issued_timestamp=ctx.timestamp,
-                issued_data=payload.model_dump(mode="json"),
-            )
-            .on_conflict_do_nothing(index_elements=[table.c.task_id])
-            .returning(table.c.task_id)
-        )
-        if created is None:
+        if not await insert_issued(ctx, table, payload, work_line_id=line.id):
             return Conflict({"reason_code": "STATE_CONFLICT"})
         await self.repository.save_input(ctx, payload, applied=True)
         return Accepted()
@@ -123,10 +107,12 @@ class SmtManualTaskFlow:
             status=task["status"],
             queue_revision=task["queue_revision"],
             dispatch_sequence=task["dispatch_sequence"],
-            not_before=task["not_before"],
+            not_before=task["not_before_ms"],
         )
         if isinstance(values, Conflict):
             return values
+        if "not_before" in values:
+            values["not_before_ms"] = values.pop("not_before")
         await self.repository.save_task(
             ctx.session, payload.task_id, queue_revision=payload.queue_revision, **values
         )
@@ -430,42 +416,17 @@ class SmtManualTaskFlow:
             if locked
             else await self.repository.lock_line(session, work_line_id)
         )
-        if line is None or not line.is_enabled or line.business_code != "smt_manual":
-            return None
-        table = self.repository.tables["task"]
-        if await session.scalar(
-            select(table.c.task_id).where(
-                table.c.work_line_id == work_line_id,
-                table.c.status.in_(("PREPARING", "EXECUTING")),
-            )
-        ):
-            return None
-        row = (
-            (
-                await session.execute(
-                    select(table)
-                    .where(
-                        table.c.work_line_id == work_line_id,
-                        table.c.status == "QUEUED",
-                        or_(table.c.not_before.is_(None), table.c.not_before <= now_ms),
-                    )
-                    .order_by(table.c.dispatch_sequence, table.c.issued_timestamp, table.c.task_id)
-                    .limit(1)
-                    .with_for_update()
-                )
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if row is None:
-            return None
-        operation_id = str(uuid7())
-        message = await self.capabilities.wms.send(
+        prepared = await prepare_next(
             session,
-            Prepare(task_id=row["task_id"], workline_code=row["workline_code"]),
-            operation_id=operation_id,
-            scope=ScopeRef(self.roller.context.domain, "TASK", row["task_id"]),
+            self.repository.tables["task"],
+            line=line,
+            owner_domain="smt_manual",
+            now_ms=now_ms,
+            wms=self.capabilities.wms,
         )
+        if prepared is None:
+            return None
+        payload, operation_id, message_id = prepared
         await session.execute(
             self.repository.tables["request"]
             .insert()
@@ -473,20 +434,19 @@ class SmtManualTaskFlow:
                 kind="PREPARE",
                 operation="sorting.task.prepare@v1",
                 operation_id=operation_id,
-                task_id=row["task_id"],
-                work_line_id=row["work_line_id"],
-                message_id=message.message_id,
-                request_snapshot=dict(task_id=row["task_id"], workline_code=row["workline_code"]),
+                task_id=payload.task_id,
+                work_line_id=line.id,
+                message_id=message_id,
+                request_snapshot=payload.model_dump(mode="json"),
             )
         )
         await self.repository.save_task(
             session,
-            row["task_id"],
-            status="PREPARING",
+            payload.task_id,
             prepare_operation_id=operation_id,
-            prepare_message_id=message.message_id,
+            prepare_message_id=message_id,
         )
-        return row["task_id"]
+        return payload.task_id
 
     async def advance_task(
         self, session: AsyncSession, *, task_id: str, locked: bool = False

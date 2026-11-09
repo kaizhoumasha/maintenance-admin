@@ -34,7 +34,9 @@ class RollerPorts:
         await session.execute(
             select(table.c.task_id)
             .where(
-                table.c.work_line_id == work_line_id, table.c.status.in_(("PREPARING", "EXECUTING"))
+                table.c.task_type == "MANUAL",
+                table.c.work_line_id == work_line_id,
+                table.c.status.in_(("PREPARING", "EXECUTING")),
             )
             .order_by(table.c.task_id)
             .with_for_update()
@@ -107,6 +109,7 @@ class RollerPorts:
             (
                 await session.execute(
                     select(table).where(
+                        table.c.task_type == "MANUAL",
                         table.c.work_line_id == work_line_id,
                         table.c.status.in_(("PREPARING", "EXECUTING")),
                     )
@@ -136,6 +139,7 @@ class RollerPorts:
                 await session.execute(
                     select(table)
                     .where(
+                        table.c.task_type == "MANUAL",
                         table.c.work_line_id == work_line_id,
                         table.c.status.in_(("QUEUED", "PREPARING", "EXECUTING")),
                     )
@@ -154,7 +158,7 @@ class RollerPorts:
         eligible = [
             r["task_id"]
             for r in rows
-            if r["not_before"] is None or r["not_before"] <= int(time() * 1000)
+            if r["not_before_ms"] is None or r["not_before_ms"] <= int(time() * 1000)
         ]
         if not rows:
             confirmation = self.repository.tables["request"]
@@ -166,6 +170,7 @@ class RollerPorts:
                         confirmation.c.operation_id == table.c.confirmation_operation_id,
                     )
                     .where(
+                        table.c.task_type == "MANUAL",
                         table.c.work_line_id == work_line_id,
                         table.c.status == "COMPLETED",
                         confirmation.c.kind == "COMPLETION_CONFIRM",
@@ -189,6 +194,7 @@ class RollerPorts:
                     select(table.c.task_id, inputs.c.operation_id, inputs.c.payload)
                     .join(inputs, inputs.c.task_id == table.c.task_id)
                     .where(
+                        table.c.task_type == "MANUAL",
                         table.c.work_line_id == work_line_id,
                         table.c.status == "CANCELLED",
                         inputs.c.operation == "sorting.task.cancel@v1",

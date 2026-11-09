@@ -401,14 +401,14 @@ flowchart TB
 
 六类 operation 在 sorting_task 全局只注册一次，任务状态及推进归 smt_auto。WMS → WES 通知入口为 `POST /api/v1/wms/events`；WES → WMS 决定请求为 `POST /api/v1/wes/decisions`。公共信封、鉴权、类型和错误见[协议规则](#protocol)。本章只在计划、撤销选择器和完成前置处区分方向，不创建两套任务生命周期。
 
-本章与smt_manual共用[sorting_task计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：[ST1](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st1)交付任务模型、任务响应合同及必要receiver适配；[ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st2)交付可信原归属、按原模式/方向调用严格分支校验及单份注册/薄分派。具体归属见[共享计划唯一分工](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)。自动宿主只核对准入/实际连续版本/成员及状态，任务表、队列、原输入及prepare/完成确认推进由总计划S1/S5实现；方向资源、逐盘接口、机械臂/生产架流、完成资格和入库归档政策仍归smt_auto。共享组件只提供合同与分派，不承接这些业务状态。
+本章与smt_manual共用[sorting_task计划](../superpowers/plans/2026-10-31-sorting-task-implementation.md)：[ST1](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st1)交付任务模型、任务响应合同及必要receiver适配；[ST2](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-st2)交付可信原归属、按原模式/方向调用严格分支校验及单份注册/薄分派。具体归属见[共享计划唯一分工](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-ownership)。自动宿主只核对准入/实际连续版本/成员及状态，任务表、队列、原输入及prepare/完成确认推进由总计划S1/S5实现；方向资源、逐盘接口、机械臂/生产架流、完成资格和入库归档政策仍归smt_auto。共享组件负责合同、原任务归属、主表及队列领取，原输入、计划及完成确认仍由各业务处理。
 
 共享验收先由ST1用隔离operation验证公共接缝、旧默认及收据重验保护，ST2创建四个真实callback后验证errors、仅plan的recheck和可选guard登记，再回归ST1；不反向要求ST1依赖这些正式入口。首个真实宿主可独立接入，但其前置共享合同须完整包含MANUAL/AUTO四分支并遵守[发布后冻结规则](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)，无需等待另一宿主生产流程；共享部分已随PR #44合入develop，专项24 passed、修复后全仓4654 passed/52 skipped及最新复审/CI证据见[共享交付§11](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-merged)；自动宿主已接入正式运行目录，现场联调另行验收；人工首宿主及公共后续收敛已随PR #47/064b5c8合入，既有软件证据见[手工统一验收](../testing/smt-manual.md#current-delivery)，本轮未重跑。
 
 <a id="task-envelope"></a>
 ### 3.1 任务命名、字段与原归属
 
-新增任务统一 `sorting.task.*@v1`：issued、queue_changed、prepare、plan_delta、cancel、completion_confirm。只有 issued 必填 task_type/business_type/workline_code；其余操作按原 task_id 解析冻结模式、方向和业务，不额外发送选择器或业务码。首次 issued 先由工作线可信配置确定宿主并校验消费者关系，已有任务/终态摘要重报先读原归属，不能因当前工作线改配而转给新业务；缺失/歧义不广播、不猜测。 WMS负责task_id在sorting_task显式消费者范围唯一；接收方拒绝可见歧义，原归属读口不提供跨宿主任务表的全局数据库唯一约束。
+新增任务统一 `sorting.task.*@v1`，包括 issued、queue_changed、prepare、plan_delta、cancel 和 completion_confirm。只有 issued 必填 task_type/business_type/workline_code。其余操作按原 task_id 解析冻结模式、方向和业务。首次 issued 由工作线可信配置确定宿主并校验消费者关系。已有任务及归档摘要始终按主表记录的原归属处理。WMS 负责在共享消费者范围内分配唯一的 task_id，WES 以 `sorting_task.task_id` 主键约束受理，并通过共享领取逻辑确保每条工作线只有一个进行中的任务。
 
 新 WMS 请求本地 business_key=business:smt_auto，Transport owner_domain=smt_auto，新 ECS 意图使用 CommandOwner("smt_auto")。新搬运的本地 `caller.workline_id` 取数据库工作线 ID 的字符串，原搬运继续使用冻结的调用方。inbound/outbound 与组件都不是独立 owner；不改历史冻结请求或回填历史 null。任务号及业务编码遵循[字段规则](#field-rules)，工作线启停见[准入规则](#workline-admission)。
 

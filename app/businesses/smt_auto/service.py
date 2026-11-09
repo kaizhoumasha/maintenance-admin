@@ -104,7 +104,7 @@ class SmtAutoService(AutoTaskService):
         self.archive = Archive(self.task_flow, self.racks)
         self.transactions = AutoS1Transactions(capabilities, service=self)
         self.components = {
-            "sorting_task": SortingTask("smt_auto", self),
+            "sorting_task": SortingTask("smt_auto", self, task_table=AutoTask.__table__),
             "bin_roller": roller,
             "rack_dispatch": self.dispatch,
         }

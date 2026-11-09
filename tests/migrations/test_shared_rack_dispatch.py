@@ -88,9 +88,13 @@ async def isolate_retained_manual_runtime(url, engine):
         proof = Path(directory) / "contract.json"
         proof.write_text(json.dumps({**evidence, "authority_acceptance": "isolated-manual-proof"}))
         result = await migrate(
-            url, "-x", f"integration_history_contract_evidence={proof}", "upgrade", "head"
+            url,
+            "-x",
+            f"integration_history_contract_evidence={proof}",
+            "upgrade",
+            "sorting_task_authority",
         )
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, result.stdout + result.stderr
     await engine.dispose()
 
 
@@ -374,7 +378,7 @@ async def seed(conn, t, multi_rotation, runtime_subject):
             issued_data={},
             queue_revision=1,
             dispatch_sequence=n,
-            task_type="OUTBOUND",
+            task_type="MANUAL",
             business_type="outbound",
             status="EXECUTING" if job == "active" else "COMPLETED",
             plan_revision=1,

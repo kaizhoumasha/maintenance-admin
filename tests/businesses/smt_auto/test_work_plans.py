@@ -621,7 +621,7 @@ async def test_public_source_advance_locks_line_jobs_subjects_before_actions(dir
             "work_lines",
             "devices",
             "rack_dispatch_job",
-            "smt_auto_task",
+            AutoTask.__tablename__,
             "smt_auto_outbound_source_member",
             "rack_dispatch_action",
         ]

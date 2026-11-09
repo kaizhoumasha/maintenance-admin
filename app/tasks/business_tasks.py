@@ -18,7 +18,7 @@ from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
 
 
-def _runtime(factory, business: str):
+def _runtime(factory, business: str | None):
     bindings, annexes = catalog.validated_command_contracts()
     commands = EcsCommands(
         None,
