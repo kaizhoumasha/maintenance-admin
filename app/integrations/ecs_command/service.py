@@ -14,7 +14,7 @@ from app.integrations.model_payload import validated_model_payload
 from app.models import IntegrationExchange, IntegrationRecord
 from app.reliable import MessageDraft
 from app.reliable.lifecycle import ensure_savepoint_transaction
-from app.reliable.types import DeliverySnapshot
+from app.reliable.types import RETRY_ACK_TIMEOUT, DeliverySnapshot
 
 from .contracts import PROTOCOL_RETRY_WINDOW, CommandEnvelope, CommandView, merge_annexes
 from .declaration import command_declaration
@@ -90,6 +90,7 @@ class EcsCommands:
             params=params,
             resolve_route=resolve_route,
             scope=scope,
+            unknown_policy=RETRY_ACK_TIMEOUT if owner.domain == "xray" else "HOLD",
         )
 
     async def _enqueue(
@@ -104,6 +105,7 @@ class EcsCommands:
         params,
         resolve_route,
         scope=None,
+        unknown_policy="HOLD",
     ):
         if (
             not isinstance(owner, CommandOwner)
@@ -172,7 +174,7 @@ class EcsCommands:
         raw = envelope.model_dump_json().encode()
         if len(raw) > 262144 or any("\x00" in v for v in (device_code, task_type)):
             raise ValueError("invalid command payload")
-        snapshot = DeliverySnapshot(route.origin, PROTOCOL, "HOLD")
+        snapshot = DeliverySnapshot(route.origin, PROTOCOL, unknown_policy)
         frozen_route = asdict(route)
         frozen_route["retry_window"] = route.retry_window.total_seconds()
         values = dict(
@@ -284,6 +286,15 @@ class EcsCommands:
         from .results import get_command
 
         return await get_command(session, owner_domain=owner.domain, command_code=command_code)
+
+    async def is_delivery_proven_unaccepted(
+        self, session: AsyncSession, *, owner: CommandOwner, command_code: str
+    ) -> bool:
+        from .results import is_delivery_proven_unaccepted
+
+        return await is_delivery_proven_unaccepted(
+            session, owner_domain=owner.domain, command_code=command_code
+        )
 
     async def get_by_call(
         self, session: AsyncSession, *, owner: CommandOwner, call_key: str

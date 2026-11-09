@@ -1,6 +1,8 @@
-"""decisions / facts 端点的协议适配器:信封核对与公共响应联合(合同 §4.4)的分类,不含任何业务字段。"""
+"""Classify common decisions and facts envelopes and declared decision data."""
 
 import re
+
+from pydantic import ValidationError
 
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import HttpRequest, HttpResult
@@ -24,7 +26,7 @@ REJECTION_REASONS = frozenset({"INVALID_ENVELOPE", "UNSUPPORTED_OPERATION", "INV
 
 class WmsEndpointAdapter:
     """同步成功响应由端点决定:facts 为 200 RECORDED / DUPLICATE,decisions 为 200 DECIDED /
-    202 PREPARE_ACCEPTED。成功即 DELIVERED 并保留响应原文,解释响应是各 operation 的事。"""
+    202 PREPARE_ACCEPTED。同步决定可声明 data 合同，业务应用仍归对应 operation。"""
 
     def __init__(self, endpoint: Endpoint, path: str, success: frozenset[tuple[int, str]]):
         self.endpoint, self.path, self.success = endpoint, path, success
@@ -74,6 +76,16 @@ class WmsEndpointAdapter:
         data_fields = set(data)
         pair = (result.status_code, ack["code"])
         if pair in self.success:
+            if self.endpoint == Endpoint.DECISIONS:
+                registered = lookup(message.operation)
+                contract = registered.decision_data if registered else None
+                if contract is not None:
+                    if pair != (200, "DECIDED"):
+                        return UNKNOWN
+                    try:
+                        contract.validate_python(data)
+                    except ValidationError:
+                        return UNKNOWN
             if pair == (202, "PREPARE_ACCEPTED"):
                 return Verdict(VerdictKind.DELIVERED, response=result.body)
             if data and pair != (200, "DECIDED"):

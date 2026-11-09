@@ -46,6 +46,9 @@ class DuplicateMessage(ValueError):
     pass
 
 
+RETRY_ACK_TIMEOUT = "RETRY_ACK_TIMEOUT"
+
+
 @dataclass(frozen=True)
 class DeliverySnapshot:
     origin: str
@@ -60,7 +63,7 @@ class DeliverySnapshot:
         HttpClientConfig(self.origin, "snapshot")
         if httpx.URL(self.origin).raw_path not in (b"", b"/") or self.origin.endswith("/"):
             raise ValueError("snapshot requires normalized origin")
-        if not self.protocol or self.unknown_policy != "HOLD":
+        if not self.protocol or self.unknown_policy not in ("HOLD", RETRY_ACK_TIMEOUT):
             raise ValueError("invalid delivery snapshot")
 
 

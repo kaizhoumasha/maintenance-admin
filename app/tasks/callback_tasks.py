@@ -200,6 +200,8 @@ async def _protected_roots(session, roots):
     )
     from app.businesses.coarse_sorting.retention import wms_message_references as coarse_references
     from app.businesses.smt_auto.retention import wms_message_references as auto_references
+    from app.businesses.xray.retention import event_references as xray_events
+    from app.businesses.xray.retention import message_references as xray_references
 
     ids = tuple(row.id for row in roots)
     receipts = {row.receipt_id: row.id for row in roots if row.receipt_id is not None}
@@ -245,6 +247,7 @@ async def _protected_roots(session, roots):
         return (
             *await coarse_references(session, **scope),
             *await auto_references(session, **scope),
+            *await xray_references(session, **scope),
         )
 
     actions = [
@@ -253,6 +256,7 @@ async def _protected_roots(session, roots):
         if kind == "BUSINESS_ACTION" and namespace == "coarse_sorting"
     ]
     lines = await event_reference_lines(session, candidate_ids=tuple(receipts))
+    lines.update(line for line, _ in await xray_events(session, candidate_ids=tuple(receipts)))
     hints = (
         await _message_references(session, set(messages), business_references=business_references)
         if messages
@@ -300,6 +304,9 @@ async def _protected_roots(session, roots):
             owner_queries[kind] = owner_query
             lines.update(row.work_line_id for row in await session.execute(owner_query))
     await _lock_lines(session, lines)
+    protected.update(
+        receipts[value] for _, value in await xray_events(session, candidate_ids=tuple(receipts))
+    )
     protected.update(
         receipts[value]
         for value in await protected_event_ids(session, candidate_ids=tuple(receipts))

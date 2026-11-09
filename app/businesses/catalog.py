@@ -141,12 +141,13 @@ def entries() -> tuple[ModuleType, ...]:
     """Explicit business compositions shared by API, worker and model loading."""
     from .smt_auto import composition as smt_auto
     from .smt_manual import composition as smt_manual
+    from .xray import composition as xray
 
     if _coarse_sorting_integration:
         from .coarse_sorting import integration as coarse_sorting
     else:
         from .coarse_sorting import composition as coarse_sorting
-    return (coarse_sorting, smt_manual, smt_auto)
+    return (coarse_sorting, smt_manual, smt_auto, xray)
 
 
 def definitions() -> tuple[BusinessDefinition, ...]:

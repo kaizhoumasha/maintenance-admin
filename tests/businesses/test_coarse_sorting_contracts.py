@@ -108,7 +108,13 @@ load_local_modules(environment=ENVIRONMENT)
 definition = catalog.get_definition('coarse_sorting')
 required = {role.role_key for role in definition.device_roles if role.required}
 assert required == {'INPUT_ARM','CONVEYOR'}
-assert not any(b.task_type in {'PUT_TO_BIN', 'MOVE_TO_NG'} for b in bindings)
+assert not any(
+    b.task_type in {'PUT_TO_BIN', 'MOVE_TO_NG'}
+    and 'coarse_sorting' in catalog.contract_consumers(
+        ('ecs_command', b.task_type, b.device_role)
+    )
+    for b in bindings
+)
 assert lookup('inbound.coarse_sorting.storage_allocate@v1') is None
 assert lookup('inbound.coarse_sorting.execution_report@v1') is None
 binding = next(b for b in bindings if b.device_role == 'CONVEYOR' and b.task_type == 'MOVE_FORWARD')

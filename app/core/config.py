@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     COARSE_SORTING_TAIL_ENABLED: bool = False
     COARSE_SORTING_OUTPUT_LOCATIONS: dict[str, str] = Field(default_factory=dict)
     COARSE_SORTING_NG_LOCATIONS: dict[str, str] = Field(default_factory=dict)
+    XRAY_TRANSIT_TARGETS: dict[str, dict[str, dict]] = Field(default_factory=dict)
+    XRAY_RETURN_RACKS: dict[str, dict] = Field(default_factory=dict)
 
     @field_validator("SMT_MANUAL_FIRST_PLAN_WAIT_MS", "SMT_AUTO_FIRST_PLAN_WAIT_MS", mode="before")
     @classmethod

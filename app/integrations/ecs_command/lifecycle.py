@@ -14,7 +14,9 @@ from .contracts import PauseReason
 from .routing import RouteAuthorization
 
 
-async def get_attempt_conclusions(session, *, exchange_id: UUID) -> dict[str, str]:
+async def get_attempt_conclusions(
+    session, *, exchange_id: UUID, require_open: bool = False
+) -> dict[str, str]:
     with session.no_autoflush:
         rows = await session.execute(
             select(
@@ -36,7 +38,9 @@ async def get_attempt_conclusions(session, *, exchange_id: UUID) -> dict[str, st
         elif attempt not in conclusions or conclusions[attempt][0] < revision:
             conclusions[attempt] = (revision, outcome)
     return {
-        attempt: conclusions[attempt][1] if attempt in conclusions else "OPEN_ATTEMPT"
+        attempt: conclusions[attempt][1]
+        if attempt in conclusions and (not require_open or attempt in opened)
+        else "OPEN_ATTEMPT"
         for attempt in opened | conclusions.keys()
     }
 

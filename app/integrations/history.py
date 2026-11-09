@@ -294,6 +294,7 @@ def body_projection(from_clause, reference, *, name):
             (record.c.body_record_id.is_not(None), body.c[column]), else_=record.c[column]
         ).label(name + "_" + key)
     columns[name + "_chain"] = body.c.body_record_id.label(name + "_chain")
+    columns[name + "_occurred_at"] = record.c.occurred_at.label(name + "_occurred_at")
     return from_clause, columns
 
 
