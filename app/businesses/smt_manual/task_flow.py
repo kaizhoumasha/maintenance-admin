@@ -13,6 +13,7 @@ from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyCha
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import CompletionDecision
 from app.businesses._components.sorting_task.ports import TaskOwnerRef
+from app.businesses._components.sorting_task.queue import queue_changes
 from app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1 import (
     CompletionConfirm,
 )
@@ -117,11 +118,15 @@ class SmtManualTaskFlow:
         _, task = await self.repository.original(ctx.session, payload.task_id)
         if task is None:
             return Conflict({"reason_code": "REFERENCE_CONFLICT"})
-        if payload.queue_revision != task["queue_revision"] + 1:
-            return Conflict({"reason_code": "REVISION_CONFLICT"})
-        values = payload.model_dump(mode="json", exclude={"task_id", "queue_revision"})
-        if task["status"] != "QUEUED" or all(task[key] == value for key, value in values.items()):
-            return Conflict({"reason_code": "STATE_CONFLICT"})
+        values = queue_changes(
+            payload,
+            status=task["status"],
+            queue_revision=task["queue_revision"],
+            dispatch_sequence=task["dispatch_sequence"],
+            not_before=task["not_before"],
+        )
+        if isinstance(values, Conflict):
+            return values
         await self.repository.save_task(
             ctx.session, payload.task_id, queue_revision=payload.queue_revision, **values
         )

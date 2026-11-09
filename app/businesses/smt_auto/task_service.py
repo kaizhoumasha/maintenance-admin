@@ -11,6 +11,7 @@ from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyCha
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import PrepareAccepted, validate_task_branch
 from app.businesses._components.sorting_task.ports import TaskOwnerRef
+from app.businesses._components.sorting_task.queue import queue_changes
 from app.businesses._components.sorting_task.request.sorting_task_prepare_v1 import Prepare
 from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
@@ -281,8 +282,6 @@ class AutoTaskService:
             ):
                 return Duplicate({"task_id": payload.task_id})
             raise Conflict({"reason_code": "IDEMPOTENCY_CONFLICT"})
-        if task.status != "QUEUED":
-            raise Conflict({"reason_code": "STATE_CONFLICT"})
         line = await ctx.session.get(WorkLine, task.work_line_id)
         if (
             line is None
@@ -291,13 +290,20 @@ class AutoTaskService:
             or line.line_code != task.workline_code
         ):
             raise Conflict({"reason_code": "STATE_CONFLICT"})
-        if payload.queue_revision != task.queue_revision + 1:
-            raise Conflict({"reason_code": "REVISION_CONFLICT"})
+        values = queue_changes(
+            payload,
+            status=task.status,
+            queue_revision=task.queue_revision,
+            dispatch_sequence=task.dispatch_sequence,
+            not_before=task.not_before_ms,
+        )
+        if isinstance(values, Conflict):
+            raise values
         task.queue_revision = payload.queue_revision
-        if payload.dispatch_sequence is not None:
-            task.dispatch_sequence = payload.dispatch_sequence
-        if "not_before" in payload.model_fields_set:
-            task.not_before_ms = payload.not_before
+        if "dispatch_sequence" in values:
+            task.dispatch_sequence = values["dispatch_sequence"]
+        if "not_before" in values:
+            task.not_before_ms = values["not_before"]
         session = ctx.session
         session.add(
             self._input_row(ctx, task, payload, applied_queue_revision=payload.queue_revision)
