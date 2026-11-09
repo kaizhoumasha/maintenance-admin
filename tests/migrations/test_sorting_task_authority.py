@@ -298,3 +298,47 @@ async def test_original_prepare_and_receipt_recover_after_cutover(state_migratio
     divergent = await run_alembic(url, "downgrade", "xray_pending_due")
     assert divergent.returncode != 0
     assert "downgrade would lose data" in (divergent.stdout + divergent.stderr)
+
+    rejected = await run_alembic(url, "upgrade", "sorting_task_cleanup")
+    assert rejected.returncode != 0
+    assert "sorting_task_cleanup_verified=true" in (rejected.stdout + rejected.stderr)
+    cleanup = await run_alembic(
+        url, "-x", "sorting_task_cleanup_verified=true", "upgrade", "sorting_task_cleanup"
+    )
+    assert cleanup.returncode == 0, cleanup.stdout + cleanup.stderr
+    async with store.engine.connect() as conn:
+
+        def table_names(sync):
+            schema = "enterprise_backend" if sync.dialect.name == "postgresql" else None
+            return set(inspect(sync).get_table_names(schema=schema))
+
+        names = await conn.run_sync(table_names)
+        assert "sorting_task" in names
+        assert not ({"smt_manual_task", "smt_auto_task"} & names)
+    async with factory.begin() as session:
+        for raw, original_response in original_receipts.values():
+            replay = await receive(session, raw, runtime=runtime)
+            assert replay.body == {**original_response, "code": "DUPLICATE"}
+
+    await store.migrate("downgrade", "xray_pending_due")
+    for name, shape in legacy_shapes.items():
+        assert (await store.schema_snapshot(name))[name] == shape
+    async with store.engine.connect() as conn:
+        manual = (
+            await conn.execute(
+                text(
+                    "SELECT prepare_operation_id, prepare_message_id, prepare_accepted "
+                    "FROM smt_manual_task WHERE task_id = 'MANUAL'"
+                )
+            )
+        ).one()
+        assert tuple(manual) == (*prepares["MANUAL"], True)
+        auto = (
+            await conn.execute(
+                text(
+                    "SELECT operation_id, message_id, consumed_at_ms "
+                    "FROM smt_auto_task_request WHERE task_id = 'AUTO'"
+                )
+            )
+        ).one()
+        assert tuple(auto) == (*prepares["AUTO"], 20)
