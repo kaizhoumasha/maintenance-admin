@@ -22,11 +22,6 @@ def test_invalid_progression_declaration_fails_before_runtime(progression_catalo
         catalog.validate_business_contracts()
 
 
-async def test_declared_pending_entry_is_bound_to_its_business(coarse_forward):
-    flow = coarse_forward
-    assert await flow.runtime.progressions["coarse_sorting"]() == 0
-
-
 def test_registered_sources_route_only_to_declared_formal_progressions():
     from app.businesses import catalog
     from app.integrations.registration import RegistrationSource

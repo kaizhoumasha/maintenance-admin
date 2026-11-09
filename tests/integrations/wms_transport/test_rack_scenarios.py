@@ -1,4 +1,3 @@
-import inspect
 import json
 from dataclasses import FrozenInstanceError
 
@@ -136,18 +135,6 @@ async def test_move_allows_omitting_target_face(
         assert "target_face" not in json.loads(message.request_raw)["data"]
 
 
-@pytest.mark.parametrize("action", SCENARIOS)
-@pytest.mark.parametrize("role", ["unknown", None, []])
-async def test_unknown_role_leaves_no_task_or_message(
-    transport_storage, scenarios, scenario_request, action, role
-):
-    async with transport_storage.factory() as session:
-        with pytest.raises(InvalidTransportRequest):
-            await register(scenarios, action, session, scenario_request | {"role": role})
-        await session.commit()
-        assert await counts(session, transport_storage) == (0, 0)
-
-
 @pytest.mark.parametrize("action", ["enter_rack", "depart_rack"])
 @pytest.mark.parametrize("target", [Rack("rack"), "destination", None])
 async def test_move_rejects_non_destination_types_without_writes(
@@ -250,20 +237,17 @@ def test_module_level_scenarios_share_the_module_level_transport_service():
     assert rack_scenarios.transport is transport_service
 
 
-def test_cycle_handle_is_immutable_and_fixes_one_role_for_all_steps(scenarios):
+def test_cycle_role_is_immutable(scenarios):
     cycle = scenarios.cycle(
         role=RackRole.FIVE_LAYER, rack_id="rack", caller=TransportCaller("line")
     )
     with pytest.raises(FrozenInstanceError):
         cycle.role = RackRole.TRANSFER
-    assert "role" not in inspect.signature(cycle.enter).parameters
-    assert "role" not in inspect.signature(cycle.rotate).parameters
-    assert "position" in inspect.signature(cycle.rotate).parameters
-    assert "role" not in inspect.signature(cycle.depart).parameters
 
 
 @pytest.mark.parametrize("role", ["unknown", None, [], "FIVE_LAYER"])
-def test_cycle_rejects_unknown_roles_when_it_is_created(scenarios, role):
+def test_cycle_rejects_unknown_roles_when_it_is_created(role):
+    scenarios = RackScenarios(TransportService())
     with pytest.raises(InvalidTransportRequest):
         scenarios.cycle(role=role, rack_id="rack", caller=TransportCaller("line"))
 

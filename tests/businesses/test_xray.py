@@ -630,7 +630,7 @@ async def test_wrong_bin_result_is_retained_without_put_report(xray):
 async def test_strict_event_and_result_shapes_reject_coercion_and_extra_fields(xray):
     x = xray
     await x.entry(status=400, barcode=None)
-    await x.entry(status=400, pkg="legacy")
+    await x.entry(status=400, extra="unexpected")
     x.decisions["pkg_decide"] = {"result": "COUNT_REQUIRED"}
     await x.entry()
     await x.drain()

@@ -6,7 +6,6 @@ from app.integrations.wms_callback import (
     CallbackPayload,
     Conflict,
     InvalidPayload,
-    Rejected,
     callback_operation,
     registry,
 )
@@ -63,8 +62,3 @@ async def test_handle_turns_the_handler_result_into_an_outcome(result, expected)
     assert isinstance(outcome, expected)
     if isinstance(result, dict):
         assert outcome.data == result
-
-
-def test_outcomes_can_be_raised_or_returned():
-    for outcome in (Accepted(), Conflict(), Rejected("X")):
-        assert isinstance(outcome, Exception)

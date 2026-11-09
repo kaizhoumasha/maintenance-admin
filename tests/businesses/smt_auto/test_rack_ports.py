@@ -285,7 +285,6 @@ async def test_prepare_and_original_references_roll_back_together(rack_host):
             "REPLAY_APPLIED",
             "ROLLBACK",
             "WRONG_FINAL_OPERATION",
-            "GENERIC_FINAL_OPERATION",
             "WRONG_FINAL_SOURCE",
             "WRONG_FINAL_BARCODE",
             "INCOMPLETE_TARGET",
@@ -537,7 +536,6 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
         "MISSING_FIELDS",
         "WRONG_SUBJECT",
         "WRONG_FINAL_OPERATION",
-        "GENERIC_FINAL_OPERATION",
         "WRONG_FINAL_SOURCE",
         "WRONG_FINAL_BARCODE",
         "INCOMPLETE_TARGET",
@@ -574,8 +572,6 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             if source_branch == "BIN_CELL"
             else "outbound.bin.material.decide@v1"
         )
-    elif old_obligation == "GENERIC_FINAL_OPERATION":
-        decision.operation = "outbound.material.decide@v1"
     elif old_obligation == "WRONG_FINAL_SOURCE":
         decision.request_data = {
             **decision.request_data,
