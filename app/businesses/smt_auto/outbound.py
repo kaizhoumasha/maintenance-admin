@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.core.identifiers import uuid7
+from app.integrations.ecs_callback import EventApplicationRef
 from app.integrations.ecs_command import CommandOwner
 from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.models import WorkLine
@@ -74,9 +75,7 @@ class Outbound:
         try:
             result = ResultEnvelope.model_validate(view.result)
             data = ArmResult.model_validate(result.data)
-            if phase == "pick" and not empty:
-                Scan.model_validate(result.data)
-            elif phase == "put" and set(result.data) != {"actual_qty", "pick_and_put_result"}:
+            if phase == "put" and set(result.data) != {"actual_qty", "pick_and_put_result"}:
                 return None
         except (ValidationError, TypeError):
             return None
@@ -89,6 +88,76 @@ class Outbound:
         ):
             return None
         return result
+
+    async def accept_platform_scan(self, ctx, payload):
+        # The receiver's binding resolver holds the WorkLine and scanner locks.
+        plates = (
+            await ctx.session.scalars(
+                select(AutoOutboundPlate)
+                .join(AutoTask, AutoTask.task_id == AutoOutboundPlate.task_id)
+                .join(AutoBinWork, AutoBinWork.id == AutoOutboundPlate.bin_work_id)
+                .where(
+                    AutoOutboundPlate.pick_command_code == payload.previous_command_code,
+                    AutoOutboundPlate.pending,
+                    AutoTask.work_line_id == ctx.work_line_id,
+                    AutoTask.business_type == "outbound",
+                    AutoTask.status.in_(("EXECUTING", "CANCELLED")),
+                    AutoBinWork.task_id == AutoTask.task_id,
+                    AutoBinWork.work_line_id == ctx.work_line_id,
+                    AutoBinWork.terminal_at_ms.is_(None),
+                )
+                .limit(2)
+                .with_for_update(of=AutoOutboundPlate)
+            )
+        ).all()
+        if len(plates) != 1:
+            ctx.note("PLATFORM_SCAN_PICK_NOT_FOUND")
+            return
+        plate = plates[0]
+        snapshot = plate.source_arrival_snapshot
+        command = snapshot.get("pick_command", {})
+        params = command.get("params", {})
+        if (
+            params.get("source", {}).get("location_type") != "BIN"
+            or params.get("target") != SCAN
+            or command.get("platform_scanner_id", ctx.binding.device_id) != ctx.binding.device_id
+        ):
+            ctx.note("PLATFORM_SCAN_PICK_MISMATCH")
+            return
+
+        event_id = command.get("platform_scan_event_id")
+        scan = (payload.barcode, ctx.timestamp)
+        if (event_id is not None or plate.pick_consumed_at_ms is not None) and (
+            plate.barcode,
+            plate.scanned_at_ms,
+        ) != scan:
+            ctx.note("PLATFORM_SCAN_CONFLICT")
+            return
+        if event_id is None:
+            event_id = ctx.receipt_id
+            plate.barcode, plate.scanned_at_ms = scan
+            plate.source_arrival_snapshot = {
+                **snapshot,
+                "pick_command": {**command, "platform_scan_event_id": event_id},
+            }
+        ctx.bind_application(EventApplicationRef("AUTO_OUTBOUND_PLATE", str(plate.id), event_id))
+
+    async def _pick_scan(self, session, plate):
+        pick = await self._result(session, plate, "pick")
+        if pick is None:
+            return None
+        command = plate.source_arrival_snapshot["pick_command"]
+        if "platform_scan_event_id" in command:
+            data = {**pick.data, "barcode": plate.barcode, "scanned_at": plate.scanned_at_ms}
+        elif "platform_scanner_id" in command:
+            return None
+        else:
+            # Commands registered before scanner binding can still carry their original scan.
+            data = pick.data
+        try:
+            return Scan.model_validate(data)
+        except ValidationError:
+            return None
 
     async def _grant(self, session, plate, *, new_pick=False):
         if plate.grant_kind == "RETRY":
@@ -356,6 +425,11 @@ class Outbound:
             role = next((b for b in bindings.values() if b and b.device_role == role_name), None)
             if role is None:
                 return plate
+            scanner = bindings.get(line.device_bindings.get("PLATFORM_SCANNER"))
+            if plate.bin_work_id is not None and (
+                scanner is None or scanner.device_role != "PLATFORM_SCANNER"
+            ):
+                return plate
             params = plate.source_params
             if plate.bin_work_id:
                 source = dict(
@@ -393,26 +467,27 @@ class Outbound:
                 command=command,
             )
             plate.pick_command_code = view.command_code
+            original = dict(
+                device_code=role.device_code, timeout_ms=timeout, params=command.model_dump()
+            )
+            if plate.bin_work_id is not None:
+                original["platform_scanner_id"] = scanner.device_id
             plate.source_arrival_snapshot = {
                 **plate.source_arrival_snapshot,
-                "pick_command": dict(
-                    device_code=role.device_code, timeout_ms=timeout, params=command.model_dump()
-                ),
+                "pick_command": original,
             }
         await observe_arm_result(self.ecs, session, plate, "pick", owner=OWNER)
-        pick = await self._result(session, plate, "pick")
-        if pick is None:
+        scan = await self._pick_scan(session, plate)
+        if scan is None:
             empty = await self._result(session, plate, "pick", empty=True)
             if empty is not None and await self._grant(session, plate):
                 await self._empty(session, task, plate, empty, now_ms, allow_continue=enabled)
             return plate
         if plate.pick_consumed_at_ms is None:
             plate.pick_consumed_at_ms = now_ms
-            plate.barcode, plate.scanned_at_ms = pick.data["barcode"], pick.data["scanned_at"]
+            plate.barcode, plate.scanned_at_ms = scan.barcode, scan.scanned_at
         context = {k: v for k, v in plate.source_locator.items() if k != "type"}
-        context.update(
-            task_id=plate.task_id, barcode=pick.data["barcode"], scanned_at=pick.data["scanned_at"]
-        )
+        context.update(task_id=plate.task_id, barcode=scan.barcode, scanned_at=scan.scanned_at)
         operation = (
             "outbound.bin.material.decide@v1"
             if plate.bin_work_id
@@ -576,7 +651,7 @@ class Outbound:
             report = dict(
                 task_id=task.task_id,
                 source_locator=plate.source_locator,
-                barcode=pick.data["barcode"],
+                barcode=scan.barcode,
                 to_locator=target
                 if is_ng
                 else {k: target[k] for k in ("type", "rack_id", "rack_face", "slot_id")},
@@ -603,6 +678,9 @@ class Outbound:
         }
 
     async def _empty_context(self, session, plate, result):
+        if plate.barcode is not None:
+            # A scan for this pick conflicts with an empty observation.
+            return None
         context = dict(
             task_id=plate.task_id,
             source_locator=plate.source_locator,
@@ -943,13 +1021,11 @@ class Outbound:
             DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(data)
         except (ValueError, TypeError):
             return None
-        pick = await self._result(session, plate, "pick")
-        if pick is None:
+        scan = await self._pick_scan(session, plate)
+        if scan is None:
             return None
         expected = {k: v for k, v in plate.source_locator.items() if k != "type"}
-        expected.update(
-            task_id=plate.task_id, barcode=pick.data["barcode"], scanned_at=pick.data["scanned_at"]
-        )
+        expected.update(task_id=plate.task_id, barcode=scan.barcode, scanned_at=scan.scanned_at)
         if round_.request_data != expected:
             return None
         chain = list(
@@ -988,7 +1064,7 @@ class Outbound:
             previous = item
         if not chain or chain[-1].id != round_.id:
             return None
-        return data, pick
+        return data, scan
 
     async def _decision(self, session, plate):
         decision = await self._final_material(session, plate)
@@ -999,7 +1075,7 @@ class Outbound:
         put = await self._result(session, plate, "put")
         if decision is None or put is None:
             return None
-        data, pick = decision
+        data, scan = decision
         command = plate.source_arrival_snapshot.get("put_command", {}).get("params", {})
         if data["result"] == "REJECT":
             if command != dict(source=SCAN, target=NG):
@@ -1007,7 +1083,7 @@ class Outbound:
             return dict(
                 task_id=plate.task_id,
                 source_locator=plate.source_locator,
-                barcode=pick.data["barcode"],
+                barcode=scan.barcode,
                 to_locator=data["ng_locator"],
                 occurred_at=put.finish_time,
             )
@@ -1054,7 +1130,7 @@ class Outbound:
         return dict(
             task_id=plate.task_id,
             source_locator=plate.source_locator,
-            barcode=pick.data["barcode"],
+            barcode=scan.barcode,
             to_locator={k: target[k] for k in ("type", "rack_id", "rack_face", "slot_id")},
             occurred_at=put.finish_time,
         )
@@ -1225,7 +1301,7 @@ class Outbound:
             )
         )
         for plate in plates:
-            if await self._result(session, plate, "pick") is None and not (
+            if await self._pick_scan(session, plate) is None and not (
                 plate.empty_observation is not None and await self.closed(session, plate)
             ):
                 return False
