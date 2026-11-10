@@ -212,7 +212,7 @@ flowchart TD
 | BIN | B7 | WES → ECS | [ARM02 / PICK_AND_PUT](#transfer-put-params) | 从扫码平台取盘，放到转运货架储位 | 需要时先完成目标换面或换架，并取得可靠就绪事实 |
 | BIN | B8 | ECS → WES | [原 ARM02 命令结果](#ecs-success-2) | 保存实际放盘结果 | 物理成功且位置确定后才能报告完成 |
 | BIN | B9 | WES → WMS | [outbound.material.movement_report@v1](#outbound-report) | 上报本盘实际移动事实 | RECORDED / DUPLICATE 仅闭合本次交付；后继取料条件见 B6 |
-| BIN | B10 | WES 业务 → BIN_Roller → ECS | [原释放决定及点 2 / MOVE_FORWARD](#scan2-release) | 满足箱级条件后交组件唯一放行 | 已有效应用 NO_WORK 或正常 ACCEPT 明确无后继，且本 arrival 无待消费授权/未决取料阶段、原取放/正常及 NG 报告均收口；命令创建或 ACK 不表示已释放 |
+| BIN | B10 | WES 业务 → BIN_Roller → ECS | [原释放决定及点 2 / MOVE_FORWARD](#scan2-release) | 满足箱级条件后交组件唯一放行 | 正常 ACCEPT 无后继时，取料链收口即可放行，放盘及正常报告独立推进；NO_WORK 按原收口条件放行。命令创建或 ACK 不表示已释放 |
 | 公共回流 | C1 | ECS → WES → WMS / RCS | [SCAN3 / SCAN4 / FIFO / Return_Batch](workline-bin-return-api.md#return-sequence) | 实际下游交接后统一分流、回架及尾箱清退 | 不以 B10 命令创建或 ACK 证明已接到箱；按公共事实及原身份推进 |
 | RackSlot | R1 | WMS → WES | [sorting.task.plan_delta@v1](#task-plan) | 安排有序来源货架及面 | 计划连续应用；不提前安排全部 SLOT |
 | RackSlot | R2 | WES → WMS → RCS | [来源架 Transport](#rackslot-order) | 编排当前计划架面进场 | 按既有 Transport 合同执行，提交接纳不代表到位 |
@@ -266,7 +266,7 @@ flowchart TB
     BE -->|SOURCE_DONE 已消费| BSC["仅关闭原 Cell，无移动不报告"]
     BSC --> BA
     BA -->|是，登记一次新求值| B1
-    BA -->|否，不另开取料| BC{"§5.6 本箱取料终局已成立<br/>且授权、取放、异常阶段、报告全收口？"}
+    BA -->|否，不另开取料| BC{"本箱满足 §5.6 放行条件？"}
     BT --> BC
     BC -->|否| BP["原待办继续；不造终局、不放箱"]
     BP -.->|原 NG/空取续问条件变化后复核| BA
@@ -2311,7 +2311,9 @@ source_rack_exhausted只作用原source所属计划/同次在位，重报不重�
 <a id="scan2-release"></a>
 ### 5.6 SCAN2 生产结束与唯一释放
 
-两方向的生产箱都按原task/arrival处理，以下条件同时成立才保存释放决定：
+两方向的生产箱都按原 task/arrival 处理。出库 BIN 的末盘已确认从原箱取至扫码平台、原 `ACCEPT` 已有效应用且省略 `next_source_action` 时，本次到位的授权链、取料和异常阶段全部收口即可登记放行。正常目标放盘及移动报告沿原盘次独立推进。放盘失败不退回原箱，SCAN2 放行无需额外设备锁。
+
+其他终局沿原条件保存释放决定：
 
 1. 本次arrival已有5.5的有效取料终局，末盘原放置不因无后继被取消。
 2. 已发授权均处理，无待消费授权/NG或空取前序事实、未决work_plan/material.decide/empty_decide、异常/WAIT/RETRY阶段、在途或未知取放扫码；不能用“下一请求尚未登记”漏掉原义务。
@@ -3056,7 +3058,7 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 4. 公共服务通过get_submission_acceptance严格核对原owner/caller/cycle/Transport/client、submit operation/message/target及完整frozen，并取得202/RECEIVED或200/DUPLICATE后，原F01 DEPART调度完成并可安排后继，去库区或不同RACK_POSITION（包括生产线工作位）相同，最终结果/终位仅备查，可失败，不回退、不回占、不重搬。ENTER/ROTATE仍按原匹配结果收口。接纳完成不填写虚假物理终位；新架须以自己的可靠到位更新当前位置，旧回调只记旧过程。
 5. 新架有独立 RACK_MOVE 和结果。确认已应用成功、架号、工作位及必要面向匹配后加入可用集合，再参与下一次扫码决定。
 
-盘已可靠取离原架后，目标放盘未完成或成功报告未收妥不阻止该架离场；原目标、历史来源及报告身份保持不变，沿原记录完成交付。单纯目标放盘失败仍由 ECS 处置，不新增失败报告；若料盘是否已完全取离或原架区域是否安全尚不明确，则保留本架物理依赖。报告未决继续按 §5.6/§3.7 约束原箱放行和任务收口，不因架已离场丢失。已有合法另一侧授权可继续执行，实际运动是否并行由共享机械臂/安全区域的 ECS/RCS 互锁决定，不以本侧搬架或报告等待统一阻断另一侧。
+盘已可靠取离原架后，目标放盘未完成或成功报告未收妥不阻止该架离场；原目标、历史来源及报告身份保持不变，沿原记录完成交付。单纯目标放盘失败仍由 ECS 处置，不新增失败报告；若料盘是否已完全取离或原架区域是否安全尚不明确，则保留本架物理依赖。报告未决继续按 §3.7 约束任务收口，原箱放行按 §5.6 判断。已有合法另一侧授权可继续执行，实际运动是否并行由共享机械臂/安全区域的 ECS/RCS 互锁决定，不以本侧搬架或报告等待统一阻断另一侧。
 
 离场请求形状：
 

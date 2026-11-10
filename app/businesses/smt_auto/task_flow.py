@@ -122,8 +122,9 @@ class TaskFlow:
         for row in rows:
             if arrival_id is not None and row.arrival_id != arrival_id:
                 continue
-            # A saved timestamp/JSON alone cannot erase accepted production responsibility.
-            if not await self._bin_terminal(session, row) or not await self._released(session, row):
+            if not await self._bin_terminal(
+                session, row, for_release=True
+            ) or not await self._released(session, row):
                 result.append(row)
                 continue
         return tuple(result)
@@ -170,7 +171,7 @@ class TaskFlow:
             return None
         return result
 
-    async def _bin_terminal(self, session, work):
+    async def _bin_terminal(self, session, work, *, for_release=False):
         if work.bin_code is None or work.production_hold_reason is not None:
             return False
         if work.association == "NO_TASK":
@@ -204,7 +205,12 @@ class TaskFlow:
                 continue
             if work.business_type != direction or reader is None:
                 return False
-            if not await reader.bin_closed(session, work):
+            closed = (
+                await reader.bin_closed(session, work, for_release=True)
+                if for_release and direction == "outbound"
+                else await reader.bin_closed(session, work)
+            )
+            if not closed:
                 return False
             has_plates = True
         if has_plates:
@@ -299,7 +305,11 @@ class TaskFlow:
 
     async def start_release(self, session, *, work_line_id, arrival_id, now_ms):
         work = await self._release_work(session, work_line_id, arrival_id)
-        if work is None or self.roller is None or not await self._bin_terminal(session, work):
+        if (
+            work is None
+            or self.roller is None
+            or not await self._bin_terminal(session, work, for_release=True)
+        ):
             return "WAITING"
         if work.release_command_code is None:
             if not await matching_arrival(self.roller, session, work):
@@ -323,7 +333,7 @@ class TaskFlow:
             return "WAITING"
         view = await self.roller.get_scan2_release_result(session, arrival_id=arrival_id)
         result = self._release_success(work, view)
-        if result is None or not await self._bin_terminal(session, work):
+        if result is None or not await self._bin_terminal(session, work, for_release=True):
             return "RELEASING"
         if work.release_consumed_at_ms is None:
             work.release_result_ref = canonical_digest(result.model_dump())
