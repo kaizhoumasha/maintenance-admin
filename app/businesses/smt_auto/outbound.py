@@ -1416,6 +1416,15 @@ class Outbound:
                         return False
         return True
 
+    async def target_reports_closed(self, session, *, job_id):
+        plates = await session.scalars(
+            select(AutoOutboundPlate).where(AutoOutboundPlate.target_rack_job_id == job_id)
+        )
+        for plate in plates:
+            if plate.report_consumed_at_ms is None or not await self.closed(session, plate):
+                return False
+        return True
+
     async def target_demand(self, session, *, job, rows):
         """Only original, fully covered production demand may release a TRANSFER rack."""
         task = await session.get(AutoTask, job.origin.task_id)
