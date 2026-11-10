@@ -1,6 +1,5 @@
 """Outbound original plate production; caller owns the ordered SSI transaction."""
 
-from dataclasses import asdict
 from decimal import Decimal
 
 from pydantic import ValidationError
@@ -345,13 +344,16 @@ class Outbound:
         jobs = await self.dispatch.jobs(
             session, work_line_id=task.work_line_id, source_kinds=("AUTO_OUTBOUND_TARGET",)
         )
+        role = next((b for b in bindings.values() if b and b.device_role == "RACK_ARM"), None)
+        if role is None:
+            return False
         eligible = []
         for job in jobs:
             if plate.target_rack_job_id is not None and plate.target_rack_job_id != job.id:
                 continue
             action = next((a for a in job.actions if a.id == job.position_action_id), None)
             point = {"kind": "RACK_POSITION", "location_code": job.origin.point}
-            role = next((b for b in bindings.values() if b and b.device_role == "RACK_ARM"), None)
+            resources = job.origin.resources
             if (
                 job.origin.task_id == task.task_id
                 and job.origin.rack_id == target.get("rack_id")
@@ -370,8 +372,13 @@ class Outbound:
                 and job.actual_position == point
                 and job.actual_face == target.get("rack_face")
                 and job.current_action_id == action.id
-                and role
-                and job.origin.resources == asdict(role)
+                and resources.get("device_id") == role.device_id
+                and resources.get("device_code") == role.device_code
+                and resources.get("device_version") == role.device_version
+                and resources.get("device_role") == role.device_role
+                and resources.get("work_line_id") == role.work_line_id
+                and resources.get("business_code") == role.business_code
+                and resources.get("position_bindings", {}).get("TRANSFER_RACK") == job.origin.point
                 and role.position_bindings.get("TRANSFER_RACK") == job.origin.point
             ):
                 eligible.append((job, action))

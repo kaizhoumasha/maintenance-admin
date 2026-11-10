@@ -708,6 +708,51 @@ async def decided_outbound(outbound_host):
     return host
 
 
+@pytest.mark.parametrize("changed", ["scanner", "rack_arm", "transfer_point", "rack", "face"])
+async def test_put_reuses_current_arrival_after_unrelated_line_change(decided_outbound, changed):
+    host = decided_outbound
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        dict(
+            result="ACCEPT",
+            target_locator=dict(
+                type="RACK_SLOT",
+                rack_id="other" if changed == "rack" else "target",
+                rack_face="B" if changed == "face" else "A",
+                slot_id="A1",
+                rack_layer=1,
+                rack_column=1,
+            ),
+        ),
+    )
+    async with host.factory.begin() as session:
+        line = await session.get(WorkLine, 1)
+        line.version += 1
+        host.outbound.settings[1] = replace(
+            host.outbound.settings[1], work_line_version=line.version
+        )
+        if changed == "scanner":
+            line.device_bindings = {**line.device_bindings, "PLATFORM_SCANNER": "other-scanner"}
+        elif changed == "rack_arm":
+            arm = await session.scalar(
+                select(Device).where(Device.device_code == line.device_bindings["RACK_ARM"])
+            )
+            arm.version += 1
+        elif changed == "transfer_point":
+            line.position_bindings = {**line.position_bindings, "TRANSFER_RACK": "Q"}
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        assert (plate.put_command_code is not None) == (changed == "scanner")
+        if plate.put_command_code:
+            job = await host.dispatch.progress(session, job_id=plate.target_rack_job_id)
+            assert job.origin.resources["work_line_version"] == 1
+            assert (
+                plate.source_arrival_snapshot["put_command"]["device_code"]
+                == line.device_bindings["RACK_ARM"]
+            )
+
+
 @pytest.mark.parametrize("invalid_next", [False, True])
 async def test_target_rotation_requires_original_applied_action(decided_outbound, invalid_next):
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
