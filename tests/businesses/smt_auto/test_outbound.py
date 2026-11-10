@@ -1126,7 +1126,7 @@ async def test_empty_wire_keeps_bin_unbound_and_rack_original_revision(outbound_
             EmptyDecide.model_validate(data)
 
 
-async def test_target_replacement_waits_for_original_put_but_not_report(decided_outbound):
+async def test_target_replacement_waits_for_applied_movement_report(decided_outbound):
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = decided_outbound
@@ -1205,9 +1205,29 @@ async def test_target_replacement_waits_for_original_put_but_not_report(decided_
         final.unresolved = False
         await session.flush()
         await racks.advance(session, task_id="t", now_ms=120)
+        job = await host.dispatch.progress(session, job_id=job_id)
+        assert [action.kind for action in job.actions] == ["ENTER"]
         second = await session.get(AutoOutboundPlate, second_id)
         assert second.target_rack_job_id is None
         assert second.put_command_code is None
+    await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
+    async with host.factory.begin() as session:
+        await racks.advance(session, task_id="t", now_ms=130)
+        job = await host.dispatch.progress(session, job_id=job_id)
+        assert [action.kind for action in job.actions] == ["ENTER"]
+        await host.outbound.advance_report(session, plate_id=host.plate_id, now_ms=131)
+        await racks.advance(session, task_id="t", now_ms=132)
+        job = await host.dispatch.progress(session, job_id=job_id)
+        assert [action.kind for action in job.actions] == ["ENTER", "DEPARTURE_DECIDE"]
+    await host.settle(
+        "rack.departure_decide@v1",
+        {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "T_OUT"}},
+    )
+    async with host.factory.begin() as session:
+        await racks.advance(session, task_id="t", now_ms=140)
+        await racks.advance(session, task_id="t", now_ms=141)
+        job = await host.dispatch.progress(session, job_id=job_id)
+        assert [action.kind for action in job.actions] == ["ENTER", "DEPARTURE_DECIDE", "DEPART"]
 
 
 async def test_final_decision_and_put_intent_roll_back_together(decided_outbound):

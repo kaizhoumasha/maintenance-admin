@@ -927,6 +927,11 @@ class AutoRackPorts:
             session, before.origin, binding, locked_bindings=locked_bindings, departure=True
         )
         demand, handoff = await self.facts(session, job_id=job_id)
+        if allow_departure and before.origin.source_kind == "AUTO_OUTBOUND_TARGET":
+            allow_departure = (
+                self.outbound is not None
+                and await self.outbound.target_reports_closed(session, job_id=job_id)
+            )
         progress = await self.dispatch.advance(
             session,
             job_id=job_id,
