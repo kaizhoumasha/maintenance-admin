@@ -12,7 +12,7 @@ from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.models import WorkLine
 
 from ._execution_facts import arrival_is_open, observe_arm_result, read_decision
-from .ecs_command import ArmResult, PickAndPut
+from .ecs_command import ArmResult, PickAndPut, ecs_reel_diameter
 from .inbound import PhysicalSettings
 from .inbound_contracts import Scan
 from .locking import lock_line
@@ -1175,9 +1175,21 @@ class Outbound:
                 **{k: plate.source_params[k] for k in ("reel_thickness", "reel_diameter")},
             ),
         )
-        # Previously frozen millimeter commands keep their original parameters.
-        if command not in (expected, PickAndPut.from_millimeters(**expected).model_dump()):
-            return None
+        # Frozen commands using rack_face may predate the diameter conversion as well.
+        legacy_inches = {
+            **expected,
+            "target": {
+                **expected["target"],
+                "reel_diameter": ecs_reel_diameter(expected["target"]["reel_diameter"]),
+            },
+        }
+        if command not in (expected, legacy_inches):
+            try:
+                normalized = PickAndPut.from_millimeters(**expected).model_dump()
+            except ValidationError:
+                return None
+            if command != normalized:
+                return None
         return dict(
             task_id=plate.task_id,
             source_locator=plate.source_locator,

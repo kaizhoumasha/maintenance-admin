@@ -445,6 +445,16 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         )
         raw = json.loads(await read_history_body(session, command.request_record_id))
         assert raw["params"]["target"]["reel_diameter"] == (179 if legacy_diameter else 7)
+        assert raw["params"]["target"]["rack_side"] == "A"
+        if legacy_diameter:
+            snapshot = plate.source_arrival_snapshot
+            put = snapshot["put_command"]
+            legacy_target = dict(put["params"]["target"])
+            legacy_target["rack_face"] = legacy_target.pop("rack_side")
+            plate.source_arrival_snapshot = {
+                **snapshot,
+                "put_command": {**put, "params": {**put["params"], "target": legacy_target}},
+            }
         if disabled:
             (await session.get(WorkLine, 1)).is_enabled = False
     monkeypatch.setattr(PickAndPut, "from_millimeters", builder)
