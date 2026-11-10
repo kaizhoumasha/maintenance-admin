@@ -5,19 +5,29 @@ from app.businesses.smt_auto.ecs_command import PickAndPut
 from app.businesses.smt_auto.outbound_contracts import BinAccept, RackReject
 
 
-def test_outbound_paths_keep_source_and_target_dimensions():
+@pytest.mark.parametrize(("face", "side"), [("90", "A"), ("270", "B"), ("A", "A"), ("B", "B")])
+def test_outbound_paths_keep_source_and_target_dimensions(face, side):
     scan = dict(location_id="STATION_SCAN", location_type="SCAN_PLATFORM")
     rack = dict(
         location_id="STATION_B",
         location_type="FIVE_LAYER_RACK",
         rack_id="R1",
-        rack_face="A",
+        rack_face=face,
         rack_layer="2",
         rack_column="3",
         reel_thickness=15.3,
         reel_diameter=7,
     )
     assert PickAndPut(source=rack, target=scan).source.reel_thickness == 15.3
+    assert PickAndPut(source=rack, target=scan).model_dump()["source"] == {
+        **{key: value for key, value in rack.items() if key != "rack_face"},
+        "rack_side": side,
+    }
+    target = PickAndPut.from_millimeters(
+        source=scan, target={**rack, "location_id": "STATION_A"}
+    ).model_dump()["target"]
+    assert target["rack_side"] == side
+    assert "rack_face" not in target
     assert (
         PickAndPut(source=scan, target={**rack, "location_id": "STATION_A"}).target.rack_layer
         == "2"

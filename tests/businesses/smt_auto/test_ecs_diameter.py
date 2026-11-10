@@ -64,7 +64,11 @@ def test_arm_commands_use_nearest_supported_inches(millimeters, inches, side, lo
     params = dict(source=reel, target=scan) if side == "source" else dict(source=scan, target=reel)
     command = PickAndPut.from_millimeters(**params)
     wire = command.model_dump(mode="json")
-    assert wire[side] == {**reel, "reel_diameter": inches}
+    expected = {**reel, "reel_diameter": inches}
+    if location == "FIVE_LAYER_RACK":
+        del expected["rack_face"]
+        expected["rack_side"] = "A"
+    assert wire[side] == expected
     assert reel["reel_diameter"] == millimeters
     assert PickAndPut.model_validate(wire).model_dump(mode="json") == wire
 

@@ -2908,9 +2908,9 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | 设备执行 | 货架侧臂（KT11 ARM02 / KT14 ARM04）`PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id=STATION_A`，对应本线左侧 TRANSFER_RACK；现场 OUT61/OUT63 仍用于 WMS/RCS。架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度用本盘原授权的毫米值，直径按 §7.7.1 从本盘原授权毫米值转换为英寸档位。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
 | 实际位置报告 | `movement_report.data.to_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id` | 本盘确定放置成功且实际位置与最终授权一致后，报告原业务目标四字段；不报告设备层/列，不用报告 ACK 证明物理成功，不改变原报告匹配与去重规则 |
 
-依据为现有 WMS 自动拣料合同 §8.1、§10.3、§12.4（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md`）、[自动机械臂附录 §3/§4.2.2/§4.3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿已确认的 `params` 信封、`rack_face`、整数层列转设备字符串及尺寸数值规则，不复制旧示例的顶层 source/target、rack_side 或尺寸字符串。
+依据为现有 WMS 自动拣料合同 §8.1、§10.3、§12.4（源仓库待提交合同：`wes_backend/docs/contracts/wms-outbound-picking-task-integration-requirements.md`）、[自动机械臂附录 §3/§4.2.2/§4.3](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/integration/device-annex-automatic-picking-arms.md)及[供应商说明书场景4、场景6和 §8.1](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)。供应商两种正常放盘场景均以五层货架为目标；附录已确认业务转运架对应 `FIVE_LAYER_RACK`。沿本稿的 `params` 信封、ECS `rack_side`、整数层列转设备字符串及尺寸数值规则。
 
-原始供应商 PDF（源仓库本地附件：`wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf`）已补充核对：第 10 页场景4和第 12 页场景6均由 ARM02 从 SCAN_PLATFORM 放到 FIVE_LAYER_RACK；第 37 页 PDF §8.1 列出目标架号、面、层、列及本盘尺寸；第 42 页 PDF §9.6 的出库图明确画出“SCAN2 流水线料箱 → 机器人1 → 扫码平台 → 机器人2 → STATION_A/B 五层料架”。该页 PDF §9.7 只有移库标题，没有对应流程图，不将缺失图示作为移库依据；RackSlot 路径仍以已确认分工及场景5/6为依据。原 PDF 场景4示例漏列 rack_id，沿 PDF §8.1 必填表和已确认附录保留；旧 rack_side、顶层 source/target、尺寸字符串也不覆盖本稿合同。
+原始供应商 PDF（源仓库本地附件：`wes_backend/docs/hardware/SMT分拣机ECS接口调用说明书.pdf`）已补充核对：第 10 页场景4和第 12 页场景6均由 ARM02 从 SCAN_PLATFORM 放到 FIVE_LAYER_RACK；第 37 页 PDF §8.1 列出目标架号、面、层、列及本盘尺寸；第 42 页 PDF §9.6 的出库图明确画出“SCAN2 流水线料箱 → 机器人1 → 扫码平台 → 机器人2 → STATION_A/B 五层料架”。该页 PDF §9.7 只有移库标题，没有对应流程图，不将缺失图示作为移库依据；RackSlot 路径仍以已确认分工及场景5/6为依据。原 PDF 场景4示例漏列 rack_id，沿 PDF §8.1 必填表和已确认附录保留；源和目标继续放在 `params` 下，尺寸字段使用数值。
 
 正常目标统一为转运货架储位，机械臂到五层目标架的路径及参数结构已有说明书和现有合同依据，本项术语及目标映射已确认关闭，不增加字段或另设映射交付项。工作线实际绑定、严格附录实现及真实设备验收仍沿第10章原交付依赖，不因本项关闭视为已经实施或现场通过。
 
@@ -3431,13 +3431,13 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 | `task_type` | `PICK_AND_PUT` |
 | `params.source.location_id` | RETURN_RACK 映射到右侧 STATION_B；现场 OUT62/OUT64 仅用于 WMS/RCS，不使用 slot_id |
 | `params.source.location_type` | 已本方确认沿供应商场景5，固定为 FIVE_LAYER_RACK |
-| `params.source.rack_id`、`params.source.rack_face` | 本次 READY 或 next_source_action 的原授权值；rack_face 沿已确认字段原样传递，不复制原文旧 rack_side |
+| `params.source.rack_id`、`params.source.rack_side` | 架号沿原授权；业务面向 `90` 转 `A`、`270` 转 `B`，`A/B` 原样使用 |
 | `params.source.rack_layer`、`params.source.rack_column` | 本次 READY 或 next_source_action 的整数来源层/列映射为设备字符串，不使用目标层列或拆解 slot_id |
 | `params.source.reel_thickness`、`params.source.reel_diameter` | 厚度取本次 READY 或 next_source_action 的毫米原值；直径按 §7.7.1 转换为英寸档位，不借 BIN、旧盘或下一盘参数 |
 | `params.target.location_id` | 固定 STATION_SCAN |
 | `params.target.location_type` | `SCAN_PLATFORM` |
 
-货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)，沿本系统公共信封、rack_face 及数值类型，不复制原文的顶层 source/target、旧 rack_side 或数字字符串尺寸。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
+货架进场、换面及离场沿 WMS/Transport 路径执行，不向机械臂 ECS 发送搬架或旋转指令。机械臂取盘形态复用[供应商场景5](https://github.com/kaizhoumasha/wes_backend/blob/9c378c0c40e336d2247a0cc039aa6a360572491e/docs/hardware/SMT%E5%88%86%E6%8B%A3%E6%9C%BAECS%E6%8E%A5%E5%8F%A3%E8%B0%83%E7%94%A8%E8%AF%B4%E6%98%8E%E4%B9%A6V1-20260318.md)，沿本系统公共信封、`rack_side` 及数值类型。不套用 BIN 的 bin_type、bin_cell_location、reel_layer 或 reel_totalthickness。
 
 **P03 已本方确认。** rack_layer、rack_column、reel_thickness、reel_diameter 均由 WMS 在本次取盘前提供：首盘置于 return_rack.work_plan.READY，后继置于 RackSlot material.decide 的 next_source_action，WMS 原授权直径使用毫米，ECS 直径按 §7.7.1 转换为英寸档位，其他字段沿现有类型和单位。WMS 负责原授权储位与本盘参数的正确对应；WES 不从 slot_id 推算层列、不借用 BIN 参数，不增加本地储位/尺寸映射、查询 API 或参数兜底流程。
 
@@ -3464,7 +3464,7 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
       "location_id": "STATION_B",
       "location_type": "FIVE_LAYER_RACK",
       "rack_id": "RETURN-RACK-01",
-      "rack_face": "A",
+      "rack_side": "A",
       "rack_layer": "2",
       "rack_column": "3",
       "reel_thickness": 15.3,
@@ -3503,7 +3503,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
       "location_id": "STATION_A",
       "location_type": "FIVE_LAYER_RACK",
       "rack_id": "TRANSFER-RACK-01",
-      "rack_face": "A",
+      "rack_side": "A",
       "rack_layer": "1",
       "rack_column": "1",
       "reel_thickness": 20,
@@ -3517,7 +3517,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 | --- | --- |
 | `source.location_id`、`target.location_id` | 固定为 STATION_SCAN、STATION_A；目标为本线左侧 TRANSFER_RACK（OUT61/OUT63），不把现场码或 `slot_id` 当成 ECS `location_id` |
 | `target.location_type` | 正常目标货架固定为 `FIVE_LAYER_RACK` |
-| `target.rack_id`、`target.rack_face` | 本盘最终 `ACCEPT.target_locator` 的原值；面向不做 A/B 转换 |
+| `target.rack_id`、`target.rack_side` | 架号沿 `ACCEPT.target_locator`；业务面向 `90` 转 `A`、`270` 转 `B`，`A/B` 原样使用 |
 | `target.rack_layer`、`target.rack_column` | 本盘最终 `ACCEPT.target_locator` 的整数转字符串；设备货架层为 `"1".."5"`，不猜列数上限 |
 | `target.reel_thickness`、`target.reel_diameter` | 本盘原授权厚度/直径，直径按 §7.7.1 转换为英寸档位；不使用下一盘 `next_source_action` 的尺寸 |
 
