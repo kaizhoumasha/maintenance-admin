@@ -6,7 +6,7 @@ AUTO role/site admission and production fact writers are still required before a
 
 import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
 
 from pydantic import TypeAdapter
@@ -737,8 +737,6 @@ class AutoRackPorts:
         )
         progress = await self.dispatch.progress(session, job_id=job_id)
         # Preserve the canonical cycle while checking every other frozen origin field.
-        from dataclasses import replace
-
         if progress.origin != replace(origin, cycle_id=progress.origin.cycle_id):
             raise ValueError("original AUTO job identity drift")
         column = (
@@ -769,7 +767,9 @@ class AutoRackPorts:
             and _plans(task, rows[AutoTaskInput])
         )
 
-    async def _resources(self, session, origin, original_binding, *, locked_bindings=None):
+    async def _resources(
+        self, session, origin, original_binding, *, locked_bindings=None, departure=False
+    ):
         if not isinstance(original_binding, DeviceBinding) or origin.resources != asdict(
             original_binding
         ):
@@ -795,7 +795,24 @@ class AutoRackPorts:
             if locked_bindings is not None
             else await resolve_binding(session, original_binding.device_code)
         )
-        return current == original_binding and origin.point in line.position_bindings.values()
+        if current is None or origin.point not in line.position_bindings.values():
+            return False
+        if not departure:
+            return current == original_binding
+        original_slots = {
+            slot
+            for slot, point in original_binding.position_bindings.items()
+            if point == origin.point
+        }
+        current_slots = {
+            slot for slot, point in current.position_bindings.items() if point == origin.point
+        }
+        return current_slots == original_slots and current == replace(
+            original_binding,
+            work_line_version=current.work_line_version,
+            device_bindings=current.device_bindings,
+            position_bindings=current.position_bindings,
+        )
 
     async def prepare(
         self,
@@ -907,7 +924,7 @@ class AutoRackPorts:
         except (TypeError, ValueError):
             binding = None
         allow_departure = allow_new and await self._resources(
-            session, before.origin, binding, locked_bindings=locked_bindings
+            session, before.origin, binding, locked_bindings=locked_bindings, departure=True
         )
         demand, handoff = await self.facts(session, job_id=job_id)
         progress = await self.dispatch.advance(

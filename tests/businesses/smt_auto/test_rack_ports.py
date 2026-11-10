@@ -761,7 +761,7 @@ async def test_return_arrival_keeps_first_original_confirmation(rack_host, monke
     assert member.arrived_at_ms == 10
 
 
-@pytest.mark.parametrize("gate", ["disabled", "line_version"])
+@pytest.mark.parametrize("gate", ["disabled", "line_version", "point_role", "arm_version"])
 async def test_departure_waits_for_current_admission_and_consumes_original_decision(
     rack_host, gate
 ):
@@ -805,21 +805,32 @@ async def test_departure_waits_for_current_admission_and_consumes_original_decis
     )
     intent_count = await db.scalar(select(func.count()).select_from(ReliableMessage))
     line = await db.get(WorkLine, 12)
+    arm = await db.get(Device, binding.device_id)
     if gate == "disabled":
         line.is_enabled = False
     else:
         line.version += 1
-    blocked = await ports.advance(db, job_id=job, now_ms=4)
-    assert [(a.kind, a.phase) for a in blocked.actions] == [
-        ("ENTER", "APPLIED"),
-        ("DEPARTURE_DECIDE", "READY"),
-    ]
-    assert blocked.actions[-1].id == root.id
-    assert blocked.actions[-1].decision_consumed_at_ms == 4
-    assert await db.scalar(select(func.count()).select_from(ReliableMessage)) == intent_count
-
-    line.is_enabled, line.version = True, binding.work_line_version
-    resumed = await ports.advance(db, job_id=job, now_ms=5)
+        if gate == "line_version":
+            line.device_bindings = {**line.device_bindings, "PLATFORM_SCANNER": "scanner"}
+            line.position_bindings = {**line.position_bindings, "TRANSFER_RACK": "other"}
+        elif gate == "point_role":
+            line.position_bindings = {"TRANSFER_RACK": original.point}
+        else:
+            arm.version += 1
+    resumed = await ports.advance(db, job_id=job, now_ms=4)
+    if gate != "line_version":
+        assert [(a.kind, a.phase) for a in resumed.actions] == [
+            ("ENTER", "APPLIED"),
+            ("DEPARTURE_DECIDE", "READY"),
+        ]
+        assert resumed.actions[-1].id == root.id
+        assert resumed.actions[-1].decision_consumed_at_ms == 4
+        assert await db.scalar(select(func.count()).select_from(ReliableMessage)) == intent_count
+        line.is_enabled = True
+        line.position_bindings = binding.position_bindings
+        arm.version = binding.device_version
+        resumed = await ports.advance(db, job_id=job, now_ms=5)
+    assert resumed.origin.resources == asdict(binding)
     depart = resumed.actions[-1]
     assert depart.kind == "DEPART"
     assert depart.previous_action_id == root.id
