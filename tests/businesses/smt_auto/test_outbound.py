@@ -708,6 +708,66 @@ async def decided_outbound(outbound_host):
     return host
 
 
+@pytest.mark.parametrize("has_successor", [False, True])
+async def test_scan2_release_follows_source_terminal_before_put_result(
+    decided_outbound, has_successor
+):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = decided_outbound
+    flow = TaskFlow(
+        host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
+    )
+    decision = dict(
+        result="ACCEPT",
+        target_locator=dict(
+            type="RACK_SLOT",
+            rack_id="target",
+            rack_face="A",
+            slot_id="A1",
+            rack_layer=1,
+            rack_column=1,
+        ),
+    )
+    if has_successor:
+        decision["next_source_action"] = dict(
+            cell_id="C2",
+            cell_index=2,
+            bin_type=3,
+            reel_layer=1,
+            reel_thickness=15.3,
+            reel_diameter=7,
+        )
+    await host.settle("outbound.bin.material.decide@v1", decision)
+    async with host.factory.begin() as session:
+        work = await session.get(AutoBinWork, host.work_id)
+        release = dict(work_line_id=1, arrival_id=work.arrival_id)
+        assert await flow.release_bin(session, **release, now_ms=55) == "WAITING"
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        assert plate.put_command_code and plate.report_message_id is None
+        state = "WAITING" if has_successor else "RELEASING"
+        assert await flow.release_bin(session, **release, now_ms=61) == state
+        command = work.release_command_code
+        assert bool(command) == (not has_successor)
+        assert await flow.release_bin(session, **release, now_ms=62) == state
+        assert work.release_command_code == command
+        assert await flow.advance(session, task_id="t", now_ms=63) == "WAITING"
+        put_code = plate.put_command_code
+    if command:
+        assert (await host.result(command)).status_code == 200
+        async with host.factory.begin() as session:
+            assert await flow.release_bin(session, **release, now_ms=64) == "RELEASED"
+            assert await flow.advance(session, task_id="t", now_ms=65) == "WAITING"
+        assert (await host.arm_result(put_code)).status_code == 200
+        async with host.factory.begin() as session:
+            plate = await host.outbound.advance(
+                session, work_line_id=1, plate_id=host.plate_id, now_ms=110
+            )
+            assert plate.report_message_id
+
+
 @pytest.mark.parametrize("changed", ["scanner", "rack_arm", "transfer_point", "rack", "face"])
 async def test_put_reuses_current_arrival_after_unrelated_line_change(decided_outbound, changed):
     host = decided_outbound

@@ -1215,7 +1215,9 @@ class Outbound:
         )
         return list(await session.scalars(query))
 
-    async def _subject_closed(self, session, *, bin_work_id=None, member_id=None, reports=True):
+    async def _subject_closed(
+        self, session, *, bin_work_id=None, member_id=None, reports=True, for_release=False
+    ):
         plates = await self._subject_plates(session, bin_work_id=bin_work_id, member_id=member_id)
         subject = (
             await session.get(AutoBinWork, bin_work_id)
@@ -1225,13 +1227,13 @@ class Outbound:
         if subject is None:
             return False
         terminals = 0
+        accepted = []
         for plate in plates:
             if plate.task_id != subject.task_id:
                 return False
             decision = await self._decision(session, plate)
             if decision is not None:
-                if reports and not await self.closed(session, plate):
-                    return False
+                accepted.append(plate)
                 if "next_source_action" not in decision[0]:
                     terminals += 1
                 elif not any(p.grant_parent_plate_id == plate.id for p in plates):
@@ -1244,11 +1246,18 @@ class Outbound:
                     return False
             elif await self._exception_round(session, plate) is None:
                 return False
-        return terminals + int(await self._subject_no_work(session, subject)) == 1
+        if terminals + int(await self._subject_no_work(session, subject)) != 1:
+            return False
+        # A terminal ACCEPT ends the source BIN's work. Delivery still owns its reports.
+        if reports and not (for_release and terminals == 1):
+            for plate in accepted:
+                if not await self.closed(session, plate):
+                    return False
+        return True
 
-    async def bin_closed(self, session, work):
+    async def bin_closed(self, session, work, *, for_release=False):
         return work.business_type == "outbound" and await self._subject_closed(
-            session, bin_work_id=work.id
+            session, bin_work_id=work.id, for_release=for_release
         )
 
     async def face_closed(self, session, member):
