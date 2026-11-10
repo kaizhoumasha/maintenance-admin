@@ -401,6 +401,50 @@ class Outbound:
         plate.target_rack_job_id, plate.target_preparation_action_id = job.id, action.id
         return True
 
+    async def _pick_role(self, session, task, plate, bindings, scanner):
+        is_bin = plate.bin_work_id is not None
+        if task.status != "EXECUTING" and not (task.status == "CANCELLED" and is_bin):
+            return None
+        if is_bin and (scanner is None or scanner.device_role != "PLATFORM_SCANNER"):
+            return None
+        role_name = "BIN_ARM" if is_bin else "RACK_ARM"
+        role = next((b for b in bindings.values() if b and b.device_role == role_name), None)
+        if (
+            role
+            and await self._grant(session, plate, new_pick=True)
+            and await self._source_ready(session, task, plate, bindings)
+        ):
+            return role
+        return None
+
+    @staticmethod
+    def _pick_priority(plate):
+        if plate.bin_work_id is None:
+            return (1, plate.id)
+        return (0 if plate.grant_kind in ("NEXT", "RETRY") else 2, plate.id)
+
+    async def _platform_clear(self, session, work_line_id):
+        outstanding = await session.scalars(
+            select(AutoOutboundPlate)
+            .join(AutoTask, AutoTask.task_id == AutoOutboundPlate.task_id)
+            .where(
+                AutoTask.work_line_id == work_line_id,
+                AutoOutboundPlate.pick_command_code.is_not(None),
+                AutoOutboundPlate.put_consumed_at_ms.is_(None),
+                AutoOutboundPlate.empty_observation.is_(None),
+            )
+        )
+        for original in outstanding:
+            put = (original.source_arrival_snapshot or {}).get("put_command", {})
+            if put.get("params", {}).get("source") == SCAN and await self._result(
+                session, original, "put"
+            ):
+                continue
+            if await self._result(session, original, "pick", empty=True):
+                continue
+            return False
+        return True
+
     async def advance(self, session, *, work_line_id, plate_id, now_ms):
         bindings = await lock_line(session, self.dispatch, work_line_id)
         plate = await session.get(AutoOutboundPlate, plate_id)
@@ -418,25 +462,25 @@ class Outbound:
             and settings.work_line_version == line.version
         )
         if plate.pick_command_code is None:
-            if (
-                not enabled
-                or (
-                    task.status != "EXECUTING"
-                    and not (task.status == "CANCELLED" and plate.bin_work_id is not None)
-                )
-                or not await self._grant(session, plate, new_pick=True)
-                or not await self._source_ready(session, task, plate, bindings)
-            ):
-                return plate
-            role_name = "BIN_ARM" if plate.bin_work_id else "RACK_ARM"
-            role = next((b for b in bindings.values() if b and b.device_role == role_name), None)
-            if role is None:
+            if not enabled:
                 return plate
             scanner = bindings.get(line.device_bindings.get("PLATFORM_SCANNER"))
-            if plate.bin_work_id is not None and (
-                scanner is None or scanner.device_role != "PLATFORM_SCANNER"
-            ):
+            role = await self._pick_role(session, task, plate, bindings, scanner)
+            if role is None or not await self._platform_clear(session, work_line_id):
                 return plate
+            candidates = await session.scalars(
+                select(AutoOutboundPlate).where(
+                    AutoOutboundPlate.task_id == task.task_id,
+                    AutoOutboundPlate.pending.is_(True),
+                    AutoOutboundPlate.pick_command_code.is_(None),
+                )
+            )
+            priority = self._pick_priority(plate)
+            for candidate in candidates:
+                if self._pick_priority(candidate) < priority and await self._pick_role(
+                    session, task, candidate, bindings, scanner
+                ):
+                    return plate
             params = plate.source_params
             if plate.bin_work_id:
                 source = dict(
