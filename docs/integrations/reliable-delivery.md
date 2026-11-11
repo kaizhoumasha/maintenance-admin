@@ -10,6 +10,10 @@
 {"defaults":{"retry_base_s":1,"retry_cap_s":300},"targets":{"peer":{"base_url":"https://example.test","protocol":"my-protocol","max_retry_after_s":1200}}}
 ```
 
+`timeout_ms` 是单次 HTTP 请求的总超时，`read_timeout_ms` 是可选的读取超时。读取默认上限为 5000 毫秒，配置后仍受总超时约束。联调可在现有 `targets.wms-decisions` 对象中设置 `"timeout_ms": 15000, "read_timeout_ms": 10000`，该目标的连接超时仍为 5 秒。
+
+回退到早于此配置项的应用版本时，先恢复该版本的目标配置或移除 `read_timeout_ms`，再启动旧容器。旧版本会拒绝带有该字段的配置。
+
 环境默认 `RELIABLE_MAX_RETRY_AFTER_S=3600`，JSON defaults 覆盖环境默认，target 再覆盖 defaults。STATIC 退避为 `max(local_jitter, min(peer_hint_ms / 1000, max_retry_after_s))`，本地 cap 默认 300 秒；只有提示超过采纳上限才截断告警，等待不延长原 TTL。
 
 协议适配器的 `build_request` / `classify_response` 同步且无副作用。启动前向 `app.state.reliable_adapters` 追加新协议，保留已有注册；不在运行中变更。`build_request` 返回 `HttpRequest`，正文必须等于冻结字节，稳定身份必须实际出现在对端可去重的位置；`classify_response` 只接收完整响应。DELIVERED 的 response 必须是实际响应原字节，未知网关响应及身份不匹配不能按 HTTP 状态码猜结果。
