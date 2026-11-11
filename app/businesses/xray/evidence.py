@@ -8,7 +8,7 @@ def select_events(events):
     for event in events:
         payload = event.payload
         if event.stage == "NG_REQUEST":
-            by_key, key = requests, payload["sourceEventId"]
+            by_key, key = requests, payload["source_event_id"]
         else:
             by_key, key = facts, event.stage
         previous = by_key.setdefault(key, event)
@@ -20,7 +20,7 @@ def select_events(events):
 
 
 def without_event_id(payload):
-    return {name: value for name, value in payload.items() if name != "eventId"}
+    return {name: value for name, value in payload.items() if name != "event_id"}
 
 
 def command_evidence(reel, actions, views):
@@ -31,7 +31,7 @@ def command_evidence(reel, actions, views):
         if not view.result:
             continue
         data = view.result["data"]
-        if data["reelId"] != reel.reel_id:
+        if data["reel_id"] != reel.reel_id:
             return "RESULT_REEL_CONFLICT"
         if view.result["result"] != "SUCCESS":
             continue
@@ -41,7 +41,7 @@ def command_evidence(reel, actions, views):
         if stage == "OUTLET":
             model = RackActual if "rack_locator" in action else BinActual
             target = {key: params["target"][key] for key in model.model_fields}
-            if data["actualTarget"] != target:
+            if data["actual_target"] != target:
                 return "RESULT_TARGET_CONFLICT"
     return None
 
@@ -80,14 +80,14 @@ def fact_conflict(facts, actions, views):
         ):
             return "EVENT_BARCODE_CONFLICT"
     count, verify, outlet = (facts.get(key) for key in ("COUNT", "VERIFY", "OUTLET"))
-    if entry["scanStatus"] == "NG" and (count or verify or outlet):
+    if entry["scan_status"] == "NG" and (count or verify or outlet):
         return "ENTRY_EVIDENCE_CONFLICT"
     entry_decision = actions.get("ENTRY", {}).get("params", {}).get("decision")
     if (count or verify) and entry_decision == "BYPASS_COUNT":
         return "EVENT_ROUTE_CONFLICT"
     if count and entry_decision == "COUNT_REQUIRED":
         result = terminal(views, "ENTRY")
-        ok = count.payload["countStatus"] == "OK"
+        ok = count.payload["count_status"] == "OK"
         if (failed(result) and ok) or (
             succeeded(result) and (not ok or count.payload["qty"] != result["data"]["qty"])
         ):
@@ -104,7 +104,7 @@ def fact_conflict(facts, actions, views):
             mode == "COUNTED"
             and verify
             and (
-                verify.payload["scanStatus"] != "OK"
+                verify.payload["scan_status"] != "OK"
                 or outlet.payload["new_barcode"] != verify.payload.get("new_barcode")
             )
         ):

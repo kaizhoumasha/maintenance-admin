@@ -8,4 +8,4 @@ from ..event_data import ScanData
 async def scan_completed(ctx: EcsEventContext, payload: ScanData) -> None:
     from app.businesses.runtime import require_runtime
 
-    await require_runtime(ctx).services["xray"].accept(ctx, payload.scanStage, payload)
+    await require_runtime(ctx).services["xray"].accept(ctx, payload.scan_stage, payload)

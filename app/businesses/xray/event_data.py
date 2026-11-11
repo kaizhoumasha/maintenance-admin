@@ -10,36 +10,36 @@ from .contracts import Incoming, Mode, NgStage, NonnegativeInt, Text, UUIDText
 class ReelEventData(Incoming, CallbackPayload):
     model_config = Incoming.model_config
 
-    eventId: UUIDText
-    reelId: UUIDText
+    event_id: UUIDText
+    reel_id: UUIDText
 
 
 class DeviceOutcome(ReelEventData):
-    reasonCode: Text | None = None
-    reasonMessage: Text | None = None
+    reason_code: Text | None = None
+    reason_message: Text | None = None
 
     def check_reason(self, succeeded: bool):
         if succeeded:
-            valid = self.reasonCode is None and self.reasonMessage is None
+            valid = self.reason_code is None and self.reason_message is None
         else:
-            valid = self.reasonCode is not None and self.reasonMessage is not None
+            valid = self.reason_code is not None and self.reason_message is not None
         if not valid:
             raise ValueError("only NG requires both reason fields")
 
 
 class ScanData(DeviceOutcome):
-    scanStage: Literal["ENTRY", "VERIFY"]
-    scanStatus: Literal["OK", "NG"]
+    scan_stage: Literal["ENTRY", "VERIFY"]
+    scan_status: Literal["OK", "NG"]
     barcode: Text | None = None
     new_barcode: Text | None = None
-    templateId: Literal["XX123456789"] | None = None
+    template_id: Literal["XX123456789"] | None = None
 
     @model_validator(mode="after")
     def stage_fields(self) -> Self:
-        ok = self.scanStatus == "OK"
+        ok = self.scan_status == "OK"
         self.check_reason(ok)
-        if self.scanStage == "ENTRY":
-            valid = self.templateId is not None and self.new_barcode is None
+        if self.scan_stage == "ENTRY":
+            valid = self.template_id is not None and self.new_barcode is None
             valid = valid and (not ok or self.barcode is not None)
         else:
             valid = self.barcode is not None and (not ok or self.new_barcode is not None)
@@ -50,13 +50,13 @@ class ScanData(DeviceOutcome):
 
 class CountData(DeviceOutcome):
     barcode: Text
-    templateId: Literal["XX123456789"]
-    countStatus: Literal["OK", "NG"]
+    template_id: Literal["XX123456789"]
+    count_status: Literal["OK", "NG"]
     qty: NonnegativeInt | None = None
 
     @model_validator(mode="after")
     def quantity_and_reason(self) -> Self:
-        ok = self.countStatus == "OK"
+        ok = self.count_status == "OK"
         self.check_reason(ok)
         if ok != (self.qty is not None):
             raise ValueError("only OK requires qty")
@@ -66,12 +66,12 @@ class CountData(DeviceOutcome):
 class ArrivalData(ReelEventData):
     barcode: Text
     mode: Mode
-    readyForPick: bool
+    ready_for_pick: bool
     new_barcode: Text | None = None
 
     @model_validator(mode="after")
     def pickup_evidence(self) -> Self:
-        if not self.readyForPick or (self.mode == "COUNTED") != (self.new_barcode is not None):
+        if not self.ready_for_pick or (self.mode == "COUNTED") != (self.new_barcode is not None):
             raise ValueError("expected a ready reel with mode-specific barcodes")
         return self
 
@@ -80,10 +80,10 @@ class NgDischargedData(ReelEventData):
     stage: NgStage
     barcode: Text | None = None
     reason: Text
-    reasonCode: Text | None = None
+    reason_code: Text | None = None
 
 
 class NgRequestedData(ReelEventData):
-    sourceEventId: UUIDText
-    reasonCode: Text
-    reasonMessage: Text
+    source_event_id: UUIDText
+    reason_code: Text
+    reason_message: Text

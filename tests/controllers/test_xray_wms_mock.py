@@ -78,9 +78,7 @@ async def mock_peer():
     app.include_router(router, prefix="/api/v1")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
 
-        async def decide(
-            stage, barcode, *, reel_id="REEL-1", operation_id=None, signed=True, **data
-        ):
+        async def decide(stage, barcode, *, operation_id=None, signed=True, **data):
             raw = json.dumps(
                 {
                     "operation_id": operation_id or str(uuid7()),
@@ -88,8 +86,6 @@ async def mock_peer():
                     "timestamp": 1000,
                     "data": {
                         "workline_code": "XRAY",
-                        "reel_id": reel_id,
-                        "source_event_id": "EVT-1",
                         "barcode": barcode,
                         **data,
                     },
@@ -115,16 +111,15 @@ async def test_unsigned_decision_cannot_claim_an_operation(mock_peer):
 async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_peer):
     decide, _ = mock_peer
     labels = []
-    for barcode, qty in zip(BARCODES, (0, 612), strict=True):
+    barcode = BARCODES[0]
+    for qty in (0, 612):
         response = await decide("pkg", barcode, scanned_at=1)
         assert response.json()["data"] == {"result": "COUNT_REQUIRED"}
-        response = await decide(
-            "count",
-            barcode,
-            actual_qty=qty,
-            template_id="XX123456789",
-            observed_at=1000,
-        )
+        count_data = dict(actual_qty=qty, template_id="XX123456789", observed_at=1000)
+        operation_id = str(uuid7())
+        response = await decide("count", barcode, operation_id=operation_id, **count_data)
+        replay = await decide("count", barcode, operation_id=operation_id, **count_data)
+        assert replay.json() == response.json()
         label = response.json()["data"]["label_variables"]
         assert label["QQTYPC"] == str(qty)
         assert label["PHHPN"] == barcode.split(",")[0][1:]
@@ -134,18 +129,26 @@ async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_pee
             barcode,
             scanned_at=1,
             scan_status="OK",
+            expected_spkg=label["SPKG"],
             new_barcode=label["SPKG"],
         )
         assert verified.json()["data"] == {"result": "OK"}
     assert labels[0] != labels[1]
-    for barcode, reel_id, other_label in (
-        (BARCODES[0], "REEL-1", labels[1]),
-        (BARCODES[0], "REEL-2", labels[0]),
-    ):
+    unread = await decide(
+        "verify",
+        barcode,
+        expected_spkg=labels[0],
+        scanned_at=1,
+        scan_status="NG",
+        reason_code="NO_READ",
+        reason_message="unreadable",
+    )
+    assert unread.json()["data"]["result"] == "NG"
+    for expected_spkg, other_label in (labels, labels[::-1]):
         response = await decide(
             "verify",
             barcode,
-            reel_id=reel_id,
+            expected_spkg=expected_spkg,
             scanned_at=1,
             scan_status="OK",
             new_barcode=other_label,
@@ -217,32 +220,30 @@ async def test_outlet_rejects_wrong_label_and_waits_when_the_slot_is_reserved(mo
     decide, dispatch = mock_peer
     barcode = BARCODES[0]
     dispatch.ready = (SimpleNamespace(origin=SimpleNamespace(rack_id="RACK"), actual_face="B"),)
-    labels = {}
-    for reel_id in ("REEL-1", "REEL-2"):
+    labels = []
+    for _ in range(2):
         reply = await decide(
             "count",
             barcode,
-            reel_id=reel_id,
             actual_qty=10,
             template_id="XX123456789",
             observed_at=1,
         )
-        labels[reel_id] = reply.json()["data"]["label_variables"]["SPKG"]
+        labels.append(reply.json()["data"]["label_variables"]["SPKG"])
     wrong = await decide(
-        "put_target", barcode, mode="COUNTED", observed_at=1, new_barcode=labels["REEL-2"]
+        "put_target", BARCODES[1], mode="COUNTED", observed_at=1, new_barcode=labels[1]
     )
     assert wrong.status_code == 422
-    first = dict(mode="COUNTED", observed_at=1, new_barcode=labels["REEL-1"])
+    first = dict(mode="COUNTED", observed_at=1, new_barcode=labels[0])
     assert (await decide("put_target", barcode, **first)).json()["data"]["result"] == "WAIT"
     dispatch.ready[0].actual_face = "A"
     assert (await decide("put_target", barcode, **first)).json()["data"]["result"] == "ACCEPT"
     second = await decide(
         "put_target",
         barcode,
-        reel_id="REEL-2",
         mode="COUNTED",
         observed_at=1,
-        new_barcode=labels["REEL-2"],
+        new_barcode=labels[1],
     )
     assert second.json()["data"]["result"] == "WAIT"
 

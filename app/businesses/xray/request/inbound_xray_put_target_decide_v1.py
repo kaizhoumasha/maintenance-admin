@@ -5,7 +5,7 @@ from pydantic import model_validator
 from app.integrations.wms_request import Endpoint, request_operation
 
 from ..contracts import DECISIONS, Mode, NonnegativeInt, OmitAbsent, Text
-from ..request_data import EventRequest
+from ..request_data import WorklineRequest
 
 OPERATION = "inbound.xray.put_target_decide@v1"
 
@@ -13,7 +13,7 @@ OPERATION = "inbound.xray.put_target_decide@v1"
 @request_operation(
     OPERATION, Endpoint.DECISIONS, requires_business_owner=True, decision_data=DECISIONS["OUTLET"]
 )
-class PutTargetDecide(OmitAbsent, EventRequest):
+class PutTargetDecide(OmitAbsent, WorklineRequest):
     mode: Mode
     barcode: Text
     new_barcode: Text | None = None
