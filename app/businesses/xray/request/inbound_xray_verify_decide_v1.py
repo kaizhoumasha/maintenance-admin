@@ -5,7 +5,7 @@ from pydantic import model_validator
 from app.integrations.wms_request import Endpoint, request_operation
 
 from ..contracts import DECISIONS, NonnegativeInt, OmitAbsent, Text
-from ..request_data import EventRequest
+from ..request_data import WorklineRequest
 
 OPERATION = "inbound.xray.verify_decide@v1"
 
@@ -13,9 +13,10 @@ OPERATION = "inbound.xray.verify_decide@v1"
 @request_operation(
     OPERATION, Endpoint.DECISIONS, requires_business_owner=True, decision_data=DECISIONS["VERIFY"]
 )
-class VerifyDecide(OmitAbsent, EventRequest):
+class VerifyDecide(OmitAbsent, WorklineRequest):
     scan_status: Literal["OK", "NG"]
     barcode: Text
+    expected_spkg: Text
     new_barcode: Text | None = None
     reason_code: Text | None = None
     reason_message: Text | None = None

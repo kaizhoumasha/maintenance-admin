@@ -78,7 +78,7 @@ class XrayService:
             .where(
                 Reel.work_line_id == line.id,
                 Reel.device_id == ctx.binding.device_id,
-                Reel.reel_id == payload.reelId,
+                Reel.reel_id == payload.reel_id,
             )
             .with_for_update()
         )
@@ -89,14 +89,14 @@ class XrayService:
                 workline_code=line.line_code,
                 device_id=ctx.binding.device_id,
                 device_code=ctx.device_code,
-                reel_id=payload.reelId,
+                reel_id=payload.reel_id,
             )
             session.add(reel)
             await session.flush()
         data = payload.model_dump(mode="json", exclude_none=True)
         original = await session.scalar(
             select(ReelEvent)
-            .where(ReelEvent.device_id == reel.device_id, ReelEvent.event_id == payload.eventId)
+            .where(ReelEvent.device_id == reel.device_id, ReelEvent.event_id == payload.event_id)
             .order_by(ReelEvent.receipt_id)
             .limit(1)
         )
@@ -123,7 +123,7 @@ class XrayService:
                 reel_key=reel.id,
                 work_line_id=line.id,
                 device_id=reel.device_id,
-                event_id=payload.eventId,
+                event_id=payload.event_id,
                 stage=stage,
                 timestamp=ctx.timestamp,
                 payload=data,
@@ -363,7 +363,7 @@ class XrayService:
             return "ORIGINAL_BINDING_UNAVAILABLE"
         if "NG" in actions:
             return "NG_RESULT_PENDING"
-        if facts["ENTRY"].payload["scanStatus"] == "NG":
+        if facts["ENTRY"].payload["scan_status"] == "NG":
             return "TECHNICAL_DISCHARGE_PENDING"
 
         stage = self._current_stage(facts, actions, views)
@@ -379,7 +379,7 @@ class XrayService:
                 return "NORMAL_COMMAND_UNRESOLVED"
             data = request.payload
             await self._ng(
-                session, reel, stage, request, None, data["reasonCode"], data["reasonMessage"]
+                session, reel, stage, request, None, data["reason_code"], data["reason_message"]
             )
             return "NG_RESULT_PENDING"
         if stage in actions:
@@ -426,9 +426,14 @@ class XrayService:
                 decision["reason_message"],
             )
             return "NG_RESULT_PENDING"
-        if stage == "VERIFY" and source.payload["scanStatus"] != "OK":
-            reel.conflict = "VERIFY_ALLOW_WITHOUT_DUAL_BARCODE"
-            return reel.conflict
+        if stage == "VERIFY":
+            if source.payload["scan_status"] != "OK":
+                reel.conflict = "VERIFY_ALLOW_WITHOUT_DUAL_BARCODE"
+                return reel.conflict
+            expected_spkg = actions["COUNT"]["params"]["label"]["variables"]["SPKG"]
+            if source.payload["new_barcode"] != expected_spkg:
+                reel.conflict = "VERIFY_ALLOW_WITH_MISMATCHED_SPKG"
+                return reel.conflict
         params = {"decision": outcome}
         if stage == "COUNT":
             params["label"] = {"variables": decision["label_variables"]}
@@ -452,7 +457,7 @@ class XrayService:
         count = facts.get("COUNT")
         if count is None:
             return None if terminal(views, "ENTRY") else "ENTRY"
-        if count.payload["countStatus"] != "OK":
+        if count.payload["count_status"] != "OK":
             return None
         if "COUNT" not in actions:
             return "COUNT"
@@ -493,7 +498,7 @@ class XrayService:
 
         reel.destination = destination
         if report is None:
-            base = {"workline_code": reel.workline_code, "reel_id": reel.reel_id}
+            base = {"workline_code": reel.workline_code}
             if discharged:
                 data = ng_event.payload if ng_event else {}
                 operation, model = self.requests["NG_REPORT"]
@@ -503,7 +508,7 @@ class XrayService:
                     barcode=facts["ENTRY"].payload.get("barcode") or data.get("barcode"),
                     occurred_at=ng_event.timestamp if ng_event else ng_result["finish_time"],
                     reason_code=(
-                        data.get("reasonCode", "DEVICE_NG_DISCHARGED")
+                        data.get("reason_code", "DEVICE_NG_DISCHARGED")
                         if ng_event
                         else ng_action["reason_code"]
                     ),
@@ -635,7 +640,7 @@ class XrayService:
         fields,
         **context,
     ):
-        params = model(reelId=reel.reel_id, sourceEventId=source.event_id, **fields)
+        params = model(reel_id=reel.reel_id, source_event_id=source.event_id, **fields)
         call_key = f"{reel.id}:{action}"
         view = await self.capabilities.ecs.create(
             session,
@@ -730,8 +735,6 @@ class XrayService:
         data = event.payload
         base = dict(
             workline_code=reel.workline_code,
-            reel_id=reel.reel_id,
-            source_event_id=event.event_id,
             barcode=data["barcode"],
         )
         if stage == "ENTRY":
@@ -740,16 +743,17 @@ class XrayService:
             return model(
                 **base,
                 actual_qty=data["qty"],
-                template_id=data["templateId"],
+                template_id=data["template_id"],
                 observed_at=event.timestamp,
             )
         if stage == "VERIFY":
             return model(
                 **base,
-                scan_status=data["scanStatus"],
+                scan_status=data["scan_status"],
+                expected_spkg=reel.actions["COUNT"]["params"]["label"]["variables"]["SPKG"],
                 new_barcode=data.get("new_barcode"),
-                reason_code=data.get("reasonCode"),
-                reason_message=data.get("reasonMessage"),
+                reason_code=data.get("reason_code"),
+                reason_message=data.get("reason_message"),
                 scanned_at=event.timestamp,
             )
         return model(

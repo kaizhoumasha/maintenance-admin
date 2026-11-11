@@ -27,17 +27,17 @@ class XrayError(ErrorDetail):
 
 
 class ReelResult(Incoming):
-    reelId: UUIDText
+    reel_id: UUIDText
 
 
 class Failed(ReelResult):
     position: Literal["SOURCE", "GRIPPER", "TARGET", "OTHER", "UNKNOWN"] | None = None
-    failureStage: Text | None = None
-    actualTarget: RackActual | BinActual | None = None
+    failure_stage: Text | None = None
+    actual_target: RackActual | BinActual | None = None
 
 
 class PutFailed(Failed):
-    actualQty: Annotated[int, Field(ge=0, le=0)] | None = None
+    actual_qty: Annotated[int, Field(ge=0, le=0)] | None = None
 
 
 class Counted(ReelResult):
@@ -52,7 +52,7 @@ class Bypassed(ReelResult):
 
 class Labelled(ReelResult):
     decision: Literal["OK"]
-    labelStatus: Literal["APPLIED"]
+    label_status: Literal["APPLIED"]
 
 
 class Verified(ReelResult):
@@ -72,16 +72,16 @@ class Discharged(ReelResult):
 
 
 class Placed(ReelResult):
-    actualQty: Annotated[int, Field(ge=1, le=1)]
+    actual_qty: Annotated[int, Field(ge=1, le=1)]
     position: Literal["TARGET"]
 
 
 class PlacedInBin(Placed):
-    actualTarget: BinActual
+    actual_target: BinActual
 
 
 class PlacedInRack(Placed):
-    actualTarget: RackActual
+    actual_target: RackActual
 
 
 class Outcome[T](RootModel[T]):
@@ -96,8 +96,8 @@ class Outcome[T](RootModel[T]):
 
 
 class Command(Strict):
-    reelId: UUIDText
-    sourceEventId: UUIDText
+    reel_id: UUIDText
+    source_event_id: UUIDText
 
 
 class Decision(OmitAbsent, Command):
@@ -114,7 +114,7 @@ class Decision(OmitAbsent, Command):
     "APPLY_PKG_DECISION",
     device_roles=(XRAY,),
     annex_id="xray.apply_pkg_decision",
-    annex_version="1",
+    annex_version="2",
     result=Outcome[Counted | Bypassed | Discharged | Failed],
     error=XrayError,
     timeout_min_ms=1,
@@ -132,7 +132,7 @@ class Label(Strict):
     "APPLY_COUNT_DECISION",
     device_roles=(XRAY,),
     annex_id="xray.apply_count_decision",
-    annex_version="1",
+    annex_version="2",
     result=Outcome[Labelled | Discharged | Failed],
     error=XrayError,
     timeout_min_ms=1,
@@ -153,7 +153,7 @@ class ApplyCountDecision(Decision):
     "APPLY_VERIFY_DECISION",
     device_roles=(XRAY,),
     annex_id="xray.apply_verify_decision",
-    annex_version="1",
+    annex_version="2",
     result=Outcome[Verified | Discharged | Failed],
     error=XrayError,
     timeout_min_ms=1,
@@ -167,7 +167,7 @@ class ApplyVerifyDecision(Decision):
     "PUT_TO_BIN",
     device_roles=(OUTPUT_ARM,),
     annex_id="xray.put_to_bin",
-    annex_version="1",
+    annex_version="2",
     result=Outcome[PlacedInBin | PutFailed],
     error=XrayError,
     timeout_min_ms=1,
@@ -181,7 +181,7 @@ class PutToBin(Command):
     "PUT_TO_RACK",
     device_roles=(OUTPUT_ARM,),
     annex_id="xray.put_to_rack",
-    annex_version="1",
+    annex_version="2",
     result=Outcome[PlacedInRack | PutFailed],
     error=XrayError,
     timeout_min_ms=1,

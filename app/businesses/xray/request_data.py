@@ -3,14 +3,9 @@ from app.integrations.wms_request import RequestPayload
 from .contracts import Identifier, NonnegativeInt
 
 
-class ReelRequest(RequestPayload):
+class WorklineRequest(RequestPayload):
     workline_code: Identifier
-    reel_id: Identifier
 
 
-class EventRequest(ReelRequest):
-    source_event_id: Identifier
-
-
-class ReportRequest(ReelRequest):
+class ReportRequest(WorklineRequest):
     occurred_at: NonnegativeInt

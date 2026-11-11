@@ -72,6 +72,7 @@ class XrayWmsMock:
                 self.fixed_lines.add(line)
         # shortcut: single-worker memory; use durable reservations if runs must survive restart.
         self._replies = {}
+        self._issued_labels = {}
         self._reserved = {}
         self._lock = asyncio.Lock()
 
@@ -95,14 +96,14 @@ class XrayWmsMock:
                 old_request, response = original
                 return response if old_request == sent else (*CONFLICT, timestamp)
             try:
-                data = await self._decide(app, session, payload)
+                data = await self._decide(app, session, payload, operation_id)
             except (ValidationError, OverflowError, ValueError):
                 return (*INVALID, timestamp)
             response = (200, "DECIDED", data, timestamp)
             self._replies[operation_id] = (sent, response)
             return response
 
-    async def _decide(self, app, session, payload):
+    async def _decide(self, app, session, payload, operation_id):
         counted = payload.barcode in self.targets[payload.workline_code]
         if isinstance(payload, pkg.PkgDecide):
             return {"result": "COUNT_REQUIRED" if counted else "BYPASS_COUNT"}
@@ -111,9 +112,9 @@ class XrayWmsMock:
         if not counted:
             raise ValueError("unknown counted barcode")
 
-        identity = f"{payload.workline_code}|{payload.reel_id}|{payload.barcode}"
-        spkg = "XRAYMOCK" + sha256(identity.encode()).hexdigest()[:16].upper()
+        material = (payload.workline_code, payload.barcode)
         if isinstance(payload, count.CountDecide):
+            spkg = "XRAYMOCK" + sha256(operation_id.encode()).hexdigest()[:16].upper()
             part, _, manufacturer, date, lot, _ = payload.barcode.split(",")
             variables = LabelVariables(
                 ID=payload.template_id,
@@ -129,17 +130,23 @@ class XrayWmsMock:
                 ),
                 LLC=lot[1:],
             )
-            return CountOk(result="OK", label_variables=variables).model_dump(mode="json")
+            response = CountOk(result="OK", label_variables=variables).model_dump(mode="json")
+            self._issued_labels[spkg] = material
+            return response
         if isinstance(payload, verify.VerifyDecide):
-            if payload.scan_status == "OK" and payload.new_barcode == spkg:
+            if (
+                payload.scan_status == "OK"
+                and payload.new_barcode == payload.expected_spkg
+                and self._issued_labels.get(payload.expected_spkg) == material
+            ):
                 return {"result": "OK"}
             return {
                 "result": "NG",
                 "reason_code": "VERIFY_MISMATCH",
                 "reason_message": "CCD did not read the SPKG generated for this reel",
             }
-        if payload.new_barcode != spkg:
-            raise ValueError("outlet SPKG does not match the reel")
+        if self._issued_labels.get(payload.new_barcode) != material:
+            raise ValueError("outlet SPKG does not match the original material")
         return await self._rack_target(app, session, payload)
 
     async def _rack_target(self, app, session, payload):
@@ -167,7 +174,7 @@ class XrayWmsMock:
             and (ready[0].origin.rack_id, ready[0].actual_face) == (loc.rack_id, loc.rack_face)
         ):
             key = (loc.rack_id, loc.rack_face, loc.slot_id)
-            owner = (payload.workline_code, payload.reel_id)
+            owner = (payload.workline_code, payload.new_barcode)
             if self._reserved.setdefault(key, owner) == owner:
                 return target.model_dump(mode="json")
         elif not ready and not await dispatch.jobs(session, **scope, pending=True):

@@ -61,7 +61,9 @@ LABEL = {
 def test_xray_registers_in_formal_catalog():
     bindings, _ = catalog.validate_business_contracts()
     assert "xray" in {item.code for item in catalog.definitions()}
-    assert {b.task_type for b in bindings if b.annex_id.startswith("xray.")} == {
+    xray_bindings = [binding for binding in bindings if binding.annex_id.startswith("xray.")]
+    assert {binding.annex_version for binding in xray_bindings} == {"2"}
+    assert {binding.task_type for binding in xray_bindings} == {
         "APPLY_PKG_DECISION",
         "APPLY_COUNT_DECISION",
         "APPLY_VERIFY_DECISION",
@@ -249,7 +251,7 @@ async def xray(callback_store, monkeypatch):
                     "device_code": device,
                     "event_type": kind,
                     "timestamp": stamp,
-                    "data": {"eventId": event_id, "reelId": reel_id or reel, **data},
+                    "data": {"event_id": event_id, "reel_id": reel_id or reel, **data},
                 },
             )
             assert response.status_code == status, response.text
@@ -259,10 +261,10 @@ async def xray(callback_store, monkeypatch):
             return await event(
                 "SCAN_COMPLETED",
                 **{
-                    "scanStage": "ENTRY",
-                    "scanStatus": "OK",
+                    "scan_stage": "ENTRY",
+                    "scan_status": "OK",
                     "barcode": original,
-                    "templateId": TEMPLATE,
+                    "template_id": TEMPLATE,
                     **changes,
                 },
             )
@@ -273,7 +275,7 @@ async def xray(callback_store, monkeypatch):
                 "device_code": cmd["device_code"],
                 "result": "FAILED" if failure else "SUCCESS",
                 "finish_time": stamp + 1,
-                "data": {"reelId": cmd["params"]["reelId"], **data},
+                "data": {"reel_id": cmd["params"]["reel_id"], **data},
             }
             if failure:
                 body["error_detail"] = {"code": "FAILED", "msg": "device failure"}
@@ -457,10 +459,14 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
     entry_id = await x.entry()
     await x.drain()
     first = x.commands[0]
-    assert first["params"]["sourceEventId"] == entry_id
+    assert first["params"]["source_event_id"] == entry_id
     if counted:
         await x.event(
-            "XRAY_COUNT_COMPLETED", barcode=x.barcode, templateId=TEMPLATE, countStatus="OK", qty=0
+            "XRAY_COUNT_COMPLETED",
+            barcode=x.barcode,
+            template_id=TEMPLATE,
+            count_status="OK",
+            qty=0,
         )
         await x.drain()
         assert x.requests[1]["data"]["actual_qty"] == 0
@@ -468,18 +474,19 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
         await x.result(first, decision="COUNT_REQUIRED", qty=0)
         await x.event(
             "SCAN_COMPLETED",
-            scanStage="VERIFY",
-            scanStatus="OK",
+            scan_stage="VERIFY",
+            scan_status="OK",
             barcode=x.barcode,
-            new_barcode="actual-new",
+            new_barcode=LABEL["SPKG"],
         )
         await x.drain()
-        await x.result(x.commands[1], decision="OK", labelStatus="APPLIED")
+        assert x.requests[2]["data"]["expected_spkg"] == LABEL["SPKG"]
+        await x.result(x.commands[1], decision="OK", label_status="APPLIED")
     mode = "COUNTED" if counted else "BYPASS"
     outlet = x.commands[-1]
-    arrived = dict(barcode=x.barcode, mode=mode, readyForPick=True)
+    arrived = dict(barcode=x.barcode, mode=mode, ready_for_pick=True)
     if counted:
-        arrived["new_barcode"] = "actual-new"
+        arrived["new_barcode"] = LABEL["SPKG"]
     await x.result(outlet, decision="OK" if counted else "BYPASS_COUNT", mode=mode)
     await x.event("MATERIAL_ARRIVED", **arrived)
     await x.event("MATERIAL_ARRIVED", **arrived)
@@ -497,11 +504,46 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
     assert x.commands[-1] == put
     assert not x.facts
     for _ in range(2):
-        await x.result(put, actualQty=1, position="TARGET", actualTarget=put["params"]["target"])
+        await x.result(put, actual_qty=1, position="TARGET", actual_target=put["params"]["target"])
         await x.drain()
     assert len(x.facts) == 1
     assert x.facts[0]["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
     assert not x.mock_facts
+    assert all(
+        not {"reel_id", "source_event_id"} & request["data"].keys()
+        for request in (*x.requests, *x.facts)
+    )
+    assert x.facts[0]["data"]["target_operation_id"] == x.requests[-1]["operation_id"]
+
+
+async def test_wms_ok_cannot_release_a_reel_with_a_mismatched_ccd_label(xray):
+    x = xray
+    x.decisions.update(
+        pkg_decide={"result": "COUNT_REQUIRED"},
+        count_decide={"result": "OK", "label_variables": LABEL},
+        verify_decide={"result": "OK"},
+    )
+    await x.entry()
+    await x.drain()
+    await x.event(
+        "XRAY_COUNT_COMPLETED", barcode=x.barcode, template_id=TEMPLATE, count_status="OK", qty=0
+    )
+    await x.drain()
+    await x.event(
+        "SCAN_COMPLETED",
+        scan_stage="VERIFY",
+        scan_status="OK",
+        barcode=x.barcode,
+        new_barcode="other-reel-label",
+    )
+    await x.drain()
+    assert x.requests[-1]["data"]["expected_spkg"] == LABEL["SPKG"]
+    assert x.requests[-1]["data"]["new_barcode"] == "other-reel-label"
+    assert [cmd["task_type"] for cmd in x.commands] == [
+        "APPLY_PKG_DECISION",
+        "APPLY_COUNT_DECISION",
+    ]
+    assert not x.facts
 
 
 async def test_wait_ng_request_stops_normal_decision_and_reports_once(xray):
@@ -512,9 +554,9 @@ async def test_wait_ng_request_stops_normal_decision_and_reports_once(xray):
     assert not x.commands
     await x.event(
         "XRAY_NG_REQUESTED",
-        sourceEventId=entry_id,
-        reasonCode="NO_CAPACITY",
-        reasonMessage="cannot wait",
+        source_event_id=entry_id,
+        reason_code="NO_CAPACITY",
+        reason_message="cannot wait",
     )
     x.clock.advance(2)
     await x.drain()
@@ -527,6 +569,7 @@ async def test_wait_ng_request_stops_normal_decision_and_reports_once(xray):
     await x.drain()
     assert len(x.facts) == 1
     assert x.facts[0]["operation"] == "inbound.xray.ng_report@v1"
+    assert "reel_id" not in x.facts[0]["data"]
 
 
 @pytest.mark.parametrize("rejected", [False, True])
@@ -540,9 +583,9 @@ async def test_ng_request_waits_for_terminal_nonacceptance(xray, rejected):
     assert len(x.commands) == 1
     request_id = await x.event(
         "XRAY_NG_REQUESTED",
-        sourceEventId=entry_id,
-        reasonCode="NO_CAPACITY",
-        reasonMessage="cannot wait",
+        source_event_id=entry_id,
+        reason_code="NO_CAPACITY",
+        reason_message="cannot wait",
     )
     x.clock.advance(301)
     await x.drain()
@@ -550,7 +593,7 @@ async def test_ng_request_waits_for_terminal_nonacceptance(xray, rejected):
     if rejected:
         ng = x.commands[-1]
         assert ng["params"]["decision"] == "NG"
-        assert ng["params"]["sourceEventId"] == request_id
+        assert ng["params"]["source_event_id"] == request_id
         await x.result(ng, decision="NG", discharged=True)
         await x.drain()
         assert x.facts[0]["data"]["reason_code"] == "NO_CAPACITY"
@@ -596,7 +639,11 @@ async def test_count_conflict_blocks_label_after_saved_decision(xray, result_fir
 
     async def count():
         await x.event(
-            "XRAY_COUNT_COMPLETED", barcode=x.barcode, templateId=TEMPLATE, countStatus="OK", qty=1
+            "XRAY_COUNT_COMPLETED",
+            barcode=x.barcode,
+            template_id=TEMPLATE,
+            count_status="OK",
+            qty=1,
         )
 
     if result_first:
@@ -619,7 +666,7 @@ async def test_technical_discharge_can_precede_entry_context(xray):
     await x.event("NG_DISCHARGED", stage="ENTRY", reason="scanner failed")
     await x.drain()
     assert not x.facts
-    await x.entry(scanStatus="NG", reasonCode="NO_BARCODE", reasonMessage="unreadable")
+    await x.entry(scan_status="NG", reason_code="NO_BARCODE", reason_message="unreadable")
     await x.drain()
     assert not x.requests
     assert not x.commands
@@ -636,15 +683,15 @@ async def test_technical_count_discharge_does_not_wait_for_failed_result(xray):
     await x.event(
         "XRAY_COUNT_COMPLETED",
         barcode=x.barcode,
-        templateId=TEMPLATE,
-        countStatus="NG",
-        reasonCode="COUNT_FAILED",
-        reasonMessage="measurement failed",
+        template_id=TEMPLATE,
+        count_status="NG",
+        reason_code="COUNT_FAILED",
+        reason_message="measurement failed",
     )
     await x.event("NG_DISCHARGED", stage="COUNT", barcode=x.barcode, reason="count failed")
     await x.drain()
     assert len(x.facts) == 1
-    await x.result(cmd, failure=True, failureStage="COUNT")
+    await x.result(cmd, failure=True, failure_stage="COUNT")
     await x.drain()
     assert len(x.facts) == len(x.commands) == len(x.requests) == 1
 
@@ -657,11 +704,11 @@ async def test_wrong_bin_result_is_retained_without_put_report(xray):
     )
     await x.entry()
     await x.drain()
-    await x.event("MATERIAL_ARRIVED", barcode=x.barcode, mode="BYPASS", readyForPick=True)
+    await x.event("MATERIAL_ARRIVED", barcode=x.barcode, mode="BYPASS", ready_for_pick=True)
     await x.drain()
     cmd = x.commands[-1]
     target = {**cmd["params"]["target"], "bin_id": "WRONG-BIN"}
-    await x.result(cmd, actualQty=1, position="TARGET", actualTarget=target)
+    await x.result(cmd, actual_qty=1, position="TARGET", actual_target=target)
     await x.drain()
     assert len(x.commands) == 2
     assert not x.facts
@@ -670,11 +717,13 @@ async def test_wrong_bin_result_is_retained_without_put_report(xray):
 async def test_strict_event_and_result_shapes_reject_coercion_and_extra_fields(xray):
     x = xray
     await x.entry(status=400, barcode=None)
+    await x.entry(status=400, eventId=str(uuid4()))
     await x.entry(status=400, extra="unexpected")
     x.decisions["pkg_decide"] = {"result": "COUNT_REQUIRED"}
     await x.entry()
     await x.drain()
     (cmd,) = x.commands
+    await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=0, reelId=str(uuid4()))
     await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=True)
     await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=0, extra="unexpected")
     await x.result(cmd, decision="COUNT_REQUIRED", qty=0)
@@ -707,7 +756,7 @@ async def test_event_cannot_override_terminal_nonacceptance(xray):
     await x.entry()
     await x.drain()
     await x.event(
-        "XRAY_COUNT_COMPLETED", barcode=x.barcode, templateId=TEMPLATE, countStatus="OK", qty=0
+        "XRAY_COUNT_COMPLETED", barcode=x.barcode, template_id=TEMPLATE, count_status="OK", qty=0
     )
     await x.drain()
     assert len(x.requests) == len(x.commands) == 1
@@ -726,24 +775,24 @@ async def test_two_reels_share_one_unsettled_arm_command(xray):
     await asyncio.gather(x.advance(), x.advance())
     await x.drain()
     assert len(x.commands) == 2
-    assert len({c["params"]["reelId"] for c in x.commands}) == 2
+    assert len({c["params"]["reel_id"] for c in x.commands}) == 2
     for c in x.commands[:]:
         await x.event(
             "MATERIAL_ARRIVED",
-            reel_id=c["params"]["reelId"],
+            reel_id=c["params"]["reel_id"],
             barcode=x.barcode,
             mode="BYPASS",
-            readyForPick=True,
+            ready_for_pick=True,
         )
     await asyncio.gather(x.advance(), x.advance())
     await x.drain()
     assert len(x.commands) == 3
     put = x.commands[-1]
-    await x.result(put, actualQty=1, position="TARGET", actualTarget=put["params"]["target"])
+    await x.result(put, actual_qty=1, position="TARGET", actual_target=put["params"]["target"])
     await x.drain()
     assert len(x.facts) == 1
     assert len(x.commands) == 4
-    assert x.commands[-1]["params"]["reelId"] != put["params"]["reelId"]
+    assert x.commands[-1]["params"]["reel_id"] != put["params"]["reel_id"]
 
 
 async def outlet(x, *, reel_id=None):
@@ -753,7 +802,7 @@ async def outlet(x, *, reel_id=None):
     cmd = next(c for c in reversed(x.commands) if c["task_type"] == "APPLY_PKG_DECISION")
     await x.result(cmd, decision="BYPASS_COUNT", mode="BYPASS")
     return await x.event(
-        "MATERIAL_ARRIVED", reel_id=reel_id, barcode=x.barcode, mode="BYPASS", readyForPick=True
+        "MATERIAL_ARRIVED", reel_id=reel_id, barcode=x.barcode, mode="BYPASS", ready_for_pick=True
     )
 
 
@@ -801,8 +850,8 @@ async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(
             "XRAY_COUNT_COMPLETED",
             reel_id=reel_id,
             barcode=barcode,
-            templateId=TEMPLATE,
-            countStatus="OK",
+            template_id=TEMPLATE,
+            count_status="OK",
             qty=index,
         )
         await x.result(first, decision="COUNT_REQUIRED", qty=index)
@@ -810,12 +859,12 @@ async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(
         label_cmd = x.commands[-1]
         label = label_cmd["params"]["label"]["variables"]
         assert label["QQTYPC"] == str(index)
-        await x.result(label_cmd, decision="OK", labelStatus="APPLIED")
+        await x.result(label_cmd, decision="OK", label_status="APPLIED")
         await x.event(
             "SCAN_COMPLETED",
             reel_id=reel_id,
-            scanStage="VERIFY",
-            scanStatus="OK",
+            scan_stage="VERIFY",
+            scan_status="OK",
             barcode=barcode,
             new_barcode=label["SPKG"],
         )
@@ -827,7 +876,7 @@ async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(
             barcode=barcode,
             new_barcode=label["SPKG"],
             mode="COUNTED",
-            readyForPick=True,
+            ready_for_pick=True,
         )
         await x.drain()
         if not fixed:
@@ -882,7 +931,7 @@ async def test_replenish_waits_for_original_enter_then_redecides(xray):
     assert target["location_id"] == "ECS-RACK-POINT"
     assert target["rack_id"] == "RACK-A"
     actual = {k: v for k, v in target.items() if not k.startswith("reel_")}
-    await x.result(put, actualQty=1, position="TARGET", actualTarget=actual)
+    await x.result(put, actual_qty=1, position="TARGET", actual_target=actual)
     await x.drain()
     assert x.facts[0]["data"]["to_locator"] == rack_slot(x)["target_locator"]
 
@@ -905,7 +954,7 @@ async def ready_rack_put(x):
 
 async def placed(x, put):
     actual = {k: v for k, v in put["params"]["target"].items() if not k.startswith("reel_")}
-    await x.result(put, actualQty=1, position="TARGET", actualTarget=actual)
+    await x.result(put, actual_qty=1, position="TARGET", actual_target=actual)
 
 
 async def test_concurrent_reels_reuse_one_enter_across_restart(xray):
@@ -918,25 +967,22 @@ async def test_concurrent_reels_reuse_one_enter_across_restart(xray):
     for reel in reel_ids:
         await x.entry(reel_id=reel)
     await x.drain()
-    event_ids = set()
     for cmd in x.commands[:]:
         await x.result(cmd, decision="BYPASS_COUNT", mode="BYPASS")
-        event_ids.add(
-            await x.event(
-                "MATERIAL_ARRIVED",
-                reel_id=cmd["params"]["reelId"],
-                barcode=x.barcode,
-                mode="BYPASS",
-                readyForPick=True,
-            )
+        await x.event(
+            "MATERIAL_ARRIVED",
+            reel_id=cmd["params"]["reel_id"],
+            barcode=x.barcode,
+            mode="BYPASS",
+            ready_for_pick=True,
         )
     await asyncio.gather(*(x.advance_reel(reel) for reel in reel_ids))
     assert await x.dispatch() == 2
     await asyncio.gather(*(x.advance_reel(reel) for reel in reel_ids))
     await x.drain()
     (enter,) = x.transports
-    first = {r["data"]["source_event_id"]: r for r in target_requests(x)}
-    assert set(first) == event_ids
+    first = target_requests(x)
+    assert len(first) == 2
     x.restart()
     await asyncio.gather(x.advance(), x.advance())
     await x.drain()
@@ -950,10 +996,8 @@ async def test_concurrent_reels_reuse_one_enter_across_restart(xray):
     assert len(x.transports) == 1
     renewed = target_requests(x)[2:]
     assert len(renewed) == 2
-    for r in renewed:
-        old = first[r["data"]["source_event_id"]]
-        assert r["data"] == old["data"]
-        assert r["operation_id"] != old["operation_id"]
+    assert [r["data"] for r in renewed] == [r["data"] for r in first]
+    assert {r["operation_id"] for r in renewed}.isdisjoint(r["operation_id"] for r in first)
     (put,) = [c for c in x.commands if c["task_type"] == "PUT_TO_RACK"]
     await placed(x, put)
     await x.drain()
@@ -977,7 +1021,6 @@ async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
     source = await outlet(x, reel_id=str(uuid4()))
     await x.drain()
     original = target_requests(x)[-1]
-    assert original["data"]["source_event_id"] == source
     x.clock.advance(301)
     x.restart()
     await x.drain()
@@ -1030,6 +1073,7 @@ async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
     assert target_requests(x)[-1]["data"] == original["data"]
     final_put = x.commands[-1]
     assert final_put["task_type"] == "PUT_TO_RACK"
+    assert final_put["params"]["source_event_id"] == source
     assert final_put["params"]["target"]["rack_id"] == rack
     assert final_put["params"]["target"]["rack_face"] == "B"
 
@@ -1089,22 +1133,24 @@ async def test_pending_pages_skip_future_wait_and_review_and_reuse_originals(xra
     notices, tick = x.wakeups(page_size=3)
     wait_ids = [str(uuid4()) for _ in range(4)]
     x.decisions["pkg_decide"] = {"result": "WAIT", "retry_after_ms": 60_000}
-    for identity in wait_ids:
-        await x.entry(reel_id=identity)
+    entry_ids = {
+        identity: await x.entry(reel_id=identity, barcode=f"WAIT-{identity}")
+        for identity in wait_ids
+    }
     for _ in range(4):
         identity = str(uuid4())
         event = await x.entry(reel_id=identity)
         await x.entry(reel_id=identity, event_id=event, barcode="CONFLICTING")
     await x.drain()
     old_requests = list(x.requests)
-    assert {r["data"]["reel_id"] for r in old_requests} == set(wait_ids)
+    assert {r["data"]["barcode"] for r in old_requests} == {f"WAIT-{i}" for i in wait_ids}
     assert not x.commands
 
     notices.clear()
     ready_ids = [str(uuid4()) for _ in range(7)]
     x.decisions["pkg_decide"] = {"result": "BYPASS_COUNT"}
     for identity in ready_ids:
-        await x.entry(reel_id=identity)
+        await x.entry(reel_id=identity, barcode=f"READY-{identity}")
     assert notices == ["xray"] * len(ready_ids)
     # The worker must cross three pages without opening transactions for sleeping reels.
     assert await tick(notices[0]) == len(ready_ids)
@@ -1112,30 +1158,29 @@ async def test_pending_pages_skip_future_wait_and_review_and_reuse_originals(xra
     while await x.dispatch():
         pass
     assert x.requests[: len(old_requests)] == old_requests
-    assert sorted(r["data"]["reel_id"] for r in x.requests[len(old_requests) :]) == sorted(
-        ready_ids
+    assert sorted(r["data"]["barcode"] for r in x.requests[len(old_requests) :]) == sorted(
+        f"READY-{identity}" for identity in ready_ids
     )
     await asyncio.gather(tick(notices[-1]), tick())
     while await x.dispatch():
         pass
-    assert sorted(c["params"]["reelId"] for c in x.commands) == sorted(ready_ids)
+    assert sorted(c["params"]["reel_id"] for c in x.commands) == sorted(ready_ids)
     await tick()
     assert await x.dispatch() == 0
 
     # A new original device fact can make a WAIT reel eligible before its WMS deadline.
-    prior = next(r for r in old_requests if r["data"]["reel_id"] == wait_ids[0])
     request_id = await x.event(
         "XRAY_NG_REQUESTED",
         reel_id=wait_ids[0],
-        sourceEventId=prior["data"]["source_event_id"],
-        reasonCode="NO_CAPACITY",
-        reasonMessage="cannot wait",
+        source_event_id=entry_ids[wait_ids[0]],
+        reason_code="NO_CAPACITY",
+        reason_message="cannot wait",
     )
     await tick(notices[-1])
     await x.dispatch()
     ng = x.commands[-1]
     assert ng["params"]["decision"] == "NG"
-    assert ng["params"]["sourceEventId"] == request_id
+    assert ng["params"]["source_event_id"] == request_id
     assert len(x.requests) == len(old_requests) + len(ready_ids)
 
     # The periodic invocation discovers due waits even without a fresh callback.
@@ -1145,7 +1190,7 @@ async def test_pending_pages_skip_future_wait_and_review_and_reuse_originals(xra
     while await x.dispatch():
         pass
     renewed = x.requests[len(old_requests) + len(ready_ids) :]
-    assert {r["data"]["reel_id"] for r in renewed} == set(wait_ids[1:])
+    assert {r["data"]["barcode"] for r in renewed} == {f"WAIT-{i}" for i in wait_ids[1:]}
     assert all(
         r["operation_id"] not in {old["operation_id"] for old in old_requests} for r in renewed
     )
@@ -1161,7 +1206,7 @@ async def test_wait_keeps_original_unsettled_command_eligible(xray):
     await x.drain()
     (count,) = x.commands
     await x.event(
-        "XRAY_COUNT_COMPLETED", barcode=x.barcode, templateId=TEMPLATE, countStatus="OK", qty=1
+        "XRAY_COUNT_COMPLETED", barcode=x.barcode, template_id=TEMPLATE, count_status="OK", qty=1
     )
     await x.drain()
     assert await x.advance() == 1
