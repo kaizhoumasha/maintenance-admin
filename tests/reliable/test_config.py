@@ -134,12 +134,39 @@ def _parse(**raw):
     return parse_reliable_config(Settings(_env_file=None, RELIABLE_TARGETS=raw))
 
 
+def test_wms_decisions_read_timeout_can_be_configured_per_target():
+    config = _parse(
+        targets={
+            "wms-decisions": {
+                "base_url": "http://x.test",
+                "protocol": "wms-decisions",
+                "timeout_ms": 15000,
+                "read_timeout_ms": 10000,
+            },
+            "wms-facts": {"base_url": "http://x.test", "protocol": "wms-facts"},
+        },
+    )
+    decisions = config.targets["wms-decisions"].http_config()
+    facts = config.targets["wms-facts"].http_config()
+    assert (decisions.connect_timeout_s, decisions.read_timeout_s, decisions.total_timeout_s) == (
+        5,
+        10,
+        15,
+    )
+    assert (facts.connect_timeout_s, facts.read_timeout_s, facts.total_timeout_s) == (5, 5, 10)
+
+
 @pytest.mark.parametrize(
     "target,error,fragment",
     [
         ({"url": "http://x.test", "protocol": "p"}, TypeError, "url"),
         ({"base_url": "not-a-url", "protocol": "p"}, ValueError, "base_url"),
         ({"base_url": "http://x.test", "protocol": "p", "timeout_ms": -1}, ValueError, "timeout"),
+        (
+            {"base_url": "http://x.test", "protocol": "p", "read_timeout_ms": 0},
+            ValueError,
+            "read_timeout_ms",
+        ),
         ({"base_url": "http://x.test", "protocol": "p", "name": "other"}, ValueError, "name"),
         ("not-an-object", ValueError, "object"),
     ],

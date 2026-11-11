@@ -33,6 +33,7 @@ class TargetConfig:
     fixed_retry_interval_s: float | None = None
     address_mode: str = "STATIC"
     explicit_only: bool = False
+    read_timeout_ms: float | None = None
 
     def __post_init__(self):
         if not isinstance(self.protocol, str) or not self.protocol:
@@ -51,6 +52,8 @@ class TargetConfig:
         for name in ("alert_after_attempts", "max_body_bytes"):
             if not isinstance(getattr(self, name), int):
                 raise TypeError(f"{name} must be an integer")
+        if self.read_timeout_ms is not None:
+            positive(self.read_timeout_ms, "read_timeout_ms")
         if self.max_not_received_attempts is not None:
             positive(self.max_not_received_attempts, "max_not_received_attempts")
             if not isinstance(self.max_not_received_attempts, int):
@@ -78,12 +81,13 @@ class TargetConfig:
 
     def http_config(self) -> HttpClientConfig:
         timeout = self.timeout_ms / 1000
+        read_timeout = 5 if self.read_timeout_ms is None else self.read_timeout_ms / 1000
         return HttpClientConfig(
             self.base_url,
             self.name,
             total_timeout_s=timeout,
             connect_timeout_s=min(5, timeout),
-            read_timeout_s=min(5, timeout),
+            read_timeout_s=min(read_timeout, timeout),
             write_timeout_s=min(5, timeout),
             pool_timeout_s=min(5, timeout),
             max_request_body_bytes=self.max_body_bytes,
