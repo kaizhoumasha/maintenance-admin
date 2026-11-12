@@ -169,19 +169,16 @@ class XrayWmsMock:
         }
         fixed = payload.workline_code in self.fixed_lines
         ready = () if fixed else await dispatch.get_point_preparations(session, **scope)
-        if fixed or (
+        plan = target.model_dump(mode="json")
+        if not fixed and not (
             len(ready) == 1
             and (ready[0].origin.rack_id, ready[0].actual_face) == (loc.rack_id, loc.rack_face)
         ):
-            key = (loc.rack_id, loc.rack_face, loc.slot_id)
-            owner = (payload.workline_code, payload.new_barcode)
-            if self._reserved.setdefault(key, owner) == owner:
-                return target.model_dump(mode="json")
-        elif not ready and not await dispatch.jobs(session, **scope, pending=True):
-            if not await dispatch.has_position_conflict(session, point=loc.location_code):
-                return {
-                    "result": "REPLENISH_REQUIRED",
-                    "location_code": loc.location_code,
-                    "incoming_rack": {"rack_id": loc.rack_id, "target_face": loc.rack_face},
-                }
-        return WAIT
+            if ready or await dispatch.jobs(session, **scope, pending=True):
+                return WAIT
+            if await dispatch.has_position_conflict(session, point=loc.location_code):
+                return WAIT
+            plan["target_preparation"] = "REPLACE"
+        key = (loc.rack_id, loc.rack_face, loc.slot_id)
+        owner = (payload.workline_code, payload.new_barcode)
+        return plan if self._reserved.setdefault(key, owner) == owner else WAIT
