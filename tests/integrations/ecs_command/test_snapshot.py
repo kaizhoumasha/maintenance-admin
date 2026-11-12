@@ -5,14 +5,78 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 
 from app.http_client import DeliveryState, HttpClientConfig, HttpResult
 from app.integrations import history as history_records
-from app.models import ReliableMessage
+from app.models import IntegrationRecord, ReliableMessage, WorkLine
 from app.reliable import MessageDraft
 from app.reliable.types import DeliverySnapshot, DuplicateMessage
 from tests.helpers import EcsMove, read_history_body
+
+
+@pytest.mark.parametrize("timeout_setting", ["lock_timeout", "statement_timeout"])
+async def test_workline_lock_timeout_retries_original_command(
+    ecs, delivery, monkeypatch, timeout_setting
+):
+    from app.reliable.testing import FakeClock
+
+    if ecs.engine.dialect.name != "postgresql":
+        pytest.skip("requires PostgreSQL row locks")
+    clock = FakeClock(ecs.service.clock())
+    delivery.store.clock = clock
+    delivery.args["clock"] = clock
+    opened = select(IntegrationRecord.id).where(
+        IntegrationRecord.exchange_id == delivery.claim.message.exchange_id,
+        IntegrationRecord.record_kind == "SEND_ATTEMPT_OPENED",
+    )
+    async with ecs.factory.begin() as session:
+        line = WorkLine(line_code="ECS-LOCK-TEST", line_name="ECS lock test")
+        session.add(line)
+        await session.flush()
+        line_id = line.id
+    lock_line = select(WorkLine.id).where(WorkLine.id == line_id).with_for_update()
+    authorize = ecs.routes.authorize_frozen
+
+    async def authorize_with_workline_lock(session, route):
+        await session.execute(
+            text("SELECT set_config(:setting, '50ms', true)"), {"setting": timeout_setting}
+        )
+        await session.scalar(lock_line)
+        return await authorize(session, route)
+
+    monkeypatch.setattr(ecs.routes, "authorize_frozen", authorize_with_workline_lock)
+    try:
+        async with ecs.factory.begin() as blocker:
+            await blocker.scalar(lock_line)
+            await delivery.send(**delivery.args)
+        assert delivery.client.requests == []
+        async with ecs.factory() as session:
+            row = await session.get(ReliableMessage, delivery.claim.message_id)
+            assert row.status == "PENDING" and not row.delivery_uncertain
+            assert row.next_attempt_at > clock()
+            assert not (await session.scalars(opened)).all()
+        assert await delivery.store.claim(1, ecs.targets) == ()
+
+        clock.advance(10)
+        first, second = await asyncio.gather(
+            delivery.store.claim(1, ecs.targets), delivery.store.claim(1, ecs.targets)
+        )
+        (retry,) = first + second
+        assert retry.message_id == delivery.claim.message_id
+        assert retry.message.operation_id == delivery.claim.message.operation_id
+        await delivery.send(**(delivery.args | {"claim": retry}))
+        assert [req.body for req in delivery.client.requests] == [
+            delivery.claim.message.request_raw
+        ]
+        assert await delivery.store.claim(1, ecs.targets) == ()
+        async with ecs.factory() as session:
+            row = await session.get(ReliableMessage, delivery.claim.message_id)
+            assert row.status == "DONE"
+            assert len((await session.scalars(opened)).all()) == 1
+    finally:
+        async with ecs.factory.begin() as session:
+            await session.execute(delete(WorkLine).where(WorkLine.id == line_id))
 
 
 async def test_open_commit_failure_prevents_http_for_both_modes(ecs, delivery, monkeypatch):
@@ -105,7 +169,11 @@ async def delivery(ecs):
     (claim,) = await store.claim(1, ecs.targets)
     client = ScriptedHttpClient(
         HttpResult(
-            DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b'{"code":200,"message":"ACK"}'
+            DeliveryState.HTTP_RESPONSE_COMPLETE,
+            None,
+            200,
+            (("Content-Type", "application/json"),),
+            b'{"code":200,"message":"ACK"}',
         )
     )
     provider = DynamicClients(factory=lambda config: client, capacity=1)
