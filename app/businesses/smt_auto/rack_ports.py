@@ -501,6 +501,8 @@ class AutoRackPorts:
             ):
                 return None
         else:
+            if row.source_arrival_snapshot.get("pending_platform_scan"):
+                return None
             round_ = (
                 await session.get(
                     AutoOutboundDecisionRound, row.final_decision_round_id, populate_existing=True

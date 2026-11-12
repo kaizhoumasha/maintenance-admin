@@ -187,6 +187,8 @@ class OutboundRacks:
             )
             .order_by(AutoOutboundPlate.id)
         ):
+            if plate.source_arrival_snapshot.get("pending_platform_scan"):
+                continue
             round_ = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
             data = (round_.response_snapshot or {}).get("data", {}) if round_ else {}
             preparation = data.get("target_preparation")

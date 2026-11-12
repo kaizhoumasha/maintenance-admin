@@ -3,7 +3,7 @@
 from decimal import Decimal
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import EventApplicationRef
@@ -90,6 +90,16 @@ class Outbound:
 
     async def accept_platform_scan(self, ctx, payload):
         # The receiver's binding resolver holds the WorkLine and scanner locks.
+        active = and_(
+            AutoOutboundPlate.pending,
+            AutoTask.status.in_(("EXECUTING", "CANCELLED")),
+            AutoBinWork.terminal_at_ms.is_(None),
+        )
+        eligible = (
+            or_(active, AutoOutboundPlate.put_command_code.is_not(None))
+            if payload.scan_revision > 1
+            else active
+        )
         plates = (
             await ctx.session.scalars(
                 select(AutoOutboundPlate)
@@ -97,13 +107,11 @@ class Outbound:
                 .join(AutoBinWork, AutoBinWork.id == AutoOutboundPlate.bin_work_id)
                 .where(
                     AutoOutboundPlate.pick_command_code == payload.previous_command_code,
-                    AutoOutboundPlate.pending,
+                    eligible,
                     AutoTask.work_line_id == ctx.work_line_id,
                     AutoTask.business_type == "outbound",
-                    AutoTask.status.in_(("EXECUTING", "CANCELLED")),
                     AutoBinWork.task_id == AutoTask.task_id,
                     AutoBinWork.work_line_id == ctx.work_line_id,
-                    AutoBinWork.terminal_at_ms.is_(None),
                 )
                 .limit(2)
                 .with_for_update(of=AutoOutboundPlate)
@@ -126,6 +134,50 @@ class Outbound:
 
         event_id = command.get("platform_scan_event_id")
         scan = (payload.barcode, ctx.timestamp)
+        revision = command.get("platform_scan_revision", 1)
+        if payload.scan_revision < revision:
+            ctx.note("PLATFORM_SCAN_STALE_REVISION")
+            return
+        if payload.scan_revision > revision:
+            if (
+                event_id is None
+                or payload.scan_revision != revision + 1
+                or plate.scanned_at_ms is None
+                or ctx.timestamp <= plate.scanned_at_ms
+            ):
+                ctx.note("PLATFORM_SCAN_REVISION_MISMATCH")
+                return
+            pending = snapshot.get("pending_platform_scan")
+            if pending is not None and (pending["barcode"], pending["timestamp"]) != scan:
+                ctx.note("PLATFORM_SCAN_CONFLICT")
+                return
+            if pending is None:
+                pending = dict(
+                    event_id=ctx.receipt_id,
+                    revision=payload.scan_revision,
+                    barcode=payload.barcode,
+                    timestamp=ctx.timestamp,
+                )
+                plate.source_arrival_snapshot = {**snapshot, "pending_platform_scan": pending}
+                if plate.put_command_code is None and plate.final_decision_round_id is None:
+                    rounds = await self._material_rounds(ctx.session, plate)
+                    if len(rounds) == 1 and rounds[0].unresolved:
+                        original = rounds[0]
+                        await self.requests.fence_replacement(
+                            ctx.session,
+                            message_id=original.message_id,
+                            operation=original.operation,
+                            operation_id=original.operation_id,
+                        )
+            ctx.bind_application(
+                EventApplicationRef(
+                    "AUTO_OUTBOUND_PLATE",
+                    str(plate.id),
+                    pending["event_id"],
+                    predecessor_event_id=event_id,
+                )
+            )
+            return
         if (event_id is not None or plate.pick_consumed_at_ms is not None) and (
             plate.barcode,
             plate.scanned_at_ms,
@@ -140,6 +192,89 @@ class Outbound:
                 "pick_command": {**command, "platform_scan_event_id": event_id},
             }
         ctx.bind_application(EventApplicationRef("AUTO_OUTBOUND_PLATE", str(plate.id), event_id))
+
+    @staticmethod
+    def _material_stage(plate, revision=None):
+        if revision is None:
+            revision = plate.source_arrival_snapshot["pick_command"].get(
+                "platform_scan_revision", 1
+            )
+        base = f"plate:{plate.id}:material"
+        return base if revision == 1 else f"{base}:scan:{revision}"
+
+    async def _material_rounds(self, session, plate):
+        return list(
+            await session.scalars(
+                select(AutoOutboundDecisionRound)
+                .where(
+                    AutoOutboundDecisionRound.plate_id == plate.id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
+                    AutoOutboundDecisionRound.stage_key == self._material_stage(plate),
+                )
+                .order_by(AutoOutboundDecisionRound.round_no)
+            )
+        )
+
+    async def _apply_platform_scan_correction(self, session, plate, pending, context, rounds):
+        if plate.final_decision_round_id is not None or len(rounds) > 1:
+            return
+        original = rounds[0] if rounds else None
+        data = {**context, "barcode": pending["barcode"], "scanned_at": pending["timestamp"]}
+        identity = str(uuid7())
+        operation = "outbound.bin.material.decide@v1"
+        request = BinDecide(**data)
+        if original is None:
+            ref = await self.requests.send(session, request, operation_id=identity)
+        else:
+            if (
+                not original.unresolved
+                or original.round_no != 1
+                or original.previous_round_id is not None
+                or original.task_id != plate.task_id
+                or original.operation != operation
+                or original.request_data != context
+            ):
+                return
+            ref = await self.requests.replace_unaccepted(
+                session,
+                request,
+                message_id=original.message_id,
+                operation=original.operation,
+                operation_id=original.operation_id,
+                replacement_operation_id=identity,
+            )
+            if ref is None:
+                return
+            original.unresolved = False
+        snapshot = {**plate.source_arrival_snapshot}
+        del snapshot["pending_platform_scan"]
+        snapshot["pick_command"] = {
+            **snapshot["pick_command"],
+            "platform_scan_event_id": pending["event_id"],
+            "platform_scan_revision": pending["revision"],
+        }
+        if original is not None:
+            snapshot["pick_command"]["superseded_material_round_ids"] = [
+                *snapshot["pick_command"].get("superseded_material_round_ids", ()),
+                original.id,
+            ]
+        plate.source_arrival_snapshot = snapshot
+        plate.barcode, plate.scanned_at_ms = pending["barcode"], pending["timestamp"]
+        session.add(
+            AutoOutboundDecisionRound(
+                task_id=plate.task_id,
+                plate_id=plate.id,
+                purpose="MATERIAL_DECIDE",
+                stage_key=self._material_stage(plate),
+                round_no=1,
+                operation=operation,
+                operation_id=identity,
+                message_id=ref.message_id,
+                request_data=data,
+                unresolved=True,
+            )
+        )
+        await session.flush()
 
     async def _pick_scan(self, session, plate):
         pick = await self._result(session, plate, "pick")
@@ -480,8 +615,8 @@ class Outbound:
             return False
         return True
 
-    async def advance(self, session, *, work_line_id, plate_id, now_ms):
-        bindings = await lock_line(session, self.dispatch, work_line_id)
+    async def advance(self, session, *, work_line_id, plate_id, now_ms, timing=None):
+        bindings = await lock_line(session, self.dispatch, work_line_id, timing=timing)
         plate = await session.get(AutoOutboundPlate, plate_id)
         task = await session.get(AutoTask, plate.task_id) if plate else None
         if task is None or task.work_line_id != work_line_id or task.business_type != "outbound":
@@ -589,17 +724,17 @@ class Outbound:
             if plate.bin_work_id
             else "outbound.rackslot.material.decide@v1"
         )
-        rounds = list(
-            await session.scalars(
-                select(AutoOutboundDecisionRound)
-                .where(
-                    AutoOutboundDecisionRound.plate_id == plate.id,
-                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
-                )
-                .order_by(AutoOutboundDecisionRound.round_no)
+        rounds = await self._material_rounds(session, plate)
+        pending_scan = plate.source_arrival_snapshot.get("pending_platform_scan")
+        if pending_scan is not None and plate.put_command_code is None:
+            await self._apply_platform_scan_correction(
+                session, plate, pending_scan, context, rounds
             )
-        )
+            return plate
         current = rounds[-1] if rounds else None
+        if current is not None and timing is not None:
+            timing["message_id"] = current.message_id
+            timing["operation_id"] = current.operation_id
         previous = None
         for index, item in enumerate(rounds):
             if (
@@ -608,7 +743,6 @@ class Outbound:
                 or item.previous_round_id != (previous.id if previous else None)
                 or item.request_data != context
                 or item.operation != operation
-                or item.stage_key != f"plate:{plate.id}:material"
             ):
                 return plate
             if previous:
@@ -667,7 +801,7 @@ class Outbound:
                     task_id=task.task_id,
                     plate_id=plate.id,
                     purpose="MATERIAL_DECIDE",
-                    stage_key=f"plate:{plate.id}:material",
+                    stage_key=self._material_stage(plate),
                     round_no=current.round_no + 1 if current else 1,
                     previous_round_id=current.id if current else None,
                     operation=operation,
@@ -772,7 +906,7 @@ class Outbound:
         return {
             k: v
             for k, v in plate.source_arrival_snapshot.items()
-            if k not in ("pick_command", "put_command")
+            if k not in ("pick_command", "put_command", "pending_platform_scan")
         }
 
     async def _empty_context(self, session, plate, result):
@@ -1092,6 +1226,10 @@ class Outbound:
         await session.flush()
 
     async def _final_material(self, session, plate):
+        if plate.put_command_code is None and plate.source_arrival_snapshot.get(
+            "pending_platform_scan"
+        ):
+            return None
         if plate.final_decision_round_id is None or not await self._grant(session, plate):
             return None
         round_ = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
@@ -1131,16 +1269,7 @@ class Outbound:
         expected.update(task_id=plate.task_id, barcode=scan.barcode, scanned_at=scan.scanned_at)
         if round_.request_data != expected:
             return None
-        chain = list(
-            await session.scalars(
-                select(AutoOutboundDecisionRound)
-                .where(
-                    AutoOutboundDecisionRound.plate_id == plate.id,
-                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
-                )
-                .order_by(AutoOutboundDecisionRound.round_no)
-            )
-        )
+        chain = await self._material_rounds(session, plate)
         previous = None
         for index, item in enumerate(chain):
             if (
@@ -1548,6 +1677,13 @@ class Outbound:
             if proof is not None and await self.target_clear(session, job_id=job.id):
                 return "NONE"
         plate_ids = {p.id for p in plates}
+        superseded_rounds = {
+            (plate.id, round_id)
+            for plate in plates
+            for round_id in plate.source_arrival_snapshot.get("pick_command", {}).get(
+                "superseded_material_round_ids", ()
+            )
+        }
         bin_ids = {b.id for b in bins}
         face_actions = {m.preparation_action_id for m in members}
         decisions = {}
@@ -1576,7 +1712,20 @@ class Outbound:
             descendants.update(children)
             frontier = children
         if any(
-            (r.plate_id not in descendants and (r.unresolved or r.consumed_at_ms is None))
+            (
+                r.plate_id not in descendants
+                and (
+                    r.unresolved
+                    or (
+                        r.consumed_at_ms is None
+                        and not (
+                            (r.plate_id, r.id) in superseded_rounds
+                            and r.purpose == "MATERIAL_DECIDE"
+                            and r.response_snapshot is None
+                        )
+                    )
+                )
+            )
             or (r.plate_id is not None and r.plate_id not in plate_ids)
             or (
                 r.purpose == "WORK_PLAN"

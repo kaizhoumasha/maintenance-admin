@@ -3561,7 +3561,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 <a id="bin-platform-scan-event"></a>
 ##### 出库 BIN 扫码平台事件
 
-ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `timestamp` 为实际扫码的 UTC Unix 毫秒，WES 将其作为 `scanned_at`。三个 data 字段均必填。`location` 固定为 `SCAN_PLATFORM`，`barcode` 保留完整原文，`previous_command_code` 为把本盘从工作位料箱放到扫码平台的原命令号。
+ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `timestamp` 为实际扫码的 UTC Unix 毫秒，WES 将其作为 `scanned_at`。`location`、`barcode` 和 `previous_command_code` 必填。`location` 固定为 `SCAN_PLATFORM`，`barcode` 保留完整原文，`previous_command_code` 为把本盘从工作位料箱放到扫码平台的原命令号。
 
 ```json
 {
@@ -3579,6 +3579,8 @@ ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `ti
 在工作线配置中，将实际扫码平台设备绑定到 `PLATFORM_SCANNER`。新 BIN 取盘需有此绑定，WES 保存原指令对应的扫码设备。绑定更新后，将 `SMT_AUTO_WORKLINES` 中对应的 `work_line_version` 同步到工作线的新版本。Result 与事件可以乱序到达。重复事件只应用一次，关联错误或扫码值冲突的事件保留诊断，原扫码值继续保留。如果已保存扫码事实而取盘结果报告空取，保留两条事实，暂停该盘推进。旧指令可凭带原指令号的真实扫码事件继续，已带完整扫码字段的历史 Result 也可继续使用。此前未携带原指令号的事件需要 ECS 以原扫码事实补报，按时间接近无法可靠关联。
 
 先升级所有 WES 回调实例并完成扫码设备绑定，再让 ECS 发送或补报新格式。旧实例收到事件会返回 ACK 并记录为未注册，同一事件随后重报会走收据去重。
+
+可选整数 `data.scan_revision` 默认为 `1`。ECS 确认需要纠正条码时，沿用原取盘指令号，提交当前生效版本的下一版及实际重扫时间。重传沿用同版本和同一报文。WES 保留原回执与更正回执。旧 WMS 请求尚未发送或已确认未接纳时，WES 原子停发旧消息，并用新 `operation_id` 重新发起判定。旧请求在途、接纳状态不明、已经接纳或 ARM04 放盘已下发时，更正保留为待核对，已下发的 ARM04 仍按原指令接收结果。
 
 <a id="ecs-success-2"></a>
 #### 7.5.2 目标放盘成功回调

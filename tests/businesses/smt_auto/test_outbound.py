@@ -1,9 +1,13 @@
 """Normal inbound consumes actual ECS results and actual WMS outbox responses."""
 
+import asyncio
 import importlib
 import json
+import logging
 import sys
 from dataclasses import asdict, replace
+from datetime import timedelta
+from time import time_ns
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +33,15 @@ from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.integrations.ecs_command.service import CommandOwner
 from app.integrations.wms_request import ADAPTERS, FACTS_PROTOCOL
-from app.models import Device, DeviceRoute, IntegrationExchange, WorkLine, WorkLinePosition
+from app.models import (
+    Device,
+    DeviceRoute,
+    IntegrationExchange,
+    IntegrationRecord,
+    ReliableMessage,
+    WorkLine,
+    WorkLinePosition,
+)
 from app.reliable.config import TargetConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
@@ -211,8 +223,13 @@ async def outbound_host(s5_roller, request, monkeypatch):
 
     pending_claims = []
 
-    async def settle(operation, data, code="DECIDED"):
-        store = MessageStore(host.factory, records=history_records)
+    async def settle(operation, data, code="DECIDED", *, on_delivered=None):
+        store = MessageStore(
+            host.factory,
+            records=history_records,
+            on_delivered=on_delivered,
+            on_result=business_wakeups.wms_result_committed if on_delivered else None,
+        )
         pending_claims.extend(await store.claim(100, host.requests.outbox.targets))
         claims = pending_claims
         matching = [c for c in claims if c.message.operation == operation]
@@ -285,7 +302,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
             claim, AttemptOutcome(MessageStatus.DONE, result=response, verdict=verdict)
         )
 
-    async def platform_scan(code, *, barcode="原始料盘," * 60, timestamp=88, device="SCANNER_001"):
+    async def platform_scan(
+        code, *, barcode="原始料盘," * 60, timestamp=88, device="SCANNER_001", scan_revision=None
+    ):
         from app.businesses.runtime import BusinessRuntime
 
         body = {
@@ -298,6 +317,8 @@ async def outbound_host(s5_roller, request, monkeypatch):
                 "previous_command_code": code,
             },
         }
+        if scan_revision is not None:
+            body["data"]["scan_revision"] = scan_revision
         runtime = BusinessRuntime({}, {"smt_auto": SimpleNamespace(outbound=host.outbound)})
         async with host.factory.begin() as session:
             return await receive_ecs_event(
@@ -730,7 +751,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
 
 
 @pytest.fixture
-async def decided_outbound(outbound_host):
+async def decided_outbound(outbound_host, request):
     host = outbound_host
     async with host.factory.begin() as session:
         work = await session.get(AutoBinWork, host.work_id)
@@ -758,10 +779,384 @@ async def decided_outbound(outbound_host):
         host.plate_id = plate.id
         await host.outbound.advance(session, work_line_id=1, plate_id=plate.id, now_ms=40)
         code = plate.pick_command_code
-    await host.arm_result(code, scan=True)
+    original_barcode = getattr(request, "param", None)
+    if original_barcode is None:
+        await host.arm_result(code, scan=True)
+    else:
+        await host.arm_result(code)
+        assert (await host.platform_scan(code, barcode=original_barcode)).status_code == 200
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=50)
     return host
+
+
+@pytest.mark.parametrize(
+    "decided_outbound",
+    ["PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-197"],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "delivery", ["unsent", "claimed", "in_flight_then_unavailable", "accepted", "put_sent"]
+)
+@pytest.mark.parametrize("direction_host", ["sqlite", "postgres"], indirect=True)
+async def test_scan_revision_replaces_only_unaccepted_material_once(decided_outbound, delivery):
+    host = decided_outbound
+    barcode = "PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-176"
+    operation = "outbound.bin.material.decide@v1"
+    accept = {
+        "result": "ACCEPT",
+        "target_locator": {
+            "type": "RACK_SLOT",
+            "rack_id": "target",
+            "rack_face": "A",
+            "slot_id": "A1",
+            "rack_layer": 1,
+            "rack_column": 1,
+        },
+    }
+    if delivery in ("accepted", "put_sent"):
+        await host.settle(operation, accept)
+        if delivery == "put_sent":
+            async with host.factory.begin() as session:
+                plate = await host.outbound.advance(
+                    session, work_line_id=1, plate_id=host.plate_id, now_ms=59
+                )
+                assert plate.put_command_code
+                put_code = plate.put_command_code
+            await host.arm_ack(put_code)
+    store = MessageStore(host.factory, records=history_records)
+    if delivery in ("claimed", "in_flight_then_unavailable"):
+        (claim,) = await store.claim(1, host.requests.outbox.targets)
+    if delivery == "in_flight_then_unavailable":
+        assert await store.before_send(claim, host.requests.outbox.targets[claim.message.target])
+    async with host.factory() as session:
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        original_pick = plate.pick_command_code
+    receipt = await host.platform_scan(
+        original_pick, barcode=barcode, timestamp=105, scan_revision=2
+    )
+    assert receipt.status_code == 200
+    if delivery == "claimed":
+        recovery = MessageStore(
+            host.factory,
+            records=history_records,
+            clock=lambda: claim.lease_until + timedelta(seconds=1),
+        )
+        assert await recovery.recover_expired(1, host.requests.outbox.targets) == 0
+        assert not await recovery.claim(1, host.requests.outbox.targets)
+        assert (
+            await store.before_send(claim, host.requests.outbox.targets[claim.message.target])
+            is None
+        )
+    if delivery == "in_flight_then_unavailable":
+        async with host.factory.begin() as session:
+            plate = await host.outbound.advance(
+                session, work_line_id=1, plate_id=host.plate_id, now_ms=59
+            )
+            assert plate.barcode.endswith("197") and plate.put_command_code is None
+        response = HttpResult(
+            DeliveryState.HTTP_RESPONSE_COMPLETE,
+            None,
+            503,
+            (),
+            json.dumps(
+                dict(
+                    operation_id=claim.message.operation_id,
+                    code="UNAVAILABLE",
+                    timestamp=105,
+                    data={},
+                )
+            ).encode(),
+        )
+        verdict = ADAPTERS["wms-decisions"].classify_response(claim.message, response)
+        assert await store.finish(
+            claim,
+            AttemptOutcome(
+                MessageStatus.PENDING,
+                result=response,
+                verdict=verdict,
+                next_attempt_at=store.clock() + timedelta(seconds=1),
+                not_received_count=1,
+            ),
+        )
+    if delivery in ("unsent", "claimed", "in_flight_then_unavailable"):
+        later_store = MessageStore(
+            host.factory,
+            records=history_records,
+            clock=lambda: store.clock() + timedelta(seconds=2),
+        )
+        assert not await later_store.claim(1, host.requests.outbox.targets)
+    for now in (60, 61):
+        async with host.factory.begin() as session:
+            await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=now)
+        repeated = await host.platform_scan(
+            original_pick, barcode=barcode, timestamp=105, scan_revision=2
+        )
+        assert repeated.status_code == 200 and repeated.outcome == "duplicate"
+    if delivery in ("unsent", "claimed", "in_flight_then_unavailable"):
+        stale = await host.platform_scan(
+            original_pick, barcode=barcode[:-3] + "197", timestamp=106, scan_revision=1
+        )
+        assert stale.diagnostic[0]["reason_code"] == "PLATFORM_SCAN_STALE_REVISION"
+    async with host.factory() as session:
+        rounds = (
+            await session.scalars(
+                select(AutoOutboundDecisionRound)
+                .where(AutoOutboundDecisionRound.plate_id == host.plate_id)
+                .order_by(AutoOutboundDecisionRound.id)
+            )
+        ).all()
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        old_message = await session.get(ReliableMessage, rounds[0].message_id)
+        assert rounds[0].request_data["barcode"].endswith("197")
+        old_request = json.loads(await read_history_body(session, old_message.request_record_id))
+        assert old_request["data"]["barcode"].endswith("197")
+        if delivery in ("accepted", "put_sent"):
+            assert len(rounds) == 1 and old_message.status == "DONE"
+            assert plate.barcode.endswith("197")
+            assert plate.source_arrival_snapshot["pending_platform_scan"]["barcode"] == barcode
+            assert plate.put_command_code == (put_code if delivery == "put_sent" else None)
+        else:
+            assert len(rounds) == 2 and old_message.status == "ABANDONED"
+            assert not rounds[0].unresolved
+            assert rounds[1].operation_id != rounds[0].operation_id
+            assert rounds[1].request_data["barcode"] == plate.barcode == barcode
+            assert rounds[1].request_data["scanned_at"] == 105
+            new_message = await session.get(ReliableMessage, rounds[1].message_id)
+            new_request = json.loads(
+                await read_history_body(session, new_message.request_record_id)
+            )
+            assert new_request["data"]["barcode"] == barcode
+            assert plate.put_command_code is None
+            scan_id = plate.source_arrival_snapshot["pick_command"]["platform_scan_event_id"]
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange.receipt_id).where(
+                        IntegrationExchange.receipt_id == scan_id,
+                        IntegrationExchange.application_ref["predecessor_event_id"]
+                        .as_integer()
+                        .is_not(None),
+                    )
+                )
+                == scan_id
+            )
+    if delivery in ("unsent", "claimed", "in_flight_then_unavailable"):
+        from app.businesses.smt_auto.outbound_racks import OutboundRacks
+        from app.businesses.smt_auto.task_flow import TaskFlow
+
+        flow = TaskFlow(
+            host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
+        )
+        racks = OutboundRacks(host.outbound, station_id="station")
+        await host.settle(operation, accept)
+        async with host.factory.begin() as session:
+            plate = await host.outbound.advance(
+                session, work_line_id=1, plate_id=host.plate_id, now_ms=62
+            )
+            assert plate.put_command_code and plate.final_decision_round_id == rounds[1].id
+            put_code = plate.put_command_code
+            rack_job_id = plate.target_rack_job_id
+            work = await session.get(AutoBinWork, host.work_id)
+            assert (
+                await flow.release_bin(
+                    session, work_line_id=1, arrival_id=work.arrival_id, now_ms=63
+                )
+                == "RELEASING"
+            )
+            release_code = work.release_command_code
+            arrival_id = work.arrival_id
+        assert (await host.result(release_code)).status_code == 200
+        assert (await host.arm_result(put_code)).status_code == 200
+        async with host.factory.begin() as session:
+            await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=64)
+            await flow.consume_release(session, work_line_id=1, arrival_id=arrival_id, now_ms=65)
+        await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
+        async with host.factory.begin() as session:
+            await host.outbound.advance_report(session, plate_id=host.plate_id, now_ms=66)
+            await racks.advance(session, task_id="t", now_ms=67)
+        await host.settle(
+            "rack.departure_decide@v1",
+            {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "SMT_B"}},
+        )
+        async with host.factory.begin() as session:
+            await racks.advance(session, task_id="t", now_ms=68)
+            await racks.advance(session, task_id="t", now_ms=69)
+            rack = await host.dispatch.progress(session, job_id=rack_job_id)
+            assert rack.actions[-1].kind == "DEPART"
+
+
+async def test_material_notice_targets_original_outbound_operation(decided_outbound, monkeypatch):
+    host = decided_outbound
+    from app.businesses.smt_auto.service import SmtAutoService
+    from app.tasks import business_tasks
+
+    notices = []
+    monkeypatch.setattr(business_wakeups, "enqueue_business", lambda *args: notices.append(args))
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        {
+            "result": "ACCEPT",
+            "target_locator": {
+                "type": "RACK_SLOT",
+                "rack_id": "target",
+                "rack_face": "A",
+                "slot_id": "A1",
+                "rack_layer": 1,
+                "rack_column": 1,
+            },
+        },
+        on_delivered=business_wakeups.wms_delivery_committed,
+    )
+    async with host.factory() as session:
+        round_ = await session.scalar(
+            select(AutoOutboundDecisionRound).where(
+                AutoOutboundDecisionRound.plate_id == host.plate_id
+            )
+        )
+        assert notices == [("smt_auto", round_.operation, round_.operation_id)]
+    service = SmtAutoService(replace(host.dispatch.capabilities, ecs=host.ecs), worklines=())
+    service.dispatch, service.roller, service.outbound = host.dispatch, host.roller, host.outbound
+
+    def unexpected_sweep(_):
+        raise AssertionError("ACCEPT must bypass the pending sweep")
+
+    monkeypatch.setattr(service, "_pending", unexpected_sweep)
+    monkeypatch.setattr(
+        business_tasks,
+        "_runtime",
+        lambda *_: SimpleNamespace(progressions={"smt_auto": service.scan_pending}),
+    )
+    assert await business_tasks.advance_pending(host.factory, *notices[0]) == 1
+    async with host.factory() as session:
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        assert plate.put_command_code
+
+
+@pytest.mark.parametrize("direction_host", ["postgres"], indirect=True)
+@pytest.mark.parametrize(
+    "decided_outbound",
+    ["PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-197"],
+    indirect=True,
+)
+async def test_targeted_material_and_sweep_create_one_put(decided_outbound, monkeypatch, caplog):
+    from app.businesses.smt_auto.service import SmtAutoService
+
+    host = decided_outbound
+    async with host.factory() as session:
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        original_pick = plate.pick_command_code
+    correction = "PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-176"
+    assert (
+        await host.platform_scan(original_pick, barcode=correction, timestamp=105, scan_revision=2)
+    ).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=60)
+    assert (
+        await host.platform_scan(original_pick, barcode=correction, timestamp=105, scan_revision=2)
+    ).outcome == "duplicate"
+    capabilities = replace(host.dispatch.capabilities, ecs=host.ecs)
+    service = SmtAutoService(capabilities, worklines=())
+    service.dispatch, service.roller, service.outbound = host.dispatch, host.roller, host.outbound
+    monkeypatch.setattr(
+        service,
+        "_pending",
+        lambda _: {"OUTBOUND_PLATE": select(AutoOutboundPlate.id).where(AutoOutboundPlate.pending)},
+    )
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        {
+            "result": "ACCEPT",
+            "target_locator": {
+                "type": "RACK_SLOT",
+                "rack_id": "target",
+                "rack_face": "A",
+                "slot_id": "A1",
+                "rack_layer": 1,
+                "rack_column": 1,
+            },
+        },
+    )
+    async with host.factory() as session:
+        round_ = await session.scalar(
+            select(AutoOutboundDecisionRound).where(
+                AutoOutboundDecisionRound.plate_id == host.plate_id,
+                AutoOutboundDecisionRound.unresolved,
+            )
+        )
+        assert round_.request_data["barcode"] == correction
+        message = await session.get(ReliableMessage, round_.message_id)
+        accepted_at = await session.scalar(
+            select(IntegrationRecord.recorded_at).where(
+                IntegrationRecord.exchange_id == message.exchange_id,
+                IntegrationRecord.record_kind == "HTTP_RESPONSE_OBSERVED",
+                IntegrationRecord.http_status == 200,
+            )
+        )
+        original_count = await session.scalar(
+            select(func.count())
+            .select_from(IntegrationExchange)
+            .where(IntegrationExchange.role == "ECS_COMMAND")
+        )
+
+    both_started = asyncio.Event()
+    kinds = set()
+    advance = service.advance
+
+    async def advance_together(kind, record_id, **kwargs):
+        if kind in ("OUTBOUND_DECISION", "OUTBOUND_PLATE"):
+            kinds.add(kind)
+            if len(kinds) == 2:
+                both_started.set()
+            await asyncio.wait_for(both_started.wait(), timeout=5)
+        return await advance(kind, record_id, **kwargs)
+
+    monkeypatch.setattr(service, "advance", advance_together)
+    notified_at_ms = time_ns() // 1_000_000
+    with caplog.at_level("INFO", logger="app.businesses.smt_auto.transactions"):
+        await asyncio.gather(
+            service.scan_pending(
+                operation=round_.operation,
+                operation_id=round_.operation_id,
+                notified_at_ms=notified_at_ms,
+            ),
+            service.scan_pending(),
+        )
+    async with host.factory() as session:
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        assert plate.put_command_code
+        registered_at = await session.scalar(
+            select(IntegrationExchange.created_at).where(
+                IntegrationExchange.command_code == plate.put_command_code
+            )
+        )
+        assert registered_at >= accepted_at
+        logging.getLogger(__name__).info(
+            "Isolated KT14 ACCEPT to ARM04 registration %.3f ms",
+            (registered_at - accepted_at).total_seconds() * 1000,
+        )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == original_count + 1
+        )
+    for field in (
+        "preceding_ms",
+        "workline_lock_ms",
+        "related_locks_ms",
+        "processing_ms",
+        "commit_ms",
+    ):
+        assert field in caplog.text
+    assert plate.put_command_code in caplog.text
+    await host.arm_ack(plate.put_command_code)
+    async with host.factory() as session:
+        command = await host.ecs.get_command(
+            session, owner=CommandOwner("smt_auto"), command_code=plate.put_command_code
+        )
+        assert command.ack_received and command.status == "WAITING_RESULT"
 
 
 @pytest.mark.parametrize("successor_state", ["absent", "valid", "conflicting"])

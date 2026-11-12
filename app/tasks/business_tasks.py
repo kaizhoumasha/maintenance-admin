@@ -43,13 +43,28 @@ def _runtime(factory, business: str | None):
     )
 
 
-async def advance_pending(factory, business: str) -> int:
+async def advance_pending(
+    factory, business: str, operation=None, operation_id=None, notified_at_ms=None
+) -> int:
     runtime = _runtime(factory, business)
+    if operation is not None:
+        return await runtime.progressions[business](
+            operation=operation, operation_id=operation_id, notified_at_ms=notified_at_ms
+        )
     return await runtime.progressions[business]()
 
 
 @celery_app.task(name="business.advance_pending", ignore_result=True)
-def advance_business_pending(business: str) -> int:
+def advance_business_pending(
+    business: str, operation=None, operation_id=None, notified_at_ms=None
+) -> int:
     return run_with_factory(
-        get_settings().DATABASE_URL, partial(advance_pending, business=business)
+        get_settings().DATABASE_URL,
+        partial(
+            advance_pending,
+            business=business,
+            operation=operation,
+            operation_id=operation_id,
+            notified_at_ms=notified_at_ms,
+        ),
     )

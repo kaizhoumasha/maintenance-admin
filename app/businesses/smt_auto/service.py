@@ -1,6 +1,7 @@
 """AUTO runtime and business-owned pending advancement."""
 
 import logging
+from time import perf_counter, time_ns
 
 from sqlalchemy import or_, select, text
 
@@ -13,11 +14,13 @@ from app.diagnostics import log_exception
 from app.integrations.ecs_command import CommandOwner
 from app.models import WorkLine
 
+from ._execution_facts import read_decision
 from .archive import RETENTION_MS, Archive
 from .locking import lock_line
 from .models import (
     AutoBinWork,
     AutoInboundPlate,
+    AutoOutboundDecisionRound,
     AutoOutboundPlate,
     AutoOutboundSourceMember,
     AutoTask,
@@ -134,10 +137,12 @@ class SmtAutoService(AutoTaskService):
             and line.version == settings.work_line_version
         )
 
-    async def advance(self, kind, record_id, *, now_ms=None):
+    async def advance(self, kind, record_id, *, now_ms=None, operation=None, timing=None):
         if now_ms is None:
             now_ms = unix_ms(self.wms.clock())
-        return await self.transactions.advance(kind, record_id, now_ms=now_ms)
+        return await self.transactions.advance(
+            kind, record_id, now_ms=now_ms, operation=operation, timing=timing
+        )
 
     def _pending(self, now_ms):
         return {
@@ -174,10 +179,29 @@ class SmtAutoService(AutoTaskService):
             ),
         }
 
-    async def scan_pending(self, *, limit=100):
+    async def scan_pending(
+        self, *, limit=100, operation=None, operation_id=None, notified_at_ms=None
+    ):
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("invalid pending page size")
         now_ms = unix_ms(self.wms.clock())
+        if operation_id is not None:
+            timing = {
+                "trigger": "wms_result",
+                "operation_id": operation_id,
+                "queue_ms": time_ns() // 1_000_000 - notified_at_ms
+                if notified_at_ms is not None
+                else None,
+                "preceding_count": 0,
+                "preceding_ms": 0,
+            }
+            outcome = await self.advance(
+                "OUTBOUND_DECISION", operation_id, now_ms=now_ms, operation=operation, timing=timing
+            )
+            if outcome is not None:
+                return int(not isinstance(outcome, str))
+        sweep_started = perf_counter()
+        preceding_ms = 0.0
         queries = self._pending(now_ms)
         async with self.capabilities.session_factory() as snapshot, snapshot.begin():
             if snapshot.get_bind().dialect.name == "postgresql":
@@ -220,8 +244,24 @@ class SmtAutoService(AutoTaskService):
                         del cursors[kind]
                         continue
                     for record_id in ids:
+                        started = perf_counter()
                         try:
-                            await self.advance(kind, record_id, now_ms=now_ms)
+                            if kind == "OUTBOUND_PLATE":
+                                await self.advance(
+                                    kind,
+                                    record_id,
+                                    now_ms=now_ms,
+                                    timing={
+                                        "trigger": "sweep",
+                                        "plate_id": record_id,
+                                        "preceding_count": total,
+                                        "preceding_ms": preceding_ms,
+                                        "sweep_scan_ms": (started - sweep_started) * 1000
+                                        - preceding_ms,
+                                    },
+                                )
+                            else:
+                                await self.advance(kind, record_id, now_ms=now_ms)
                         except Exception as error:
                             log_exception(
                                 logger,
@@ -232,10 +272,32 @@ class SmtAutoService(AutoTaskService):
                                 context={"request_id": str(record_id)},
                             )
                         total += 1
+                        preceding_ms += (perf_counter() - started) * 1000
                     cursors[kind] = ids[-1]
             return total
 
-    async def advance_original(self, session, kind, record_id, *, now_ms):
+    async def advance_original(
+        self, session, kind, record_id, *, now_ms, operation=None, timing=None
+    ):
+        decision = None
+        if kind == "OUTBOUND_DECISION":
+            decision_identity = record_id
+            decision = await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.operation == operation,
+                    AutoOutboundDecisionRound.operation_id == record_id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
+                    AutoOutboundDecisionRound.unresolved,
+                )
+            )
+            if decision is None or decision.plate_id is None:
+                return "NOT_FOUND"
+            if timing is not None:
+                timing.update(plate_id=decision.plate_id, message_id=decision.message_id)
+            response = await read_decision(self.wms, session, decision)
+            if response is None or response.response_data.get("result") != "ACCEPT":
+                return None  # Preserve the normal wakeup for other decision outcomes.
+            kind, record_id = "OUTBOUND_PLATE", decision.plate_id
         if kind in ("INBOUND_REPORT", "OUTBOUND_REPORT"):
             flow = self.inbound if kind == "INBOUND_REPORT" else self.outbound
             return await flow.advance_report(session, plate_id=record_id, now_ms=now_ms)
@@ -298,8 +360,18 @@ class SmtAutoService(AutoTaskService):
         if task is None and kind != "BIN":
             return "NOT_FOUND"
         line_id = subject.work_line_id if kind == "BIN" else task.work_line_id
-        await lock_line(session, self.dispatch, line_id, roller=self.roller)
+        if timing is not None:
+            timing["work_line_id"] = line_id
+        await lock_line(session, self.dispatch, line_id, roller=self.roller, timing=timing)
         await session.refresh(subject)
+        if decision is not None:
+            await session.refresh(decision)
+            if (
+                not subject.pending
+                or not decision.unresolved
+                or decision.operation_id != decision_identity
+            ):
+                return "ALREADY_ADVANCED"
         configured = await self._configured(session, line_id)
         if kind == "TASK":
             if task.status == "QUEUED":
@@ -340,4 +412,17 @@ class SmtAutoService(AutoTaskService):
                 )
             return "WAITING"
         flow = self.inbound if kind == "INBOUND_PLATE" else self.outbound
+        if kind == "OUTBOUND_PLATE" and timing is not None:
+            original_put = subject.put_command_code
+            started = perf_counter()
+            locks_before = timing["all_locks_ms"]
+            result = await flow.advance(
+                session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms, timing=timing
+            )
+            timing["processing_ms"] = max(
+                0, (perf_counter() - started) * 1000 - (timing["all_locks_ms"] - locks_before)
+            )
+            if result is not None and result.put_command_code != original_put:
+                timing["put_command_code"] = result.put_command_code
+            return result
         return await flow.advance(session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms)

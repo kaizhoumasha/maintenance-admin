@@ -2,6 +2,7 @@
 
 import logging
 from functools import partial
+from time import time_ns
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,9 @@ from app.transactions import after_commit
 logger = logging.getLogger(__name__)
 
 
-def enqueue_business(business: str) -> None:
+def enqueue_business(
+    business: str, operation: str | None = None, operation_id: str | None = None
+) -> None:
     if business not in catalog.progressions():
         raise ValueError("Business progression is not declared")
     from app.tasks.business_tasks import advance_business_pending
@@ -29,10 +32,15 @@ def enqueue_business(business: str) -> None:
         "socket_connect_timeout": 1,
         "socket_timeout": 1,
     }
+    args = (
+        (business,)
+        if operation is None
+        else (business, operation, operation_id, time_ns() // 1_000_000)
+    )
     with app.connection_for_write(connect_timeout=1, transport_options=options) as connection:
         with connection.Producer() as producer:
             advance_business_pending.apply_async(
-                args=(business,), producer=producer, retry=False, ignore_result=True
+                args=args, producer=producer, retry=False, ignore_result=True
             )
 
 
@@ -63,6 +71,25 @@ def wms_result_committed(operation: str, business_key: str | None = None) -> Non
         )
         return
     notify_business_committed(business)
+
+
+async def wms_delivery_committed(session: AsyncSession, message: OutgoingMessage) -> bool:
+    """Send material decisions to the owning pending entry with their original identity."""
+    if (
+        message.business_key != "business:smt_auto"
+        or message.operation
+        not in (
+            "outbound.bin.material.decide@v1",
+            "outbound.rackslot.material.decide@v1",
+        )
+        or "smt_auto" not in catalog.progressions()
+        or "smt_auto" not in catalog.contract_consumers(("wms_request", message.operation, None))
+    ):
+        return False
+    after_commit(
+        session, partial(enqueue_business, "smt_auto", message.operation, message.operation_id)
+    )
+    return True
 
 
 def ecs_result_committed(owner_domain: str) -> None:
