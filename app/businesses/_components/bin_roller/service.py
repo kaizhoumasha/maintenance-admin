@@ -1,11 +1,13 @@
 """One host-owned component using four current checkpoints and the original public ports."""
 
 from collections.abc import Mapping
+from datetime import UTC
 
 from sqlalchemy import Table, func, or_, select
 
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses.runtime import Capabilities
+from app.core.clock import unix_ms
 from app.core.errors import AppError, ErrorCode
 from app.integrations.ecs_command.service import CommandOwner
 from app.reliable import ScopeRef
@@ -93,6 +95,83 @@ class BinRoller:
 
     async def get_supply_progress(self, session, *, work_line_id, task_id):
         return await self.repository(work_line_id).supply_progress(session, task_id)
+
+    async def cancelled_bin_bypass(
+        self, session, *, work_line_id, task_id, bin_code, withdrawn_at_ms
+    ):
+        """Match a cancelled supply's passage to its first downstream SCAN3."""
+        repo = self.repository(work_line_id)
+        passage, returns = (self.tables[key] for key in ("bin_passage", "bin_return"))
+        originals = (
+            (
+                await session.execute(
+                    select(passage)
+                    .where(
+                        *repo.scoped(passage),
+                        passage.c.scope_kind == "TASK",
+                        passage.c.scope_id == task_id,
+                        passage.c.bin_code == bin_code,
+                    )
+                    .limit(2)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        if len(originals) != 1:
+            return None
+        original = originals[0]
+        if original["scan1_event_id"] is None or original["scan2_event_id"] is not None:
+            return None
+        first_event = func.coalesce(passage.c.scan1_event_id, passage.c.scan2_event_id)
+        next_passage = (
+            select(func.min(first_event))
+            .where(
+                *repo.scoped(passage),
+                passage.c.bin_code == bin_code,
+                first_event > original["scan1_event_id"],
+            )
+            .scalar_subquery()
+        )
+        returned = (
+            (
+                await session.execute(
+                    select(returns)
+                    .where(
+                        *repo.scoped(returns),
+                        returns.c.bin_code == bin_code,
+                        returns.c.scan3_event_id > original["scan1_event_id"],
+                        or_(next_passage.is_(None), returns.c.scan3_event_id < next_passage),
+                    )
+                    .order_by(returns.c.scan3_event_id)
+                    .limit(1)
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if returned is None:
+            return None
+        scan = await point_event(session, returned, "SCAN3")
+        if (
+            scan is None
+            or scan.context["device_role"] != "SCAN3"
+            or scan.context["owner_domain"] != self.context.domain
+            or scan.context["work_line_id"] != work_line_id
+            or scan.envelope["timestamp"] < withdrawn_at_ms
+            or scan.application_ref is None
+            or scan.application_ref.subject_kind != "BIN_RETURN"
+            or scan.application_ref.subject_id != returned["id"]
+            or scan.application_ref.canonical_event_id != scan.event_id
+            or scan.envelope["data"].get("bin_code") != f"{bin_code}-B"
+        ):
+            return None
+        received_at = scan.received_at
+        if unix_ms(received_at if received_at.tzinfo else received_at.replace(tzinfo=UTC)) < (
+            withdrawn_at_ms
+        ):
+            return None
+        return [bin_code, original["id"], returned["id"], scan.event_id]
 
     def pending_query(self, kind):
         if kind in ("PASSAGE", "SCAN2_RELEASE"):

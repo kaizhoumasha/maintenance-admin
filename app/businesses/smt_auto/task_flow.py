@@ -1,5 +1,7 @@
 """AUTO-owned original release and completion recovery; caller owns one transaction."""
 
+from collections import Counter
+
 from sqlalchemy import select
 
 from app.businesses._components.bin_roller.completion import release_intent, supply_accounted_for
@@ -75,15 +77,9 @@ async def withdrawn_outbound_source(session, *, dispatch, task, member, inputs, 
     )
 
 
-def supply_member_closed(member, facts, inputs):
-    """Completed feed or exactly cancelled original never-started public supply."""
-    if len(facts) != 1 or not facts[0].original_ids or facts[0].pending:
-        return False
-    if facts[0].feed_complete:
-        return True
+def supply_member_cancelled(member, inputs):
     return bool(
-        facts[0].withdrawn_before_start
-        and member.withdrawn_at_ms is not None
+        member.withdrawn_at_ms is not None
         and any(
             row.id == member.withdrawn_by_input_id
             and row.task_id == member.task_id
@@ -98,6 +94,15 @@ def supply_member_closed(member, facts, inputs):
             )
             for row in inputs
         )
+    )
+
+
+def supply_member_closed(member, facts, inputs):
+    """Completed feed or exactly cancelled original never-started public supply."""
+    if len(facts) != 1 or not facts[0].original_ids or facts[0].pending:
+        return False
+    return facts[0].feed_complete or (
+        facts[0].withdrawn_before_start and supply_member_cancelled(member, inputs)
     )
 
 
@@ -598,7 +603,34 @@ class TaskFlow:
                 .order_by(AutoBinWork.id)
             )
         )
-        if not supply_accounted_for(progress, production_count=len(bins)):
+        bypasses = []
+        if task.business_type == "outbound" and not supply_accounted_for(
+            progress, production_count=len(bins)
+        ):
+            production_codes = {b.bin_code for b in bins}
+            fed_codes = Counter(code for fact in progress for code in fact.fed_bin_codes)
+            cancelled = {
+                SourceFaceRef(m.plan_revision, m.rack_id, m.rack_face): m
+                for m in supplies
+                if supply_member_cancelled(m, inputs)
+            }
+            for fact in progress:
+                member = cancelled.get(fact.source)
+                if member is None:
+                    continue
+                for code in fact.fed_bin_codes:
+                    if fed_codes[code] != 1 or code in production_codes:
+                        continue
+                    bypass = await self.roller.cancelled_bin_bypass(
+                        session,
+                        work_line_id=task.work_line_id,
+                        task_id=task.task_id,
+                        bin_code=code,
+                        withdrawn_at_ms=member.withdrawn_at_ms,
+                    )
+                    if bypass is not None:
+                        bypasses.append([member.withdrawn_by_input_id, *bypass])
+        if not supply_accounted_for(progress, production_count=len(bins) + len(bypasses)):
             return None
         if (
             task.status != "CANCELLED"
@@ -656,6 +688,8 @@ class TaskFlow:
                 for p in progress
             ],
         }
+        if bypasses:
+            basis["supply_bypasses"] = bypasses
         # Keep already-saved Result-based confirmations recoverable across this change.
         legacy = {**basis, "bins": [[b.id, b.release_result_ref] for b in bins]}
         if task.confirmation_basis == legacy:

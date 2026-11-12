@@ -5,7 +5,13 @@ import json
 import pytest
 from sqlalchemy import func, select
 
-from app.businesses.smt_auto.models import AutoBinWork, AutoTask, AutoTaskRequest
+from app.businesses.smt_auto.models import (
+    AutoBinWork,
+    AutoSupplyMember,
+    AutoTask,
+    AutoTaskInput,
+    AutoTaskRequest,
+)
 from app.http_client import DeliveryState, HttpResult
 from app.integrations import history as history_records
 from app.integrations.wms_request import ADAPTERS, DECISIONS_PROTOCOL
@@ -171,6 +177,57 @@ async def terminal_bin(host, flow, *, index=0, now=110):
         )
         work = await session.get(AutoBinWork, work.id)
         return work
+
+
+@pytest.mark.parametrize(
+    ("cancelled", "scan3_code", "scan3_at", "expected"),
+    [
+        (True, "A000000002-B", 230, "CONFIRMING"),
+        (False, "A000000002-B", 230, "WAITING"),
+        (True, "A000000003-B", 230, "WAITING"),
+        (True, "A000000002-B", 205, "WAITING"),
+    ],
+)
+async def test_completion_accounts_for_original_cancelled_bin_at_scan3(
+    s5_roller, cancelled, scan3_code, scan3_at, expected
+):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=2)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    await terminal_bin(host, flow)
+    await host.scan(point="SCAN1", timestamp=200, bin_code="A000000002-B")
+    if cancelled:
+        async with host.factory.begin() as session:
+            cancel = AutoTaskInput(
+                task_id="t",
+                operation="sorting.task.cancel@v1",
+                operation_id="cancel",
+                request_timestamp=210,
+                first_received_at_ms=210,
+                effective_digest="cancel",
+                contract_version="1",
+                effective_request={
+                    "cancel_scope": "PLAN_MEMBERS",
+                    "bin_source_racks": [{"plan_revision": 1, "rack_id": "R", "rack_face": ["90"]}],
+                },
+                disposition="APPLIED",
+            )
+            session.add(cancel)
+            await session.flush()
+            member = await session.scalar(select(AutoSupplyMember))
+            member.withdrawn_at_ms, member.withdrawn_by_input_id = 210, cancel.id
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=220) == "WAITING"
+    await host.scan(point="SCAN3", timestamp=scan3_at, bin_code=scan3_code)
+    async with host.factory.begin() as session:
+        assert await flow.advance(session, task_id="t", now_ms=240) == expected
+        assert await session.scalar(select(func.count()).select_from(AutoBinWork)) == 1
+    if expected == "CONFIRMING":
+        await complete_result(host, {"result": "COMPLETED"})
+        async with host.factory.begin() as session:
+            assert await flow.advance(session, task_id="t", now_ms=250) == "COMPLETED"
 
 
 @pytest.mark.parametrize("count", [1, 2])

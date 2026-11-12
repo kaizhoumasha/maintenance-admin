@@ -31,7 +31,7 @@ from app.reliable.config import TargetConfig
 from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
 from app.services.device_bindings import resolve_binding
-from tests.businesses.rack_dispatch import apply_outcome, origin
+from tests.businesses.rack_dispatch import apply_outcome, origin, respond
 from tests.helpers import read_history_body
 
 
@@ -39,6 +39,9 @@ from tests.helpers import read_history_body
 async def outbound_host(s5_roller, request, monkeypatch):
     host = s5_roller
     rack_arm, bin_arm = request.param[:2]
+    target_rack, target_point, target_face = (
+        request.param[3] if len(request.param) > 3 else ("target", "P", "A")
+    )
     for name in (
         "outbound_bin_material_decide_v1",
         "outbound_rackslot_material_decide_v1",
@@ -122,8 +125,8 @@ async def outbound_host(s5_roller, request, monkeypatch):
             "SCAN2": "SCAN2",
             "PLATFORM_SCANNER": "SCANNER_001",
         }
-        line.position_bindings = {"TRANSFER_RACK": "P", "RETURN_RACK": "Q"}
-        session.add(WorkLinePosition(work_line_id=1, position_code="P", capacity=None))
+        line.position_bindings = {"TRANSFER_RACK": target_point, "RETURN_RACK": "Q"}
+        session.add(WorkLinePosition(work_line_id=1, position_code=target_point, capacity=None))
         session.add(WorkLinePosition(work_line_id=1, position_code="Q", capacity=None))
         for index, code in enumerate((rack_arm, bin_arm, "SCAN2", "SCANNER_001"), start=1):
             route_id = f"r{index}"
@@ -149,7 +152,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
             contract_version="v1",
             disposition="APPLIED",
             applied_plan_revision=1,
-            effective_request={"target_rack": {"rack_id": "target", "rack_face": "A"}},
+            effective_request={"target_rack": {"rack_id": target_rack, "rack_face": target_face}},
         )
         session.add(plan)
         await session.flush()
@@ -160,9 +163,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
             work_line_id=1,
             task_id="t",
             source_ref=auth.source_ref,
-            initial_face="A",
-            rack_id="target",
-            point="P",
+            initial_face=target_face,
+            rack_id=target_rack,
+            point=target_point,
             resources=asdict(binding),
         )
         ports = AutoRackPorts(host.dispatch)
@@ -175,7 +178,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
             job_id=job,
             kind="ENTER",
             authorization=auth,
-            face="A",
+            face=target_face,
             original_binding=binding,
         )
         progress = await host.dispatch.progress(session, job_id=job)
@@ -183,9 +186,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
             session,
             progress.actions[-1],
             "SUCCEEDED",
-            point="P",
-            rack_id="target",
-            arrival_face="A",
+            point=target_point,
+            rack_id=target_rack,
+            arrival_face=target_face,
         )
         await ports.advance(session, job_id=job, now_ms=10)
         assert action
@@ -197,7 +200,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
         ecs,
         host.dispatch,
         host.roller,
-        settings=PhysicalSettings(1, 1, 30001, 30002, (("P", "STATION_A"), ("Q", "STATION_B"))),
+        settings=PhysicalSettings(
+            1, 1, 30001, 30002, ((target_point, "STATION_A"), ("Q", "STATION_B"))
+        ),
     )
     host.ecs = ecs
 
@@ -1228,6 +1233,149 @@ async def test_target_replacement_waits_for_applied_movement_report(decided_outb
         await racks.advance(session, task_id="t", now_ms=141)
         job = await host.dispatch.progress(session, job_id=job_id)
         assert [action.kind for action in job.actions] == ["ENTER", "DEPARTURE_DECIDE", "DEPART"]
+
+
+@pytest.mark.parametrize(
+    "outbound_host", [("ARM04", "ARM03", None, ("610002", "OUT63", "90"))], indirect=True
+)
+@pytest.mark.parametrize("departure_position", ["OUT63", "SMT_B"])
+async def test_same_transfer_rack_reenters_after_departure_without_replace(
+    decided_outbound, departure_position
+):
+    from app.businesses.smt_auto.outbound_racks import OutboundRacks
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = decided_outbound
+    racks = OutboundRacks(host.outbound, station_id="station")
+    flow = TaskFlow(
+        host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
+    )
+    locator = dict(
+        type="RACK_SLOT",
+        rack_id="610002",
+        rack_face="90",
+        slot_id="A1",
+        rack_layer=1,
+        rack_column=1,
+    )
+    operation = "outbound.bin.material.decide@v1"
+    await host.settle(operation, {"result": "ACCEPT", "target_locator": locator})
+    async with host.factory.begin() as session:
+        first = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        old_job_id, put_code = first.target_rack_job_id, first.put_command_code
+        old_bin = await session.get(AutoBinWork, host.work_id)
+        assert (
+            await flow.release_bin(
+                session, work_line_id=1, arrival_id=old_bin.arrival_id, now_ms=61
+            )
+            == "RELEASING"
+        )
+        release_code = old_bin.release_command_code
+    assert (await host.result(release_code)).status_code == 200
+    assert (await host.arm_result(put_code)).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=70)
+        await flow.consume_release(
+            session, work_line_id=1, arrival_id=old_bin.arrival_id, now_ms=71
+        )
+    await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
+    async with host.factory.begin() as session:
+        await host.outbound.advance_report(session, plate_id=host.plate_id, now_ms=72)
+        await racks.advance(session, task_id="t", now_ms=73)
+    await host.settle(
+        "rack.departure_decide@v1",
+        {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "SMT_B"}},
+    )
+    async with host.factory.begin() as session:
+        await racks.advance(session, task_id="t", now_ms=74)
+        await racks.advance(session, task_id="t", now_ms=75)
+        old_job = await host.dispatch.progress(session, job_id=old_job_id)
+        depart = old_job.actions[-1]
+        assert depart.kind == "DEPART"
+        await respond(
+            session,
+            depart.submit_operation_id,
+            202,
+            "RECEIVED",
+            {"transport_task_id": depart.transport_task_id},
+        )
+        await racks.advance(session, task_id="t", now_ms=76)
+        assert (await host.dispatch.progress(session, job_id=old_job_id)).state == "COMPLETED"
+    work = await host.scan(timestamp=90, bin_code="A000000002-C")
+    async with host.factory.begin() as session:
+        await host.work_plans.start_bin(
+            session, work_line_id=1, arrival_id=work.arrival_id, now_ms=91
+        )
+    await host.settle(
+        "outbound.bin.work_plan@v1",
+        dict(
+            result="READY",
+            cell_id="C2",
+            cell_index=2,
+            bin_type=3,
+            reel_layer=1,
+            reel_thickness=15.3,
+            reel_diameter=7,
+        ),
+    )
+    async with host.factory.begin() as session:
+        await host.work_plans.consume_bin(
+            session, work_line_id=1, arrival_id=work.arrival_id, now_ms=92
+        )
+        plate_id = await session.scalar(
+            select(AutoOutboundPlate.id).where(AutoOutboundPlate.bin_work_id == work.id)
+        )
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=93)
+        pick_code = plate.pick_command_code
+    assert (await host.arm_result(pick_code, scan=True)).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=94)
+    await host.settle(
+        operation, {"result": "ACCEPT", "target_locator": {**locator, "slot_id": "A2"}}
+    )
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=95)
+        await racks.advance(session, task_id="t", now_ms=96)
+        assert plate.target_rack_job_id is None and plate.put_command_code is None
+
+        await apply_outcome(
+            session, depart, "CANCELLED", point=departure_position, rack_id="610002"
+        )
+        await racks.advance(session, task_id="t", now_ms=97)
+        await racks.advance(session, task_id="t", now_ms=98)
+        jobs = await host.dispatch.jobs(
+            session, work_line_id=1, source_kinds=("AUTO_OUTBOUND_TARGET",)
+        )
+        if departure_position == "OUT63":
+            assert len(jobs) == 1
+            assert plate.target_rack_job_id is None and plate.put_command_code is None
+            return
+        assert len(jobs) == 2
+        returned = next(job for job in jobs if job.id != old_job_id)
+        assert returned.origin.rack_id == "610002"
+        (enter,) = returned.actions
+        assert (enter.kind, enter.target, enter.target_face) == (
+            "ENTER",
+            {"kind": "RACK_POSITION", "location_code": "OUT63"},
+            "90",
+        )
+        assert enter.submit_operation_id != depart.submit_operation_id
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=99)
+        assert plate.put_command_code is None
+        await apply_outcome(
+            session, enter, "SUCCEEDED", point="OUT63", rack_id="610002", arrival_face="90"
+        )
+        await racks.advance(session, task_id="t", now_ms=100)
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=101)
+        assert plate.put_command_code and plate.target_preparation_action_id == enter.id
+        command = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == plate.put_command_code
+            )
+        )
+        assert command.device_code == "ARM04"
 
 
 async def test_final_decision_and_put_intent_roll_back_together(decided_outbound):

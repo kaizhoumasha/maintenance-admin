@@ -567,6 +567,62 @@ class RackDispatch:
         )
         return holders > 1 or await self._position_conflict(session, point)
 
+    async def point_vacant_for_entry(
+        self, session: AsyncSession, *, point: str, rack_id: str, exclude_job_id=None
+    ) -> bool:
+        """An accepted departure alone does not prove the point is empty."""
+        occupied = select(RackJob.id).where(
+            RackJob.pending,
+            or_(
+                RackJob.point == point,
+                RackJob.actual_position["location_code"].as_string() == point,
+            ),
+        )
+        if exclude_job_id is not None:
+            occupied = occupied.where(RackJob.id != exclude_job_id)
+        if (
+            await session.scalar(occupied.limit(1))
+            or await self.has_position_conflict(session, point=point)
+            or await self.has_conflicting_responsibility(
+                session, point=point, rack_id=rack_id, exclude_job_id=exclude_job_id
+            )
+        ):
+            return False
+        latest = (
+            select(RackJob, RackAction)
+            .join(RackAction, RackAction.job_id == RackJob.id)
+            .where(RackJob.point == point, RackAction.kind.in_(("ENTER", "ROTATE", "DEPART")))
+            .order_by(RackAction.id.desc())
+            .limit(1)
+        )
+        original = (await session.execute(latest)).one_or_none()
+        if original is None:
+            return False
+        job, action = original
+        if (
+            job.state != "COMPLETED"
+            or job.current_action_id != action.id
+            or action.kind != "DEPART"
+            or action.phase != "ACCEPTED"
+            or action.source != _point(point)
+        ):
+            return False
+        result = await self._result(session, job, action)
+        if not result or not result.outcome or result.has_pending_outcome:
+            return False
+        observation = result.position_observation
+        physical = (
+            observation
+            if observation and observation["outcome_revision"] > result.outcome["outcome_revision"]
+            else result.outcome
+        )
+        location = physical.get("final_position")
+        return bool(
+            not physical.get("position_unknown")
+            and location
+            and location.get("location_code") != point
+        )
+
     async def _position_conflict(self, session, point, *, exclude_job_id=None):
         conflict = (
             select(RackAction.id)

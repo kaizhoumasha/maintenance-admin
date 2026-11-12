@@ -271,6 +271,11 @@ class RollerRepository:
                     ids,
                     withdrawn_before_start=withdrawn_before_start,
                     fed_bin_count=fed_bin_count,
+                    fed_bin_codes=tuple(
+                        item["bin_code"] for item in manifest.get("bins", ())[:fed_bin_count]
+                    )
+                    if manifest is not None and fed_bin_count is not None
+                    else (),
                 )
             )
         return tuple(result)

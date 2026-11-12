@@ -1400,6 +1400,14 @@ class Outbound:
                 final = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
                 data = (final.response_snapshot or {}).get("data", {}) if final else {}
                 if data.get("result") == "ACCEPT":
+                    if (
+                        data.get("target_preparation") is None
+                        and job.origin.source_ref == f"PLATE_TARGET:{plate.id}"
+                        and plate.target_rack_job_id == job_id
+                        and plate.target_preparation_action_id is None
+                        and job.position_action_id is None
+                    ):
+                        continue
                     own = next(
                         (
                             a

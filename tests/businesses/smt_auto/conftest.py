@@ -439,19 +439,19 @@ async def s5_roller(direction_host, monkeypatch):
             device_version=1,
             work_line_id=host.line_id,
             work_line_version=1,
-            device_role="SCAN2",
-            device_bindings={"SCAN2": device_code},
+            device_role=device_code,
+            device_bindings={device_code: device_code},
             position_bindings={},
             business_code="smt_auto",
         )
 
-    async def scan(*, timestamp=10, bin_code="A000000001-C"):
+    async def scan(*, timestamp=10, bin_code="A000000001-C", point="SCAN2"):
         async with host.factory.begin() as session:
             result = await receive_ecs_event(
                 session,
                 json.dumps(
                     {
-                        "device_code": "SCAN2",
+                        "device_code": point,
                         "event_type": "SCAN_COMPLETED",
                         "timestamp": timestamp,
                         "data": {"bin_code": bin_code},

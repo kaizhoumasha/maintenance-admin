@@ -1562,7 +1562,7 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | `data.next_source_action.reel_layer` | integer | 条件 | 后继取料的料盘层数 |
 | `data.next_source_action.reel_thickness` | number | 条件 | 后继取料的单盘厚度，单位毫米；有限数值 |
 | `data.next_source_action.reel_diameter` | number | 条件 | 后继取料的料盘直径，单位毫米；有限数值 |
-| `data.target_preparation` | string | 条件 | 枚举 `ROTATE`、`REPLACE`；目标需要换面或换架时提供，无需准备时省略 |
+| `data.target_preparation` | string | 条件 | 枚举 `ROTATE`、`REPLACE`；省略时可使用已就绪的原分配，或在确认空位后将分配货架搬入 |
 
 `rack_id`、`slot_id`、`cell_id` 使用与请求业务编码相同的正则约束。
 `next_source_action` 出现时，其六个子字段全部必填，可以授权同 Cell 下一盘或另一 Cell；省略表示本次授权范围内无后续来源，不发送 `null`。
@@ -3127,6 +3127,8 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 #### 6.3.3 本盘目标准备与物理义务
 
 初始物料目标取首版 target_rack，后续精确目标及 ROTATE/REPLACE 取本盘 ACCEPT.target_locator/target_preparation。ROTATE 换同一目标架的面，REPLACE 的旧架去向独立请求共用 departure_decide；模板沿 §6.1，不从物理层数猜角色，不向 ECS 机械臂发送搬架指令。
+
+若本盘 `ACCEPT` 只给出 `target_locator`，且原离场搬运的已应用结果确认转运位腾空，该点也没有在位、已登记或在途的架作业，WES 可沿原分配为该架登记一次 `ENTER`。已离场的同一架号可以开启新轮次。等待本轮到位结果匹配架号、面向和点位后才下发放盘。
 
 TRANSFER 是否仍需留在本点，由原完整目标授权、待接料/未决决定、未处理计划及当前直接执行事实判断。未知未来、漏原输入或一次查空不能判定无需求。任何现有目标授权或未知 PUT/NG 仍保留直接责任。
 
