@@ -28,6 +28,10 @@ class EvidenceIntegrityError(EvidencePersistenceError):
     pass
 
 
+class PreDispatchTimeout(EvidencePersistenceError):
+    pass
+
+
 def database_failure_code(error):
     original = error.__cause__ if isinstance(error, EvidencePersistenceError) else error
     return getattr(original.orig, "sqlstate", None) if isinstance(original, DBAPIError) else None
@@ -106,7 +110,20 @@ class SnapshotTransactions:
 
     async def gate(self, claim, target):
         async with evidence_transaction(self.store.session_factory) as session:
-            port, context, row, authorization = await self.locked(session, claim, authorize=True)
+            try:
+                port, context, row, authorization = await self.locked(
+                    session, claim, authorize=True
+                )
+            except DBAPIError as error:
+                code = database_failure_code(error)
+                # Equal PostgreSQL timeout budgets can report the lock wait as a statement timeout.
+                if code != "55P03" and not (
+                    code == "57014"
+                    and str(error.orig) == "canceling statement due to statement timeout"
+                ):
+                    raise
+                await session.rollback()
+                raise PreDispatchTimeout("send gate timed out and rolled back") from error
             now = self.store.clock()
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
                 return None

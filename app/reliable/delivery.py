@@ -6,7 +6,7 @@ from app.diagnostics import log_exception
 from app.http_client import DeliveryState, FailureKind, HttpClient, HttpResult, validate_request
 
 from .config import TargetConfig
-from .lifecycle import EvidencePersistenceError
+from .lifecycle import EvidencePersistenceError, PreDispatchTimeout
 from .policy import retry_delay_s
 from .store import AttemptOutcome, Claim, MessageStore, utc_datetime
 from .types import (
@@ -188,19 +188,23 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         phase = "acquire_client"
         async with provider.borrow(effective.http_config()) as client:
             phase = "before_send"
-            until = await store.before_send(claim, target)
-            if not until:
-                phase = "acquire_client"
-                return
-            gated = True
-            now = utc_datetime(clock())
-            if until <= now or (
-                claim.message.expires_at is not None and claim.message.expires_at <= now
-            ):
+            try:
+                until = await store.before_send(claim, target)
+            except PreDispatchTimeout:
                 result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
             else:
-                phase = "send"
-                result = await client.send(request)
+                if not until:
+                    phase = "acquire_client"
+                    return
+                gated = True
+                now = utc_datetime(clock())
+                if until <= now or (
+                    claim.message.expires_at is not None and claim.message.expires_at <= now
+                ):
+                    result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
+                else:
+                    phase = "send"
+                    result = await client.send(request)
             if not isinstance(result, HttpResult):
                 raise ValueError("invalid HTTP result")
             if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
@@ -231,7 +235,7 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                 if verdict.pause_reason != "CONTRACT_NON_COMPLIANT"
                 else None,
             )
-        elif definite:
+        elif definite and (gated or not claim.delivery_uncertain):
             hint = verdict.retry_after_ms if verdict else None
             now = utc_datetime(clock())
             if hint is not None and hint / 1000 > target.max_retry_after_s:
