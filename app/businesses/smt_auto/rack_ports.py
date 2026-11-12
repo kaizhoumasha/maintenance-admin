@@ -525,6 +525,8 @@ class AutoRackPorts:
             if not _accept_target(data, bin_source=row.bin_work_id is not None):
                 return None
             target = data["target_locator"]
+            preparation = data.get("target_preparation")
+            implicit_entry = kind == "ENTER" and preparation is None
             if (
                 origin.source_kind != "AUTO_OUTBOUND_TARGET"
                 or round_ is None
@@ -542,11 +544,29 @@ class AutoRackPorts:
                 or round_.unresolved
                 or round_.consumed_at_ms is None
                 or data.get("result") != "ACCEPT"
-                or data.get("target_preparation") != ("ROTATE" if kind == "ROTATE" else "REPLACE")
+                or (
+                    not implicit_entry
+                    and preparation != ("ROTATE" if kind == "ROTATE" else "REPLACE")
+                )
                 or row.target_snapshot != target
                 or row.next_source_action != data.get("next_source_action")
                 or target.get("rack_id") != origin.rack_id
                 or target.get("rack_face") != face
+            ):
+                return None
+            if implicit_entry and (
+                not row.pending
+                or row.put_call_key is not None
+                or row.put_command_code is not None
+                or (
+                    row.target_preparation_action_id is None
+                    and not await self.dispatch.point_vacant_for_entry(
+                        session,
+                        point=origin.point,
+                        rack_id=origin.rack_id,
+                        exclude_job_id=row.target_rack_job_id,
+                    )
+                )
             ):
                 return None
             if self.outbound is not None:

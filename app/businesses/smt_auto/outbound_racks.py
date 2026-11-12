@@ -155,6 +155,7 @@ class OutboundRacks:
                     )
             break
         target_jobs = [j for j in active if j.origin.point == points["TRANSFER_RACK"]]
+        first_target_registered = False
         first = await session.scalar(
             select(AutoTaskInput).where(
                 AutoTaskInput.task_id == task_id,
@@ -165,15 +166,17 @@ class OutboundRacks:
         if first and first.target_job_id is None and not target_jobs:
             target = first.effective_request.get("target_rack", {})
             if set(target) == {"rack_id", "rack_face"}:
-                await self._enter(
-                    session,
-                    task,
-                    binding,
-                    source_kind="AUTO_OUTBOUND_TARGET",
-                    point=points["TRANSFER_RACK"],
-                    rack_id=target["rack_id"],
-                    face=target["rack_face"],
-                    auth=RackAuthorization("FIRST_TARGET", first.id),
+                first_target_registered = bool(
+                    await self._enter(
+                        session,
+                        task,
+                        binding,
+                        source_kind="AUTO_OUTBOUND_TARGET",
+                        point=points["TRANSFER_RACK"],
+                        rack_id=target["rack_id"],
+                        face=target["rack_face"],
+                        auth=RackAuthorization("FIRST_TARGET", first.id),
+                    )
                 )
         for plate in await session.scalars(
             select(AutoOutboundPlate)
@@ -187,7 +190,7 @@ class OutboundRacks:
             round_ = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
             data = (round_.response_snapshot or {}).get("data", {}) if round_ else {}
             preparation = data.get("target_preparation")
-            if preparation not in ("ROTATE", "REPLACE"):
+            if data.get("result") != "ACCEPT" or first_target_registered:
                 continue
             target = data["target_locator"]
             auth = RackAuthorization("PLATE_TARGET", plate.id)
@@ -204,8 +207,8 @@ class OutboundRacks:
                     face=target["rack_face"],
                     original_binding=binding,
                 )
-            elif preparation == "REPLACE" and not target_jobs:
-                await self._enter(
+            elif preparation in (None, "REPLACE") and not target_jobs:
+                if not await self._enter(
                     session,
                     task,
                     binding,
@@ -214,7 +217,26 @@ class OutboundRacks:
                     rack_id=target["rack_id"],
                     face=target["rack_face"],
                     auth=auth,
+                ):
+                    continue
+            elif (
+                preparation is None
+                and any(
+                    job.id == plate.target_rack_job_id and job.origin.source_ref == auth.source_ref
+                    for job in target_jobs
                 )
+                and plate.target_preparation_action_id is None
+            ):
+                await self.ports.prepare(
+                    session,
+                    job_id=plate.target_rack_job_id,
+                    kind="ENTER",
+                    authorization=auth,
+                    face=target["rack_face"],
+                    original_binding=binding,
+                )
+            elif preparation is None:
+                continue
             break
         for job in await self.dispatch.jobs(
             session,

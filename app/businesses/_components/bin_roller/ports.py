@@ -37,6 +37,7 @@ class SupplyProgress:
     original_ids: tuple[str, ...]
     withdrawn_before_start: bool = False
     fed_bin_count: int | None = None
+    fed_bin_codes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
