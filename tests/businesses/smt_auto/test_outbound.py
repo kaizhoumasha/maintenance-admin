@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from app import business_wakeups
 from app.businesses.smt_auto.models import (
     AutoBinWork,
     AutoOutboundDecisionRound,
@@ -23,6 +24,8 @@ from app.http_client import DeliveryState, HttpResult
 from app.integrations import history as history_records
 from app.integrations.ecs_callback.receiver import receive_ecs_event
 from app.integrations.ecs_command import compile_commands
+from app.integrations.ecs_command.lifecycle import EcsLifecycle
+from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.integrations.ecs_command.service import CommandOwner
 from app.integrations.wms_request import ADAPTERS, FACTS_PROTOCOL
@@ -261,6 +264,27 @@ async def outbound_host(s5_roller, request, monkeypatch):
             assert (await platform_scan(code)).status_code == 200
         return response
 
+    async def ack(code, *, on_ack=None):
+        store = MessageStore(
+            host.factory,
+            lifecycles={PROTOCOL: EcsLifecycle(ecs, on_ack=on_ack)},
+            records=history_records,
+        )
+        (claim,) = await store.claim(1, ecs.outbox.targets)
+        assert claim.message.operation_id == code
+        assert await store.before_send(claim, ecs.outbox.targets["ecs"])
+        response = HttpResult(
+            DeliveryState.HTTP_RESPONSE_COMPLETE,
+            None,
+            200,
+            (("content-type", "application/json"),),
+            b'{"code":200,"message":"ACK"}',
+        )
+        verdict = EcsCommandAdapter().classify_response(claim.message, response)
+        assert await store.finish(
+            claim, AttemptOutcome(MessageStatus.DONE, result=response, verdict=verdict)
+        )
+
     async def platform_scan(code, *, barcode="原始料盘," * 60, timestamp=88, device="SCANNER_001"):
         from app.businesses.runtime import BusinessRuntime
 
@@ -285,6 +309,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
             )
 
     host.platform_scan = platform_scan
+    host.arm_ack = ack
     host.settle, host.arm_result = settle, result
     yield host
     for name, namespace in original_modules.items():
@@ -685,6 +710,14 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         assert await session.scalar(select(func.count()).select_from(AutoOutboundPlate)) == (
             2 if next_mode == "valid" else 1
         )
+    if next_mode == "valid":
+        await host.arm_ack(put_code)
+        async with host.factory.begin() as session:
+            successor = await session.scalar(
+                select(AutoOutboundPlate).where(AutoOutboundPlate.grant_parent_plate_id == plate_id)
+            )
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=71)
+            assert successor.pick_command_code is None
     assert (await host.arm_result(put_code)).status_code == 200
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=80)
@@ -732,8 +765,12 @@ async def decided_outbound(outbound_host):
 
 
 @pytest.mark.parametrize("successor_state", ["absent", "valid", "conflicting"])
-async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, successor_state):
+async def test_ready_return_rack_yields_only_to_bin_successor(
+    decided_outbound, successor_state, monkeypatch
+):
     host = decided_outbound
+    notices = []
+    monkeypatch.setattr(business_wakeups, "enqueue_business", notices.append)
     _, _, rack_plate_id = await return_face(host)
     decision = dict(
         result="ACCEPT",
@@ -769,6 +806,49 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
             session, work_line_id=1, plate_id=rack_plate_id, now_ms=61
         )
         assert rack.pick_command_code is None
+        if successor_state == "valid":
+            successor = await session.scalar(
+                select(AutoOutboundPlate).where(
+                    AutoOutboundPlate.grant_parent_plate_id == host.plate_id
+                )
+            )
+            successor_id = successor.id
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=62)
+            assert successor.pick_command_code is None
+    await host.arm_ack(put_code, on_ack=business_wakeups.ecs_ack_committed)
+    assert notices == ["smt_auto"]
+    async with host.factory.begin() as session:
+        rack = await host.outbound.advance(
+            session, work_line_id=1, plate_id=rack_plate_id, now_ms=63
+        )
+        assert rack.pick_command_code is None
+        if successor_state == "valid":
+            successor = await host.outbound.advance(
+                session, work_line_id=1, plate_id=successor_id, now_ms=64
+            )
+            pick_code = successor.pick_command_code
+            assert pick_code
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=65)
+            assert successor.pick_command_code == pick_code
+            put = await host.ecs.get_command(
+                session, owner=CommandOwner("smt_auto"), command_code=put_code
+            )
+            assert put.status == "WAITING_RESULT" and put.result is None
+    if successor_state == "valid":
+        assert (await host.arm_result(pick_code)).status_code == 200
+        assert (
+            await host.platform_scan(pick_code, barcode="next reel", timestamp=105)
+        ).status_code == 200
+        async with host.factory.begin() as session:
+            successor = await host.outbound.advance(
+                session, work_line_id=1, plate_id=successor_id, now_ms=66
+            )
+            assert successor.barcode == "next reel"
+            assert not await session.scalar(
+                select(AutoOutboundDecisionRound.id).where(
+                    AutoOutboundDecisionRound.plate_id == successor_id
+                )
+            )
     assert (await host.arm_result(put_code)).status_code == 200
     async with host.factory.begin() as session:
         rack = await host.outbound.advance(
@@ -782,7 +862,13 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
                 )
             )
             await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=71)
-            assert successor.pick_command_code
+            assert successor.pick_command_code == pick_code
+            assert await session.scalar(
+                select(AutoOutboundDecisionRound.id).where(
+                    AutoOutboundDecisionRound.plate_id == successor_id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
+                )
+            )
         else:
             if successor_state == "absent":
                 assert rack.pick_command_code

@@ -70,6 +70,11 @@ def ecs_result_committed(owner_domain: str) -> None:
         enqueue_business(owner_domain)
 
 
+def ecs_ack_committed(owner_domain: str, task_type: str) -> None:
+    if owner_domain == "smt_auto" and task_type == "PICK_AND_PUT":
+        notify_business_committed(owner_domain)
+
+
 def notify_business_committed(business_code: str) -> None:
     if business_code in catalog.progressions():
         enqueue_business(business_code)

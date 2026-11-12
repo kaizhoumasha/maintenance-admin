@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+from app.business_wakeups import ecs_ack_committed
 from app.http_client import AsyncHttpClient
 from app.integrations.ecs_command.clients import DynamicClients
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
@@ -32,7 +33,7 @@ def configure_ecs(app, *, routes, annexes, client_factory=AsyncHttpClient, autho
     lifecycles = dict(getattr(app.state, "reliable_lifecycles", {}))
     adapters[PROTOCOL] = EcsCommandAdapter()
     service = EcsCommands(None, TARGET, routes, annexes, authorize_new=authorize_new)
-    lifecycles[PROTOCOL] = EcsLifecycle(service)
+    lifecycles[PROTOCOL] = EcsLifecycle(service, on_ack=ecs_ack_committed)
     provider = DynamicClients(factory=client_factory)
     app.state.ecs_commands = service
     app.state.reliable_adapters = adapters

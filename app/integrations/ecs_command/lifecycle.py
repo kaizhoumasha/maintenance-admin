@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from app.http_client import DeliveryState
 from app.integrations.history import RecordDraft, read_bodies, write_record
 from app.models import IntegrationExchange, IntegrationRecord
 from app.reliable.types import VerdictKind
+from app.transactions import after_commit
 
 from .contracts import PauseReason
 from .routing import RouteAuthorization
@@ -46,8 +48,9 @@ async def get_attempt_conclusions(
 
 
 class EcsLifecycle:
-    def __init__(self, service):
+    def __init__(self, service, *, on_ack=None):
         self.service = service
+        self.on_ack = on_ack
 
     async def lock_context(self, session, identity, *, nowait=False):
         command = await session.scalar(
@@ -188,3 +191,11 @@ class EcsLifecycle:
                 "FAILED": "REJECTED",
                 "EXPIRED": "EXPIRED",
             }.get(outcome.status, "QUEUED")
+        if (
+            self.on_ack is not None
+            and command.status == "WAITING_RESULT"
+            and command.ack_record_id is not None
+            and outcome.verdict is not None
+            and outcome.verdict.kind == VerdictKind.DELIVERED
+        ):
+            after_commit(session, partial(self.on_ack, command.owner_domain, command.task_type))
