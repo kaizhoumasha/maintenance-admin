@@ -15,12 +15,21 @@ from app.reliable.config import TargetConfig
 from .operation import Endpoint, lookup
 
 MOCK_DECISIONS_TARGET = "xray-mock-wms-decisions"
+COARSE_MOCK_PATH = "/dev/coarse-sorting/mock-wms"
+COARSE_MOCK_DECISIONS_TARGET = "coarse-sorting-mock-wms-decisions"
+COARSE_MOCK_FACTS_TARGET = "coarse-sorting-mock-wms-facts"
+COARSE_MOCK_ROUND_HEADER = "x-wes-mock-round"
+COARSE_MOCK_ROUND_ID = r"[A-Za-z0-9._-]{1,100}"
 MOCK_SIGNATURE_HEADER = "x-wes-mock-signature"
 
 
-def mock_signature(body: bytes) -> bytes:
+def mock_signature(body: bytes, *, namespace: bytes = b"xray-wms-mock") -> bytes:
     secret = get_settings().JWT_SECRET_KEY.encode()
-    return digest(secret, b"xray-wms-mock\0" + body, "sha256").hex().encode()
+    return digest(secret, namespace + b"\0" + body, "sha256").hex().encode()
+
+
+def coarse_mock_signature(body: bytes, round_id: str) -> bytes:
+    return mock_signature(body, namespace=b"coarse-wms-mock:" + round_id.encode("ascii"))
 
 
 CONFLICT_REASONS = frozenset(
@@ -55,9 +64,28 @@ class WmsEndpointAdapter:
         headers = (("accept", "application/json"), ("content-type", "application/json"))
         if target.explicit_only and target.name == MOCK_DECISIONS_TARGET:
             headers += ((MOCK_SIGNATURE_HEADER, mock_signature(message.request_raw).decode()),)
+        path = self.path
+        if target.explicit_only and target.name in (
+            COARSE_MOCK_DECISIONS_TARGET,
+            COARSE_MOCK_FACTS_TARGET,
+        ):
+            scope = message.scope
+            if (
+                scope is None
+                or scope.owner_domain != "coarse_sorting"
+                or scope.kind != "TASK"
+                or re.fullmatch(COARSE_MOCK_ROUND_ID, scope.scope_id) is None
+            ):
+                raise ValueError("coarse WMS mock request has no original round")
+            signature = coarse_mock_signature(message.request_raw, scope.scope_id)
+            headers += (
+                (COARSE_MOCK_ROUND_HEADER, scope.scope_id),
+                (MOCK_SIGNATURE_HEADER, signature.decode()),
+            )
+            path = f"/api/v1{COARSE_MOCK_PATH}/{self.endpoint.value}"
         return HttpRequest(
             method="POST",
-            path=self.path,
+            path=path,
             headers=headers,
             body=message.request_raw,
         )

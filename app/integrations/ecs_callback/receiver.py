@@ -5,6 +5,7 @@
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from functools import partial
@@ -22,7 +23,7 @@ from app.integrations.wms_callback.receiver import CallbackResponse
 from app.models import IntegrationExchange
 from app.transactions import after_commit
 
-from .binding import BindingResolver
+from .binding import BindingResolver, DeviceBinding
 from .envelope import EcsEventEnvelope, issues_from
 from .registry import EcsEventContext, lookup
 
@@ -109,6 +110,10 @@ async def receive_ecs_event(
     raw: bytes,
     *,
     resolve_binding: BindingResolver | None = None,
+    authorize_event: Callable[
+        [AsyncSession, EcsEventEnvelope, DeviceBinding | None], Awaitable[bool]
+    ]
+    | None = None,
     runtime: object | None = None,
     on_committed=None,
     on_business_committed=None,
@@ -170,6 +175,10 @@ async def receive_ecs_event(
     binding = await resolve_binding(session, device_code) if resolve_binding else None
     if binding is not None and binding.device_code != device_code:
         raise RuntimeError("ECS binding does not match event device")
+    if authorize_event is not None and not await authorize_event(session, envelope, binding):
+        return EcsResponse(
+            403, {"code": 403, "message": "FORBIDDEN_SOURCE"}, "forbidden", event_type, device_code
+        )
     registered = lookup(binding.device_role, event_type) if binding else None
     business_code = binding.business_code if binding is not None else None
     component_key = None

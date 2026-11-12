@@ -6,10 +6,12 @@ from pydantic import ConfigDict, Field, FiniteFloat
 
 from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
+from ..contracts import VALIDATE
+
 NonemptyText = Annotated[str, Field(min_length=1)]
 
 
-@request_operation("inbound.coarse_sorting.validate_bind@v1", Endpoint.DECISIONS)
+@request_operation(VALIDATE, Endpoint.DECISIONS)
 class ValidateBind(RequestPayload):
     model_config = ConfigDict(
         json_schema_extra={

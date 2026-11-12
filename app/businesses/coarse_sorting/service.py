@@ -18,13 +18,19 @@ from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.registry import EcsEventContext
 from app.integrations.ecs_command import CommandOwner
 from app.integrations.wms_request import RequestPayload
+from app.integrations.wms_request.adapter import (
+    COARSE_MOCK_DECISIONS_TARGET,
+    COARSE_MOCK_FACTS_TARGET,
+)
 from app.models import Device, WorkLine
+from app.reliable import ScopeRef
 from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 from app.services.workline_service import business_configuration_issue, read_workline
 
 from .contracts import (
     ALLOCATE,
     REPORT,
+    VALIDATE,
     Allocated,
     Depart,
     Replace,
@@ -39,7 +45,6 @@ from .ecs_command import MoveForward, MoveToLocationResult, MoveToNg, MoveToNgRe
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
-VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 DIRECT_PUT_STATES = ("AWAITING_ALLOCATION", "AWAITING_RACK", "AWAITING_PUT", "AWAITING_REPORT")
 WAIT_INTERVAL = timedelta(milliseconds=5000)
 
@@ -62,6 +67,8 @@ class CoarseSortingService:
     ng_locations: Mapping[str, str] | None = None
     preparation_table: Table | None = None
     rack_dispatch: RackDispatch | None = None
+    mock_workline: str | None = None
+    mock_round_id: str | None = None
 
     @property
     def direct_put(self) -> bool:
@@ -109,6 +116,13 @@ class CoarseSortingService:
             return
         line = await read_workline(ctx.session, binding.work_line_id)
         scan_id = str(uuid7())
+        scan_payload = {
+            "barcode": payload.barcode,
+            "reel_diameter": payload.size_inch,
+            "reel_thickness": payload.thickness_mm,
+        }
+        if self.mock_round_id and line.line_code == self.mock_workline:
+            scan_payload["mock_round_id"] = self.mock_round_id
         await ctx.session.execute(
             table.insert().values(
                 id=scan_id,
@@ -123,11 +137,7 @@ class CoarseSortingService:
                 work_line_version=binding.work_line_version,
                 binding_revision=binding.revision,
                 timestamp=ctx.timestamp,
-                payload={
-                    "barcode": payload.barcode,
-                    "reel_diameter": payload.size_inch,
-                    "reel_thickness": payload.thickness_mm,
-                },
+                payload=scan_payload,
                 received_at=datetime.now(UTC),
                 pending=True,
                 wait_reason="AWAITING_VALIDATION_STAGE",
@@ -211,6 +221,16 @@ class CoarseSortingService:
             return row["wait_reason"]
         actions = await self._lock_actions(session, row)
         action = actions.get(row["current_action_id"])
+        round_id = row["payload"].get("mock_round_id")
+        active_round = self.mock_round_id if row["workline_code"] == self.mock_workline else None
+        validation = row["validation_response"] or {}
+        if (
+            (round_id or validation.get("target") == COARSE_MOCK_DECISIONS_TARGET)
+            and (not round_id or round_id != active_round)
+            and row["state"] != "AWAITING_REPORT"
+            and not (known_ng and action and action["kind"] == "MOVE_TO_NG")
+        ):
+            return await save("MOCK_ROUND_RECONCILIATION_REQUIRED")
         input_arm = next((d for d in devices if d.id == row["device_id"]), None)
         if known_ng:
             if action and action["kind"] == "MOVE_TO_NG":
@@ -319,6 +339,8 @@ class CoarseSortingService:
                 )
             ):
                 return await save("VALIDATION_RECONCILIATION_REQUIRED")
+            if round_id != active_round:
+                return await save("MOCK_ROUND_RECONCILIATION_REQUIRED")
             payload = row["payload"]
             operation_id = str(uuid7())
             model = self.validate_bind(
@@ -327,7 +349,13 @@ class CoarseSortingService:
                 reel_diameter=payload["reel_diameter"],
                 reel_thickness=payload["reel_thickness"],
             )
-            reference = await self.capabilities.wms.send(session, model, operation_id=operation_id)
+            reference = await self.capabilities.wms.send(
+                session,
+                model,
+                operation_id=operation_id,
+                explicit_target=COARSE_MOCK_DECISIONS_TARGET if round_id else None,
+                scope=ScopeRef(OWNER.domain, "TASK", round_id) if round_id else None,
+            )
             action_id = await self._insert_action(
                 session,
                 row,
@@ -356,6 +384,8 @@ class CoarseSortingService:
         )
         if not self._valid_response(result, "DECIDED"):
             return await save(self._request_wait_reason(result, "VALIDATION"))
+        if result.target == COARSE_MOCK_DECISIONS_TARGET and not round_id:
+            return await save("MOCK_ROUND_RECONCILIATION_REQUIRED")
         try:
             decision = ValidateBindDecision.model_validate(result.response_data)
         except ValidationError:
@@ -644,7 +674,17 @@ class CoarseSortingService:
 
     async def _send_request(self, session, row, predecessor, kind, operation, model, **values):
         operation_id = str(uuid7())
-        reference = await self.capabilities.wms.send(session, model, operation_id=operation_id)
+        target = None
+        scope = None
+        validation = row["validation_response"] or {}
+        if validation.get("target") == COARSE_MOCK_DECISIONS_TARGET:
+            target = (
+                COARSE_MOCK_FACTS_TARGET if operation == REPORT else COARSE_MOCK_DECISIONS_TARGET
+            )
+            scope = ScopeRef(OWNER.domain, "TASK", row["payload"]["mock_round_id"])
+        reference = await self.capabilities.wms.send(
+            session, model, operation_id=operation_id, explicit_target=target, scope=scope
+        )
         return await self._insert_action(
             session,
             row,
@@ -739,13 +779,15 @@ class CoarseSortingService:
         }
 
     async def _register_ng(self, session, row, action, line, input_arm, evidence, save, **values):
+        scan_facts = dict(row["payload"])
+        scan_facts.pop("mock_round_id", None)
         if (
             not action
             or action["kind"] != "VALIDATE_BIND"
             or action["operation"] != VALIDATE
             or action["operation_id"] != row["validation_operation_id"]
             or action["message_id"] != row["validation_message_id"]
-            or action["request_data"] != {"workline_code": row["workline_code"], **row["payload"]}
+            or action["request_data"] != {"workline_code": row["workline_code"], **scan_facts}
             or evidence.get("operation") != action["operation"]
             or evidence.get("operation_id") != action["operation_id"]
             or evidence.get("message_id") != action["message_id"]
@@ -2135,7 +2177,7 @@ async def read_scan(session, digest: str) -> dict | None:
     )
     if row is None:
         return None
-    return {
+    view = {
         key: value
         for key, value in row.items()
         if key
@@ -2153,3 +2195,6 @@ async def read_scan(session, digest: str) -> dict | None:
             "ng_reason_code",
         }
     }
+    view["payload"] = dict(view["payload"])
+    view["payload"].pop("mock_round_id", None)
+    return view

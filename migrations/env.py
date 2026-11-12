@@ -93,6 +93,13 @@ def _prepare_schema(connection) -> str:
     return SCHEMA
 
 
+def _include_name(name, kind, parent):
+    if kind == "schema":
+        return name == SCHEMA
+    # This ledger is managed by the integration operator, outside Alembic.
+    return kind != "table" or name != "coarse_sorting_mock_round"
+
+
 def _run(connection) -> None:
     sqlite = connection.dialect.name == "sqlite"
     with connection.begin():
@@ -105,7 +112,7 @@ def _run(connection) -> None:
             transactional_ddl=True if sqlite else None,
             version_table_schema=schema,
             include_schemas=not sqlite,
-            include_name=lambda name, kind, parent: kind != "schema" or name == SCHEMA,
+            include_name=_include_name,
         )
         with context.begin_transaction():
             context.run_migrations()

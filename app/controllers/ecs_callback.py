@@ -1,5 +1,6 @@
 import logging
 from datetime import UTC, datetime
+from functools import partial
 from time import perf_counter
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
@@ -33,6 +34,7 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
     "/callback/event",
     response_class=Response,
     responses={
+        403: {"description": "FORBIDDEN_SOURCE: event source is not authorized"},
         400: {"description": "INVALID_ENVELOPE: bad JSON or envelope; see error_detail.issues"},
         413: {"description": "PAYLOAD_TOO_LARGE: body exceeds 256 KiB"},
         503: {"description": "TEMPORARILY_UNAVAILABLE: retry the original event"},
@@ -81,10 +83,18 @@ async def receive_event_request(
         if len(raw) > MAX_BODY_BYTES:
             result = EcsResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
         else:
+            authorize = getattr(request.app.state, "ecs_event_authorizer", None)
+            if authorize is not None:
+                authorize = partial(
+                    authorize,
+                    source_ip=request.client.host if request.client else "",
+                    real_callback=response_scope == "HTTP",
+                )
             async with factory() as session, session.begin():
                 result = await receive_ecs_event(
                     session,
                     raw,
+                    authorize_event=authorize,
                     resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
                     runtime=getattr(request.app.state, "business_runtime", None),
                     on_committed=getattr(request.app.state, "business_event_committed", None),
@@ -104,7 +114,9 @@ async def receive_event_request(
             device_code,
         )
     _log_request(result, started)
-    if allow_snapshot("ecs"):  # 被限流丢弃的请求不再把请求体挂到后台任务上
+    if result.status_code != 403 and allow_snapshot(
+        "ecs"
+    ):  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(
             record_snapshot,
             factory,
