@@ -28,7 +28,18 @@ async def test_postgres_integration_resumes_original_work_across_processes(schem
     await exercise_integration(url)
 
 
-async def exercise_integration(integration_database):
+async def test_configured_mock_line_completes_normal_and_ng_through_the_original_sender(tmp_path):
+    await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'mock.db'}", mock="fixed")
+
+
+async def test_postgres_mock_round_with_real_outbox_transactions(schema_database):  # noqa: F811
+    url, _ = schema_database
+    result = await run_alembic(url, "upgrade", "head")
+    assert result.returncode == 0, result.stdout + result.stderr
+    await exercise_integration(url, mock="random")
+
+
+async def exercise_integration(integration_database, *, mock=None):
     peer = FastAPI()
     requests, commands, reports, transports = [], [], [], []
     allocation = {
@@ -106,6 +117,21 @@ async def exercise_integration(integration_database):
         }
 
     async def run(phase, *, tail=False, **locations):
+        targets = {
+            protocol: {"protocol": protocol, "base_url": origin}
+            for protocol in ("wms-decisions", "wms-facts", "wms-transport")
+        }
+        if phase == "mock":
+            targets.update(
+                {
+                    f"coarse-sorting-mock-wms-{endpoint}": {
+                        "protocol": f"wms-{endpoint}",
+                        "base_url": origin,
+                        "explicit_only": True,
+                    }
+                    for endpoint in ("decisions", "facts")
+                }
+            )
         result = await asyncio.to_thread(
             subprocess.run,
             [sys.executable, "-m", __name__, phase, origin],
@@ -115,14 +141,7 @@ async def exercise_integration(integration_database):
                 "COARSE_SORTING_TAIL_ENABLED": str(tail).lower(),
                 "DATABASE_URL": integration_database,
                 "REDIS_URL": "redis://127.0.0.1:1/0",
-                "RELIABLE_TARGETS": json.dumps(
-                    {
-                        "targets": {
-                            protocol: {"protocol": protocol, "base_url": origin}
-                            for protocol in ("wms-decisions", "wms-facts", "wms-transport")
-                        }
-                    }
-                ),
+                "RELIABLE_TARGETS": json.dumps({"targets": targets}),
                 "COARSE_SORTING_OUTPUT_LOCATIONS": "{}",
                 "COARSE_SORTING_NG_LOCATIONS": "{}",
                 **locations,
@@ -135,6 +154,36 @@ async def exercise_integration(integration_database):
         return json.loads(result.stdout.splitlines()[-1])
 
     async with loopback_app(peer) as origin:
+        if mock:
+            await run(
+                "mock",
+                tail=True,
+                COARSE_SORTING_WMS_MOCK=json.dumps(
+                    {
+                        "round_id": "test-1",
+                        "ecs_source_ips": ["127.0.0.1"],
+                        "rack_position": "RACK-POINT",
+                    }
+                    | (
+                        {"empty_cells": [allocation | {"reel_totalthickness": 0}]}
+                        if mock == "random"
+                        else {
+                            "normal_barcode": "NORMAL",
+                            "ng_barcode": "NG",
+                            "allocation": allocation,
+                        }
+                    )
+                ),
+                COARSE_SORTING_OUTPUT_LOCATIONS='{"COARSE":"OUTPUT-POINT"}',
+                COARSE_SORTING_NG_LOCATIONS='{"COARSE":"NG-POINT"}',
+            )
+            assert not requests and not reports and not transports
+            assert sorted(command["task_type"] for command in commands) == [
+                "MOVE_FORWARD",
+                "MOVE_TO_NG",
+                "PUT_TO_BIN",
+            ]
+            return
         original = await run("first")
         assert [request["operation"] for request in requests] == [VALIDATE, VALIDATE]
         assert [command["task_type"] for command in commands] == ["MOVE_FORWARD"]
@@ -186,17 +235,28 @@ async def exercise_integration(integration_database):
 
 
 async def exercise(phase, origin):
+    from contextlib import AsyncExitStack
+    from dataclasses import replace
+    from types import SimpleNamespace
+
     from httpx import ASGITransport, AsyncClient
     from pytest import raises
     from sqlalchemy import select
 
-    from app import business_wakeups
+    from app import business_wakeups, main
     from app.businesses.catalog import load_business_models
+    from app.businesses.coarse_sorting.contracts import RandomMockRound
+    from app.businesses.coarse_sorting.mock_storage import CoarseSortingMockRound
     from app.businesses.coarse_sorting.models import CoarseSortingAction, CoarseSortingJob
     from app.core import get_current_user
     from app.core.database import engine, session_factory
     from app.core.identifiers import uuid7
+    from app.http_client import AsyncHttpClient
     from app.integrations.wms_request import InvalidRequestPayload, wms_requests
+    from app.integrations.wms_request.adapter import (
+        COARSE_MOCK_DECISIONS_TARGET,
+        COARSE_MOCK_FACTS_TARGET,
+    )
     from app.integrations.wms_request.operation import lookup
     from app.main import app
     from app.models import (
@@ -212,7 +272,7 @@ async def exercise(phase, origin):
 
     # Drive the worker's task body directly, without a broker or a second sender.
     business_wakeups.enqueue_business = lambda _: None
-    if phase == "first":
+    if phase in ("first", "mock"):
         load_business_models()
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
@@ -249,15 +309,57 @@ async def exercise(phase, origin):
                 await advance_pending(session_factory, "coarse_sorting")
                 async with session_factory() as session:
                     jobs = (await session.scalars(select(CoarseSortingJob))).all()
+                    if phase == "mock":
+                        jobs = [job for job in jobs if job.payload["barcode"] != "BEFORE-MOCK"]
                     reasons = {job.payload["barcode"]: job.wait_reason for job in jobs}
                     if reasons == expected:
                         return {job.payload["barcode"]: job for job in jobs}
                 await asyncio.sleep(0.05)
 
-    async with (
-        app.router.lifespan_context(app),
-        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
-    ):
+    async with AsyncExitStack() as stack:
+        if phase == "mock":
+            async with engine.begin() as connection:
+                await connection.run_sync(CoarseSortingMockRound.__table__.create)
+
+            async def drop_mock_table():
+                async with engine.begin() as connection:
+                    await connection.run_sync(CoarseSortingMockRound.__table__.drop)
+
+            stack.push_async_callback(drop_mock_table)
+            mock_origin = await stack.enter_async_context(loopback_app(app))
+            real_lifespan = main.reliable_lifespan
+
+            def client_factory(config):
+                if config.destination_key in (
+                    COARSE_MOCK_DECISIONS_TARGET,
+                    COARSE_MOCK_FACTS_TARGET,
+                ):
+                    config = replace(config, base_url=mock_origin)
+                return AsyncHttpClient(config)
+
+            main.reliable_lifespan = lambda *a, **kw: real_lifespan(
+                *a, **kw, client_factory=client_factory
+            )
+        await stack.enter_async_context(app.router.lifespan_context(app))
+        random_mock = phase == "mock" and isinstance(
+            app.state.coarse_sorting_mock_round, RandomMockRound
+        )
+        if random_mock:
+            from app.businesses.coarse_sorting import mock_wms
+
+            draws = iter((1, 0, 1))
+            mock_wms.randbelow = lambda _: next(draws)
+        normal, ng, full = (
+            (
+                f"PTEST-{kind},Q2000,MMAKER,D2610,LLOT,SREEL-{kind}"
+                for kind in ("NORMAL", "NG", "FULL")
+            )
+            if random_mock
+            else ("NORMAL", "NG", "FULL")
+        )
+        client = await stack.enter_async_context(
+            AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        )
 
         async def complete_commands(results):
             async with asyncio.timeout(12):
@@ -289,8 +391,55 @@ async def exercise(phase, origin):
                 )
                 assert response.status_code == 200, response.text
 
-        if phase == "first":
-            for timestamp, barcode in enumerate(("NORMAL", "NG"), start=1):
+        if phase == "mock":
+            probe = {
+                "device_code": "INPUT",
+                "event_type": "SCAN_COMPLETED",
+                "timestamp": 1,
+                "data": {"barcode": "NORMAL", "size_inch": 7, "thickness_mm": 20},
+            }
+            app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=999, roles=())
+            debug = await client.post("/api/v1/dev/ecs/events", json=probe)
+            assert debug.json()["status_code"] == 403
+            untrusted_client = await stack.enter_async_context(
+                AsyncClient(
+                    transport=ASGITransport(app=app, client=("192.0.2.25", 1234)),
+                    base_url="http://test",
+                )
+            )
+            untrusted = await untrusted_client.post(
+                "/api/v1/callback/event", json=probe, headers={"x-forwarded-for": "127.0.0.1"}
+            )
+            assert untrusted.status_code == 403
+            async with session_factory() as session:
+                assert await session.scalar(select(CoarseSortingJob.id)) is None
+
+            runtime = app.state.business_runtime
+            app.state.business_runtime = replace(
+                runtime,
+                services={
+                    **runtime.services,
+                    "coarse_sorting": replace(
+                        runtime.services["coarse_sorting"], mock_workline=None, mock_round_id=None
+                    ),
+                },
+            )
+            try:
+                queued = await client.post(
+                    "/api/v1/callback/event",
+                    json=probe | {"data": probe["data"] | {"barcode": "BEFORE-MOCK"}},
+                )
+                assert queued.status_code == 200
+            finally:
+                app.state.business_runtime = runtime
+            await advance_pending(session_factory, "coarse_sorting")
+            async with session_factory() as session:
+                queued_job = (await session.scalars(select(CoarseSortingJob))).one()
+                assert queued_job.validation_operation_id is None
+                assert queued_job.wait_reason == "MOCK_ROUND_RECONCILIATION_REQUIRED"
+
+        if phase in ("first", "mock"):
+            for timestamp, barcode in enumerate((normal, ng), start=1):
                 response = await client.post(
                     "/api/v1/callback/event",
                     json={
@@ -301,9 +450,31 @@ async def exercise(phase, origin):
                     },
                 )
                 assert response.status_code == 200, response.text
-            await advance_until({"NORMAL": "AWAITING_MOVE_RESULT", "NG": "AWAITING_NG_STAGE"})
-            await complete_commands({"MOVE_FORWARD": {"actual_qty": 1}})
-            expected = {"NORMAL": "AWAITING_ALLOCATION_STAGE", "NG": "AWAITING_NG_STAGE"}
+                if random_mock and barcode == normal:
+                    await advance_until({normal: "AWAITING_MOVE_RESULT"})
+            if phase == "mock":
+                await advance_until({normal: "AWAITING_MOVE_RESULT", ng: "AWAITING_NG_RESULT"})
+                await complete_commands({"MOVE_FORWARD": {"actual_qty": 1}})
+                await advance_until({normal: "AWAITING_PUT_RESULT", ng: "AWAITING_NG_RESULT"})
+                await complete_commands(
+                    {
+                        "PUT_TO_BIN": {"actual_qty": 1, "location": "OUTPUT-POINT"},
+                        "MOVE_TO_NG": {"actual_qty": 1, "location": "NG-POINT"},
+                    }
+                )
+                expected = {normal: "COMPLETED", ng: "NG_COMPLETED"}
+                if random_mock:
+                    await advance_until(expected)
+                    response = await client.post(
+                        "/api/v1/callback/event",
+                        json=probe | {"timestamp": 3, "data": probe["data"] | {"barcode": full}},
+                    )
+                    assert response.status_code == 200, response.text
+                    expected[full] = "VALIDATION_RECONCILIATION_REQUIRED"
+            else:
+                await advance_until({"NORMAL": "AWAITING_MOVE_RESULT", "NG": "AWAITING_NG_STAGE"})
+                await complete_commands({"MOVE_FORWARD": {"actual_qty": 1}})
+                expected = {"NORMAL": "AWAITING_ALLOCATION_STAGE", "NG": "AWAITING_NG_STAGE"}
         elif phase == "blocked":
             app.dependency_overrides[get_current_user] = lambda: None
             binding = {"workline_code": "COARSE", "binding_id": "ORIGINAL-BIND"}
@@ -384,6 +555,13 @@ async def exercise(phase, origin):
             )
             expected = {"NORMAL": "COMPLETED", "NG": "NG_COMPLETED"}
         jobs = await advance_until(expected)
+        if phase == "mock":
+            assert jobs[normal].validation_response["target"] == COARSE_MOCK_DECISIONS_TARGET
+            assert jobs[ng].validation_response["target"] == COARSE_MOCK_DECISIONS_TARGET
+            if random_mock:
+                assert jobs[full].command_code is None
+            print(json.dumps({barcode: job.state for barcode, job in jobs.items()}))
+            return
         async with session_factory() as session:
             actions = (await session.scalars(select(CoarseSortingAction))).all()
         identities = {}

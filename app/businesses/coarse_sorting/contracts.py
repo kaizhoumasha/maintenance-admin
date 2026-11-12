@@ -7,12 +7,14 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
+    IPvAnyAddress,
     StringConstraints,
     TypeAdapter,
     model_validator,
 )
 
 from app.businesses.bin_types import BinType
+from app.core.strict_json import canonical_digest
 from app.integrations.ecs_callback import CallbackPayload
 
 
@@ -57,6 +59,7 @@ class ValidateBindDecision(BaseModel):
         return self
 
 
+VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
 
@@ -116,3 +119,63 @@ class Replace(WorklineDecision):
 allocation_decision = TypeAdapter(
     Annotated[Allocated | Wait | Replenish | Depart | Replace, Field(discriminator="result")]
 )
+
+
+class _MockRoundBase(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    round_id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._-]{1,100}$")]
+    ecs_source_ips: Annotated[list[IPvAnyAddress], Field(min_length=1)]
+    rack_position: Reference
+
+    @property
+    def configuration_digest(self) -> str:
+        configuration = self.model_dump(mode="json", exclude={"ecs_source_ips"})
+        if not configuration.get("additional_normal_barcodes"):
+            configuration.pop("additional_normal_barcodes", None)
+        return canonical_digest(configuration)
+
+
+class FixedMockRound(_MockRoundBase):
+    normal_barcode: Reference
+    additional_normal_barcodes: list[Reference] = Field(default_factory=list)
+    ng_barcode: Reference
+    allocation: Allocated
+
+    @model_validator(mode="after")
+    def _different_barcodes(self):
+        normal = {self.normal_barcode, *self.additional_normal_barcodes}
+        if len(normal) != len(self.additional_normal_barcodes) + 1 or self.ng_barcode in normal:
+            raise ValueError("Coarse sorting mock requires distinct normal and NG test barcodes")
+        return self
+
+    @property
+    def workline_code(self) -> str:
+        return self.allocation.workline_code
+
+
+class RandomMockRound(_MockRoundBase):
+    empty_cells: Annotated[list[Allocated], Field(min_length=1)]
+
+    @property
+    def workline_code(self) -> str:
+        return self.empty_cells[0].workline_code
+
+    @model_validator(mode="after")
+    def _distinct_empty_cells(self) -> Self:
+        cells = self.empty_cells
+        boxes = {(cell.bin_location, cell.bin_code, str(cell.bin_type)) for cell in cells}
+        if (
+            len({(cell.workline_code, cell.rack_id) for cell in cells}) != 1
+            or any(cell.reel_totalthickness != 0 for cell in cells)
+            or len({cell.cell_id for cell in cells}) != len(cells)
+            or len({(cell.bin_location, cell.cell_index) for cell in cells}) != len(cells)
+            or len({box[0] for box in boxes}) != len(boxes)
+            or len({box[1] for box in boxes}) != len(boxes)
+        ):
+            raise ValueError("Mock pool requires distinct empty cells on one workline and rack")
+        return self
+
+
+MockRound = FixedMockRound | RandomMockRound
+mock_round_config = TypeAdapter(MockRound)

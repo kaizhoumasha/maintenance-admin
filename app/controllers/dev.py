@@ -3,6 +3,7 @@
 场景由固定 Transport 平台入口及业务 composition.ENTRY_MODULES 中的 dev 入口显式导入。
 """
 
+from functools import partial
 from typing import Annotated, Union
 
 from fastapi import Body, Depends, FastAPI
@@ -94,6 +95,15 @@ def include_dev_routers(
         app.state.xray_wms_mock = XrayWmsMock(
             settings.XRAY_WMS_MOCK_TARGETS, settings.XRAY_RETURN_RACKS
         )
+    if settings.COARSE_SORTING_WMS_MOCK:
+        from app.businesses.coarse_sorting.contracts import mock_round_config
+        from app.businesses.coarse_sorting.mock_wms import authorize_mock_scan
+        from app.businesses.coarse_sorting.mock_wms import router as coarse_mock_router
+
+        mock_round = mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
+        app.state.coarse_sorting_mock_round = mock_round
+        app.state.ecs_event_authorizer = partial(authorize_mock_scan, mock_round)
+        app.include_router(coarse_mock_router, prefix=prefix)
     app.include_router(mock_wms_router, prefix=prefix)
     app.include_router(callback_router, prefix=prefix)
     app.include_router(registry_router, prefix=prefix)
