@@ -7,10 +7,11 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.controllers.ecs_callback import include_ecs_callback
 from app.core.identifiers import uuid7
+from app.core.strict_json import canonical_digest
 from app.integrations.ecs_callback import CallbackPayload, registry
 from app.integrations.ecs_command import RoleRoutes, compile_commands, configure_ecs
 from app.integrations.ecs_command.contracts import CommandBinding
@@ -201,11 +202,13 @@ async def test_injected_event_resolver_failure_returns_503_then_retries_original
         async with callback_store() as session:
             assert (
                 await session.scalar(
-                    select(func.count())
-                    .select_from(IntegrationExchange)
-                    .where(IntegrationExchange.role == "RECEIPT")
+                    select(IntegrationExchange.id).where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.operation == "ecs.event",
+                        IntegrationExchange.operation_id == canonical_digest(body),
+                    )
                 )
-                == 0
+                is None
             )
         unavailable = False
         for _ in range(2):
