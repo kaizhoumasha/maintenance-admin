@@ -201,6 +201,7 @@ class Outbound:
             if (
                 expected.get("result") != "ACCEPT"
                 or expected.get("next_source_action") != plate.grant_snapshot
+                or "result" in plate.grant_snapshot
             ):
                 return False
         else:
@@ -264,10 +265,12 @@ class Outbound:
             else {"result": "READY", **plate.grant_snapshot}
         )
         try:
-            PLANS["bin" if plate.bin_work_id else "rack"].validate_python(ready)
+            plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(
+                ready, extra="ignore" if plate.grant_kind == "NEXT" else None
+            )
         except (ValueError, TypeError):
             return False
-        fields = {k: v for k, v in ready.items() if k != "result"}
+        fields = {k: ready[k] for k in type(plan).model_fields if k != "result"}
         locator = {k: v for k, v in plate.source_locator.items() if k not in ("type", "bin_code")}
         return fields == {**locator, **plate.source_params}
 
@@ -586,7 +589,9 @@ class Outbound:
                 return plate
             data = result.response_data
             try:
-                DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(data)
+                DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(
+                    data, extra="ignore"
+                )
             except (ValueError, TypeError):
                 return plate
             snapshot = dict(
@@ -634,15 +639,15 @@ class Outbound:
             return plate
         if plate.final_decision_round_id not in (None, current.id):
             return plate
+        is_ng = data["result"] == "REJECT"
+        target = data["ng_locator" if is_ng else "target_locator"]
         if current.unresolved:
             current.response_snapshot = snapshot
             current.response_recorded_at_ms = current.consumed_at_ms = now_ms
             current.unresolved = False
             plate.final_decision_round_id = current.id
-            plate.target_snapshot = data.get("target_locator", data.get("ng_locator"))
-            plate.next_source_action = data.get("next_source_action")
-        is_ng = data["result"] == "REJECT"
-        target = data["ng_locator" if is_ng else "target_locator"]
+            plate.target_snapshot = target
+            plate.next_source_action = None if is_ng else data.get("next_source_action")
         if plate.target_snapshot != target:
             return plate
         if not is_ng:
@@ -703,7 +708,7 @@ class Outbound:
                 task_id=task.task_id,
                 source_locator=plate.source_locator,
                 barcode=scan.barcode,
-                to_locator=target
+                to_locator={k: target[k] for k in ("type", "zone_code")}
                 if is_ng
                 else {k: target[k] for k in ("type", "rack_id", "rack_face", "slot_id")},
                 occurred_at=put.finish_time,
@@ -987,8 +992,8 @@ class Outbound:
         if successor is None or "result" in successor:
             return
         try:
-            PLANS["bin" if plate.bin_work_id else "rack"].validate_python(
-                {"result": "READY", **successor}
+            plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(
+                {"result": "READY", **successor}, extra="ignore"
             )
         except (ValueError, TypeError):
             return
@@ -1032,7 +1037,11 @@ class Outbound:
                 grant_parent_plate_id=plate.id,
                 grant_snapshot=successor,
                 source_locator=locator,
-                source_params={k: v for k, v in successor.items() if k not in locator},
+                source_params={
+                    k: successor[k]
+                    for k in type(plan).model_fields
+                    if k != "result" and k not in locator
+                },
                 source_arrival_snapshot=self._arrival_context(plate),
                 pick_call_key=f"auto:{plate.task_id}:outbound:{plate.id}:next",
                 pending=True,
@@ -1065,11 +1074,12 @@ class Outbound:
             not isinstance(data, dict)
             or data != (round_.response_snapshot or {}).get("data")
             or data.get("result") not in ("ACCEPT", "REJECT")
-            or data.get("target_locator", data.get("ng_locator")) != plate.target_snapshot
+            or data.get("ng_locator" if data["result"] == "REJECT" else "target_locator")
+            != plate.target_snapshot
         ):
             return None
         try:
-            DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(data)
+            DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(data, extra="ignore")
         except (ValueError, TypeError):
             return None
         scan = await self._pick_scan(session, plate)
@@ -1135,7 +1145,7 @@ class Outbound:
                 task_id=plate.task_id,
                 source_locator=plate.source_locator,
                 barcode=scan.barcode,
-                to_locator=data["ng_locator"],
+                to_locator={k: data["ng_locator"][k] for k in ("type", "zone_code")},
                 occurred_at=put.finish_time,
             )
         target = data["target_locator"]

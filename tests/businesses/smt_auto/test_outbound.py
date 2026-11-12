@@ -731,12 +731,13 @@ async def decided_outbound(outbound_host):
     return host
 
 
-@pytest.mark.parametrize("has_successor", [False, True])
-async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, has_successor):
+@pytest.mark.parametrize("successor_state", ["absent", "valid", "conflicting"])
+async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, successor_state):
     host = decided_outbound
     _, _, rack_plate_id = await return_face(host)
     decision = dict(
         result="ACCEPT",
+        detailMessage="OK",
         target_locator=dict(
             type="RACK_SLOT",
             rack_id="target",
@@ -746,7 +747,7 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
             rack_column=1,
         ),
     )
-    if has_successor:
+    if successor_state != "absent":
         decision["next_source_action"] = dict(
             cell_id="C2",
             cell_index=2,
@@ -754,7 +755,10 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
             reel_layer=1,
             reel_thickness=15.3,
             reel_diameter=7,
+            label="next reel",
         )
+    if successor_state == "conflicting":
+        decision["next_source_action"]["result"] = "WAIT"
     await host.settle("outbound.bin.material.decide@v1", decision)
     async with host.factory.begin() as session:
         first = await host.outbound.advance(
@@ -770,7 +774,7 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
         rack = await host.outbound.advance(
             session, work_line_id=1, plate_id=rack_plate_id, now_ms=70
         )
-        if has_successor:
+        if successor_state == "valid":
             assert rack.pick_command_code is None
             successor = await session.scalar(
                 select(AutoOutboundPlate).where(
@@ -780,7 +784,13 @@ async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, 
             await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=71)
             assert successor.pick_command_code
         else:
-            assert rack.pick_command_code
+            if successor_state == "absent":
+                assert rack.pick_command_code
+            assert not await session.scalar(
+                select(AutoOutboundPlate.id).where(
+                    AutoOutboundPlate.grant_parent_plate_id == host.plate_id
+                )
+            )
 
 
 @pytest.mark.parametrize("rack_ready", [False, True])
@@ -981,7 +991,10 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
             result="REJECT",
             business_exception_code="MATERIAL_REJECTED",
             source_disposition=disposition,
-            ng_locator=dict(type="NG_ZONE", zone_code="MATERIAL_NG_01"),
+            detailMessage="OK",
+            target_locator=None,
+            next_source_action={"label": "irrelevant to REJECT"},
+            ng_locator=dict(type="NG_ZONE", zone_code="MATERIAL_NG_01", label="NG"),
         ),
     )
     async with host.factory.begin() as session:
@@ -990,6 +1003,7 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
                 session, work_line_id=1, plate_id=host.plate_id, now_ms=now
             )
         assert plate.final_decision_round_id
+        assert plate.next_source_action is None
         assert plate.put_command_code
         code = plate.put_command_code
         line = await session.get(WorkLine, 1)
@@ -1333,7 +1347,12 @@ async def test_same_transfer_rack_reenters_after_departure_without_replace(
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=94)
     await host.settle(
-        operation, {"result": "ACCEPT", "target_locator": {**locator, "slot_id": "A2"}}
+        operation,
+        {
+            "result": "ACCEPT",
+            "detailMessage": "OK",
+            "target_locator": {**locator, "slot_id": "A2", "label": "A2"},
+        },
     )
     async with host.factory.begin() as session:
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=95)
