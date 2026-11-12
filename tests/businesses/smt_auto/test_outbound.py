@@ -837,6 +837,13 @@ async def test_scan_revision_replaces_only_unaccepted_material_once(decided_outb
     )
     assert receipt.status_code == 200
     if delivery == "claimed":
+        recovery = MessageStore(
+            host.factory,
+            records=history_records,
+            clock=lambda: claim.lease_until + timedelta(seconds=1),
+        )
+        assert await recovery.recover_expired(1, host.requests.outbox.targets) == 0
+        assert not await recovery.claim(1, host.requests.outbox.targets)
         assert (
             await store.before_send(claim, host.requests.outbox.targets[claim.message.target])
             is None

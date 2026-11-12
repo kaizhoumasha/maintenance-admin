@@ -102,6 +102,26 @@ class WmsRequests:
             and old.pause_reason in (None, REPLACEMENT_PENDING)
         ):
             old.pause_reason = REPLACEMENT_PENDING
+            if (
+                old.status == MessageStatus.SENDING
+                and old.lease_id is not None
+                and not old.delivery_uncertain
+                and old.attempts == old.not_received_count
+            ):
+                opened = await session.scalar(
+                    select(IntegrationRecord.id)
+                    .where(
+                        IntegrationRecord.exchange_id == old.exchange_id,
+                        IntegrationRecord.record_kind == "SEND_ATTEMPT_OPENED",
+                        IntegrationRecord.attempt_id == old.lease_id,
+                    )
+                    .limit(1)
+                )
+                if opened is None:
+                    # The sender and recovery both use the same message lock.
+                    old.status = MessageStatus.PENDING
+                    old.lease_id = old.lease_until = None
+                    old.next_attempt_at = old.updated_at = self.clock()
 
     async def replace_unaccepted(
         self,
