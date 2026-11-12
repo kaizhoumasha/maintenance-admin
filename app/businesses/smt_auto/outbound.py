@@ -426,7 +426,32 @@ class Outbound:
             return (1, plate.id)
         return (0 if plate.grant_kind in ("NEXT", "RETRY") else 2, plate.id)
 
-    async def _platform_clear(self, session, work_line_id):
+    async def _rack_put_accepted(self, session, plate, rack_arm_code):
+        put = (plate.source_arrival_snapshot or {}).get("put_command", {})
+        params = put.get("params", {})
+        if (
+            not rack_arm_code
+            or put.get("device_code") != rack_arm_code
+            or params.get("source") != SCAN
+            or params.get("target", {}).get("location_type") != "FIVE_LAYER_RACK"
+            or not plate.put_call_key
+            or not plate.put_command_code
+        ):
+            return False
+        view = await self.ecs.get_by_call(session, owner=OWNER, call_key=plate.put_call_key)
+        return bool(
+            view
+            and view.command_code == plate.put_command_code
+            and view.device_code == rack_arm_code
+            and view.task_type == "PICK_AND_PUT"
+            and view.ack_received
+            and view.delivery_status == "DONE"
+            and view.status == "WAITING_RESULT"
+            and not view.hold_reason
+            and not view.needs_reconciliation
+        )
+
+    async def _platform_allows_pick(self, session, work_line_id, plate, rack_arm_code):
         outstanding = await session.scalars(
             select(AutoOutboundPlate)
             .join(AutoTask, AutoTask.task_id == AutoOutboundPlate.task_id)
@@ -444,6 +469,13 @@ class Outbound:
             ):
                 continue
             if await self._result(session, original, "pick", empty=True):
+                continue
+            if (
+                plate.bin_work_id is not None
+                and plate.grant_kind == "NEXT"
+                and plate.grant_parent_plate_id == original.id
+                and await self._rack_put_accepted(session, original, rack_arm_code)
+            ):
                 continue
             return False
         return True
@@ -469,7 +501,9 @@ class Outbound:
                 return plate
             scanner = bindings.get(line.device_bindings.get("PLATFORM_SCANNER"))
             role = await self._pick_role(session, task, plate, bindings, scanner)
-            if role is None or not await self._platform_clear(session, work_line_id):
+            if role is None or not await self._platform_allows_pick(
+                session, work_line_id, plate, line.device_bindings.get("RACK_ARM")
+            ):
                 return plate
             candidates = await session.scalars(
                 select(AutoOutboundPlate).where(
@@ -531,6 +565,14 @@ class Outbound:
                 "pick_command": original,
             }
         await observe_arm_result(self.ecs, session, plate, "pick", owner=OWNER)
+        if plate.bin_work_id is not None and plate.grant_kind == "NEXT":
+            # Only the next BIN pick overlaps. Target decisions can request rack movement.
+            parent = await session.get(AutoOutboundPlate, plate.grant_parent_plate_id)
+            if parent is None or (
+                parent.put_consumed_at_ms is None
+                and await self._result(session, parent, "put") is None
+            ):
+                return plate
         scan = await self._pick_scan(session, plate)
         if scan is None:
             empty = await self._result(session, plate, "pick", empty=True)
