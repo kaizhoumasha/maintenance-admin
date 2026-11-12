@@ -192,11 +192,11 @@ async def test_counted_outlet_replays_original_and_waits_for_applied_rack_arriva
         if column == 1:
             operation_id = str(uuid7())
             first = await decide("put_target", barcode, operation_id=operation_id, **args)
-            assert first.json()["data"] == {
-                "result": "REPLENISH_REQUIRED",
-                "location_code": "POINT",
-                "incoming_rack": {"rack_id": "RACK", "target_face": "A"},
-            }
+            data = first.json()["data"]
+            assert data["result"] == "ACCEPT" and data["target_preparation"] == "REPLACE"
+            assert data["target_locator"]["rack_id"] == "RACK"
+            assert data["target_locator"]["rack_face"] == "A"
+            assert data["target_locator"]["slot_id"] == "S1"
             dispatch.pending = (object(),)
             waiting = await decide("put_target", barcode, **args)
             assert waiting.json()["data"]["result"] == "WAIT"

@@ -905,9 +905,9 @@ async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(
         assert not x.transports
 
 
-async def test_replenish_waits_for_original_enter_then_redecides(xray):
+async def test_rack_enter_preserves_original_slot_authorization(xray):
     x = xray
-    x.decisions["put_target_decide"] = replenish(x)
+    x.decisions["put_target_decide"] = rack_slot(x) | {"target_preparation": "REPLACE"}
     await outlet(x)
     await x.drain()
     (enter,) = x.transports
@@ -919,12 +919,9 @@ async def test_replenish_waits_for_original_enter_then_redecides(xray):
     assert x.requests[-1] == first
     assert len(x.transports) == 1
 
-    x.decisions["put_target_decide"] = rack_slot(x)
     await x.transport_result(enter)
     await x.drain()
-    renewed = x.requests[-1]
-    assert first["operation_id"] != renewed["operation_id"]
-    assert first["data"] == renewed["data"]
+    assert target_requests(x) == [first]
     put = x.commands[-1]
     assert put["task_type"] == "PUT_TO_RACK"
     target = put["params"]["target"]
@@ -934,6 +931,7 @@ async def test_replenish_waits_for_original_enter_then_redecides(xray):
     await x.result(put, actual_qty=1, position="TARGET", actual_target=actual)
     await x.drain()
     assert x.facts[0]["data"]["to_locator"] == rack_slot(x)["target_locator"]
+    assert x.facts[0]["data"]["target_operation_id"] == first["operation_id"]
 
 
 def target_requests(x):
@@ -961,24 +959,31 @@ async def test_concurrent_reels_reuse_one_enter_across_restart(xray):
     x = xray
     if x.dialect != "postgresql":
         pytest.skip("requires PostgreSQL serializable transactions")
-    x.decisions["put_target_decide"] = replenish(x)
     x.decisions["pkg_decide"] = {"result": "BYPASS_COUNT"}
-    reel_ids = [str(uuid4()), str(uuid4())]
-    for reel in reel_ids:
-        await x.entry(reel_id=reel)
+    materials = {str(uuid4()): column for column in (3, 4)}
+
+    def decide(request):
+        column = int(request["data"]["barcode"])
+        return rack_slot(x, slot_id=f"A-0{column}", rack_column=column) | {
+            "target_preparation": "REPLACE"
+        }
+
+    x.decisions["put_target_decide"] = decide
+    for reel, column in materials.items():
+        await x.entry(reel_id=reel, barcode=str(column))
     await x.drain()
     for cmd in x.commands[:]:
         await x.result(cmd, decision="BYPASS_COUNT", mode="BYPASS")
         await x.event(
             "MATERIAL_ARRIVED",
             reel_id=cmd["params"]["reel_id"],
-            barcode=x.barcode,
+            barcode=str(materials[cmd["params"]["reel_id"]]),
             mode="BYPASS",
             ready_for_pick=True,
         )
-    await asyncio.gather(*(x.advance_reel(reel) for reel in reel_ids))
+    await asyncio.gather(*(x.advance_reel(reel) for reel in materials))
     assert await x.dispatch() == 2
-    await asyncio.gather(*(x.advance_reel(reel) for reel in reel_ids))
+    await asyncio.gather(*(x.advance_reel(reel) for reel in materials))
     await x.drain()
     (enter,) = x.transports
     first = target_requests(x)
@@ -989,30 +994,26 @@ async def test_concurrent_reels_reuse_one_enter_across_restart(xray):
     assert x.transports == [enter]
     assert len(target_requests(x)) == 2
 
-    x.decisions["put_target_decide"] = rack_slot(x)
     await x.transport_result(enter)
     await asyncio.gather(x.advance(), x.advance())
     await x.drain()
     assert len(x.transports) == 1
-    renewed = target_requests(x)[2:]
-    assert len(renewed) == 2
-    assert [r["data"] for r in renewed] == [r["data"] for r in first]
-    assert {r["operation_id"] for r in renewed}.isdisjoint(r["operation_id"] for r in first)
+    assert target_requests(x) == first
     (put,) = [c for c in x.commands if c["task_type"] == "PUT_TO_RACK"]
     await placed(x, put)
     await x.drain()
-    assert len([c for c in x.commands if c["task_type"] == "PUT_TO_RACK"]) == 2
+    puts = [c for c in x.commands if c["task_type"] == "PUT_TO_RACK"]
+    assert len(puts) == 2
+    assert {c["params"]["target"]["slot_id"] for c in puts} == {"A-03", "A-04"}
+    assert target_requests(x) == first
 
 
-@pytest.mark.parametrize("mode", ["ROTATE_REQUIRED", "DEPART_REQUIRED", "REPLACE_REQUIRED"])
+@pytest.mark.parametrize("mode", ["ROTATE", "REPLACE"])
 async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
     x = xray
     first_put = await ready_rack_put(x)
-    plan = {"result": mode, "location_code": x.point, "current_rack": {"rack_id": "RACK-A"}}
-    if mode == "ROTATE_REQUIRED":
-        plan["target_face"] = "B"
-    elif mode == "REPLACE_REQUIRED":
-        plan["incoming_rack"] = {"rack_id": "RACK-B", "target_face": "B"}
+    rack = "RACK-B" if mode == "REPLACE" else "RACK-A"
+    plan = rack_slot(x, rack=rack, face="B") | {"target_preparation": mode}
     x.decisions["put_target_decide"] = plan
     x.decisions["departure_decide"] = {
         "result": "READY",
@@ -1027,11 +1028,9 @@ async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
     assert len(x.transports) == 1
     assert not any(r["operation"] == "rack.departure_decide@v1" for r in x.requests)
 
-    if mode == "DEPART_REQUIRED":
-        x.decisions["put_target_decide"] = {"result": "WAIT", "retry_after_ms": 1000}
     await placed(x, first_put)
     await x.drain()
-    if mode == "ROTATE_REQUIRED":
+    if mode == "ROTATE":
         _, move = x.transports
         assert move["data"]["kind"] == "RACK_ROTATE"
         assert move["data"]["rcs_template_id"] == "CK04"
@@ -1042,17 +1041,6 @@ async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
         _, depart, *remaining = x.transports
         assert depart["data"]["rack_id"] == "RACK-A"
         assert depart["data"]["target"] == {"kind": "ZONE", "location_code": "RETURN-STOCK"}
-        if mode == "DEPART_REQUIRED":
-            assert not remaining
-            assert target_requests(x)[-1]["operation_id"] != original["operation_id"]
-            assert target_requests(x)[-1]["data"] == original["data"]
-            await x.transport_result(
-                depart, final_position={"kind": "RACK_POSITION", "location_code": "STOCK-SLOT"}
-            )
-            x.restart()
-            await x.drain()
-            assert len(x.transports) == 2
-            return
         (move,) = remaining
         assert move["data"]["rack_id"] == "RACK-B"
         assert move["data"]["target_face"] == "B"
@@ -1065,17 +1053,47 @@ async def test_rack_move_waits_for_original_put_and_resumes(xray, mode):
     await x.drain()
     assert target_requests(x)[-1] == original
 
-    rack = "RACK-B" if mode == "REPLACE_REQUIRED" else "RACK-A"
-    x.decisions["put_target_decide"] = rack_slot(x, rack=rack, face="B")
     await x.transport_result(move)
     await x.drain()
-    assert target_requests(x)[-1]["operation_id"] != original["operation_id"]
-    assert target_requests(x)[-1]["data"] == original["data"]
+    assert target_requests(x)[-1] == original
     final_put = x.commands[-1]
     assert final_put["task_type"] == "PUT_TO_RACK"
     assert final_put["params"]["source_event_id"] == source
     assert final_put["params"]["target"]["rack_id"] == rack
     assert final_put["params"]["target"]["rack_face"] == "B"
+
+
+async def test_replacement_waits_for_an_authorized_plate_while_arm_is_busy(xray):
+    x = xray
+    initial = await ready_rack_put(x)
+    await placed(x, initial)
+    await x.drain()
+    x.decisions["put_target_decide"] = {
+        "result": "ACCEPT",
+        "target_locator": {"type": "TRANSIT_BIN"},
+    }
+    await outlet(x, reel_id=str(uuid4()))
+    await x.drain()
+    transit = x.commands[-1]
+    assert transit["task_type"] == "PUT_TO_BIN"
+
+    x.decisions["put_target_decide"] = rack_slot(x, slot_id="A-04", rack_column=4)
+    await outlet(x, reel_id=str(uuid4()))
+    await x.drain()
+    x.decisions["put_target_decide"] = rack_slot(x, rack="RACK-B", face="B") | {
+        "target_preparation": "REPLACE"
+    }
+    await outlet(x, reel_id=str(uuid4()))
+    await x.drain()
+    assert len(x.transports) == 1
+    assert not any(r["operation"] == "rack.departure_decide@v1" for r in x.requests)
+
+    await placed(x, transit)
+    await x.drain()
+    put = x.commands[-1]
+    assert put["task_type"] == "PUT_TO_RACK"
+    assert put["params"]["target"]["slot_id"] == "A-04"
+    assert not any(r["operation"] == "rack.departure_decide@v1" for r in x.requests)
 
 
 @pytest.mark.parametrize("plan", ["unknown", "wrong-point", "wrong-face-result", "missing-face"])
@@ -1220,7 +1238,7 @@ async def test_wait_keeps_original_unsettled_command_eligible(xray):
     assert x.commands == [count]
 
 
-async def test_departure_wait_reuses_original_until_due(xray):
+async def test_departure_wait_reuses_original_and_implicit_entry_requires_vacancy(xray):
     x = xray
     first = await ready_rack_put(x)
     await placed(x, first)
@@ -1250,3 +1268,20 @@ async def test_departure_wait_reuses_original_until_due(xray):
     original, renewed = [r for r in x.requests if r["operation"] == "rack.departure_decide@v1"]
     assert original["operation_id"] != renewed["operation_id"]
     assert original["data"] == renewed["data"]
+
+    x.decisions["put_target_decide"] = rack_slot(x, rack="RACK-B", face="B")
+    x.clock.advance(1)
+    await x.drain()
+    assert len(x.transports) == 2  # Departure submission alone does not prove vacancy.
+    target = target_requests(x)[-1]
+
+    await x.transport_result(
+        x.transports[-1], final_position={"kind": "RACK_POSITION", "location_code": "STOCK-SLOT"}
+    )
+    await x.drain()
+    assert len(x.transports) == 3
+    assert x.transports[-1]["data"]["rack_id"] == "RACK-B"
+    await x.transport_result(x.transports[-1])
+    await x.drain()
+    assert target_requests(x)[-1] == target
+    assert x.commands[-1]["task_type"] == "PUT_TO_RACK"

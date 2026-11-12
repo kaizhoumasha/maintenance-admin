@@ -154,11 +154,12 @@ class TransitAccept(Strict):
     target_locator: TransitLocator
 
 
-class RackAccept(Strict):
+class RackAccept(OmitAbsent, Incoming):
     result: Literal["ACCEPT"]
     target_locator: RackLocator
     reel_diameter: Diameter
     reel_thickness: PositiveNumber
+    target_preparation: Literal["ROTATE", "REPLACE"] | None = None
 
     @model_validator(mode="after")
     def check_diameter(self) -> Self:

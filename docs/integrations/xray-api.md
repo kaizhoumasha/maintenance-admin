@@ -32,9 +32,8 @@
 | 出料 | O1 | WES → ECS | [`APPLY_VERIFY_DECISION`（`OK`）／`APPLY_PKG_DECISION`（`BYPASS_COUNT`）](#xray-ecs-route) | 复核放行走 `COUNTED`，原清点前决定免清点走 [`BYPASS`](#xray-bypass)。 |
 | 出料 | O2 | ECS → WES | [原正常出料判定 Result](#xray-outlet-result) | 按原命令关闭出料动作。 |
 | 出料 | O3 | ECS → WES | [`MATERIAL_ARRIVED` Event](#xray-arrived) | 本盘实际到位、停稳、保持且可取时触发一次选位。 |
-| 出料 | O4 | WES → WMS | [`inbound.xray.put_target_decide@v1`](#xray-target) | WMS 给出精确放料目标、退料架准备方案或等待决定。 |
+| 出料 | O4 | WES → WMS | [`inbound.xray.put_target_decide@v1`](#xray-target) | WMS 给出本盘精确目标及可选的架准备指示，或返回等待。 |
 | 架准备 | R1 | WES → WMS；WMS → WES | [`rack.departure_decide@v1`／`transport.task.submit@v1`／`transport.task.resulted@v1`](#xray-rack) | 按 WMS 方案补架、换面、换架或退架，使用公共动作完成条件。 |
-| 架准备 | R2 | WES → WMS | [`inbound.xray.put_target_decide@v1`](#xray-target) | 原准备完成后，沿原盘和到料事实用新 operation_id 重新选位。 |
 | 上架 | P1 | WES → ECS | [`PUT_TO_RACK`](#xray-ecs-put-rack)／[`PUT_TO_BIN`](#xray-ecs-put-bin) | 五层架按[公共架就绪证据](#xray-rack)和授权储位放料。通箱位由 WES 在 A/B/C/D 中随机选定并冻结。 |
 | 上架 | P2 | ECS → WES | [`PUT_TO_RACK` Result](#xray-ecs-put-rack-result)／[`PUT_TO_BIN` Result](#xray-ecs-put-bin-result) | 按原命令确认实际落位或入箱。 |
 | 上架 | P3 | WES → WMS | [`inbound.xray.put_report@v1`](#xray-put-report) | 按原报告身份交付本盘实际去向。 |
@@ -70,7 +69,7 @@ flowchart TD
     F -->|NG| N
     O --> T{"WMS 选定上架分支"}
     T -->|需要准备退料架| A["按 WMS 方案执行公共货架动作"]
-    A -->|原准备完成，重新选位| T
+    A -->|核对原授权及实际到位| R
     T -->|五层架精确储位| R["原架原点原面就绪，机械臂放入目标储位"]
     T -->|通箱中转| B["WES 随机选 A/B/C/D，机械臂放入通箱"]
     B --> H["人工搬运通箱及单层架，另行手工上架"]
@@ -835,13 +834,13 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 <a id="xray-target"></a>
 ### 2.9 出口选位
 
-**WES → WMS 决定请求**。本盘实际可取后发起。WMS 决定本盘走五层退料架还是通箱，五层架工作位需要准备时返回架级方案。只有精确储位授权可以用于五层架放料。COUNTED 使用已复核的 `new_barcode`（SPKG）关联发标物料，BYPASS 使用 `barcode` 及 `mode` 求值。复核与到料是否属于同一次进机由 WES 按 [2.8.3](#xray-outlet-conflict) 核对。
+**WES → WMS 决定请求**。本盘实际可取后发起。选位请求沿 SMT 自动线的分工，由 WES 在内部核对当前架号、架面、空位、未知状态和在途作业。WMS 决定本盘走五层退料架还是通箱，五层架在同一决定中返回精确目标和可选准备指示。COUNTED 使用已复核的 `new_barcode`（SPKG）关联发标物料，BYPASS 使用 `barcode` 及 `mode` 求值。复核与到料是否属于同一次进机由 WES 按 [2.8.3](#xray-outlet-conflict) 核对。
 
 | 项目 | 值 |
 | --- | --- |
 | 方向 / 端点 | WES → WMS，`POST /api/v1/wes/decisions` |
 | operation | `inbound.xray.put_target_decide@v1` |
-| 触发 | 原正常出口实际可取事件已保存。首次选位、有效 WAIT 到期或原架准备完成后，按本盘当前阶段发起。 |
+| 触发 | 原正常出口实际可取事件已保存。首次选位或有效 WAIT 到期时按本盘当前阶段发起。架准备结束后继续消费原 ACCEPT。 |
 
 ```json
 {
@@ -892,11 +891,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 
 | HTTP / code | 完整响应 `data` | WES 处理 |
 | --- | --- | --- |
-| 200 / DECIDED | `result=ACCEPT`，另含 `target_locator`（RACK_SLOT）、`reel_diameter` 和 `reel_thickness`，见上例 | 保存原储位授权。核对原架、工作位和面已就绪后安排放料。 |
-| 200 / DECIDED | `{"result":"REPLENISH_REQUIRED","location_code":"XRAY-RACK-01","incoming_rack":{"rack_id":"RETURN-RACK-02","target_face":"A"}}` | WMS 确认本工作位可补，授权按指定新架和入场面补架。WES 按 2.10 核对并登记原进场。 |
-| 200 / DECIDED | `{"result":"ROTATE_REQUIRED","location_code":"XRAY-RACK-01","current_rack":{"rack_id":"RETURN-RACK-01"},"target_face":"B"}` | 当前原架的目标面可用，按方案换面。 |
-| 200 / DECIDED | `{"result":"REPLACE_REQUIRED","location_code":"XRAY-RACK-01","current_rack":{"rack_id":"RETURN-RACK-01"},"incoming_rack":{"rack_id":"RETURN-RACK-02","target_face":"A"}}` | 旧架按公共离场决定调走，再补入新架。 |
-| 200 / DECIDED | `{"result":"DEPART_REQUIRED","location_code":"XRAY-RACK-01","current_rack":{"rack_id":"RETURN-RACK-01"}}` | 旧架按公共离场决定调走，之后重新选位。 |
+| 200 / DECIDED | `result=ACCEPT`，另含 `target_locator`（RACK_SLOT）、`reel_diameter`、`reel_thickness` 及可选 `target_preparation`，见上例 | 保存原储位授权。核对原架、工作位和面已就绪后安排放料。 |
 | 200 / DECIDED | `{"result":"ACCEPT","target_locator":{"type":"TRANSIT_BIN"}}` | 保存通箱中转分支。WES 随机选择并冻结箱位，再登记 PUT_TO_BIN。 |
 | 200 / DECIDED | `{"result":"WAIT","retry_after_ms":1000}` | 保留原出口任务，按公共规则续问。等待期间按工作线规则告警。 |
 
@@ -909,34 +904,27 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 | reel_diameter | integer / 是 | `7 / 13 / 15` 英寸。 |
 | reel_thickness | number / 是 | 正数，毫米，沿 WMS 返回的本盘尺寸。 |
 
-| 退料架准备响应字段 | 类型 / 必填 | 约束 |
-| --- | --- | --- |
-| location_code | Identifier / 四种准备分支均必填 | 本线已配置的退料架工作位。 |
-| current_rack.rack_id | Identifier / ROTATE_REQUIRED、REPLACE_REQUIRED、DEPART_REQUIRED 必填 | WMS 指定的当前原架，须与原工作位的可信在位事实匹配。 |
-| incoming_rack.rack_id / incoming_rack.target_face | Identifier / enum，REPLENISH_REQUIRED、REPLACE_REQUIRED 均必填 | 新架及入场面。面为 A 或 B，换架时新旧架不同。 |
-| target_face | enum / ROTATE_REQUIRED 必填 | 同一原架的目标面，为 A 或 B，须与可信当前面不同。 |
+| target_preparation | enum / 可选 | `ROTATE` 或 `REPLACE`，目标架号和架面取同次 `target_locator`。省略表示可直接使用已就绪的目标架，或在 WES 确认工作位空置后安排进场。通箱分支省略此字段。 |
 
-各准备分支仅携带上表及其示例规定的字段，架级许可由 [2.10](#xray-rack) 推进。暂无可执行的放料或准备方案时返回 WAIT。通箱分支的 `target_locator` 仅含 `type=TRANSIT_BIN`，由 WES 按 [2.11](#xray-put) 选择并冻结箱位。
+暂无可执行的目标时返回 WAIT。通箱分支的 `target_locator` 仅含 `type=TRANSIT_BIN`，由 WES 按 [2.11](#xray-put) 选择并冻结箱位。
 
 <a id="xray-rack"></a>
 ### 2.10 五层退料架工作位
 
 WES 按工作线绑定退料架工作位，通过 `RackDispatch.progress(...)` 跟踪原架、实际面向及进场、换面和离场责任。启用或重启时，以匹配本线、本点、原架和面的原进场或换面成功结果恢复作业。发现已有在位架但缺少可信记录时，由现场沿既有流程核对。
 
-独立补架以 WMS 对本次原选位请求返回的 `REPLENISH_REQUIRED` 为可补依据。WES 在同一事务核对原请求、配置工作位、已知在位和未结责任。原工作位已有在位架、原绑定变化或存在冲突责任时，保存原证据待核对。原决定重报沿用同一进场作业。RCS 进场时复核实际点位和互锁。整机 Status、空查询和离场提交接纳均不能证明物理空位。
+WES 根据同一份精确储位授权推进架准备。原绑定变化、已有冲突责任或目标证据不匹配时留证待核对。整机 Status、空查询和离场提交接纳均不能证明物理空位。
 
-WMS 的准备决定关联到本点原作业和原 Transport。同一点已有活动准备作业时，等待盘关联该作业，直到原动作达到公共完成条件。WES 用 `PointDemand` 表达原架的待服务需求，用 `DirectHandoff` 表达机械臂取放责任。原取放未结或责任未知时，保留原架及作业，暂停换面和离场。空闲架需要离场时，按原作业确认需求及交接责任后请求 WMS 决定去向。
-
-| 准备决定 | 重新选位的依据 |
+| 原授权及当前事实 | WES 推进 |
 | --- | --- |
-| REPLENISH_REQUIRED | 原进场结果已应用成功，架号、实际工作位和面与冻结方案一致。 |
-| ROTATE_REQUIRED | 原换面结果已应用成功，原架、原工作位和实际目标面一致。 |
-| REPLACE_REQUIRED | 原旧架离场按公共规则完成调度后补入新架。新架的原进场结果已应用成功，架号、实际工作位和面一致。 |
-| DEPART_REQUIRED | 通过 `rack.departure_decide@v1` 获得 WMS 的 READY 去向，按公共规则完成原离场调度。WMS 指定库区时回库。 |
+| 原架、工作位和架面均已就绪 | 保留本盘授权，使用原格位。 |
+| 省略 `target_preparation`，工作位已确认空置 | 复用公共空位门禁登记目标架进场。 |
+| `target_preparation=ROTATE` | 核对当前是同一目标架后安排换面，等待原换面结果应用成功。 |
+| `target_preparation=REPLACE` | 已知在位旧架时，先通过公共离场决定处理旧架，再调入指定目标架。点位无已登记架作业或冲突责任时可按该显式授权提交目标架进场，由 RCS 核对实际空位和互锁。 |
 
-并发盘在同一点已有架准备时保留各自原决定，等待该准备完成后再重新选位。架准备期间已登记的原取放仍按原命令收口。
+同一点一次推进一个原准备作业。其他料盘保留各自的精确目标，等待公共作业结束，再核对各自授权的架号和架面。现架面仍有其他已获授权且未放料的料盘时，先完成该架面的需求。原取放未结或责任未知时，`PointDemand` 和 `DirectHandoff` 继续保护现架，暂停换面和离场。正常架准备完成后沿用本盘原 `operation_id`、原到料事件和原储位授权，实际放料报告仍引用这条选位请求。通箱路径独立推进。
 
-准备完成后保留原 reel_id 和到料 event_id，以新 operation_id 重新请求 [2.9](#xray-target)。通信重试沿用原请求。只有当前有效的精确储位授权和匹配的架、工作位、面向事实才允许登记 `PUT_TO_RACK`。迟到的旧架决定、目标冲突、准备失败或结果未知留证待核对。通箱路径独立推进。
+已有旧版架级准备决定继续按原记录恢复。旧版决定只有架级许可，准备完成后仍须重新求取本盘精确储位。新流程直接使用同一份 `ACCEPT` 的精确授权。
 
 进场、换面和离场统一复用 [公共货架调度](../superpowers/specs/2026-11-02-shared-rack-dispatch-design.md)、[离场决定合同](workline-business-api.md#rack-departure-confirmed-wire) 和 [Transport 合同](wms-transport.md)。公共离场提交接纳只结束原离场调度责任，WMS/RCS 继续裁决实际点位和搬运互锁。
 
@@ -1695,7 +1683,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | `PTEST-PART-02,Q50000,MTEST-MPN-02,D260102,LTEST-LOT-02,STEST-SERIAL-02` | 清点，标签数量同样使用 ECS 实测值。CCD 读错盘码或未读出时返回 `NG`。 | 同架同面，使用第二盘配置的架位。 |
 | 其他有效原码 | 免清点。 | 通箱，WES 按 `XRAY_TRANSIT_TARGETS` 选位。 |
 
-`XRAY_WMS_MOCK_TARGETS` 是 JSON 对象，默认空。结构为 `workline_code → 完整原码 → RackAccept`，每个 `RackAccept` 使用 [2.9](#xray-target) 的 `ACCEPT / RACK_SLOT` 报文 `data`。两盘使用同架同面的两个不同空位，工作位和坐标须与 `XRAY_RETURN_RACKS` 一致，盘径和厚度按实物填写。使用搬运架时，空工作位先返回 `REPLENISH_REQUIRED`，有在途准备时返回 `WAIT`。RackDispatch 确认原搬运任务已完成且指定架号、工作位、面向均匹配后，新的 Operation 才返回架位。
+`XRAY_WMS_MOCK_TARGETS` 是 JSON 对象，默认空。结构为 `workline_code → 完整原码 → RackAccept`，每个 `RackAccept` 使用 [2.9](#xray-target) 的 `ACCEPT / RACK_SLOT` 报文 `data`。两盘使用同架同面的两个不同空位，工作位和坐标须与 `XRAY_RETURN_RACKS` 一致，盘径和厚度按实物填写。使用搬运架且点位可提交准备时，同一次 `ACCEPT` 即返回精确格位及 `target_preparation=REPLACE`。有在途准备且尚未授权本盘时可返回 `WAIT`。已授权的本盘等 RackDispatch 确认原搬运任务完成后，沿用原授权放料。
 
 现场已摆放测试架时，在该联调工作线的 `XRAY_RETURN_RACKS` 配置中填写 `fixed_test_rack` 为实物架号，仅配置当前可用的一面及格位，省略搬运模板。WES 核对指定架号、工作位、面向、格位及公共搬运责任后直接向 ECS 下发 `PUT_TO_RACK`。ECS 核验实际可放性并回传原放盘结果。固定架仅适用于启用本地 X-Ray Mock 的工作线。
 
@@ -1744,7 +1732,7 @@ Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工
 | 需清点链路 | 按进机身份及阶段记录关联清点、贴标、CCD 和出口，不按最近命令猜测；实测 0 有效；同码并行使用各自 SPKG，另一盘合法新码及未读出新码均不得放行。清点出料使用已复核新码，实际放料引用原选位 Operation。 |
 | 免清点链路 | 只走入口、BYPASS 出口及后续取放；不生成清点、贴标或 CCD，不构造数量或新码。重复到料只触发一次选位。 |
 | Result／Event 乱序和冲突 | 清点双回调使用同一实测值，覆盖两种顺序及重复。按 2.3.3、2.6.1、2.8.3、2.14.3 核对成功／失败、数量、模式和实际去向冲突。冲突留证，暂停登记新动作，已登记动作保留原责任。 |
-| 退料架工作位 | 覆盖补架、换面、换架、仅退架及回库。首盘无本地架记录时，凭匹配的原补架决定登记一次进场。已知占位、错工作位、配置变化或冲突责任时留证。原架、工作位和面一致后才允许取放，架准备完成后沿原盘和原到料事实以新 operation_id 重新选位。 |
+| 退料架工作位 | 覆盖补架、换面、换架、仅退架及回库。首盘显式准备或确认空位后只登记一次进场。已知占位、错工作位、配置变化或冲突责任时留证。原架、工作位和面一致后沿原选位授权取放。 |
 | 同点并发 | 多盘共享一次架准备。用隔离 PostgreSQL 验证取放与换面、离场互斥，回滚和 40001 后只登记一次原意图。 |
 | 通箱 | 随机一次并冻结完整目标，重启沿用原箱位。覆盖接纳后满箱跨过 300 秒、人工处理、ECS 自动续作及原 Result 补报，实际目标一致才报告。 |
 | 技术异常与实际排出 | 技术失败不由 WES 另发 NG；排出事实按本次进机报告，命令按各自 Result 结算。覆盖 NG Event 与 FAILED／未知命令并存、Event 先到、Result 先到及重复，只形成一个冻结报告。 |
