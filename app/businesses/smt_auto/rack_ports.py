@@ -172,24 +172,12 @@ def _ready(data, *, bin_source):
     )
 
 
-def _accept_target(data, *, bin_source):
+def _accept_target(data):
     if not isinstance(data, dict) or data.get("result") != "ACCEPT":
         return False
-    if (
-        not {"result", "target_locator"}
-        <= set(data)
-        <= {"result", "target_locator", "target_preparation", "next_source_action"}
-    ):
-        return False
-    target = data["target_locator"]
-    if not isinstance(target, dict) or set(target) != {
-        "type",
-        "rack_id",
-        "rack_face",
-        "slot_id",
-        "rack_layer",
-        "rack_column",
-    }:
+    target = data.get("target_locator")
+    required = {"type", "rack_id", "rack_face", "slot_id", "rack_layer", "rack_column"}
+    if not isinstance(target, dict) or not required <= target.keys():
         return False
     if target["type"] != "RACK_SLOT" or not all(
         type(target[key]) is int for key in ("rack_layer", "rack_column")
@@ -522,7 +510,7 @@ class AutoRackPorts:
             )
             response = round_.response_snapshot if round_ else None
             data = response.get("data", {}) if isinstance(response, dict) else {}
-            if not _accept_target(data, bin_source=row.bin_work_id is not None):
+            if not _accept_target(data):
                 return None
             target = data["target_locator"]
             preparation = data.get("target_preparation")
