@@ -28,7 +28,7 @@ async def reliable_lifespan(
     client_provider=None,
     on_result: Callable[[str, str | None], None] | None = None,
     observe_delivered: Callable[[Claim, AttemptOutcome], Awaitable[None]] | None = None,
-    on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[None]] | None = None,
+    on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[bool | None]] | None = None,
 ) -> AsyncIterator[Outbox | None]:
     url = database_url or get_settings().DATABASE_URL
     pool = dict(

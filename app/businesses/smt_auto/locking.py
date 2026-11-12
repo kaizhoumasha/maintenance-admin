@@ -1,5 +1,7 @@
 """One ordered AUTO admission lock set; a changed set requires a fresh transaction."""
 
+from time import perf_counter
+
 from sqlalchemy import select
 
 from app.businesses._components.bin_roller.service import RackLockSetChanged
@@ -21,9 +23,20 @@ from .models import (
 )
 
 
-async def lock_line(session, dispatch, work_line_id, *, include_job_ids=(), roller=None):
-    await session.execute(select(WorkLine.id).where(WorkLine.id == work_line_id).with_for_update())
+async def lock_line(
+    session, dispatch, work_line_id, *, include_job_ids=(), roller=None, timing=None
+):
+    started = perf_counter() if timing is not None else 0.0
+    try:
+        await session.execute(
+            select(WorkLine.id).where(WorkLine.id == work_line_id).with_for_update()
+        )
+    finally:
+        if timing is not None:
+            timing["workline_lock_ms"] += (perf_counter() - started) * 1000
     if dispatch is None:
+        if timing is not None:
+            timing["all_locks_ms"] += (perf_counter() - started) * 1000
         return {}
     devices = tuple(
         await session.scalars(
@@ -75,4 +88,6 @@ async def lock_line(session, dispatch, work_line_id, *, include_job_ids=(), roll
     current = await dispatch.admission_jobs(session, work_line_id=work_line_id)
     if tuple(sorted(job.id for job in current)) != original:
         raise RackLockSetChanged("original AUTO dispatch jobs changed during lock acquisition")
+    if timing is not None:
+        timing["all_locks_ms"] += (perf_counter() - started) * 1000
     return bindings

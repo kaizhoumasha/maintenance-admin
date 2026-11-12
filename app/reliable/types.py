@@ -47,6 +47,7 @@ class DuplicateMessage(ValueError):
 
 
 RETRY_ACK_TIMEOUT = "RETRY_ACK_TIMEOUT"
+REPLACEMENT_PENDING = "REPLACEMENT_PENDING"
 
 
 @dataclass(frozen=True)

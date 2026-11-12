@@ -222,7 +222,7 @@ async def auto_receiver(request, monkeypatch, postgres_tables):
 
 
 @pytest.fixture
-async def direction_host(monkeypatch):
+async def direction_host(monkeypatch, request, postgres_tables):
     entry = business_composition("smt_auto")
     entry.DEFINITION = BusinessDefinition(code="smt_auto", display_name="Isolated AUTO")
     entry.ENTRY_MODULES = ("app.businesses.smt_auto.request",)
@@ -266,13 +266,21 @@ async def direction_host(monkeypatch):
         ),
     ):
         table.to_metadata(metadata)
-    engine = create_async_engine(
-        "sqlite+aiosqlite://",
-        execution_options={"schema_translate_map": {Base.metadata.schema: None}},
-    )
-    async with engine.begin() as connection:
-        copy_history_tables(metadata)
-        await connection.run_sync(metadata.create_all)
+    database = None
+    if getattr(request, "param", None) == "postgres":
+        url = os.environ.get("TEST_DATABASE_URL")
+        if not url:
+            pytest.skip("TEST_DATABASE_URL required for concurrent AUTO advancement")
+        database = postgres_tables(url, "auto_direction", metadata)
+        engine = await database.__aenter__()
+    else:
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            execution_options={"schema_translate_map": {Base.metadata.schema: None}},
+        )
+        async with engine.begin() as connection:
+            copy_history_tables(metadata)
+            await connection.run_sync(metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     target = TargetConfig("decisions", "http://example.test", DECISIONS_PROTOCOL)
     requests = WmsRequests(
@@ -345,8 +353,13 @@ async def direction_host(monkeypatch):
         Capabilities(None, requests, transport, factory),
         task_admission=SimpleNamespace(allows_task_entry=allows_task_entry),
     )
-    yield SimpleNamespace(factory=factory, requests=requests, dispatch=dispatch, entry=entry)
-    await engine.dispose()
+    try:
+        yield SimpleNamespace(factory=factory, requests=requests, dispatch=dispatch, entry=entry)
+    finally:
+        if database is not None:
+            await database.__aexit__(None, None, None)
+        else:
+            await engine.dispose()
 
 
 @pytest.fixture

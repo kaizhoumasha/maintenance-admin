@@ -18,6 +18,7 @@ from app.transactions import after_commit
 from .config import TargetConfig, positive
 from .policy import retry_delay_s
 from .types import (
+    REPLACEMENT_PENDING,
     DeliverySnapshot,
     FailReason,
     MessageStatus,
@@ -86,7 +87,8 @@ class MessageStore:
         lifecycles=None,
         served_snapshot_protocols=None,
         on_result: Callable[[str, str | None], None] | None = None,
-        on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[None]] | None = None,
+        on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[bool | None]]
+        | None = None,
     ):
         positive(lease_margin_s, "lease_margin_s")
         self.session_factory = session_factory
@@ -161,6 +163,11 @@ class MessageStore:
                     after_skip,
                     ReliableMessage.status == MessageStatus.PENDING,
                     ReliableMessage.next_attempt_at <= now,
+                    or_(
+                        ReliableMessage.pause_reason.is_distinct_from(REPLACEMENT_PENDING),
+                        ReliableMessage.delivery_uncertain,
+                        ReliableMessage.attempts != ReliableMessage.not_received_count,
+                    ),
                     (ReliableMessage.expires_at.is_(None)) | (ReliableMessage.expires_at > now),
                 )
                 .order_by(ReliableMessage.next_attempt_at, ReliableMessage.id)
@@ -227,6 +234,15 @@ class MessageStore:
             )
             now = utc_datetime(self.clock())
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
+                return None
+            if (
+                row.pause_reason == REPLACEMENT_PENDING
+                and not row.delivery_uncertain
+                and row.attempts == row.not_received_count
+            ):
+                row.status = MessageStatus.PENDING
+                row.lease_id = row.lease_until = None
+                row.next_attempt_at = row.updated_at = now
                 return None
             if self._time(session, row.lease_until) <= now or (
                 claim.message.expires_at is not None and claim.message.expires_at <= now
@@ -349,9 +365,11 @@ class MessageStore:
                 .returning(ReliableMessage.id)
             )
             if changed is not None:
+                handled = False
                 if outcome.status == MessageStatus.DONE and self.on_delivered is not None:
-                    await self.on_delivered(session, claim.message)
-                self._notify_terminal(session, claim.message, outcome.status)
+                    handled = await self.on_delivered(session, claim.message)
+                if not handled:
+                    self._notify_terminal(session, claim.message, outcome.status)
         if changed is not None:
             self._log(
                 claim.message,

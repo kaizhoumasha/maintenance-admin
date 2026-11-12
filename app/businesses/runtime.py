@@ -25,7 +25,7 @@ class Capabilities:
 class BusinessRuntime:
     definitions: Mapping[str, BusinessDefinition]
     services: Mapping[str, object]
-    progressions: Mapping[str, Callable[[], Awaitable[int]]] = field(default_factory=dict)
+    progressions: Mapping[str, Callable[..., Awaitable[int]]] = field(default_factory=dict)
 
 
 def build_runtime(
