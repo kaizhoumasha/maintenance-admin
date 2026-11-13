@@ -222,3 +222,73 @@ def test_shared_task_default_publishes_without_result_backend(publisher_app, mon
     with publisher_app.connection_for_write() as connection, connection.Producer() as producer:
         task.apply_async(args=("coarse_sorting",), producer=producer, retry=False)
     assert_business_message_queued(publisher_app)
+
+
+@pytest.mark.parametrize("source", ["immediate", "beat"])
+def test_xray_trace_follows_the_published_task(publisher_app, monkeypatch, caplog, source):
+    import logging
+    from types import SimpleNamespace
+
+    from celery import signals
+
+    from app.business_wakeups import wms_result_committed
+    from app.tasks import business_tasks
+    from app.tasks.celery_app import celery_app
+    from app.xray_dispatch_trace import current_trace
+
+    worker_task = celery_app.tasks["business.advance_pending"]
+    caplog.set_level(logging.INFO, logger="app.xray_dispatch_trace")
+    operation_id = str(uuid7())
+    if source == "immediate":
+        wms_result_committed("inbound.xray.pkg_decide@v1", "business:xray", operation_id)
+    else:
+        scheduler = Scheduler(app=publisher_app, lazy=True)
+        entry = scheduler.Entry(
+            name="xray-pending",
+            app=publisher_app,
+            **celery_app.conf.beat_schedule["advance-business-xray"],
+        )
+        with publisher_app.connection_for_write() as connection, connection.Producer() as producer:
+            scheduler.apply_async(entry, producer=producer, advance=False)
+    with publisher_app.connection_for_write() as connection:
+        queue = connection.SimpleQueue(publisher_app.conf.task_default_queue)
+        try:
+            message = queue.get(block=False)
+            task_id = message.headers["id"]
+            assert message.headers["xray_dispatch_source"] == source
+            assert message.headers.get("xray_trigger_operation_id") == (
+                operation_id if source == "immediate" else None
+            )
+            signals.task_received.send(
+                sender=None,
+                request=SimpleNamespace(
+                    name="business.advance_pending",
+                    id=task_id,
+                    args=("xray",),
+                    request_dict=message.headers,
+                ),
+            )
+            message.ack()
+        finally:
+            queue.close()
+
+    def run(_url, _work):
+        assert current_trace.get().task_id == task_id
+        assert current_trace.get().source == source
+        return 1
+
+    monkeypatch.setattr(business_tasks, "run_with_factory", run)
+    worker_task.push_request(id=task_id, headers=message.headers)
+    try:
+        assert worker_task.run("xray") == 1
+    finally:
+        worker_task.pop_request()
+    assert current_trace.get() is None
+    expected = ["wms_result_committed"] if source == "immediate" else []
+    assert [r.stage for r in caplog.records if getattr(r, "task_id", None) == task_id] == [
+        *expected,
+        "published",
+        "worker_received",
+        "worker_started",
+        "worker_finished",
+    ]

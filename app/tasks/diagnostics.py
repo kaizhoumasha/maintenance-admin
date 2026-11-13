@@ -6,6 +6,7 @@ from celery import signals
 from celery.app.trace import LOG_RETRY
 
 from app.diagnostics import diagnose, diagnostic_text, log_exception, safe_traceback
+from app.xray_dispatch_trace import TASK, DispatchTrace
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,23 @@ class _SafeCeleryException(logging.Filter):
         return True
 
 
+def _xray_published(sender=None, headers=None, body=None, **kwargs):
+    if sender == TASK and headers and body and tuple(body[0]) == ("xray",):
+        trace = DispatchTrace.read(headers.get("id"), headers)
+        if trace:
+            trace.log("published")
+
+
+def _xray_received(request=None, **kwargs):
+    if request is not None and request.name == TASK and tuple(request.args) == ("xray",):
+        trace = DispatchTrace.read(request.id, request.request_dict)
+        if trace:
+            trace.log("worker_received")
+
+
 def install_celery_diagnostics() -> None:
+    signals.after_task_publish.connect(_xray_published, weak=False, dispatch_uid="xray-published")
+    signals.task_received.connect(_xray_received, weak=False, dispatch_uid="xray-received")
     signals.task_failure.connect(_task_failed, weak=False, dispatch_uid="safe-task-failure")
     signals.task_retry.connect(_task_retry, weak=False, dispatch_uid="safe-task-retry")
     for name in ("celery.app.trace", "celery.worker.request"):

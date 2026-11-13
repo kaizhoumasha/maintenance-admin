@@ -34,7 +34,7 @@ async def test_saved_result_notifies_operation_once(storage, delivered):
             reader, await reader.get(ReliableMessage, reference.message_id)
         )
         assert row.status == "DONE" and row.response_raw == b"ok"
-    assert published == [("opaque", "opaque:original")]
+    assert published == [("opaque", "opaque:original", claim.message.operation_id)]
     assert not await store.finish(claim, delivered)
     assert len(published) == 1
 
@@ -89,8 +89,9 @@ async def test_application_sender_publishes_after_result_is_visible(pg_rig, pg_u
         client_factory=lambda _: Peer(),
         on_result=notice,
     ):
+        draft = pg_rig.draft()
         async with pg_rig.factory.begin() as session:
-            reference = await pg_rig.outbox.enqueue(session, pg_rig.draft())
+            reference = await pg_rig.outbox.enqueue(session, draft)
         async with asyncio.timeout(5):
             await notified.wait()
         async with pg_rig.factory() as reader:
@@ -98,7 +99,7 @@ async def test_application_sender_publishes_after_result_is_visible(pg_rig, pg_u
                 reader, await reader.get(ReliableMessage, reference.message_id)
             )
             assert row.status == "DONE" and row.response_raw == b"ok"
-        assert published == [("opaque", None)]
+        assert published == [("opaque", None, draft.operation_id)]
 
 
 async def test_publish_failure_does_not_undo_saved_result(storage, delivered):
@@ -148,10 +149,9 @@ async def test_committed_expiry_notifies_original_association_once(storage, tran
         on_result=lambda *args: notices.append(args),
         records=history_records,
     )
+    draft = storage.draft(ttl=timedelta(seconds=1), business_key="opaque:deadline")
     async with storage.factory.begin() as session:
-        ref = await storage.outbox.enqueue(
-            session, storage.draft(ttl=timedelta(seconds=1), business_key="opaque:deadline")
-        )
+        ref = await storage.outbox.enqueue(session, draft)
     claim = (await store.claim(1, storage.targets))[0] if transition != "pending" else None
     storage.clock.advance(100)
 
@@ -162,11 +162,11 @@ async def test_committed_expiry_notifies_original_association_once(storage, tran
             return await store.recover_expired(10, storage.targets)
         return await store.release(claim, storage.targets)
 
-    assert await expire() == 1 and notices == [("opaque", "opaque:deadline")]
+    assert await expire() == 1 and notices == [("opaque", "opaque:deadline", draft.operation_id)]
     assert await expire() == 0
     if claim is not None:
         assert not await store.finish(claim, delivered)
-    assert notices == [("opaque", "opaque:deadline")]
+    assert notices == [("opaque", "opaque:deadline", draft.operation_id)]
     async with storage.factory() as session:
         row = await message_history_view(
             session, await session.get(ReliableMessage, ref.message_id)
@@ -184,4 +184,4 @@ async def test_native_delivery_hook_leaves_opaque_terminal_callback_unchanged(st
     store, _, claim = await claim_message(storage, lambda *args: published.append(args))
     store.on_delivered = transport_submit_delivered
     assert await store.finish(claim, delivered)
-    assert published == [("opaque", "opaque:original")]
+    assert published == [("opaque", "opaque:original", claim.message.operation_id)]

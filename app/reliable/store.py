@@ -86,7 +86,7 @@ class MessageStore:
         lease_margin_s: float = 5,
         lifecycles=None,
         served_snapshot_protocols=None,
-        on_result: Callable[[str, str | None], None] | None = None,
+        on_result: Callable[[str, str | None, str], None] | None = None,
         on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[bool | None]]
         | None = None,
     ):
@@ -382,7 +382,12 @@ class MessageStore:
 
     def _notify_terminal(self, session, message, status) -> None:
         if status in TERMINAL and self.on_result is not None:
-            after_commit(session, partial(self.on_result, message.operation, message.business_key))
+            after_commit(
+                session,
+                partial(
+                    self.on_result, message.operation, message.business_key, message.operation_id
+                ),
+            )
 
     async def recover_expired(self, limit: int, targets: Mapping[str, TargetConfig]) -> int:
         now = utc_datetime(self.clock())
