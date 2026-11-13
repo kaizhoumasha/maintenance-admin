@@ -2,6 +2,7 @@
 
 import logging
 from datetime import UTC, datetime
+from functools import partial
 from random import choice
 
 from pydantic import ValidationError
@@ -18,6 +19,8 @@ from app.integrations.wms_request.adapter import MOCK_DECISIONS_TARGET
 from app.models import Device, WorkLine
 from app.reliable.lifecycle import EvidencePersistenceError, database_failure_code
 from app.services.workline_service import business_configuration_issue
+from app.transactions import after_commit
+from app.xray_dispatch_trace import current_trace
 
 from .contracts import DECISIONS
 from .definition import DEFINITION, OUTPUT_ARM, XRAY
@@ -662,6 +665,16 @@ class XrayService:
                 **context,
             },
         }
+        if trace := current_trace.get():
+            after_commit(
+                session,
+                partial(
+                    trace.log,
+                    "ecs_command_registered",
+                    wms_operation_id=intent.operation_id if intent else None,
+                    command_code=view.command_code,
+                ),
+            )
 
     @staticmethod
     async def _latest(session, reel, stage):

@@ -516,6 +516,28 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
     assert x.facts[0]["data"]["target_operation_id"] == x.requests[-1]["operation_id"]
 
 
+async def test_xray_trace_logs_committed_command_with_its_wms_operation(xray, caplog):
+    import logging
+
+    from app.xray_dispatch_trace import DispatchTrace, track_worker
+
+    caplog.set_level(logging.INFO, logger="app.xray_dispatch_trace")
+    xray.decisions["pkg_decide"] = {"result": "BYPASS_COUNT"}
+    await xray.entry()
+    task_id = str(uuid4())
+    with track_worker(DispatchTrace(task_id, "beat")):
+        await xray.drain()
+        await xray.drain()
+    stages = [record for record in caplog.records if getattr(record, "task_id", None) == task_id]
+    assert [record.stage for record in stages] == [
+        "worker_started",
+        "ecs_command_registered",
+        "worker_finished",
+    ]
+    assert f"wms_operation_id={xray.requests[0]['operation_id']}" in stages[1].getMessage()
+    assert f"command_code={xray.commands[0]['command_code']}" in stages[1].getMessage()
+
+
 async def test_wms_ok_cannot_release_a_reel_with_a_mismatched_ccd_label(xray):
     x = xray
     x.decisions.update(
