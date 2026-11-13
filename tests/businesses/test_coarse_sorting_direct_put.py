@@ -56,7 +56,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         "bin_location": "B",
         "bin_cell_location": "7",
         "bin_type": str(bin_type),
-        "reel_totalthickness": 120,
+        "reel_totalthickness": "120",
     }
     assert await flow.service.advance(scan_id) == "AWAITING_PUT_RESULT"
     assert not flow.peer.reports
@@ -504,7 +504,7 @@ async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direc
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
     first_put = await dispatch_put(flow, first)
-    assert first_put["params"]["reel_totalthickness"] == 120
+    assert first_put["params"]["reel_totalthickness"] == "120"
     await finish_put(flow, first, first_put)
     flow.peer.report_code = None
     assert await flow.dispatch() == 1
@@ -513,10 +513,10 @@ async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direc
 
     # Simulate WMS knowing the next physical height while the original response was lost.
     flow.peer.decision = {"result": "OK", "binding_id": "BIND-SECOND"}
-    flow.peer.allocate = allocated(flow, reel_totalthickness=140)
+    flow.peer.allocate = allocated(flow, reel_totalthickness=140.25)
     second = await reach_allocate(flow, timestamp=1793206799001)
     second_put = await dispatch_put(flow, second)
-    assert second_put["params"]["reel_totalthickness"] == 140
+    assert second_put["params"]["reel_totalthickness"] == "140.25"
     assert second_put["params"]["bin_cell_location"] == "7"
     assert first_put["command_code"] != second_put["command_code"]
 

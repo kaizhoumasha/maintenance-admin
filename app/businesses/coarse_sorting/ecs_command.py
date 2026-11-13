@@ -97,6 +97,6 @@ class PutToBin(BaseModel):
     bin_type: EcsBinType
     reel_totalthickness: ReelHeight
 
-    @field_serializer("bin_cell_location", when_used="json")
-    def serialize_cell(self, cell: int) -> str:
-        return str(cell)
+    @field_serializer("bin_cell_location", "reel_totalthickness", when_used="json")
+    def serialize_numbers(self, value: int | float) -> str:
+        return str(value)
