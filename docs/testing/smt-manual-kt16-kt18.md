@@ -11,7 +11,7 @@
 
 工厂专项包括 KT16/KT18 × RETURN/TRANSFER × ZONE 同源/异位共 **8 个真实正式 profile 场景**：KT16 OUT55/OUT65、KT18 OUT56/OUT66。同源终位保持 POSITION_CONFLICT/占位；异位成功才可沿原公开闭合事实释放。其他取消回归覆盖目标外安全释放与受管点冲突、目标内 null 朝向且 RETURN 全撤销补偿、有效/STARTED 或 TRANSFER 的 RECOVERY_REQUIRED、取消同架不隐式重入及不同架独立授权继续。正常 TRANSFER 的任务 COMPLETED/原成功进场门禁保持。
 
-证据目录 **C** 为 [本轮 Task1 报告](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/task-1-report.md)，顺序控制的独立复核见 [fix1 review](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/task-1-fix1-review.md)；实施范围见[修复计划](../superpowers/plans/2026-11-02-smt-manual-rack-cancellation-fixes.md)。C 为本地保留证据，不表示已提交交付。真实命令模板：
+证据目录 **C** 为 `本轮 Task1 报告`，顺序控制的独立复核见 `fix1 review`；实施范围见[修复计划](../superpowers/plans/2026-11-02-smt-manual-rack-cancellation-fixes.md)。C 为本地保留证据，不表示已提交交付。真实命令模板：
 
 ```text
 rtk uv run python .superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/run_checks.py LABEL -m pytest <测试文件/筛选> -q
@@ -29,11 +29,11 @@ C 保存对应 `.log/.exit` 与完整测试文件命令。顺序控制覆盖成�
 
 最终增量另补两处保护：混合 BIN+target 计划沿原普通完成资格（包括 target 尚无 Result 的情形），但原 TRANSFER ENTER 的公开已应用 `CANCELLED` 必须否决 completion_confirm，即使架推进尚未消费该结果也不例外；位置观测不能代替 applied outcome。新 SMT-owned ENTER 还检查原业务 rack/action 中未释放的 `POSITION_CONFLICT` 的确切 RACK_POSITION/location，避免向同线其他角色或其他线已知冲突目的点再次进场；只阻断命中的点，无关点仍可推进。保护仅依据当前事务可见的已提交业务投影，不证明全局物理互斥，也不改变共享 BIN_Roller 目的点调度；并发未相互可见的事实不因此获得全局串行保证。后续 sweep 仍读取原公开结果并重算冲突，投影无变化时不重复写 rack/action；只读轮询成本仍保留。
 
-最终补修证据见 [final-fix-report](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-fix-report.md)，修复前发现见 [final-review-report](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-review-report.md)。`final-fix-focused` 使用同一 wrapper，运行 rack_cancellation、factory_profile、supply_completion、task_completion 四文件；83 项与先前测试范围重叠，不相加。五文件 Ruff check/format check 通过；最终冻结快照门禁结果已补录如下。
+最终补修证据见 `final-fix-report`，修复前发现见 `final-review-report`。`final-fix-focused` 使用同一 wrapper，运行 rack_cancellation、factory_profile、supply_completion、task_completion 四文件；83 项与先前测试范围重叠，不相加。五文件 Ruff check/format check 通过；最终冻结快照门禁结果已补录如下。
 
 最终冻结快照专项门禁 `final-focused3` 已通过：**1822 passed / 11 skipped in 296.54s，exit 0**（wrapper 300.83s），覆盖 SMT、BIN_Roller、sorting_task、WMS Transport 及真实 worker/Beat 两例；不是全仓或现场验收。11 项为 SQLite-only 事务/锁分支，其 PostgreSQL 对应覆盖通过。最终源码增量六文件 Ruff check、format check 及 diff check 通过。证据为 [final-focused3.log](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-focused3.log)、[退出码](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-focused3.exit)及 [XML](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-focused3.xml)。
 
-中间 `final-focused2` 的 **1 failed / 1821 passed / 11 skipped** 保留为失败历史：未改的 BIN_Roller 容量测试把最后创建的 demand 误当作当前 waiter，同毫秒 UUID 排序使该前置不成立；仅在测试本地排序三个 demand ID 修正前置，原 50 条断言与参数均保持。补验四例及关联 104 项通过，不与最终门禁或先前专项相加。修复独立复核见 [final-fix-review-report](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/final-fix-review-report.md)，测试前置修正复核见 [capacity-verification-review](../../.superpowers/sdd/2026-11-02-smt-manual-rack-cancellation-fixes/capacity-verification-review.md)。
+中间 `final-focused2` 的 **1 failed / 1821 passed / 11 skipped** 保留为失败历史：未改的 BIN_Roller 容量测试把最后创建的 demand 误当作当前 waiter，同毫秒 UUID 排序使该前置不成立；仅在测试本地排序三个 demand ID 修正前置，原 50 条断言与参数均保持。补验四例及关联 104 项通过，不与最终门禁或先前专项相加。修复独立复核见 `final-fix-review-report`，测试前置修正复核见 `capacity-verification-review`。
 
 测试仅用隔离 PostgreSQL/Redis 与 loopback peer；未部署、未作供应商/现场验证，未扩展供应商 1.1、Status10秒或未消费源元数据的兼容结论。
 

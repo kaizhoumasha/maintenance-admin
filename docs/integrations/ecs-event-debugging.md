@@ -69,7 +69,7 @@ POST 完成一次接收尝试后 HTTP 为 200；原接收器状态在 status_cod
 
 ### 按设备检索持久历史
 
-统一存储启用后，`integration_exchange.device_code` 保存原 ECS 信封设备码；无设备信封的 WMS 交互和历史未知值保持 NULL。该字段不关联设备表外键，设备删除、重分配或事件重报不改写原值，也不改变回调摘要和幂等身份。旧 `callback_receipt` 只属于切换前来源，收缩后不再存在，不能用它查询新交互。
+启用三张 HTTP 往来表后，`ecs_http_exchange.device_code` 保存原 ECS 信封设备码。原收据及幂等回复由当前运行表 `callback_receipt` 保存。设备删除、重分配或事件重报均保持原设备码和原幂等身份。切换前使用 `integration_exchange.device_code`，两种模式均可通过下方摘要视图查询。
 
 通过统一查询接口或无正文 SQL 视图检索，例如 PostgreSQL：
 
@@ -81,7 +81,7 @@ WHERE device_code = 'RS-INPUT-ARM-01'
 ORDER BY created_at DESC, id DESC;
 ```
 
-这里的 `id` 为交互 UUID，原数值事件 ID 保留在 RECEIPT 主实体的 `receipt_id`，不会被 UUID 替换。PostgreSQL 的完整设备码哈希索引继续支持等值检索；SQLite 使用普通索引，不截断长码。历史 NULL 不通过当前绑定猜测回填。原资格到期后，运行事件读口返回 NOT_FOUND，历史查询在合法保留窗口内仍可查看旧实例。
+这里的 `id` 为交互 UUID。启用新表后，它定位一次 HTTP 往来，原数值事件 ID 仍通过 `receipt_id` 定位。设备码使用完整值等值检索，历史空值保留。原受理资格到期后，运行事件读口返回 NOT_FOUND，已采集往来在过程留存窗口内仍可查询。
 
 接口、权限、原文可用性和维护窗口见[统一对接历史](integration-history.md)。切换前设备字段的来源设计见[设备检索设计](../superpowers/specs/2026-10-29-callback-receipt-device-code-design.md)；历史设计不能作为当前物理表结构。
 
