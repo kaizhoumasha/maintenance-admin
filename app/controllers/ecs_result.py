@@ -5,11 +5,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from fastapi.responses import Response
 
 from app.core.database import session_factory
+from app.core.identifiers import uuid7
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.diagnostics import log_exception
 from app.integrations.ecs_command.result import receive_ecs_result, reply
+from app.integrations.http_exchanges import capture_callback
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_callback.snapshots import (
     SNAPSHOT_PREVIEW_BYTES,
     allow_snapshot,
@@ -66,6 +69,9 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
 )
 async def result_callback(request: Request, background_tasks: BackgroundTasks):
     received_at = datetime.now(UTC)
+    exchange_id = uuid7()
+    commit_pending = False
+    transaction_failed = False
     raw = b""
     body_available = False
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
@@ -84,13 +90,27 @@ async def result_callback(request: Request, background_tasks: BackgroundTasks):
                     raw,
                     service,
                     on_result=getattr(request.app.state, "ecs_result_committed", None),
+                    attempt_id=str(exchange_id),
                 )
+                commit_pending = True
     except Exception as error:
+        transaction_failed = True
         log_exception(
             logger, "ECS result transaction failed", error, component="http", phase="ecs_result"
         )
         result = reply(503, "TEMPORARILY_UNAVAILABLE")
-    if allow_snapshot("ecs_result"):
+    await capture_callback(
+        factory,
+        identity=exchange_id,
+        source="ecs_result",
+        request=request,
+        started_at=received_at,
+        raw=raw if body_available else None,
+        limit=262144,
+        result=result,
+        commit_unknown=commit_pending and result.status_code == 503 and transaction_failed,
+    )
+    if not enabled() and allow_snapshot("ecs_result"):
         background_tasks.add_task(
             record_snapshot,
             factory,

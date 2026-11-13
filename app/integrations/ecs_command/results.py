@@ -3,15 +3,30 @@
 from sqlalchemy import select
 
 from app.integrations.history import EvidenceIntegrityError
-from app.models import IntegrationExchange, IntegrationRecord, ReliableMessage
+from app.integrations.runtime_authority import enabled
+from app.models import (
+    EcsCommand,
+    EcsResultEvidence,
+    IntegrationExchange,
+    IntegrationRecord,
+    ReliableMessage,
+)
 
 
 async def get_command(session, *, owner_domain: str, command_code: str):
     from .protocol import OPERATION
     from .service import CommandView
 
-    root = IntegrationExchange.__table__
-    evidence = IntegrationRecord.__table__.alias("applied_result")
+    model = EcsCommand if enabled() else IntegrationExchange
+    root = model.__table__
+    evidence = (EcsResultEvidence if model is EcsCommand else IntegrationRecord).__table__.alias(
+        "applied_result"
+    )
+    link = (
+        evidence.c.command_code == root.c.command_code
+        if model is EcsCommand
+        else (evidence.c.exchange_id == root.c.id) & (evidence.c.record_kind == "RESULT_EVIDENCE")
+    )
     message = ReliableMessage.__table__
     with session.no_autoflush:
         row = (
@@ -33,9 +48,7 @@ async def get_command(session, *, owner_domain: str, command_code: str):
                     .select_from(
                         root.outerjoin(
                             evidence,
-                            (evidence.c.exchange_id == root.c.id)
-                            & (evidence.c.record_kind == "RESULT_EVIDENCE")
-                            & (evidence.c.semantic_digest == root.c.applied_result_id),
+                            link & (evidence.c.semantic_digest == root.c.applied_result_id),
                         ).outerjoin(
                             message,
                             (message.c.exchange_id == root.c.id)
@@ -45,7 +58,6 @@ async def get_command(session, *, owner_domain: str, command_code: str):
                         )
                     )
                     .where(
-                        root.c.role == "ECS_COMMAND",
                         root.c.owner_domain == owner_domain,
                         root.c.command_code == command_code,
                     )
@@ -77,7 +89,7 @@ async def is_delivery_proven_unaccepted(session, *, owner_domain: str, command_c
     from .lifecycle import get_attempt_conclusions
     from .protocol import OPERATION
 
-    root = IntegrationExchange
+    root = EcsCommand if enabled() else IntegrationExchange
     message = ReliableMessage
     with session.no_autoflush:
         command = (
@@ -91,7 +103,6 @@ async def is_delivery_proven_unaccepted(session, *, owner_domain: str, command_c
                     & (message.operation_id == root.command_code),
                 )
                 .where(
-                    root.role == "ECS_COMMAND",
                     root.owner_domain == owner_domain,
                     root.command_code == command_code,
                     root.ack_record_id.is_(None),
@@ -120,19 +131,19 @@ async def get_message_ids(session, *, owner_domain, command_codes, candidate_ids
 
     if not command_codes or not candidate_ids:
         return {}
+    command = EcsCommand if enabled() else IntegrationExchange
     with session.no_autoflush:
         rows = await session.execute(
-            select(IntegrationExchange.command_code, ReliableMessage.id)
+            select(command.command_code, ReliableMessage.id)
             .join(
                 ReliableMessage,
-                (ReliableMessage.target == IntegrationExchange.target)
+                (ReliableMessage.target == command.target)
                 & (ReliableMessage.operation == OPERATION)
-                & (ReliableMessage.operation_id == IntegrationExchange.command_code),
+                & (ReliableMessage.operation_id == command.command_code),
             )
             .where(
-                IntegrationExchange.role == "ECS_COMMAND",
-                IntegrationExchange.owner_domain == owner_domain,
-                IntegrationExchange.command_code.in_(command_codes),
+                command.owner_domain == owner_domain,
+                command.command_code.in_(command_codes),
                 ReliableMessage.id.in_(candidate_ids),
             )
         )

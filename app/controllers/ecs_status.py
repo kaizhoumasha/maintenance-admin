@@ -4,11 +4,13 @@ import json
 import math
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from typing import Annotated
 
 from fastapi import Depends, Query, Request
 
 from app.core import error_responses, require_permission
+from app.core.database import session_factory
 from app.core.errors import AppError, ErrorCode
 from app.core.routing import new_router
 from app.http_client import AsyncHttpClient
@@ -20,6 +22,7 @@ from app.integrations.ecs_status import (
     query,
 )
 from app.integrations.ecs_status.client import STATUS_PATH
+from app.integrations.http_exchanges import capture_status
 from app.integrations.registration import registration_source
 
 router = new_router(
@@ -46,12 +49,16 @@ def status_capability() -> dict:
 
 @router.get("", response_model=StatusQueryResult, responses=error_responses(502, 504))
 async def query_status(request: Request, inputs: Annotated[StatusQueryIn, Query()]):
-    """查询指定 ECS 的全部或单台设备；结果只返回，不登记、不保存、不发命令。"""
+    """查询指定 ECS 的全部或单台设备，记录本次 HTTP 往来。"""
     try:
         return await query(
             inputs.ecs_origin,
             device_code=inputs.device_code,
             client_factory=getattr(request.app.state, "ecs_status_client_factory", AsyncHttpClient),
+            observe=partial(
+                capture_status,
+                getattr(request.app.state, "callback_session_factory", session_factory),
+            ),
         )
     except StatusQueryError as error:
         raise status_error(error) from None

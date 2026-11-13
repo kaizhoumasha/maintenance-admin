@@ -36,7 +36,7 @@ class HistoryParams(BaseModel):
 
 
 class ExchangeListParams(HistoryParams):
-    peer_system: Literal["ECS", "WMS"] | None = None
+    peer_system: Literal["ECS", "WMS", "TRANSPORT"] | None = None
     direction: Literal["INBOUND", "OUTBOUND", "INTERNAL"] | None = None
     operation: str | None = None
     device_code: str | None = None
@@ -94,6 +94,11 @@ class ExchangeSummary(BaseModel):
     delivery: dict
     protocol_result: dict
     application: dict
+    trace_id: str | None = None
+    reason_code: str | None = None
+    failure_kind: str | None = None
+    close_reason: str | None = None
+    late_response_at: UtcTime | None = None
 
 
 class ExchangeDetail(ExchangeSummary):
@@ -136,3 +141,4 @@ class RecordSummary(BaseModel):
     source_version: str | None
     response_record_id: UUID | None
     metadata: dict | None
+    side: Literal["request", "response"] | None = None

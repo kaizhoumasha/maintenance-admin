@@ -97,7 +97,25 @@ def _include_name(name, kind, parent):
     if kind == "schema":
         return name == SCHEMA
     # This ledger is managed by the integration operator, outside Alembic.
-    return kind != "table" or name != "coarse_sorting_mock_round"
+    return kind != "table" or name not in {
+        "coarse_sorting_mock_round",
+        "integration_history_retirement",
+    }
+
+
+def _retired_table_filter(connection, schema):
+    retired = schema == SCHEMA and connection.scalar(
+        text("SELECT to_regclass('enterprise_backend.integration_history_retirement') IS NOT NULL")
+    )
+
+    def include(obj, name, kind, reflected, compare_to):
+        return not (
+            retired
+            and kind == "table"
+            and name in {"integration_exchange", "integration_record", "integration_reference"}
+        )
+
+    return include
 
 
 def _run(connection) -> None:
@@ -106,6 +124,7 @@ def _run(connection) -> None:
         if sqlite:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
         schema = None if sqlite else _prepare_schema(connection)
+        options = context.get_x_argument(as_dictionary=True)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
@@ -113,9 +132,24 @@ def _run(connection) -> None:
             version_table_schema=schema,
             include_schemas=not sqlite,
             include_name=_include_name,
+            include_object=_retired_table_filter(connection, schema),
         )
         with context.begin_transaction():
             context.run_migrations()
+        command = getattr(context.config.cmd_opts, "cmd", None)
+        if command and command[0].__name__ == "upgrade":
+            use_runtime = (
+                options.get("fence_legacy_writes") == "true"
+                or get_settings().INTEGRATION_RUNTIME_AUTHORITY
+            )
+            from app.integrations.runtime_authority import QUERY_REVISION, check_reconciled
+
+            if not use_runtime and context.get_context().get_current_revision() != QUERY_REVISION:
+                return
+            try:
+                check_reconciled(connection, use_runtime=use_runtime)
+            except RuntimeError as error:
+                raise CommandError(str(error)) from None
 
 
 async def _run_online() -> None:

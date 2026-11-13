@@ -77,20 +77,22 @@ async def query(
     device_code: str | None = None,
     client_factory: Callable[[HttpClientConfig], HttpClient] = AsyncHttpClient,
     clock: Callable[[], datetime] = utc_now,
+    observe=None,
 ) -> StatusQueryResult:
     """Query one explicit ECS once; return provenance without registering or storing devices."""
     origin = normalize_status_origin(ecs_origin)
     inputs = StatusQueryIn(ecs_origin=origin, device_code=device_code)
     config = HttpClientConfig(origin, "ecs-status", total_timeout_s=5)
     client = client_factory(config)
+    request = HttpRequest(
+        "GET",
+        STATUS_PATH,
+        query=() if inputs.device_code is None else (("device_code", inputs.device_code),),
+    )
+    started = clock()
+    result = reason = None
     try:
-        result = await client.send(
-            HttpRequest(
-                "GET",
-                STATUS_PATH,
-                query=() if inputs.device_code is None else (("device_code", inputs.device_code),),
-            )
-        )
+        result = await client.send(request)
         completed = clock()
 
         def error(kind: str, retry_at: datetime | None = None) -> StatusQueryError:
@@ -139,7 +141,17 @@ async def query(
             fetched_at=completed,
             devices=parsed.devices,
         )
+    except StatusQueryError as failure:
+        reason = failure.error_kind
+        raise
     finally:
+        if observe is not None:
+            try:
+                await observe(
+                    origin=origin, request=request, started_at=started, result=result, reason=reason
+                )
+            except Exception:
+                logger.warning("ECS Status observation unavailable")
         try:
             if isinstance(client, AsyncHttpClient):
                 await client.aclose(timeout_s=1)

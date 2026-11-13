@@ -11,7 +11,8 @@ from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
 from app.integrations import history as history_records
 from app.integrations.model_payload import validated_model_payload
-from app.models import IntegrationRecord, ReliableMessage
+from app.integrations.runtime_authority import enabled
+from app.models import IntegrationRecord, ReliableDeliveryAttempt, ReliableMessage
 from app.reliable import EnqueueResult, MessageDraft, MessageStatus, Outbox
 from app.reliable.config import parse_reliable_config, target_config_hint, targets_for_protocol
 from app.reliable.types import REPLACEMENT_PENDING
@@ -105,18 +106,22 @@ class WmsRequests:
             if (
                 old.status == MessageStatus.SENDING
                 and old.lease_id is not None
+                and old.lease_not_started is True
                 and not old.delivery_uncertain
                 and old.attempts == old.not_received_count
             ):
-                opened = await session.scalar(
-                    select(IntegrationRecord.id)
-                    .where(
-                        IntegrationRecord.exchange_id == old.exchange_id,
-                        IntegrationRecord.record_kind == "SEND_ATTEMPT_OPENED",
-                        IntegrationRecord.attempt_id == old.lease_id,
+                if enabled():
+                    opened = await session.get(ReliableDeliveryAttempt, (old.id, old.lease_id))
+                else:
+                    opened = await session.scalar(
+                        select(IntegrationRecord.id)
+                        .where(
+                            IntegrationRecord.exchange_id == old.exchange_id,
+                            IntegrationRecord.record_kind == "SEND_ATTEMPT_OPENED",
+                            IntegrationRecord.attempt_id == old.lease_id,
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                )
                 if opened is None:
                     # The sender and recovery both use the same message lock.
                     old.status = MessageStatus.PENDING
@@ -149,19 +154,21 @@ class WmsRequests:
             or old.attempts != old.not_received_count
         ):
             return None
-        unexpected = await session.scalar(
-            select(IntegrationRecord.id)
-            .where(
-                IntegrationRecord.exchange_id == old.exchange_id,
-                IntegrationRecord.record_kind == "HTTP_RESPONSE_OBSERVED",
-                or_(
-                    IntegrationRecord.protocol_verdict.is_(None),
-                    IntegrationRecord.protocol_verdict != "NOT_RECEIVED",
-                ),
+        unexpected = old.replacement_blocked
+        if not enabled():
+            unexpected = await session.scalar(
+                select(IntegrationRecord.id)
+                .where(
+                    IntegrationRecord.exchange_id == old.exchange_id,
+                    IntegrationRecord.record_kind == "HTTP_RESPONSE_OBSERVED",
+                    or_(
+                        IntegrationRecord.protocol_verdict.is_(None),
+                        IntegrationRecord.protocol_verdict != "NOT_RECEIVED",
+                    ),
+                )
+                .limit(1)
             )
-            .limit(1)
-        )
-        if unexpected is not None:
+        if unexpected:
             return None
         ref = await self.send(session, payload, operation_id=replacement_operation_id)
         new = await session.get(ReliableMessage, ref.message_id)
@@ -172,6 +179,9 @@ class WmsRequests:
         old.pause_reason = "SUPERSEDED_BY_SCAN_CORRECTION"
         old.next_attempt_at = None
         old.updated_at = now
+        if enabled():
+            old.superseded_by_message_id = new.id
+            return ref
         record = await history_records.write_record(
             session,
             draft=history_records.RecordDraft(

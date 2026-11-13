@@ -1,10 +1,23 @@
 from app.models.audit import AuditLog, AuditLogArchive
 from app.models.base import Base
 from app.models.device import Device, DeviceRoute
+from app.models.http_exchange import (
+    EcsHttpExchange,
+    ReliableDeliveryAttempt,
+    TransportHttpExchange,
+    WmsHttpExchange,
+)
 from app.models.integration_history import (
     IntegrationExchange,
     IntegrationRecord,
     IntegrationReference,
+)
+from app.models.integration_runtime import (
+    CallbackReceipt,
+    EcsCommand,
+    EcsResultEvidence,
+    EcsSendEvidence,
+    RuntimeRetentionHold,
 )
 from app.models.menu import Menu
 from app.models.rbac import Permission, Role, role_permission, user_role
@@ -19,6 +32,15 @@ __all__ = [
     "DeviceRoute",
     "WorkLine",
     "IntegrationExchange",
+    "CallbackReceipt",
+    "EcsCommand",
+    "EcsSendEvidence",
+    "EcsResultEvidence",
+    "RuntimeRetentionHold",
+    "ReliableDeliveryAttempt",
+    "WmsHttpExchange",
+    "EcsHttpExchange",
+    "TransportHttpExchange",
     "IntegrationRecord",
     "IntegrationReference",
     "AuditLog",

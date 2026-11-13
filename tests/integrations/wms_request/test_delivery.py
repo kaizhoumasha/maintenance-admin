@@ -2,11 +2,13 @@ import json
 from dataclasses import replace
 
 import pytest
+from sqlalchemy import text
 
+from app.core.config import get_settings
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
 from app.integrations import history as history_records
-from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL, WmsRequests
 from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
 from app.reliable.delivery import send_one
@@ -90,3 +92,47 @@ async def test_invalid_ack_preserves_uncertainty_and_retries_the_frozen_request(
                 assert row.response_raw == responses[1].body
         clock.advance(2)
     assert [request.body for request in client.requests] == [row.request_raw, row.request_raw]
+
+
+@pytest.mark.parametrize("runtime_authority", [False, True])
+@pytest.mark.parametrize("through_send_gate", [False, True])
+async def test_replacement_requires_proof_the_current_lease_did_not_send(
+    sessions, wms, clock, monkeypatch, runtime_authority, through_send_gate
+):
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime_authority)
+    requests = WmsRequests(
+        wms.outbox, clock=clock, owner_domain="test", contract_consumers=lambda _: {"test"}
+    )
+    operation = "example.decision.ask@v1"
+    operation_id = str(uuid7(clock()))
+    payload = lookup(operation).data_model(task_id="T-1", qty=2)
+    async with sessions.begin() as session:
+        reference = await requests.send(session, payload, operation_id=operation_id)
+    store = MessageStore(sessions, clock=clock, records=history_records)
+    (claim,) = await store.claim(1, wms.outbox.targets)
+    if through_send_gate:
+        target = wms.outbox.targets[claim.message.target]
+        request = wms.outbox.adapters[target.protocol].build_request(claim.message, target)
+        assert await store.before_send(replace(claim, request=request), target)
+        async with sessions.begin() as session:
+            for table, column in (
+                ("reliable_delivery_attempt", "lease_id"),
+                ("integration_record", "attempt_id"),
+            ):
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE {column}=:lease"), {"lease": claim.lease_id}
+                )
+
+    identity = dict(message_id=reference.message_id, operation=operation, operation_id=operation_id)
+    async with sessions.begin() as session:
+        await requests.fence_replacement(session, **identity)
+        replacement = await requests.replace_unaccepted(
+            session, payload, **identity, replacement_operation_id=str(uuid7(clock()))
+        )
+        row = await session.get(ReliableMessage, reference.message_id)
+        if through_send_gate:
+            assert replacement is None
+            assert (row.status, row.lease_id) == ("SENDING", claim.lease_id)
+        else:
+            assert replacement and replacement.message_id != row.id
+            assert (row.status, row.lease_id) == ("ABANDONED", None)

@@ -18,9 +18,16 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest, json_object
 from app.integrations.callback_diagnostics import queue_diagnostics
-from app.integrations.callback_receipts import ReceiptView, find_receipt, insert_receipt
+from app.integrations.callback_receipts import (
+    ReceiptView,
+    active_receipt,
+    find_receipt,
+    insert_receipt,
+    receipt_model,
+)
+from app.integrations.http_exchanges import operation_uuid
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_callback.receiver import CallbackResponse
-from app.models import IntegrationExchange
 from app.transactions import after_commit
 
 from .binding import BindingResolver, DeviceBinding
@@ -153,6 +160,8 @@ async def receive_ecs_event(
             exchange_id=existing.exchange_id,
             attempt_id=attempt_id,
             prepared_body=existing.prepared_body,
+            receipt_id=existing.id,
+            replayed_from_id=operation_uuid(existing.reply_attempt_id),
         )
 
     existing = await find_receipt(session, OPERATION, identity)
@@ -237,6 +246,7 @@ async def receive_ecs_event(
         if existing is None:
             raise RuntimeError("receipt identity conflict without a visible receipt")
         return duplicate(existing)
+    receipt_table = receipt_model()
     if registered is None:
         note = unregistered_note(_event(envelope))
         if isinstance(note["data"], dict) and "digest" in note["data"]:  # 已缩减:完整事件不会落库
@@ -263,11 +273,10 @@ async def receive_ecs_event(
             component_key=component_key,
         )
         await session.execute(
-            update(IntegrationExchange)
+            update(receipt_table)
             .where(
-                IntegrationExchange.role == "RECEIPT",
-                IntegrationExchange.receipt_id == receipt_id,
-                IntegrationExchange.receipt_active.is_(True),
+                active_receipt(receipt_table),
+                receipt_table.receipt_id == receipt_id,
             )
             .values(
                 event_envelope=_event(envelope),
@@ -283,31 +292,31 @@ async def receive_ecs_event(
                 },
             )
         )
-        from app.integrations.history import write_reference
+        if not enabled():
+            from app.integrations.history import write_reference
 
-        receipt_root = await session.scalar(
-            select(IntegrationExchange).where(
-                IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_id == receipt_id
+            receipt_root = await session.scalar(
+                select(receipt_table).where(
+                    active_receipt(receipt_table), receipt_table.receipt_id == receipt_id
+                )
             )
-        )
-        await write_reference(
-            session,
-            exchange_id=receipt_root.id,
-            reference_kind="WORKLINE",
-            namespace="id",
-            value=str(binding.work_line_id),
-            relation_role="EVENT_CONTEXT",
-            created_at=receipt_root.created_at,
-        )
+            await write_reference(
+                session,
+                exchange_id=receipt_root.id,
+                reference_kind="WORKLINE",
+                namespace="id",
+                value=str(binding.work_line_id),
+                relation_role="EVENT_CONTEXT",
+                created_at=receipt_root.created_at,
+            )
         # 不捕获异常:控制器映射 503,整个事务(含收据)回滚
         await registered.func(ctx, data)
         if ctx._applications:
             await session.execute(
-                update(IntegrationExchange)
+                update(receipt_table)
                 .where(
-                    IntegrationExchange.role == "RECEIPT",
-                    IntegrationExchange.receipt_id == receipt_id,
-                    IntegrationExchange.receipt_active.is_(True),
+                    active_receipt(receipt_table),
+                    receipt_table.receipt_id == receipt_id,
                 )
                 .values(
                     application_ref=asdict(ctx._applications[0]),
@@ -320,11 +329,10 @@ async def receive_ecs_event(
         outcome, notes = "received", ctx.notes
     if notes:
         await session.execute(
-            update(IntegrationExchange)
+            update(receipt_table)
             .where(
-                IntegrationExchange.role == "RECEIPT",
-                IntegrationExchange.receipt_id == receipt_id,
-                IntegrationExchange.receipt_active.is_(True),
+                active_receipt(receipt_table),
+                receipt_table.receipt_id == receipt_id,
             )
             .values(diagnostic=notes)
         )
@@ -339,6 +347,7 @@ async def receive_ecs_event(
         identity,
         notes or None,
         prepared_body=prepared.prepared_body,
+        receipt_id=receipt_id,
         exchange_id=receipt.exchange_id,
         attempt_id=attempt_id,
     )

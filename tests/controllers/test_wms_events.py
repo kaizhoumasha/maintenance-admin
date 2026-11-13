@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 from typing import Literal
+from uuid import UUID
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, event, insert, select
@@ -45,6 +46,8 @@ async def stored(factory, model):
 async def test_unknown_operation_replays_its_original_rejection(
     callback_client, callback_store, envelope
 ):
+    from app.models import WmsHttpExchange
+
     first = await callback_client.post(PATH, json=envelope)
     assert first.status_code == 422
     body = first.json()
@@ -62,6 +65,17 @@ async def test_unknown_operation_replays_its_original_rejection(
     assert len(receipts) == 1 and receipts[0].body == body
     assert receipts[0].compare_mode == "RAW" and receipts[0].effective_digest is None
     assert "Retry-After" not in first.headers
+    async with callback_store() as session:
+        rows = await session.scalars(
+            select(WmsHttpExchange)
+            .where(WmsHttpExchange.operation_id == UUID(envelope["operation_id"]))
+            .order_by(WmsHttpExchange.started_at, WmsHttpExchange.id)
+        )
+        original, repeated = rows.all()
+    assert original.handling_outcome == "REJECTED"
+    assert repeated.handling_outcome == "REPLAYED"
+    assert repeated.replayed_from_id == original.id
+    assert repeated.response_wire == original.response_wire == first.content
 
 
 async def test_wms_receipt_does_not_infer_device_from_payload(

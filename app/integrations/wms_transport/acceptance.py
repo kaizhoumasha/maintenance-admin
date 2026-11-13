@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpResult
 from app.integrations import history
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_envelope import outgoing_message, stored_response
 from app.models import TransportTask
 from app.reliable import OutgoingMessage, VerdictKind
@@ -132,13 +133,19 @@ def _saved(task, evidence):
         raise ValueError("Missing recorded attempt")
     if evidence.get("format_version") not in {None, 2}:
         raise ValueError("Unknown acceptance format")
+    original = evidence
     evidence = {
         k: v
         for k, v in evidence.items()
         if k not in {"format_version", "request_raw", "response_raw"}
     }
-    evidence["request_raw"] = history.projected_body(task, name="acceptance_request").decode()
-    evidence["response_raw"] = history.projected_body(task, name="acceptance_response").decode()
+    for side in ("request", "response"):
+        key = side + "_raw"
+        evidence[key] = (
+            original[key]
+            if enabled()
+            else history.projected_body(task, name="acceptance_" + side).decode()
+        )
     message = OutgoingMessage(
         evidence["target"],
         OPERATION,
@@ -303,10 +310,11 @@ def submission_observer(
                         raise ValueError("Claim does not identify the original submission")
                     snapshot = asdict(basis)
                     snapshot["evidence_sha256"] = canonical_digest(snapshot)
-                    del snapshot["request_raw"], snapshot["response_raw"]
+                    if not enabled():
+                        del snapshot["request_raw"], snapshot["response_raw"]
                     snapshot["format_version"] = 2
                     response_id = await history.observe_response(
-                        session, claim=claim, outcome=outcome
+                        session, claim=claim, outcome=outcome, at=datetime.now(UTC)
                     )
                     await session.execute(
                         task_table.update()

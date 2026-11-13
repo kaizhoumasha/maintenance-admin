@@ -13,6 +13,8 @@ async def test_history_routes_require_authentication(client):
         f"/integrations/exchanges/{uuid7()}",
         f"/integrations/exchanges/{uuid7()}/records",
         f"/integrations/records/{uuid7()}/body",
+        f"/integrations/diagnostics?peer=WMS&reference={uuid7()}",
+        f"/integrations/http-exchanges/WMS/{uuid7()}/request",
     ):
         assert (await client.get("/api/v1" + path)).status_code == 401
 
@@ -37,6 +39,7 @@ async def test_history_permission_guards_every_metadata_route(client, admin):
         "/integrations/exchanges",
         f"/integrations/exchanges/{uuid7()}",
         f"/integrations/exchanges/{uuid7()}/records",
+        f"/integrations/diagnostics?peer=WMS&reference={uuid7()}",
     ):
         response = await client.get("/api/v1" + path, headers=admin)
         assert response.status_code == 403, response.text
@@ -176,3 +179,54 @@ async def test_history_detail_reads_one_independent_read_only_snapshot(
     second = await client.get(path, headers=admin)
     assert second.status_code == 200
     assert second.json()["coverage"] == "PARTIAL" and second.json()["delivery"]["state"] == "DONE"
+
+
+async def test_diagnostics_finds_unmatched_ecs_callback_and_keeps_wire_out_of_summary(
+    client, admin, callback_db, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from app.main import app
+
+    monkeypatch.setattr(app.state, "integration_history_session_factory", callback_db)
+    monkeypatch.setattr(app.state, "ecs_commands", SimpleNamespace(), raising=False)
+    payload = {
+        "command_code": str(uuid7()),
+        "device_code": "D1",
+        "result": "SUCCESS",
+        "finish_time": 1,
+        "data": {"note": "private-example"},
+    }
+    callback = await client.post("/api/v1/callback/result", json=payload)
+    assert callback.status_code == 404
+    response = await client.get(
+        "/api/v1/integrations/diagnostics",
+        headers=admin,
+        params={"peer": "ECS", "reference": payload["command_code"]},
+    )
+    assert response.status_code == 200
+    assert "private-example" not in response.text
+    result = response.json()
+    assert result["runtime"] == []
+    [row] = result["items"]
+    assert row["http_status"] == 404 and row["reason_code"] == "COMMAND_NOT_FOUND"
+    wire = await client.get(
+        f"/api/v1/integrations/http-exchanges/ECS/{row['id']}/response", headers=admin
+    )
+    assert wire.content == callback.content
+    data = await client.get(
+        f"/api/v1/integrations/http-exchanges/ECS/{row['id']}/request",
+        headers=admin,
+        params={"representation": "payload"},
+    )
+    assert data.status_code == 200 and data.json() == payload["data"]
+    async with app.state.audit_session_factory() as session:
+        audits = (
+            await session.scalars(select(AuditLog).where(AuditLog.resource == "http_exchange"))
+        ).all()
+    assert {
+        (entry.detail["side"], entry.detail["representation"])
+        for entry in audits
+        if entry.detail["record_id"] == row["id"]
+    } == {("request", "payload"), ("response", "wire")}
+    assert "private-example" not in str([entry.detail for entry in audits])

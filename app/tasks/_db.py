@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.database import create_database_engine
+from app.integrations.runtime_authority import require_reconciled
 
 
 def run_with_factory[T](
@@ -15,8 +16,17 @@ def run_with_factory[T](
     async def execute() -> T:
         engine = create_database_engine(database_url, hide_parameters=True)
         try:
-            return await work(async_sessionmaker(engine))
+            factory = async_sessionmaker(engine)
+            await require_reconciled(factory)
+            return await work(factory)
         finally:
             await engine.dispose()
 
     return asyncio.run(execute())
+
+
+def check_worker_database(database_url: str) -> None:
+    async def ready(_factory):
+        return None
+
+    run_with_factory(database_url, ready)

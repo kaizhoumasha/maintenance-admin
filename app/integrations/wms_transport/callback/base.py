@@ -5,8 +5,9 @@ from functools import partial
 from sqlalchemy import select
 
 from app.integrations import history
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_callback import Accepted, CallbackContext
-from app.models import IntegrationExchange, IntegrationReference
+from app.models import CallbackReceipt, IntegrationExchange, IntegrationReference
 from app.models.transport import TransportTask
 from app.transactions import after_commit
 
@@ -29,6 +30,36 @@ async def apply_callback(
         ctx.note("UNKNOWN_TASK", transport_task_id=ack["transport_task_id"], data=data)
         return ack
     await settle_submitted(ctx.session, task.transport_task_id)  # 对端已知该任务,不必再重试提交
+    if enabled():
+        trigger = await ctx.session.get(CallbackReceipt, ctx.receipt_id, with_for_update=True)
+        if trigger is not None:
+            trigger.owner_domain = trigger.owner_domain or task.owner_domain
+        if task.frozen is None:
+            ctx.note("FROZEN_MISSING", transport_task_id=task.transport_task_id, data=data)
+            return ack
+        previous = task.applied_outcome_revision
+        previous_pending = task.pending_outcome
+        previous_pending_id = task.pending_result_receipt_id
+        previous_observation = task.position_observation
+        apply(TaskCallbacks(task, ctx), data, ack)
+        resulted = ctx.operation == "transport.task.resulted@v1"
+        if task.pending_outcome is None:
+            task.pending_result_receipt_id = None
+            task.pending_result_source_unknown = None
+        elif task.pending_outcome != previous_pending:
+            task.pending_result_receipt_id = ctx.receipt_id
+            task.pending_result_source_unknown = False
+        applied = task.applied_outcome_revision
+        if applied != previous:
+            task.applied_result_receipt_id = ctx.receipt_id if resulted else previous_pending_id
+            task.applied_trigger_receipt_id = ctx.receipt_id
+        if (
+            (applied != previous or task.position_observation != previous_observation)
+            and task.owner_domain is not None
+            and ctx.on_owner_committed is not None
+        ):
+            after_commit(ctx.session, partial(ctx.on_owner_committed, task.owner_domain))
+        return Accepted(ack)
     trigger = await ctx.session.scalar(
         select(IntegrationExchange).where(
             IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_id == ctx.receipt_id
@@ -73,8 +104,11 @@ async def apply_callback(
             created_at=datetime.now(UTC),
         )
     previous = task.applied_outcome_revision
+    previous_pending = task.pending_outcome
     previous_observation = task.position_observation
     apply(TaskCallbacks(task, ctx), data, ack)  # 判重为 Duplicate/Conflict 时直接抛出
+    if task.pending_outcome != previous_pending:
+        task.pending_result_source_unknown = None if task.pending_outcome is None else False
     applied = task.applied_outcome_revision
     if applied is not None and (previous is None or applied > previous):
         original = list(

@@ -2,9 +2,10 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.database import SCHEMA
 from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
 from tests.migration_helpers import seed_command_message, seed_transport_identity_case, source_table
 
@@ -44,6 +45,8 @@ async def legacy(state_migration):
         )
     yield async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as c:
+        schema = SCHEMA if c.dialect.name == "postgresql" else None
+        tables = await c.run_sync(lambda bind: inspect(bind).get_table_names(schema=schema))
         preparations = await source_table(c, "coarse_sorting_rack_preparation")
         actions = await source_table(c, "coarse_sorting_action")
         await c.execute(preparations.update().values(current_action_id=None))
@@ -63,8 +66,9 @@ async def legacy(state_migration):
             "callback_receipt",
             "callback_snapshot",
         ):
-            t = await source_table(c, name)
-            await c.execute(delete(t))
+            if name in tables:
+                t = await source_table(c, name)
+                await c.execute(delete(t))
         await c.execute(
             text(
                 "UPDATE integration_exchange SET request_record_id=NULL, "
@@ -893,7 +897,10 @@ async def test_original_coarse_scan_without_an_action_keeps_its_proven_job_owner
             await session.execute(line.delete().where(line.c.id == line_id))
 
 
-async def test_migrated_pending_command_keeps_its_original_send_gate(legacy, state_migration):
+async def test_migrated_pending_command_keeps_its_original_send_gate(
+    legacy, state_migration, tmp_path
+):
+    import json
     from datetime import timedelta
     from types import SimpleNamespace
 
@@ -902,7 +909,9 @@ async def test_migrated_pending_command_keeps_its_original_send_gate(legacy, sta
     from app.integrations.ecs_command.routing import RouteAuthorization
     from app.reliable.config import TargetConfig
     from app.reliable.store import MessageStore
+    from migrations.integration_history_contract_v2 import WRITERS
     from scripts.backfill_integration_history import SOURCES, backfill_batch
+    from tests.helpers import run_alembic
 
     code, _ = await seed_command_message(legacy)
     snapshot = {"origin": "http://ecs.test", "protocol": "ecs-command", "unknown_policy": "HOLD"}
@@ -932,7 +941,22 @@ async def test_migrated_pending_command_keeps_its_original_send_gate(legacy, sta
             assert (
                 await backfill_batch(session, source=source, after=None, limit=500)
             ).conflicts == 0
-    await state_migration.migrate("upgrade", "integrationhistoryauthority")
+    # The current Sender expects the expanded schema even in legacy authority mode.
+    evidence = tmp_path / "contract-evidence.json"
+    evidence.write_text(
+        json.dumps(
+            dict.fromkeys(WRITERS, "DRAINED")
+            | {"attestation": "isolated", "authority_acceptance": "isolated"}
+        )
+    )
+    result = await run_alembic(
+        state_migration.engine.url.render_as_string(hide_password=False),
+        "-x",
+        f"integration_history_contract_evidence={evidence}",
+        "upgrade",
+        "http_exchange_runtime_expand",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
     class Routes:
         async def authorize_frozen(self, session, route):

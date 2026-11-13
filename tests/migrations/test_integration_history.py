@@ -605,9 +605,11 @@ async def test_contract_preserves_live_unavailable_response_observation(
     from app.reliable.store import MessageStore
     from app.reliable.testing import ScriptedHttpClient
     from tests.helpers import OpaqueHistoryAdapter
+    from tests.migration_helpers import add_http_runtime_test_schema
 
     state = state_migration
     factory, _, _ = await prepare_contract(state)
+    await add_http_runtime_test_schema(state.engine)
     target = TargetConfig("live-attempt", "http://example.test", "opaque")
     adapters = {"opaque": OpaqueHistoryAdapter()}
     outbox = Outbox({target.name: target}, adapters, records=history)
@@ -674,9 +676,11 @@ async def test_contract_checks_live_transport_adopted_payload(
     from app.models import IntegrationRecord, TransportTask
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
+    from tests.migration_helpers import add_http_runtime_test_schema
 
     state = state_migration
     factory, _, _ = await prepare_contract(state)
+    await add_http_runtime_test_schema(state.engine)
     target = TargetConfig("live-transport", "http://example.test", PROTOCOL)
     outbox = Outbox({target.name: target}, ADAPTERS, records=history)
     service = TransportService(outbox, target=target.name)
@@ -805,9 +809,11 @@ async def test_delivered_wms_summary_keeps_original_response_source(state_migrat
     from app.reliable.store import MessageStore
     from app.reliable.testing import ScriptedHttpClient
     from app.services.integration_history_service import get_exchange
+    from tests.migration_helpers import add_http_runtime_test_schema
 
     state = state_migration
     factory, code, _ = await prepare_contract(state)
+    await add_http_runtime_test_schema(state.engine)
     monkeypatch.setattr(registry, "_registry", dict(registry._registry))
 
     class Report(RequestPayload):

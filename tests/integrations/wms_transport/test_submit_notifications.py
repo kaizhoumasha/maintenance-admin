@@ -553,3 +553,45 @@ async def test_consumption_keeps_independent_acceptance_source_after_outbox_clea
         record = await session.get(IntegrationRecord, identity)
         assert record.parent_record_id == reply_id
         assert record.details["coverage_reason"] == "ORIGINAL_REFERENCE"
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_transport_callback_closes_exchange_before_http_response(
+    submit, rack_failure_callback, late
+):
+    from app.integrations.http_exchanges import reconcile_outbound
+    from app.models import TransportHttpExchange
+
+    flow = submit
+    rig = flow.rig
+    request = ADAPTERS[rig.target.protocol].build_request(flow.claim.message, rig.target)
+    assert await flow.store.before_send(replace(flow.claim, request=request), rig.target)
+
+    async with rig.factory.begin() as session:
+        await rack_failure_callback(rig, session, flow.handle, "R1")
+    await reconcile_outbound(rig.factory, now=rig.clock())
+    query = select(TransportHttpExchange).where(
+        TransportHttpExchange.transport_task_id == flow.handle.transport_task_id
+    )
+    async with rig.factory() as session:
+        row = (await session.scalars(query)).one()
+        identity, finished = row.id, row.finished_at
+        assert row.close_reason == "SETTLED_BY_CALLBACK"
+        assert row.attempt_state == "DELIVERY_UNKNOWN" and row.response_wire is None
+
+    if late:
+        rig.clock.advance(1)
+        outcome = flow.outcome()
+        await submission_observer(rig.outbox.targets, rig.factory, flow.notices.append)(
+            flow.claim, outcome
+        )
+        # Transport acceptance committed, but the sender never recorded completion.
+        await reconcile_outbound(rig.factory, now=rig.clock())
+        async with rig.factory() as session:
+            row = (await session.scalars(query)).one()
+            assert (row.id, row.finished_at, row.close_reason) == (
+                identity,
+                finished,
+                "SETTLED_BY_CALLBACK",
+            )
+            assert row.response_wire == outcome.result.body and row.late_response_at is not None

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 
@@ -7,8 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import get_settings
 from app.database import create_database_engine as create_async_engine
+from app.diagnostics import log_exception
 from app.http_client import AsyncHttpClient, HttpClient, HttpClientConfig
 from app.integrations import history as history_records
+from app.integrations.http_exchanges import reconcile_outbound
+from app.integrations.runtime_authority import require_reconciled
 from app.reliable import Outbox, OutgoingMessage, ProtocolAdapter
 from app.reliable.config import ReliableConfig
 from app.reliable.sender import Sender
@@ -38,8 +42,9 @@ async def reliable_lifespan(
         url, hide_parameters=True, **(pool if url.startswith("postgresql") else {})
     )
     clients = {}
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     store = MessageStore(
-        async_sessionmaker(engine, expire_on_commit=False),
+        factory,
         lease_margin_s=config.lease_margin_s,
         lifecycles=lifecycles,
         served_snapshot_protocols=set(adapters) if client_provider is not None else set(),
@@ -57,7 +62,32 @@ async def reliable_lifespan(
         provider=client_provider,
         observe_delivered=observe_delivered,
     )
+
+    async def project_pending():
+        last_failure = float("-inf")
+        while True:
+            try:
+                async with asyncio.timeout(config.poll_interval_s):
+                    await reconcile_outbound(
+                        factory,
+                        retention_days=get_settings().INTEGRATION_HISTORY_RETENTION_DAYS,
+                    )
+            except Exception as error:
+                now = time.monotonic()
+                if now - last_failure >= 60:
+                    log_exception(
+                        logger,
+                        "HTTP exchange projection failed",
+                        error,
+                        component="http_exchange",
+                        phase="reconcile_outbound",
+                    )
+                    last_failure = now
+            await asyncio.sleep(config.poll_interval_s)
+
+    projection = None
     try:
+        await require_reconciled(factory)
         for name, target in config.targets.items():
             if target.address_mode == "SNAPSHOT":
                 if client_provider is None or target.protocol not in (lifecycles or {}):
@@ -78,10 +108,15 @@ async def reliable_lifespan(
                     target.protocol,
                 )
         sender.runner = asyncio.create_task(sender.run())
+        if config.targets:
+            projection = asyncio.create_task(project_pending())
         yield (
             Outbox(config.targets, adapters, lifecycles=lifecycles, records=history_records)
             if config.targets
             else None
         )
     finally:
+        if projection is not None:
+            projection.cancel()
+            await asyncio.gather(projection, return_exceptions=True)
         await sender.aclose()

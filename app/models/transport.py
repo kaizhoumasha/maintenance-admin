@@ -6,7 +6,6 @@ from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
-    ForeignKey,
     Index,
     String,
     Text,
@@ -14,8 +13,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
-
-from app.database import SCHEMA
 
 from .base import Base
 
@@ -43,15 +40,9 @@ class TransportTask(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    submission_exchange_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_exchange.id", ondelete="RESTRICT")
-    )
-    acceptance_request_record_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
-    )
-    acceptance_response_record_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
-    )
+    submission_exchange_id: Mapped[UUID] = mapped_column(Uuid)
+    acceptance_request_record_id: Mapped[UUID | None] = mapped_column(Uuid)
+    acceptance_response_record_id: Mapped[UUID | None] = mapped_column(Uuid)
     client_request_id: Mapped[str] = mapped_column(Text, unique=True)
     transport_task_id: Mapped[str] = mapped_column(Text, unique=True)
     operation_id: Mapped[str] = mapped_column(Text, unique=True)
@@ -73,3 +64,7 @@ class TransportTask(Base):
     outcome_digests: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     pending_outcome: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     position_observation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    pending_result_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    applied_result_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    applied_trigger_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    pending_result_source_unknown: Mapped[bool | None]

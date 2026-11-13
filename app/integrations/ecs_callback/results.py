@@ -7,7 +7,7 @@ from typing import Literal
 
 from sqlalchemy import or_, select
 
-from app.models import IntegrationExchange
+from app.integrations.callback_receipts import active_receipt, receipt_model
 
 from .envelope import EcsEventEnvelope
 
@@ -112,12 +112,9 @@ def _read(row):
 
 async def get_event(session, *, event_id: int) -> EventReadResult:
     with session.no_autoflush:
+        table = receipt_model()
         row = await session.scalar(
-            select(IntegrationExchange).where(
-                IntegrationExchange.role == "RECEIPT",
-                IntegrationExchange.receipt_active.is_(True),
-                IntegrationExchange.receipt_id == event_id,
-            )
+            select(table).where(active_receipt(table), table.receipt_id == event_id)
         )
         return _read(row)
 
@@ -133,10 +130,9 @@ async def list_point_events(
 ) -> tuple[EventRecord, ...]:
     if type(limit) is not int or not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
-    table = IntegrationExchange
+    table = receipt_model()
     query = select(table).where(
-        table.role == "RECEIPT",
-        table.receipt_active.is_(True),
+        active_receipt(table),
         table.operation == "ecs.event",
         table.event_context["owner_domain"].as_string() == owner_domain,
         table.event_context["work_line_id"].as_integer() == work_line_id,

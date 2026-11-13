@@ -270,6 +270,10 @@ async def test_manual_worker_advances_wait_completion_and_roller_pending(
             dict(task_id=tasks[0], bin_code="A000000001", result="NORMAL", completed_at=30),
         )
     ).status_code == 202
+    # A sweep may check TASK before applying the completion from the same snapshot.
+    # Run the next sweep after that work is idle, without starting Beat early.
+    await run.wait_idle()
+    business_wakeups.enqueue_business("smt_manual")
     await eventually(lambda: flow.rows("confirmation"), lambda rows: len(rows) == 1)
     before_restart = await flow.rows("manual_bin")
     release = next(r for r in before_restart if r["task_id"] == tasks[0])
