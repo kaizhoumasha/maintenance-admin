@@ -2,7 +2,7 @@
 
 from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_serializer, model_validator
 
 from app.businesses.bin_types import EcsBinType
 from app.integrations.ecs_command import ecs_command
@@ -96,3 +96,7 @@ class PutToBin(BaseModel):
     bin_cell_location: CellIndex
     bin_type: EcsBinType
     reel_totalthickness: ReelHeight
+
+    @field_serializer("bin_cell_location", when_used="json")
+    def serialize_cell(self, cell: int) -> str:
+        return str(cell)

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### 粗分机 ECS 入箱箱格号
+
+- 粗分机 `PUT_TO_BIN` 向 ECS 发送字符串形式的 `bin_cell_location`。WMS 分配和完成报告继续使用整数 `cell_index`。
+
 ### ECS 回调兼容
 
 - ECS 上报的事件和命令结果允许在业务 `data` 中附带未声明字段。WES 仍校验已声明字段，保留原始报文及去重规则。
