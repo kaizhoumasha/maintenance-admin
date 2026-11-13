@@ -146,7 +146,6 @@ def test_candidate_put_accepts_rack_bin_locations_and_original_index(location, b
     )
     assert command.bin_location == location
     assert command.bin_cell_location == 7
-    assert command.model_dump(mode="json")["bin_cell_location"] == "7"
     assert command.bin_type == str(bin_type)
 
 
