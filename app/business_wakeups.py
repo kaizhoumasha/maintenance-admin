@@ -8,12 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.businesses import catalog
+from app.core.identifiers import uuid7
 from app.integrations.registration import RegistrationSource
 from app.integrations.wms_request.operation import operations
 from app.integrations.wms_transport import OPERATION
 from app.models.transport import TransportTask
 from app.reliable import OutgoingMessage
 from app.transactions import after_commit
+from app.xray_dispatch_trace import SOURCE, TRIGGER, DispatchTrace
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +39,28 @@ def enqueue_business(
         if operation is None
         else (business, operation, operation_id, time_ns() // 1_000_000)
     )
-    with app.connection_for_write(connect_timeout=1, transport_options=options) as connection:
-        with connection.Producer() as producer:
-            advance_business_pending.apply_async(
-                args=args, producer=producer, retry=False, ignore_result=True
-            )
+    task_options = {}
+    trace = None
+    if business == "xray":
+        headers = {SOURCE: "immediate", TRIGGER: operation_id}
+        trace = DispatchTrace(str(uuid7()), "immediate", operation_id)
+        task_options = {"task_id": trace.task_id, "headers": headers}
+        if operation_id is not None:
+            trace.log("wms_result_committed")
+    try:
+        with app.connection_for_write(connect_timeout=1, transport_options=options) as connection:
+            with connection.Producer() as producer:
+                advance_business_pending.apply_async(
+                    args=args,
+                    producer=producer,
+                    retry=False,
+                    ignore_result=True,
+                    **task_options,
+                )
+    except Exception:
+        if trace:
+            trace.log("publish_failed")
+        raise
 
 
 def event_committed(source: RegistrationSource) -> None:
@@ -50,7 +69,9 @@ def event_committed(source: RegistrationSource) -> None:
         enqueue_business(business)
 
 
-def wms_result_committed(operation: str, business_key: str | None = None) -> None:
+def wms_result_committed(
+    operation: str, business_key: str | None = None, operation_id: str | None = None
+) -> None:
     registered = operations().get(operation)
     if registered is None:
         return
@@ -70,7 +91,10 @@ def wms_result_committed(operation: str, business_key: str | None = None) -> Non
             "WMS result business association cannot be routed: operation=%s", registered.name
         )
         return
-    notify_business_committed(business)
+    if business == "xray" and operation_id is not None:
+        enqueue_business(business, operation_id=operation_id)
+    else:
+        notify_business_committed(business)
 
 
 async def wms_delivery_committed(session: AsyncSession, message: OutgoingMessage) -> bool:

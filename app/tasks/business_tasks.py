@@ -16,6 +16,7 @@ from app.reliable import Outbox
 from app.services.device_routes import DeviceRoutes, authorize_new_command
 from app.tasks._db import run_with_factory
 from app.tasks.celery_app import celery_app
+from app.xray_dispatch_trace import DispatchTrace, track_worker
 
 
 def _runtime(factory, business: str | None):
@@ -54,17 +55,20 @@ async def advance_pending(
     return await runtime.progressions[business]()
 
 
-@celery_app.task(name="business.advance_pending", ignore_result=True)
+@celery_app.task(name="business.advance_pending", ignore_result=True, bind=True)
 def advance_business_pending(
-    business: str, operation=None, operation_id=None, notified_at_ms=None
+    self, business: str, operation=None, operation_id=None, notified_at_ms=None
 ) -> int:
-    return run_with_factory(
-        get_settings().DATABASE_URL,
-        partial(
-            advance_pending,
-            business=business,
-            operation=operation,
-            operation_id=operation_id,
-            notified_at_ms=notified_at_ms,
-        ),
-    )
+    request = self.request
+    trace = DispatchTrace.read(request.id, request.headers) if business == "xray" else None
+    with track_worker(trace):
+        return run_with_factory(
+            get_settings().DATABASE_URL,
+            partial(
+                advance_pending,
+                business=business,
+                operation=operation,
+                operation_id=operation_id,
+                notified_at_ms=notified_at_ms,
+            ),
+        )

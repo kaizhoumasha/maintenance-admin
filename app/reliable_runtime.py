@@ -26,7 +26,7 @@ async def reliable_lifespan(
     client_factory: Callable[[HttpClientConfig], HttpClient] = AsyncHttpClient,
     lifecycles=None,
     client_provider=None,
-    on_result: Callable[[str, str | None], None] | None = None,
+    on_result: Callable[[str, str | None, str], None] | None = None,
     observe_delivered: Callable[[Claim, AttemptOutcome], Awaitable[None]] | None = None,
     on_delivered: Callable[[AsyncSession, OutgoingMessage], Awaitable[bool | None]] | None = None,
 ) -> AsyncIterator[Outbox | None]:

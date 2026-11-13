@@ -5,6 +5,7 @@ from app.businesses import catalog
 from app.core import get_settings
 from app.integrations.discovery import load_runtime_contracts
 from app.tasks.diagnostics import install_celery_diagnostics
+from app.xray_dispatch_trace import SOURCE
 
 install_celery_diagnostics()
 settings = get_settings()
@@ -38,7 +39,10 @@ celery_app.conf.update(
                 "task": "business.advance_pending",
                 "args": (business,),
                 "schedule": 5.0,
-                "options": {"ignore_result": True},
+                "options": {
+                    "ignore_result": True,
+                    **({"headers": {SOURCE: "beat"}} if business == "xray" else {}),
+                },
             }
             for business in catalog.progressions()
         },
