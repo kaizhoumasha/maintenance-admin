@@ -382,7 +382,14 @@ class XrayService:
                 return "NORMAL_COMMAND_UNRESOLVED"
             data = request.payload
             await self._ng(
-                session, reel, stage, request, None, data["reason_code"], data["reason_message"]
+                session,
+                reel,
+                stage,
+                request,
+                None,
+                data["reason_code"],
+                data["reason_message"],
+                barcode=source.payload.get("barcode"),
             )
             return "NG_RESULT_PENDING"
         if stage in actions:
@@ -408,7 +415,16 @@ class XrayService:
                     reel.next_check_at_ms = intent.retry_at
             return "OUTLET_WAIT" if stage == "OUTLET" else "BUSINESS_WAIT"
         if stage == "OUTLET":
-            reason = await self._put(session, reel, arm, source, intent, decision, point)
+            reason = await self._put(
+                session,
+                reel,
+                arm,
+                source,
+                intent,
+                decision,
+                point,
+                original_barcode=facts["ENTRY"].payload["barcode"],
+            )
             if reason == "RACK_PREPARATION_PENDING" and point and point.latest:
                 due = point.latest.next_check_at_ms
                 if (
@@ -437,7 +453,16 @@ class XrayService:
             if source.payload["new_barcode"] != expected_spkg:
                 reel.conflict = "VERIFY_ALLOW_WITH_MISMATCHED_SPKG"
                 return reel.conflict
-        params = {"decision": outcome}
+        params = {
+            "decision": outcome,
+            "barcode": source.payload["new_barcode" if stage == "VERIFY" else "barcode"],
+        }
+        if outcome == "COUNT_REQUIRED":
+            thickness = decision.get("reel_thickness")
+            if thickness is None:
+                reel.conflict = "COUNT_THICKNESS_MISSING"
+                return reel.conflict
+            params["reel_thickness"] = thickness
         if stage == "COUNT":
             params["label"] = {"variables": decision["label_variables"]}
         timeout = (
@@ -561,7 +586,7 @@ class XrayService:
         )
         return "DECISION_PENDING"
 
-    async def _put(self, session, reel, arm, source, intent, decision, point):
+    async def _put(self, session, reel, arm, source, intent, decision, point, *, original_barcode):
         context = {}
         if decision["result"] == "ACCEPT" and decision["target_locator"]["type"] == "TRANSIT_BIN":
             model = PutToBin
@@ -576,7 +601,7 @@ class XrayService:
                 point,
                 intent,
                 unix_ms(self.clock()),
-                barcode=source.payload["barcode"],
+                barcode=original_barcode,
             )
             if reason == "RACK_REDECIDE":
                 return await self._request_decision(session, reel, "OUTLET", source, intent, point)
@@ -609,13 +634,21 @@ class XrayService:
             arm.device_code,
             model,
             90000,
-            {"target": target},
+            {
+                "target": target,
+                "barcode": source.payload.get("new_barcode") or source.payload["barcode"],
+            },
             **context,
         )
         reel.arm_device_code = arm.device_code
         return "PUT_UNRESOLVED"
 
-    async def _ng(self, session, reel, stage, source, intent, code, message):
+    async def _ng(self, session, reel, stage, source, intent, code, message, *, barcode=None):
+        params = {
+            "decision": "NG",
+            "reason": message,
+            "barcode": barcode or source.payload["barcode"],
+        }
         await self._command(
             session,
             reel,
@@ -625,7 +658,7 @@ class XrayService:
             reel.device_code,
             COMMANDS[stage],
             TIMEOUTS["NG"],
-            {"decision": "NG", "reason": message},
+            params,
             phase=stage,
             reason_code=code,
         )
@@ -643,7 +676,7 @@ class XrayService:
         fields,
         **context,
     ):
-        params = model(reel_id=reel.reel_id, source_event_id=source.event_id, **fields)
+        params = model(source_event_id=source.event_id, **fields)
         call_key = f"{reel.id}:{action}"
         view = await self.capabilities.ecs.create(
             session,
@@ -770,7 +803,8 @@ class XrayService:
                 scanned_at=event.timestamp,
             )
         return model(
-            **base,
+            workline_code=reel.workline_code,
+            barcode=data.get("new_barcode") or data["barcode"],
             mode=data["mode"],
             new_barcode=data.get("new_barcode"),
             observed_at=event.timestamp,

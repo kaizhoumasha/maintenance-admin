@@ -1,6 +1,6 @@
 """Correlate physical evidence with this reel's original actions."""
 
-from .contracts import BinActual, RackActual
+from .contracts import BinActual, LegacyBinActual, RackActual
 
 
 def select_events(events):
@@ -33,13 +33,18 @@ def command_evidence(reel, actions, views):
         data = view.result["data"]
         if data["reel_id"] != reel.reel_id:
             return "RESULT_REEL_CONFLICT"
+        params = action["params"]
+        if "barcode" in params and data.get("barcode") != params["barcode"]:
+            return "RESULT_BARCODE_CONFLICT"
         if view.result["result"] != "SUCCESS":
             continue
-        params = action["params"]
         if "decision" in params and data.get("decision") != params["decision"]:
             return "RESULT_DECISION_CONFLICT"
         if stage == "OUTLET":
-            model = RackActual if "rack_locator" in action else BinActual
+            if "rack_locator" in action:
+                model = RackActual
+            else:
+                model = LegacyBinActual if "rack_id" in params["target"] else BinActual
             target = {key: params["target"][key] for key in model.model_fields}
             if data["actual_target"] != target:
                 return "RESULT_TARGET_CONFLICT"
@@ -70,7 +75,7 @@ def event_actions(facts):
 
 def fact_conflict(facts, actions, views):
     entry = facts["ENTRY"].payload
-    for phase in ("COUNT", "VERIFY", "OUTLET", "NG"):
+    for phase in ("COUNT", "VERIFY", "NG"):
         event = facts.get(phase)
         if (
             event
@@ -96,19 +101,23 @@ def fact_conflict(facts, actions, views):
         return "LABEL_EVIDENCE_CONFLICT"
     if outlet:
         mode = outlet.payload["mode"]
+        if mode == "BYPASS" and outlet.payload["barcode"] != entry.get("barcode"):
+            return "EVENT_BARCODE_CONFLICT"
         if (mode == "BYPASS" and entry_decision == "COUNT_REQUIRED") or (
             mode == "COUNTED" and entry_decision == "BYPASS_COUNT"
         ):
             return "OUTLET_MODE_CONFLICT"
-        if (
-            mode == "COUNTED"
-            and verify
-            and (
+        if mode == "COUNTED" and verify:
+            barcode = verify.payload.get("new_barcode")
+            release = actions.get("VERIFY", {}).get("params", {})
+            if (
                 verify.payload["scan_status"] != "OK"
-                or outlet.payload["new_barcode"] != verify.payload.get("new_barcode")
-            )
-        ):
-            return "OUTLET_BARCODE_CONFLICT"
+                or outlet.payload["new_barcode"] != barcode
+                or ("barcode" in release and release["barcode"] != barcode)
+                or outlet.payload["barcode"]
+                not in ((barcode,) if "barcode" in release else (barcode, entry.get("barcode")))
+            ):
+                return "OUTLET_BARCODE_CONFLICT"
         original_stage = "ENTRY" if mode == "BYPASS" else "VERIFY"
         if failed(terminal(views, original_stage)):
             return "OUTLET_EVIDENCE_CONFLICT"

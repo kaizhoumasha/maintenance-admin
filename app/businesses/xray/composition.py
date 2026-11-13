@@ -5,6 +5,11 @@ from .ecs_command import (
     ApplyCountDecision,
     ApplyPkgDecision,
     ApplyVerifyDecision,
+    LegacyCountDecision,
+    LegacyPkgDecision,
+    LegacyPutToBin,
+    LegacyPutToRack,
+    LegacyVerifyDecision,
     PutToBin,
     PutToRack,
 )
@@ -24,6 +29,13 @@ ENTRY_MODULES = (
 )
 MODEL_MODULES = ("app.businesses.xray.models",)
 COMMANDS = (ApplyPkgDecision, ApplyCountDecision, ApplyVerifyDecision, PutToRack, PutToBin)
+HISTORY_COMMANDS = (
+    LegacyPkgDecision,
+    LegacyCountDecision,
+    LegacyVerifyDecision,
+    LegacyPutToRack,
+    LegacyPutToBin,
+)
 PROGRESSION = "scan_pending"
 COMPONENTS = (RACK_DISPATCH,)
 
@@ -48,7 +60,17 @@ def build_service(capabilities):
     for line, targets in get_settings().XRAY_TRANSIT_TARGETS.items():
         if set(targets) != set("ABCD"):
             raise ValueError("XRAY_TRANSIT_TARGETS requires A, B, C and D for each configured line")
-        mapped = {slot: BinActual.model_validate(target) for slot, target in targets.items()}
+        # Existing site settings may still contain the former static asset identifiers.
+        mapped = {
+            slot: BinActual.model_validate(
+                {
+                    field: value
+                    for field, value in target.items()
+                    if field not in {"rack_id", "bin_id"}
+                }
+            )
+            for slot, target in targets.items()
+        }
         if any(slot != target.bin_location for slot, target in mapped.items()):
             raise ValueError("XRAY_TRANSIT_TARGETS slot must match bin_location")
         mappings[line] = mapped

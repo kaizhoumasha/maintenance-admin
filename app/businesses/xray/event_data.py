@@ -32,17 +32,31 @@ class ScanData(DeviceOutcome):
     scan_status: Literal["OK", "NG"]
     barcode: Text | None = None
     new_barcode: Text | None = None
+    old_barcode: Text | None = None
     template_id: Literal["XX123456789"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_null(cls, value):
+        if (
+            isinstance(value, dict)
+            and value.get("scan_stage") == "ENTRY"
+            and value.get("scan_status") == "NG"
+            and value.get("barcode") is None
+        ):
+            value = {key: item for key, item in value.items() if key != "barcode"}
+        return super().no_null(value)
 
     @model_validator(mode="after")
     def stage_fields(self) -> Self:
         ok = self.scan_status == "OK"
         self.check_reason(ok)
         if self.scan_stage == "ENTRY":
-            valid = self.template_id is not None and self.new_barcode is None
+            valid = self.template_id is not None and self.new_barcode is self.old_barcode is None
             valid = valid and (not ok or self.barcode is not None)
         else:
             valid = self.barcode is not None and (not ok or self.new_barcode is not None)
+            valid = valid and self.old_barcode == self.barcode
         if not valid:
             raise ValueError("invalid scan fields for this stage")
         return self
@@ -73,6 +87,8 @@ class ArrivalData(ReelEventData):
     def pickup_evidence(self) -> Self:
         if not self.ready_for_pick or (self.mode == "COUNTED") != (self.new_barcode is not None):
             raise ValueError("expected a ready reel with mode-specific barcodes")
+        if self.new_barcode is not None and self.barcode != self.new_barcode:
+            raise ValueError("COUNTED barcode must match the read label")
         return self
 
 
@@ -81,6 +97,13 @@ class NgDischargedData(ReelEventData):
     barcode: Text | None = None
     reason: Text
     reason_code: Text | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def no_null(cls, value):
+        if isinstance(value, dict) and value.get("barcode") is None:
+            value = {key: item for key, item in value.items() if key != "barcode"}
+        return super().no_null(value)
 
 
 class NgRequestedData(ReelEventData):

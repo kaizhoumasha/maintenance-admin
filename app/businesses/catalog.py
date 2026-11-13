@@ -87,6 +87,7 @@ def _snapshot():
             entry.DEFINITION,
             tuple(entry.ENTRY_MODULES),
             tuple(entry.COMMANDS),
+            tuple(getattr(entry, "HISTORY_COMMANDS", ())),
             tuple(getattr(entry, "MODEL_MODULES", ())),
             components(entry),
             getattr(entry, "PROGRESSION", None),
@@ -399,6 +400,9 @@ def validate_business_contracts() -> tuple[
             if existing is None:
                 compiled_by_key[command_key] = command
                 commands.append(command)
+        # Historical declarations supply Result models without enabling old sends.
+        _, historical = compile_commands(*getattr(entry, "HISTORY_COMMANDS", ()))
+        declared = merge_annexes(declared, historical, source=f"{location} history")
         for key, annex in declared.items():
             source = entry_annex_sources.get(key, location)
             try:

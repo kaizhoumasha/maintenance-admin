@@ -84,9 +84,10 @@ COMMANDS = (MoveTo,)
 ```
 
 装饰器返回原精确类，`device_roles` 必须为非空、唯一角色 tuple。一个参数模型可供多个角色共享，
-composition 只声明 `COMMANDS`。catalog 内部编译并只激活所属 definition 角色的交集；
+composition 用 `COMMANDS` 声明可新登记的命令。catalog 内部编译并只激活所属 definition 角色的交集；
 模型至少覆盖本业务一个角色，所有声明角色须存在于显式 catalog 中，未列模型的其他业务不获得权限。
 重复角色/动作、同附录键不同模型/范围、非法合同或 local 来源在资源构造前失败。
+更换附录版本时可在 `HISTORY_COMMANDS` 保留原声明模型，catalog 编译其严格 Result 合同供迟到回报使用。
 编译产物及声明元数据属于平台内部；业务不手造绑定/附录或修改元数据，不建立命令发现树。
 标题保留“显式编译”锚点供历史链接跳转，编译由 catalog 负责。
 
