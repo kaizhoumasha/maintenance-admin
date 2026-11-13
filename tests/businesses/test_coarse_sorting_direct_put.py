@@ -54,7 +54,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
     assert put["params"] == {
         "barcode": row["payload"]["barcode"],
         "bin_location": "B",
-        "bin_cell_location": 7,
+        "bin_cell_location": "7",
         "bin_type": str(bin_type),
         "reel_totalthickness": 120,
     }
@@ -517,7 +517,7 @@ async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direc
     second = await reach_allocate(flow, timestamp=1793206799001)
     second_put = await dispatch_put(flow, second)
     assert second_put["params"]["reel_totalthickness"] == 140
-    assert second_put["params"]["bin_cell_location"] == 7
+    assert second_put["params"]["bin_cell_location"] == "7"
     assert first_put["command_code"] != second_put["command_code"]
 
     flow.rebuild()

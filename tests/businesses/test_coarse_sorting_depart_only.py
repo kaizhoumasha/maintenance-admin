@@ -182,7 +182,7 @@ async def test_normal_reel_completes_after_rack_change_while_ng_closes_independe
     assert await flow.dispatch() == 1
     put = json.loads(flow.peer.commands[-1])
     assert put["task_type"] == "PUT_TO_BIN"
-    assert put["params"]["bin_cell_location"] == flow.peer.allocate["cell_index"]
+    assert put["params"]["bin_cell_location"] == str(flow.peer.allocate["cell_index"])
     assert not flow.peer.reports
     assert (
         await flow.result(
