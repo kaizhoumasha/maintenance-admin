@@ -5,6 +5,7 @@
 ### 粗分机 ECS 入箱箱格号
 
 - 粗分机 `PUT_TO_BIN` 向 ECS 发送字符串形式的 `bin_cell_location`。WMS 分配和完成报告继续使用整数 `cell_index`。
+- 粗分机 `PUT_TO_BIN` 向 ECS 发送字符串形式的 `reel_totalthickness`，WMS 分配继续使用数值。
 
 ### ECS 回调兼容
 
