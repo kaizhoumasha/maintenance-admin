@@ -161,11 +161,11 @@ WMS 决定和事实沿用现有公共信封，请求使用 `operation_id/operati
 
 示例的身份、时间和位置为开发样例，正式绑定和目标映射由工作线配置提供。ECS 示例描述下划线版合同，现场切换条件见 [6.1](#xray-ecs-cutover)。HTTP 信封、投递及错误分类沿用公共能力；各节字段表定义完整业务 DTO。
 
-WMS 与 ECS 的接口字段统一使用下划线分隔（`snake_case`），涵盖信封、`data`、`params` 及其嵌套对象。标签模板的十个变量名是既有模板内容，按原键原值透传。X-Ray 的 ECS Event 和 WMS Operation 均以 `barcode` 表示入口实读原码，以 `new_barcode` 表示 CCD 实读新码。WMS 授权目标用 `target_locator`，实际去向用 `to_locator`。WES 保存两侧原报文和关联。ECS 原事件统一写作 `event_id`，ECS 命令引用统一写作 `source_event_id`，本次进机身份统一写作 `reel_id`。WES 在内部将这些设备事实与 `operation_id` 关联，WMS 请求 `data` 仅发送各 Operation 所需的业务字段。映射见下表，WMS 字段命名参考 [SMT 自动线选位](../../app/businesses/smt_auto/outbound_contracts.py)和[物料移动报告](../../app/businesses/smt_auto/request/outbound_material_movement_report_v1.py)。
+WMS 与 ECS 的接口字段统一使用下划线分隔（`snake_case`），涵盖信封、`data`、`params` 及其嵌套对象。标签模板的十个变量名是既有模板内容，按原键原值透传。CCD 复核前的 `barcode` 取入口实读原码，`new_barcode` 取 CCD 实读新码。复核 OK 后，正常出料、到料、选位和搬运使用已复核的实读新码作为 `barcode`。免清点继续使用入口实读码。WMS 授权目标用 `target_locator`，实际去向用 `to_locator`。WES 保存两侧原报文和关联。ECS 原事件统一写作 `event_id`，ECS 命令引用统一写作 `source_event_id`，本次进机身份统一写作 `reel_id`。WES 在内部将这些设备事实与 `operation_id` 关联，WMS 请求 `data` 仅发送各 Operation 所需的业务字段。映射见下表，WMS 字段命名参考 [SMT 自动线选位](../../app/businesses/smt_auto/outbound_contracts.py)和[物料移动报告](../../app/businesses/smt_auto/request/outbound_material_movement_report_v1.py)。
 
 | WMS 业务字段 | ECS 字段 | 映射要求 |
 | --- | --- | --- |
-| barcode / new_barcode | barcode / new_barcode | 同名字段原值传递。barcode 始终指本盘入口实读原码，new_barcode 取 CCD 实读新码。 |
+| barcode / new_barcode | barcode / new_barcode | 同名字段原值传递。复核阶段保留双码，COUNTED 到料及选位的两个字段都使用已复核的实读新码。 |
 | expected_spkg | 原贴标命令的 label.variables.SPKG | 仅用于复核请求，由 WES 取本盘原 WMS 标签决定中冻结的 SPKG。 |
 | actual_qty | qty | 清点实测 PCS。取放 Result 的 actual_qty 单位为盘。 |
 | template_id / label_variables | template_id / label.variables | 保留模板关联和原十变量。 |
@@ -219,9 +219,9 @@ WES 将五种 Command 模型列入 `COMMANDS`。三个判定模型各自包含�
 | 顶层 device_code / command_code | 可信绑定的设备编码和 WES 原命令 UUIDv7。Result 原值回传。 |
 | 顶层 timestamp / finish_time | 非负 UTC Unix 毫秒整数，范围同 2.0.3。Event 为原事实时间，Command 为原创建时间，Result 为实际终态时间。 |
 | Command priority / timeout | priority 为整数 1。timeout 为正毫秒整数。按原载荷冻结，各分支示例给出对应预算。 |
-| event_id / reel_id | UUID 字符串，分别为 ECS 原事件与本次进机身份。补报保持原值，WES 平台收件 ID 独立保存。 |
+| event_id / reel_id | UUID 字符串，分别为 ECS 原事件与本次进机身份。Event 和 Result 沿用原 `reel_id`，WES 平台收件 ID 独立保存。 |
 | Command source_event_id | UUID 字符串，引用本次决定对应的原 event_id。等待例外引用异常排料请求的 event_id，见 3.2.1。 |
-| barcode / new_barcode | Barcode，分别保存入口实读原码及 CCD 实读新码。各事件的必填条件见对应小节。 |
+| barcode / new_barcode | Barcode。复核前使用入口原码，复核 OK 后的正常路径使用实读新码。各报文的必填条件见对应小节。 |
 | template_id / label.variables.ID | 固定模板标识 XX123456789。入口、点料和标签变量保持一致，未结盘期间不切换模板或变量定义。部署变更须明确配置，不按单盘临时选模板。 |
 | reason_code / reason_message | 原设备原因码和说明，均为非空字符串。按各事件的条件携带；NG_DISCHARGED 使用 reason 作为说明。 |
 | Result result / error_detail | result 为 SUCCESS／FAILED。FAILED 必含 error_detail，且仅含 code、msg 两个非空字符串，SUCCESS 省略 error_detail 或为 null。 |
@@ -238,7 +238,7 @@ Command `params` 和 Result `data` 按冻结的严格分支校验。模型包含
 Result／Event 可以乱序；各节成功样例、下列失败样例及 NG 分支互斥。设备预算和投递窗口见 [3.3](#xray-recovery)。
 
 <a id="xray-ecs-failed"></a>
-**通用 FAILED Result。** 所有命令复用以下信封。示例为原 PUT_TO_RACK 失败，与 2.12.1 的 SUCCESS 互斥；其他命令回传各自的原 command_code、device_code 和 reel_id。
+**通用 FAILED Result。** 所有命令复用以下信封。示例为原 PUT_TO_RACK 失败。各命令回传原 command_code、device_code、reel_id 和命令冻结的 barcode。
 
 ```json
 {
@@ -248,6 +248,7 @@ Result／Event 可以乱序；各节成功样例、下列失败样例及 NG 分�
   "finish_time": 1793413840000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "position": "GRIPPER",
     "actual_qty": 0
   },
@@ -261,6 +262,7 @@ Result／Event 可以乱序；各节成功样例、下列失败样例及 NG 分�
 | 失败字段 | 约束 |
 | --- | --- |
 | data.reel_id | 必填，原料盘 UUID。 |
+| data.barcode | 必填，原命令冻结的条码。 |
 | data.position | 可选，可信实际位置 SOURCE／GRIPPER／TARGET／OTHER／UNKNOWN。 |
 | data.failure_stage | 可选非空字符串，如 COUNT、PRINT、LABEL、PICK、PUT，不限定为封闭枚举。 |
 | data.actual_qty | 仅搬运失败且可证实目标放料未完成时填整数 0，未知时省略。 |
@@ -298,7 +300,7 @@ Result／Event 可以乱序；各节成功样例、下列失败样例及 NG 分�
 | --- | --- | --- |
 | event_id / reel_id | UUID 字符串 / 是 | 原事件与本次进机身份。 |
 | scan_stage / scan_status | enum / 是 | scan_stage 固定 ENTRY，scan_status 为 OK 或 NG。 |
-| barcode | Barcode / OK 必填，NG 已知时可带 | 实际旧码，无读码时省略。 |
+| barcode | Barcode 或 null | OK 使用实读旧码。NG 无码时填 null，兼容省略。 |
 | template_id | Identifier / 是 | 本次进机对应的设备模板标识。 |
 | reason_code / reason_message | 原因字段 / NG 必填，OK 省略 | 实际读码失败原因。 |
 
@@ -336,7 +338,8 @@ WMS 根据本盘原入口事实检查发料和使用记录，决定清点、免�
   "code": "DECIDED",
   "timestamp": 1793413801100,
   "data": {
-    "result": "COUNT_REQUIRED"
+    "result": "COUNT_REQUIRED",
+    "reel_thickness": 15.3
   }
 }
 ```
@@ -349,7 +352,7 @@ WMS 根据本盘原入口事实检查发料和使用记录，决定清点、免�
 
 | HTTP / code | 完整响应 `data` 示例 | WES 处理 |
 | --- | --- | --- |
-| 200 / DECIDED | `{"result":"COUNT_REQUIRED"}` | 登记本盘唯一原清点命令。 |
+| 200 / DECIDED | `{"result":"COUNT_REQUIRED","reel_thickness":15.3}` | 冻结 WMS 提供的本盘厚度（毫米，严格正数），登记本盘唯一原清点命令。 |
 | 200 / DECIDED | `{"result":"BYPASS_COUNT"}` | 直接安排正常出料，跳过清点、贴标和 CCD。 |
 | 200 / DECIDED | `{"result":"NG","reason_code":"MATERIAL_REJECTED","reason_message":"WMS 判定该盘不适用"}` | 保存原拒绝原因，登记原排料动作，等待实际排出。 |
 | 200 / DECIDED | `{"result":"WAIT","retry_after_ms":1000}` | 按公共 WAIT 规则保持本盘。 |
@@ -372,17 +375,19 @@ WMS 根据本盘原入口事实检查发料和使用记录，决定清点、免�
   "timeout": 70000,
   "timestamp": 1793413801200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "source_event_id": "1b2daf25-09b1-4734-ab69-57f40524e3be",
-    "decision": "COUNT_REQUIRED"
+    "decision": "COUNT_REQUIRED",
+    "reel_thickness": 15.3
   }
 }
 ```
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘与原 ENTRY 事件。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | 实读进料条码与原 ENTRY 事件。 |
 | decision | enum / 是 | 本分支为 COUNT_REQUIRED。BYPASS_COUNT 和 NG 分别见 2.13、2.14。 |
+| reel_thickness | 正数 / COUNT_REQUIRED 必填 | 来自原 WMS 决定，单位毫米。BYPASS_COUNT 和 NG 省略。 |
 
 **推进条件。** 业务以稳定的原调用键登记一次 APPLY_PKG_DECISION（COUNT_REQUIRED）。ECS 核对本盘在位及清点许可。ACK 后等待原 Result 和实际点料事实。
 
@@ -407,13 +412,14 @@ WMS 根据本盘原入口事实检查发料和使用记录，决定清点、免�
   "finish_time": 1793413808000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "decision": "COUNT_REQUIRED",
     "qty": 4000
   }
 }
 ```
 
-SUCCESS 的 `data` 包含原 `reel_id`、`decision=COUNT_REQUIRED` 和严格非负整数 `qty`（PCS）。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
+SUCCESS 的 `data` 包含原 `reel_id`、`barcode`、`decision=COUNT_REQUIRED` 和严格非负整数 `qty`（PCS）。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
 
 **推进条件。** Result 关闭原 APPLY_PKG_DECISION（COUNT_REQUIRED） 动作，清点后决定由实测数量 Event 触发。两条证据按 [2.3.3](#xray-count-evidence) 核对。
 
@@ -557,7 +563,7 @@ WMS 根据原码、实测数量及原模板返回业务决定。本次清点请�
   "timeout": 40000,
   "timestamp": 1793413809200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "source_event_id": "5ad0f02e-e98d-456d-bb52-dff0d8706865",
     "decision": "OK",
     "label": {
@@ -580,12 +586,12 @@ WMS 根据原码、实测数量及原模板返回业务决定。本次清点请�
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘和原清点事件。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | 实读进料条码与原清点事件。 |
 | decision | enum / 是 | 本分支为 OK。NG 分支见 2.14。 |
 | label | object / OK 必填 | 只含 variables。NG 时省略。 |
 | label.variables | object / OK 必填 | 2.4 的完整十变量，等于 WMS 原 label_variables。 |
 
-**推进条件。** WES 复核原清点证据和原标签决定，冻结原数据并登记唯一贴标动作。ECS 用 `ID` 核对本地模板后执行实际打印贴标。后续 CCD 由设备自动执行。
+**推进条件。** WES 复核原清点证据和原标签决定，冻结原数据并登记唯一贴标动作。ECS 用 `ID` 核对本地模板，沿用同盘清点许可保存的厚度，执行实际打印贴标。后续 CCD 由设备自动执行。
 
 <a id="xray-label-result"></a>
 ### 2.5 实际贴标完成
@@ -606,13 +612,14 @@ WMS 根据原码、实测数量及原模板返回业务决定。本次清点请�
   "finish_time": 1793413813000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "decision": "OK",
     "label_status": "APPLIED"
   }
 }
 ```
 
-SUCCESS 的 `data` 包含原 `reel_id`、`decision=OK` 和 `label_status=APPLIED`。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
+SUCCESS 的 `data` 包含原 `reel_id`、`barcode`、`decision=OK` 和 `label_status=APPLIED`。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
 
 **推进条件。** SUCCESS 结束原贴标动作。CCD Event 按 [2.6.1](#xray-label-evidence) 独立核对。FAILED 保存原错误及实际证据，避免因失败回调自动重复打印。
 
@@ -636,6 +643,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision=OK` 和 `label_status=APPLIED
     "scan_stage": "VERIFY",
     "scan_status": "OK",
     "barcode": "PKG-OLD-A",
+    "old_barcode": "PKG-OLD-A",
     "new_barcode": "SXCN0031482261000009NVD"
   }
 }
@@ -646,6 +654,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision=OK` 和 `label_status=APPLIED
 | event_id / reel_id | UUID 字符串 / 是 | 原 CCD 事实及本次进机身份。 |
 | scan_stage / scan_status | enum / 是 | scan_stage 固定 VERIFY，scan_status 为 OK 或 NG。 |
 | barcode | Barcode / 是 | 同盘实际进料旧码。 |
+| old_barcode | Barcode / 必填 | 与本事件 barcode 和原 ENTRY 实读旧码一致。 |
 | new_barcode | Barcode / OK 必填，NG 有实际读码时可带 | CCD 实际读到的新码，无读码时省略。 |
 | template_id | Identifier / 可选 | 模板追溯字段，提供时须与本盘模板一致。 |
 | reason_code / reason_message | 原因字段 / NG 必填，OK 省略 | 实际读码失败原因。 |
@@ -739,7 +748,7 @@ WMS 按 `expected_spkg` 找到原发标记录，核对工作线及原码，并�
   "timeout": 25000,
   "timestamp": 1793413815200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "source_event_id": "58132158-68da-4e5b-bbd2-63553c7b4856",
     "decision": "OK"
   }
@@ -748,7 +757,7 @@ WMS 按 `expected_spkg` 找到原发标记录，核对工作线及原码，并�
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘和授权对应的原事件。COUNTED 引用 VERIFY，BYPASS 引用 ENTRY。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | COUNTED 放行使用原 VERIFY 实读新码和事件身份。BYPASS 命令见 2.13。 |
 | decision | enum / 是 | COUNTED 使用 APPLY_VERIFY_DECISION、decision=OK，引用原 VERIFY。BYPASS 使用 APPLY_PKG_DECISION、decision=BYPASS_COUNT，引用原 ENTRY。 |
 
 **推进条件。** WES 在原阶段仍有效时只登记一次出料。ECS 核对实际盘位及通行条件。原动作到出口实际可取才回 SUCCESS，并另报一次到料 Event。排 NG 使用原阶段判定命令的 decision=NG 分支，见 2.14。
@@ -774,13 +783,14 @@ WMS 按 `expected_spkg` 找到原发标记录，核对工作线及原码，并�
   "finish_time": 1793413819000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "decision": "OK",
     "mode": "COUNTED"
   }
 }
 ```
 
-SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的 decision=OK、mode=COUNTED，免清点的 decision=BYPASS_COUNT、mode=BYPASS。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
+SUCCESS 的 `data` 包含原 `reel_id`、`barcode`、`decision` 和 `mode`。复核放行的 decision=OK、mode=COUNTED，barcode 为原命令冻结的实读新码。免清点的 decision=BYPASS_COUNT、mode=BYPASS，barcode 为入口实读码。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
 
 **推进条件。** 原 Result 结束出料命令。WES 使用独立的实际到料 Event 作为选位触发事实，矛盾证据按 [2.8.3](#xray-outlet-conflict) 处理。
 
@@ -801,7 +811,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
   "data": {
     "event_id": "ae674c2d-635a-471e-bb2e-0dfa924c8a04",
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
-    "barcode": "PKG-OLD-A",
+    "barcode": "SXCN0031482261000009NVD",
     "mode": "COUNTED",
     "ready_for_pick": true,
     "new_barcode": "SXCN0031482261000009NVD"
@@ -812,17 +822,17 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 | `data` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
 | event_id / reel_id | UUID 字符串 / 是 | 原到料事实及本次进机身份。 |
-| barcode | Barcode / 是 | 原进料旧码。 |
+| barcode | Barcode / 是 | COUNTED 取已复核的实读新码，BYPASS 取入口实读码。 |
 | mode | enum / 是 | BYPASS 或 COUNTED，须和原路线一致。 |
 | ready_for_pick | boolean / 是 | 固定 true，以设备实际条件为据。 |
-| new_barcode | Barcode / COUNTED 必填，BYPASS 省略 | 同盘实际读到且已复核的新码。 |
+| new_barcode | Barcode / COUNTED 必填，BYPASS 省略 | 同盘实际读到且已复核的新码，与 COUNTED 的 barcode 相同。 |
 
 **推进条件。** WES 按 2.8.3 核对原出料证据后，沿原到料事件登记一次 2.9 的选位请求。保持占位时沿原身份补报。机械臂执行前由 ECS 重验实时取盘条件。
 
 <a id="xray-outlet-conflict"></a>
 #### 2.8.3 出料证据核对
 
-按原设备、reel_id 和 mode 找到本次进机保存的正常出料动作：COUNTED 对应 APPLY_VERIFY_DECISION（OK），BYPASS 对应 APPLY_PKG_DECISION（BYPASS_COUNT）。barcode 与入口一致；COUNTED 的 new_barcode 等于本盘已复核的 CCD 实际新码，BYPASS 不带 new_barcode。
+按原设备、reel_id 和 mode 找到本次进机保存的正常出料动作：COUNTED 对应 APPLY_VERIFY_DECISION（OK），BYPASS 对应 APPLY_PKG_DECISION（BYPASS_COUNT）。COUNTED 的 barcode 和 new_barcode 均须与同盘已复核的 CCD 实读新码一致。BYPASS 的 barcode 须与入口一致，省略 new_barcode。
 
 | 证据 | 推进 |
 | --- | --- |
@@ -834,7 +844,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 <a id="xray-target"></a>
 ### 2.9 出口选位
 
-**WES → WMS 决定请求**。本盘实际可取后发起。选位请求沿 SMT 自动线的分工，由 WES 在内部核对当前架号、架面、空位、未知状态和在途作业。WMS 决定本盘走五层退料架还是通箱，五层架在同一决定中返回精确目标和可选准备指示。COUNTED 使用已复核的 `new_barcode`（SPKG）关联发标物料，BYPASS 使用 `barcode` 及 `mode` 求值。复核与到料是否属于同一次进机由 WES 按 [2.8.3](#xray-outlet-conflict) 核对。
+**WES → WMS 决定请求**。本盘实际可取后发起。选位请求沿 SMT 自动线的分工，由 WES 在内部核对当前架号、架面、空位、未知状态和在途作业。WMS 决定本盘走五层退料架还是通箱，五层架在同一决定中返回精确目标和可选准备指示。COUNTED 使用 `barcode` 中已复核的实读新码关联发标物料，BYPASS 使用 `barcode` 及 `mode` 求值。复核与到料是否属于同一次进机由 WES 按 [2.8.3](#xray-outlet-conflict) 核对。
 
 | 项目 | 值 |
 | --- | --- |
@@ -850,7 +860,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
   "data": {
     "workline_code": "XRAY-LINE-01",
     "mode": "COUNTED",
-    "barcode": "PKG-OLD-A",
+    "barcode": "SXCN0031482261000009NVD",
     "new_barcode": "SXCN0031482261000009NVD",
     "observed_at": 1793413819000
   }
@@ -885,7 +895,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`decision` 和 `mode`。复核放行的
 | --- | --- | --- |
 | workline_code | Identifier / 是 | 原事实所属的工作线。 |
 | mode | enum / 是 | `BYPASS / COUNTED`。 |
-| barcode | Barcode / 是 | 原进料旧码。 |
+| barcode | Barcode / 是 | COUNTED 取已复核的实读新码，BYPASS 取入口实读码。 |
 | new_barcode | Barcode / COUNTED 必填，BYPASS 省略 | WMS 已复核的实际新码。 |
 | observed_at | 毫秒整数 / 是 | 本盘实际可取的发生时间。 |
 
@@ -940,7 +950,7 @@ WES 根据同一份精确储位授权推进架准备。原绑定变化、已有�
 
 通箱使用下文的 `PUT_TO_BIN` 合同。WES 调度以本盘通箱放料结果为依据，通箱及单层架的搬运由人工处理。
 
-WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选择一次。选择结果、目标映射和原命令关联一并持久保存；重复到料、技术重试或重启恢复均沿用原目标，不再次抽取。bin_id 是必填的 ECS 目标身份，须读取对应箱位配置；A/B/C/D 表示 bin_location。四个箱位的映射须齐备且与 ECS 一致，缺失时保留待办并告警，不发送缺字段命令。
+WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选择一次。选择结果、目标映射和原命令关联一并持久保存；重复到料、技术重试或重启恢复均沿用原目标，不再次抽取。A/B/C/D 表示 bin_location。四个箱位的站点映射须齐备且与 ECS 一致，缺失时保留待办。
 
 ```text
 已有原取放意图 → 恢复原箱位、原 target、原命令
@@ -968,7 +978,7 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
   "timeout": 90000,
   "timestamp": 1793413820200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "source_event_id": "ae674c2d-635a-471e-bb2e-0dfa924c8a04",
     "target": {
       "location_id": "XRAY-RACK-01",
@@ -987,7 +997,7 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘与原 MATERIAL_ARRIVED 事件。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | 原到料事件的有效条码和事件身份。 |
 | target.location_id | Identifier / 是 | 从 WMS target_locator.location_code 按已配置站点映射生成，示例两侧值相同。 |
 | target.location_type | enum / 是 | 固定 RETURN_RACK。 |
 | target.rack_id / rack_face / slot_id | 原定位字段 / 是 | 保留 WMS 原架、面和储位，面为 A／B。 |
@@ -1005,7 +1015,7 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
 | 角色 / task_type | `OUTPUT_ARM / PUT_TO_BIN` |
 | 触发 | 本盘实际可取，WMS 选位返回 TRANSIT_BIN，与 PUT_TO_RACK 分支互斥。 |
 
-以下样例的随机结果为 D，仅包含必填目标字段；站点、架号和箱号为示例，正式值由本线 ECS 配置提供。
+以下样例选中 D 箱位。目标站点由本线配置提供。
 
 ```json
 {
@@ -1016,13 +1026,11 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
   "timeout": 90000,
   "timestamp": 1793413820200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "source_event_id": "ae674c2d-635a-471e-bb2e-0dfa924c8a04",
     "target": {
       "location_id": "STATION_B",
       "location_type": "ONE_LAYER_RACK",
-      "rack_id": "110014",
-      "bin_id": "A000001568",
       "bin_type": "1",
       "bin_location": "D",
       "bin_cell_location": 8
@@ -1033,20 +1041,15 @@ WES 每次创建新的通箱取放意图时，在 A/B/C/D 中等概率随机选�
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘与原 MATERIAL_ARRIVED 事件。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | 原到料事件的有效条码和事件身份。 |
 | target | object / 是 | WES 原随机箱位对应的完整 ECS 目标，不得省略。 |
-| target.location_id / rack_id / bin_id | 非空字符串 / 均必填 | 已配置站点、单层架及该箱位对应箱身份，三者与实际 ECS 映射一致。 |
+| target.location_id | 非空字符串 / 必填 | 已配置目标站点，与箱位共同定位。 |
 | target.location_type | enum / 是 | 固定 ONE_LAYER_RACK。 |
 | target.bin_type | string / 是 | 固定字符串 "1"，不能发整数。 |
 | target.bin_location | enum / 是 | WES 原随机结果 A／B／C／D，不由 ECS 改选。 |
 | target.bin_cell_location | integer / 是 | 固定 JSON 整数 8。 |
-| target.reel_layer | integer / 可选 | 放入前已有盘层数，非负；没有可信事实时省略。 |
-| target.reel_thickness / reel_diameter | number / 可选 | 本盘厚度为正毫米数，直径为 7／13／15 英寸。 |
-| target.reel_totalthickness | number / 可选 | 放入前已有物料总高度，非负毫米数，不是放入后的总高度。 |
 
-单层架和通箱实物由人工管理，WES 的调度对象是本盘及固定箱位 A／B／C／D。现行 ECS 附录 §6.4.1 要求 `rack_id`、`bin_id` 随命令传递，WES 将它们作为 ECS 提供的固定接口映射，随原命令冻结并用于结果核对。固定映射能否随人工换箱继续使用，由 ECS 确认。若 ECS 支持仅按站点及箱位定位，可共同更新命令与 Result 合同，简化这两个字段。
-
-四个 reel_* 控制字段均可选，本通箱样例均省略。不提供时 ECS 必须具备已冻结的控制配方或可信设备参数；实际所需参数无法确定时明确未接纳，不猜测、不拿上一盘缓存或用 0 补缺。
+单层架和通箱实物由人工管理。ECS 根据站点和箱位定位并核对实时实物及安全条件。命令省略架号、箱号、尺寸及堆叠字段。
 
 **推进条件。** WES 保存原随机箱位及完整目标。ECS 能安全保留原取放时，持久接纳 `PUT_TO_BIN`。满箱、缺箱等可恢复的等待由工人在设备端处理。条件恢复后，ECS 核对本盘、原目标及实时安全条件，继续原动作，并按原 `command_code` 回报实际终态。WES 保留原任务并等待 Result，沿用原箱位。
 
@@ -1074,6 +1077,7 @@ ECS 无法安全承担原任务时，按公共规则明确未接纳。WES 在原
   "finish_time": 1793413840000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "actual_qty": 1,
     "position": "TARGET",
     "actual_target": {
@@ -1089,7 +1093,7 @@ ECS 无法安全承担原任务时，按公共规则明确未接纳。WES 在原
 }
 ```
 
-SUCCESS 必含 `reel_id`、整数 `actual_qty=1`、`position=TARGET` 及 `actual_target`。实际位置对象包含 location_id、location_type=RETURN_RACK、rack_id、rack_face、slot_id、rack_layer、rack_column。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。WES 保留实际位置与授权不一致的证据。
+SUCCESS 必含 `barcode`、`reel_id`、整数 `actual_qty=1`、`position=TARGET` 及 `actual_target`。实际位置对象包含 location_id、location_type=RETURN_RACK、rack_id、rack_face、slot_id、rack_layer、rack_column。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。WES 保留实际位置与授权不一致的证据。
 
 **推进条件。** 真实落位与原目标匹配才生成 2.12.3 的事实报告。实际目标不同、失败或仍有不确定责任时保留原结果和实际位置待核对。
 
@@ -1112,13 +1116,12 @@ SUCCESS 必含 `reel_id`、整数 `actual_qty=1`、`position=TARGET` 及 `actual
   "finish_time": 1793413840000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "SXCN0031482261000009NVD",
     "actual_qty": 1,
     "position": "TARGET",
     "actual_target": {
       "location_id": "STATION_B",
       "location_type": "ONE_LAYER_RACK",
-      "rack_id": "110014",
-      "bin_id": "A000001568",
       "bin_type": "1",
       "bin_location": "D",
       "bin_cell_location": 8
@@ -1127,7 +1130,7 @@ SUCCESS 必含 `reel_id`、整数 `actual_qty=1`、`position=TARGET` 及 `actual
 }
 ```
 
-SUCCESS 必含 `reel_id`、整数 `actual_qty=1`、`position=TARGET` 和完整 `actual_target`。实际目标仅含 location_id、location_type=ONE_LAYER_RACK、rack_id、bin_id、bin_type、bin_location、bin_cell_location，不回填可选 reel_* 控制上下文。各身份字段须与原命令冻结目标逐项匹配。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。WES 保存完整实际位置，核对后将本分支映射为 `to_locator={"type":"TRANSIT_BIN"}`，不改变 WMS 业务 DTO。
+SUCCESS 必含 `barcode`、`reel_id`、整数 `actual_qty=1`、`position=TARGET` 和完整 `actual_target`。实际目标仅含 location_id、location_type=ONE_LAYER_RACK、bin_type、bin_location、bin_cell_location，各身份字段须与原命令冻结目标逐项匹配。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。WES 保存完整实际位置，核对后将本分支映射为 `to_locator={"type":"TRANSIT_BIN"}`，不改变 WMS 业务 DTO。
 
 **推进条件。** 本盘实际入箱且完整 actual_target 与原随机目标一致后，生成 2.12.3 的通箱放料报告。目标不符、失败或结果未知时保存原证据待核对，不按期望目标报告成功。后续手工上架是独立作业。
 
@@ -1231,7 +1234,7 @@ WMS 清点前返回免清点后，WES 登记 APPLY_PKG_DECISION，decision=BYPAS
   "timeout": 25000,
   "timestamp": 1793413901200,
   "params": {
-    "reel_id": "bb9f68e9-7d0c-480c-81a3-4e8153139c70",
+    "barcode": "PKG-OLD-B",
     "source_event_id": "508db06a-ad88-42af-8da6-b6346162aa7d",
     "decision": "BYPASS_COUNT"
   }
@@ -1248,6 +1251,7 @@ WMS 清点前返回免清点后，WES 登记 APPLY_PKG_DECISION，decision=BYPAS
   "finish_time": 1793413905000,
   "data": {
     "reel_id": "bb9f68e9-7d0c-480c-81a3-4e8153139c70",
+    "barcode": "PKG-OLD-B",
     "decision": "BYPASS_COUNT",
     "mode": "BYPASS"
   }
@@ -1327,7 +1331,7 @@ WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":
   "timeout": 20000,
   "timestamp": 1793413815200,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "source_event_id": "58132158-68da-4e5b-bbd2-63553c7b4856",
     "decision": "NG",
     "reason": "WMS 复核未通过"
@@ -1337,7 +1341,7 @@ WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":
 
 | `params` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
-| reel_id / source_event_id | UUID 字符串 / 是 | 本盘及本次排料依据的原设备事件。业务 NG 引用原 WMS 决定对应的原事实，机内等待例外引用原 XRAY_NG_REQUESTED 的 event_id。 |
+| barcode / source_event_id | Barcode 与 UUID 字符串 / 均必填 | 三个阶段的 NG 均使用入口实读旧码。业务 NG 引用原阶段事件，机内等待例外引用原 XRAY_NG_REQUESTED。 |
 | decision | enum / 是 | 固定 NG。ENTRY 对应 APPLY_PKG_DECISION，COUNT 对应 APPLY_COUNT_DECISION，VERIFY 对应 APPLY_VERIFY_DECISION。阶段由原 source_event_id 关联。 |
 | reason | 非空字符串 / 是 | WMS 原拒绝说明或异常排料请求的原 reason_message。原 reason_code 留在 WES 业务上下文。 |
 
@@ -1352,7 +1356,7 @@ WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":
   "timeout": 20000,
   "timestamp": 1793413814600,
   "params": {
-    "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "source_event_id": "f4c5040e-113e-4fe9-bae6-f16e78dce35f",
     "decision": "NG",
     "reason": "本盘无法继续保持，设备已确认具备安全排料条件"
@@ -1381,13 +1385,14 @@ WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":
   "finish_time": 1793413818000,
   "data": {
     "reel_id": "18520712-e29b-4197-b145-1aefa4c14cca",
+    "barcode": "PKG-OLD-A",
     "decision": "NG",
     "discharged": true
   }
 }
 ```
 
-SUCCESS 的 `data` 包含 `reel_id`、`decision=NG` 和 `discharged=true`。阶段及原因从原命令与其 source_event_id 关联。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
+SUCCESS 的 `data` 包含 `reel_id`、原排料命令冻结的旧码 `barcode`、`decision=NG` 和 `discharged=true`。阶段及原因从原命令与其 source_event_id 关联。失败字段见 [通用 FAILED Result](#xray-ecs-failed)。
 
 **推进条件。** SUCCESS 结束原排料动作并提供实际排出证据。FAILED 保存原失败与位置证据。两种结果均按 [2.14.3](#xray-ng-event) 核对同盘其他证据后再决定是否报告。
 
@@ -1420,7 +1425,7 @@ SUCCESS 的 `data` 包含 `reel_id`、`decision=NG` 和 `discharged=true`。阶�
 | --- | --- | --- |
 | event_id / reel_id | UUID 字符串 / 是 | 实际排出事实及本次进机。 |
 | stage | enum / 是 | ENTRY、COUNT、LABEL、VERIFY。 |
-| barcode | Barcode / 已知时带 | 实际旧码，无码时省略。 |
+| barcode | Barcode 或 null | 实际旧码，无码时填 null，兼容省略。 |
 | reason | 非空字符串 / 是 | 设备实际排出原因，原文保存。 |
 | reason_code | 原因码 / 可选 | 设备已知的实际排出原因码，原文保存。 |
 
@@ -1513,7 +1518,7 @@ WES 按本次进机核对落位和排出证据，登记报告时冻结证据来�
 
 | 对象 | 关联与恢复 |
 | --- | --- |
-| 本次进机 | 进料设备为本次进机分配一个 `reel_id`。同一料盘从入口、清点、贴标、复核到出口、取放或排 NG，相关 Event、Command、Result 始终沿用该值。WES 保存该值与 WMS 请求的内部关联。贴新码时保持原 `reel_id`，返工重新进机才分配新值。 |
+| 本次进机 | 进料设备为本次进机分配一个 `reel_id`，相关 Event 和 Result 均沿用该值。Command 使用原 `source_event_id` 与该阶段实际条码关联同一盘。WES 保存该盘与 WMS 请求的内部关联。贴新码时保持原 `reel_id`，返工重新进机才分配新值。 |
 | 原设备事实 | 保存设备、事实身份、实际时间及原内容。公共接收器处理原信封重报，X-Ray 再按原设备及 ECS event_id 核对业务事实。同身份改内容留证待核对。同盘同阶段的同一实际动作只消费一次。 |
 | WMS 请求／报告 | 独立 `operation_id`，关联原盘、阶段与事实。技术重试沿用原身份、时间和正文。 |
 | 阶段动作与命令 | 保存本盘各动作的输入 event_id、WMS operation_id、稳定 call_key、command_code、发送证据及 Result。冻结原设备、地址、动作、时间和参数，已完成记录仍参与迟到事实核对。 |
@@ -1615,7 +1620,7 @@ WES 按盘独立推进，ECS 根据实际工位、共享路径、曝光、打印
 ```text
 阶段 = 从 data.source_event_id 的原 ENTRY OK / 点料 OK / VERIFY 事件推导
 命令 = 阶段对应的 APPLY_*_DECISION
-命令.params = {reel_id, source_event_id: 本请求.event_id,
+命令.params = {barcode: 原阶段入口实读码, source_event_id: 本请求.event_id,
                decision: NG, reason: 本请求.reason_message}
 ```
 
@@ -1648,7 +1653,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | ECS 服务 | `http://10.24.209.33:18080`，Status 查询路径为 `/api/v1/device/status`。 |
 | X-Ray、出口机械臂 | 工作线绑定键为 `XRAY`、`XRAY_OUTPUT_ARM`，设备编码示例为 XRAY01、ARM01。 |
 | 机内和正常出口 | 机内封闭且无人工介入位。正常出口为机械臂固定取盘源。机内保持及安全互锁由 ECS 负责，等待异常使用最小排料请求，正常出口实际可取使用 MATERIAL_ARRIVED。 |
-| 通箱中转架 | 工作线可用 `TRANSIT_BIN` 登记单层架工作位。四个位置 A/B/C/D，WES 创建取放意图时等概率随机选一位并持久保存。用 `XRAY_TRANSIT_TARGETS` 按 `workline_code → A/B/C/D → target` 配置 2.11.2 定义的七个固定目标字段。静态映射不填写随实际物料变化的 reel_* 控制字段。未配置时保留本盘选位及出口等待，ECS 负责实际可放性和安全互锁。 |
+| 通箱中转架 | 工作线可用 `TRANSIT_BIN` 登记单层架工作位。四个位置 A/B/C/D，WES 创建取放意图时等概率随机选一位并持久保存。用 `XRAY_TRANSIT_TARGETS` 按 `workline_code → A/B/C/D → target` 配置 2.11.2 定义的五个目标字段。未配置时保留本盘选位及出口等待，ECS 负责实际可放性和安全互锁。 |
 | 五层退料架 | 工作线绑定 `RETURN_RACK`。用 `XRAY_RETURN_RACKS` 按 workline_code 配置 `location_code`（与绑定一致）、ECS `location_id`、`templates`（ENTER、ROTATE、DEPART）及 `slots`（A/B → slot_id → rack_layer、rack_column）。原搬运结果须实际报告匹配的架号、工作位和面向。 |
 | 模板 | 使用 ECS／X-Ray 本地模板和 WMS 原十变量。模板实物、标识及变量长度属于设备配置。 |
 | 诊断 | Status 供观察设备状态。逐盘推进依赖已关联的原 Event、Result 和业务决定。 |
@@ -1699,7 +1704,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | 接口 | 联调值 |
 | --- | --- |
 | 出口臂 | `DEMO-OUTPUT-ARM`。使用现场 ECS 时，以设备 Status 登记该编码，命令与 Result 沿用同一编码。 |
-| 通箱 `PUT_TO_BIN` | 固定 `location_id=DEMO-BIN-POINT`、`rack_id=DEMO-BIN-POINT`，A/B/C/D 各用 `DEMO-BIN-POINT-A` / `DEMO-BIN-POINT-B` / `DEMO-BIN-POINT-C` / `DEMO-BIN-POINT-D` 作为 `bin_id`。通箱实物及换箱由人工管理。 |
+| 通箱 `PUT_TO_BIN` | 固定 `location_id=DEMO-BIN-POINT`，按 A/B/C/D 区分四个箱位。通箱实物及换箱由人工管理。 |
 | 通箱固定字段 | `location_type=ONE_LAYER_RACK`、`bin_type="1"`、`bin_cell_location=8`，`bin_location` 为 WES 选定的 A/B/C/D。ECS 的成功 Result 按原目标回报 `actual_target`。 |
 | ECS 回调 | WES 联调地址为 `http://wes.example.test`，Event 发送到 `/api/v1/callback/event`，Result 发送到 `/api/v1/callback/result`。 |
 
@@ -1722,13 +1727,13 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 }
 ```
 
-Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工作线、完整原码的关联。同一请求重放沿用首次响应。CCD 根据 `expected_spkg` 核对原发标记录及实际 `new_barcode`；清点出料以 `new_barcode` 核对发标记录及标识测试架位占用，免清点按原码分流。联调 API 保持单 worker，原决定、发标记录及测试架位占用保存在进程内。专用决策端验证 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。启停 MOCK 或改动架位参数前，先收口该线的在途料盘和报告。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
+Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工作线、完整原码的关联。同一请求重放沿用首次响应。CCD 根据 `expected_spkg` 核对原发标记录及实际 `new_barcode`；清点出料以 `barcode` 中的实读新码查找原发标记录并标识测试架位占用，免清点按原码分流。联调 API 保持单 worker，原决定、发标记录及测试架位占用保存在进程内。专用决策端验证 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。启停 MOCK 或改动架位参数前，先收口该线的在途料盘和报告。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
 
 ### 5.2 回归场景
 
 | 场景 | 核对重点 |
 | --- | --- |
-| 公共合同 | 六个 Operation、五种 Event、五种 Command 正确注册；六个 WMS 请求均省略 ECS 身份；ECS 报文统一使用 `event_id`、`source_event_id`、`reel_id`。APPLY SUCCESS 回显原 decision。 |
+| 公共合同 | 六个 Operation、五种 Event、五种 Command 正确注册。WMS 请求省略 ECS 身份。ECS 命令用 `barcode` 和 `source_event_id`，Result 回显原 `reel_id` 和命令冻结的 `barcode`。APPLY SUCCESS 回显原 decision。 |
 | 需清点链路 | 按进机身份及阶段记录关联清点、贴标、CCD 和出口，不按最近命令猜测；实测 0 有效；同码并行使用各自 SPKG，另一盘合法新码及未读出新码均不得放行。清点出料使用已复核新码，实际放料引用原选位 Operation。 |
 | 免清点链路 | 只走入口、BYPASS 出口及后续取放；不生成清点、贴标或 CCD，不构造数量或新码。重复到料只触发一次选位。 |
 | Result／Event 乱序和冲突 | 清点双回调使用同一实测值，覆盖两种顺序及重复。按 2.3.3、2.6.1、2.8.3、2.14.3 核对成功／失败、数量、模式和实际去向冲突。冲突留证，暂停登记新动作，已登记动作保留原责任。 |
@@ -1747,15 +1752,15 @@ Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工
 
 ECS 按第 2 章发送 Event 和原命令 Result，补报沿用原身份、时间及内容。清点双回调使用同一终态，见 [2.3.3](#xray-count-evidence)。已接纳的可恢复通箱等待由设备端处理并续作，见 [2.11.2](#xray-ecs-put-bin)。
 
-ECS 与 WES 需同步采用第 2 章定义的下划线字段。相对现行附录，本版调整了 Event、Command 和 Result 的业务字段拼写，条码统一为 `barcode` 和 `new_barcode`。X-Ray 的 Event、Command 和 Result 按本版严格校验，五种 Command 统一采用附录版本 `2`。现场按 [6.1](#xray-ecs-cutover) 切换。
+ECS 与 WES 需同步采用第 2 章的报文。五种新登记的 ECS 命令均使用附录版本 `3`。现场按 [6.1](#xray-ecs-cutover) 切换。
 
 正常业务等待由 ECS 保持本盘，WES 恢复原 WMS 请求；需要结束等待时，ECS 上报五字段 XRAY_NG_REQUESTED，由 WES 下发对应阶段的 APPLY NG 命令，source_event_id 引用该请求 event_id。完整报文、接纳条件和恢复规则见 [3.2](#xray-wait)。
 
 <a id="xray-ecs-cutover"></a>
 ### 6.1 全量切换与在途恢复
 
-本次按 X-Ray 无历史逐盘数据和未结命令的前提直接切换。现场切换前，确认相关工作线无待推进料盘、未结命令、待投递 WMS 请求或报告，ECS 的旧版待报队列已清空。WES 和 ECS 更新到本版后恢复进料。Event 和 Result 只接受本版定义的字段，旧字段或新旧字段混用均返回原协议的校验错误。
+现场切换前，确认相关工作线无待推进料盘、未结命令、待投递 WMS 请求或报告，ECS 的旧版待报队列已清空。WMS 须在进料清点许可提供正数 `reel_thickness`，并在清点盘选位时接受以实读新码作为 `barcode`。确认这两项后，与更新后的 WES、ECS 一起恢复进料。新增 Event 按本版校验，Result 按原命令冻结版本校验。
 
-切换后，Event 补报沿用原 `event_id`、时间和正文，WES 按原设备及事件身份去重。命令保留原 `command_code`、`call_key`、设备地址、附录版本、请求字节和截止时间。ACK 超时在原 300 秒窗口内重发同一命令，窗口到期后等待原 Result。迟到 Result 按原命令冻结的 `(annex_id, annex_version)` 校验，跨重启继续结算同一动作。
+切换后，Event 补报沿用原 `event_id`、时间和正文，WES 按原设备及事件身份去重。命令保留原 `command_code`、`call_key`、设备地址、附录版本、请求字节和截止时间。同版原命令按原 300 秒窗口恢复投递。切换后，旧版路由须经原授权核对。迟到 Result 按原命令冻结的 `(annex_id, annex_version)` 校验，跨重启继续结算同一动作。
 
 验收覆盖新版 Event 重报、旧字段和混合字段拒绝、五种 Command 的出站字段，以及 Result 乱序、重报和重启后恢复。需要回切时，先收口本版已登记的义务。

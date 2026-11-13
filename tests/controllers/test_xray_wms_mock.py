@@ -105,7 +105,7 @@ async def test_unsigned_decision_cannot_claim_an_operation(mock_peer):
     )
     assert rejected.status_code == 401
     accepted = await decide("pkg", BARCODES[1], scanned_at=1, operation_id=operation_id)
-    assert accepted.json()["data"] == {"result": "COUNT_REQUIRED"}
+    assert accepted.json()["data"] == {"result": "COUNT_REQUIRED", "reel_thickness": 8}
 
 
 async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_peer):
@@ -114,7 +114,7 @@ async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_pee
     barcode = BARCODES[0]
     for qty in (0, 612):
         response = await decide("pkg", barcode, scanned_at=1)
-        assert response.json()["data"] == {"result": "COUNT_REQUIRED"}
+        assert response.json()["data"] == {"result": "COUNT_REQUIRED", "reel_thickness": 8}
         count_data = dict(actual_qty=qty, template_id="XX123456789", observed_at=1000)
         operation_id = str(uuid7())
         response = await decide("count", barcode, operation_id=operation_id, **count_data)
@@ -189,6 +189,7 @@ async def test_counted_outlet_replays_original_and_waits_for_applied_rack_arriva
             "observed_at": 1,
             "new_barcode": counted.json()["data"]["label_variables"]["SPKG"],
         }
+        barcode = args["new_barcode"]
         if column == 1:
             operation_id = str(uuid7())
             first = await decide("put_target", barcode, operation_id=operation_id, **args)
@@ -231,16 +232,21 @@ async def test_outlet_rejects_wrong_label_and_waits_when_the_slot_is_reserved(mo
         )
         labels.append(reply.json()["data"]["label_variables"]["SPKG"])
     wrong = await decide(
-        "put_target", BARCODES[1], mode="COUNTED", observed_at=1, new_barcode=labels[1]
+        "put_target", labels[0], mode="COUNTED", observed_at=1, new_barcode=labels[1]
     )
     assert wrong.status_code == 422
+    unknown = await decide(
+        "put_target", "UNKNOWN-SPKG", mode="COUNTED", observed_at=1, new_barcode="UNKNOWN-SPKG"
+    )
+    assert unknown.status_code == 422
     first = dict(mode="COUNTED", observed_at=1, new_barcode=labels[0])
+    barcode = labels[0]
     assert (await decide("put_target", barcode, **first)).json()["data"]["result"] == "WAIT"
     dispatch.ready[0].actual_face = "A"
     assert (await decide("put_target", barcode, **first)).json()["data"]["result"] == "ACCEPT"
     second = await decide(
         "put_target",
-        barcode,
+        labels[1],
         mode="COUNTED",
         observed_at=1,
         new_barcode=labels[1],

@@ -106,9 +106,19 @@ class XrayWmsMock:
     async def _decide(self, app, session, payload, operation_id):
         counted = payload.barcode in self.targets[payload.workline_code]
         if isinstance(payload, pkg.PkgDecide):
-            return {"result": "COUNT_REQUIRED" if counted else "BYPASS_COUNT"}
-        if isinstance(payload, outlet.PutTargetDecide) and payload.mode == "BYPASS" and not counted:
-            return {"result": "ACCEPT", "target_locator": {"type": "TRANSIT_BIN"}}
+            if counted:
+                target = self.targets[payload.workline_code][payload.barcode]
+                return {"result": "COUNT_REQUIRED", "reel_thickness": target.reel_thickness}
+            return {"result": "BYPASS_COUNT"}
+        if isinstance(payload, outlet.PutTargetDecide):
+            if payload.mode == "BYPASS":
+                if counted:
+                    raise ValueError("invalid bypass barcode")
+                return {"result": "ACCEPT", "target_locator": {"type": "TRANSIT_BIN"}}
+            original = self._issued_labels.get(payload.barcode)
+            if original is None or original[0] != payload.workline_code:
+                raise ValueError("outlet barcode was not issued for this workline")
+            return await self._rack_target(app, session, payload, original[1])
         if not counted:
             raise ValueError("unknown counted barcode")
 
@@ -145,12 +155,9 @@ class XrayWmsMock:
                 "reason_code": "VERIFY_MISMATCH",
                 "reason_message": "CCD did not read the SPKG generated for this reel",
             }
-        if self._issued_labels.get(payload.new_barcode) != material:
-            raise ValueError("outlet SPKG does not match the original material")
-        return await self._rack_target(app, session, payload)
 
-    async def _rack_target(self, app, session, payload):
-        target = self.targets[payload.workline_code][payload.barcode]
+    async def _rack_target(self, app, session, payload, original_barcode):
+        target = self.targets[payload.workline_code][original_barcode]
         loc = target.target_locator
         line = await session.scalar(
             select(WorkLine).where(
@@ -180,5 +187,5 @@ class XrayWmsMock:
                 return WAIT
             plan["target_preparation"] = "REPLACE"
         key = (loc.rack_id, loc.rack_face, loc.slot_id)
-        owner = (payload.workline_code, payload.new_barcode)
+        owner = (payload.workline_code, payload.barcode)
         return plan if self._reserved.setdefault(key, owner) == owner else WAIT

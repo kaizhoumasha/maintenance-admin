@@ -23,4 +23,6 @@ class PutTargetDecide(OmitAbsent, WorklineRequest):
     def mode_fields(self) -> Self:
         if (self.mode == "COUNTED") != (self.new_barcode is not None):
             raise ValueError("only COUNTED requires new_barcode")
+        if self.new_barcode is not None and self.barcode != self.new_barcode:
+            raise ValueError("COUNTED barcode must match new_barcode")
         return self

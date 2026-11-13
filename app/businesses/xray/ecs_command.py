@@ -7,11 +7,13 @@ from app.integrations.ecs_command.contracts import ErrorDetail
 
 from .contracts import (
     BinActual,
-    BinTarget,
     Incoming,
     LabelVariables,
+    LegacyBinActual,
+    LegacyBinTarget,
     NonnegativeInt,
     OmitAbsent,
+    PositiveNumber,
     RackActual,
     RackTarget,
     Strict,
@@ -33,7 +35,7 @@ class ReelResult(Incoming):
 class Failed(ReelResult):
     position: Literal["SOURCE", "GRIPPER", "TARGET", "OTHER", "UNKNOWN"] | None = None
     failure_stage: Text | None = None
-    actual_target: RackActual | BinActual | None = None
+    actual_target: RackActual | LegacyBinActual | None = None
 
 
 class PutFailed(Failed):
@@ -76,12 +78,8 @@ class Placed(ReelResult):
     position: Literal["TARGET"]
 
 
-class PlacedInBin(Placed):
-    actual_target: BinActual
-
-
-class PlacedInRack(Placed):
-    actual_target: RackActual
+class LegacyPlacedInBin(Placed):
+    actual_target: LegacyBinActual
 
 
 class Outcome[T](RootModel[T]):
@@ -95,12 +93,12 @@ class Outcome[T](RootModel[T]):
         return self
 
 
-class Command(Strict):
+class LegacyCommand(Strict):
     reel_id: UUIDText
     source_event_id: UUIDText
 
 
-class Decision(OmitAbsent, Command):
+class DecisionReason(OmitAbsent):
     reason: Text | None = None
 
     @model_validator(mode="after")
@@ -120,7 +118,7 @@ class Decision(OmitAbsent, Command):
     timeout_min_ms=1,
     timeout_max_ms=2**63 - 1,
 )
-class ApplyPkgDecision(Decision):
+class LegacyPkgDecision(DecisionReason, LegacyCommand):
     decision: Literal["COUNT_REQUIRED", "BYPASS_COUNT", "NG"]
 
 
@@ -138,7 +136,96 @@ class Label(Strict):
     timeout_min_ms=1,
     timeout_max_ms=2**63 - 1,
 )
-class ApplyCountDecision(Decision):
+class LegacyCountDecision(DecisionReason, LegacyCommand):
+    decision: Literal["OK", "NG"]
+    label: Label | None = None
+
+    @model_validator(mode="after")
+    def ok_label(self) -> Self:
+        if (self.decision == "OK") != (self.label is not None):
+            raise ValueError("only OK requires label")
+        return self
+
+
+class MaterialCommand(Strict):
+    barcode: Text
+    source_event_id: UUIDText
+
+
+class MaterialCounted(Counted):
+    barcode: Text
+
+
+class MaterialBypassed(Bypassed):
+    barcode: Text
+
+
+class MaterialLabelled(Labelled):
+    barcode: Text
+
+
+class MaterialVerified(Verified):
+    barcode: Text
+
+
+class MaterialDischarged(Discharged):
+    barcode: Text
+
+
+class MaterialFailed(Failed):
+    barcode: Text
+    actual_target: RackActual | BinActual | None = None
+
+
+class MaterialPutFailed(MaterialFailed):
+    actual_qty: Annotated[int, Field(ge=0, le=0)] | None = None
+
+
+class PlacedInBin(Placed):
+    barcode: Text
+    actual_target: BinActual
+
+
+class LegacyPlacedInRack(Placed):
+    actual_target: RackActual
+
+
+class PlacedInRack(LegacyPlacedInRack):
+    barcode: Text
+
+
+@ecs_command(
+    "APPLY_PKG_DECISION",
+    device_roles=(XRAY,),
+    annex_id="xray.apply_pkg_decision",
+    annex_version="3",
+    result=Outcome[MaterialCounted | MaterialBypassed | MaterialDischarged | MaterialFailed],
+    error=XrayError,
+    timeout_min_ms=1,
+    timeout_max_ms=2**63 - 1,
+)
+class ApplyPkgDecision(DecisionReason, MaterialCommand):
+    decision: Literal["COUNT_REQUIRED", "BYPASS_COUNT", "NG"]
+    reel_thickness: PositiveNumber | None = None
+
+    @model_validator(mode="after")
+    def count_thickness(self) -> Self:
+        if (self.decision == "COUNT_REQUIRED") != (self.reel_thickness is not None):
+            raise ValueError("only COUNT_REQUIRED requires reel_thickness")
+        return self
+
+
+@ecs_command(
+    "APPLY_COUNT_DECISION",
+    device_roles=(XRAY,),
+    annex_id="xray.apply_count_decision",
+    annex_version="3",
+    result=Outcome[MaterialLabelled | MaterialDischarged | MaterialFailed],
+    error=XrayError,
+    timeout_min_ms=1,
+    timeout_max_ms=2**63 - 1,
+)
+class ApplyCountDecision(DecisionReason, MaterialCommand):
     decision: Literal["OK", "NG"]
     label: Label | None = None
 
@@ -153,13 +240,55 @@ class ApplyCountDecision(Decision):
     "APPLY_VERIFY_DECISION",
     device_roles=(XRAY,),
     annex_id="xray.apply_verify_decision",
+    annex_version="3",
+    result=Outcome[MaterialVerified | MaterialDischarged | MaterialFailed],
+    error=XrayError,
+    timeout_min_ms=1,
+    timeout_max_ms=2**63 - 1,
+)
+class ApplyVerifyDecision(DecisionReason, MaterialCommand):
+    decision: Literal["OK", "NG"]
+
+
+@ecs_command(
+    "PUT_TO_BIN",
+    device_roles=(OUTPUT_ARM,),
+    annex_id="xray.put_to_bin",
+    annex_version="3",
+    result=Outcome[PlacedInBin | MaterialPutFailed],
+    error=XrayError,
+    timeout_min_ms=1,
+    timeout_max_ms=2**63 - 1,
+)
+class PutToBin(MaterialCommand):
+    target: BinActual
+
+
+@ecs_command(
+    "PUT_TO_RACK",
+    device_roles=(OUTPUT_ARM,),
+    annex_id="xray.put_to_rack",
+    annex_version="3",
+    result=Outcome[PlacedInRack | MaterialPutFailed],
+    error=XrayError,
+    timeout_min_ms=1,
+    timeout_max_ms=2**63 - 1,
+)
+class PutToRack(MaterialCommand):
+    target: RackTarget
+
+
+@ecs_command(
+    "APPLY_VERIFY_DECISION",
+    device_roles=(XRAY,),
+    annex_id="xray.apply_verify_decision",
     annex_version="2",
     result=Outcome[Verified | Discharged | Failed],
     error=XrayError,
     timeout_min_ms=1,
     timeout_max_ms=2**63 - 1,
 )
-class ApplyVerifyDecision(Decision):
+class LegacyVerifyDecision(DecisionReason, LegacyCommand):
     decision: Literal["OK", "NG"]
 
 
@@ -168,13 +297,13 @@ class ApplyVerifyDecision(Decision):
     device_roles=(OUTPUT_ARM,),
     annex_id="xray.put_to_bin",
     annex_version="2",
-    result=Outcome[PlacedInBin | PutFailed],
+    result=Outcome[LegacyPlacedInBin | PutFailed],
     error=XrayError,
     timeout_min_ms=1,
     timeout_max_ms=2**63 - 1,
 )
-class PutToBin(Command):
-    target: BinTarget
+class LegacyPutToBin(LegacyCommand):
+    target: LegacyBinTarget
 
 
 @ecs_command(
@@ -182,10 +311,10 @@ class PutToBin(Command):
     device_roles=(OUTPUT_ARM,),
     annex_id="xray.put_to_rack",
     annex_version="2",
-    result=Outcome[PlacedInRack | PutFailed],
+    result=Outcome[LegacyPlacedInRack | PutFailed],
     error=XrayError,
     timeout_min_ms=1,
     timeout_max_ms=2**63 - 1,
 )
-class PutToRack(Command):
+class LegacyPutToRack(LegacyCommand):
     target: RackTarget

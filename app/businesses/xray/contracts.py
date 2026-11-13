@@ -102,14 +102,17 @@ class RackTarget(RackActual):
 class BinActual(Strict):
     location_id: Text
     location_type: Literal["ONE_LAYER_RACK"]
-    rack_id: Text
-    bin_id: Text
     bin_type: Literal["1"]
     bin_location: BinSlot
     bin_cell_location: Annotated[int, Field(ge=8, le=8)]
 
 
-class BinTarget(OmitAbsent, BinActual):
+class LegacyBinActual(BinActual):
+    rack_id: Text
+    bin_id: Text
+
+
+class LegacyBinTarget(OmitAbsent, LegacyBinActual):
     reel_layer: NonnegativeInt | None = None
     reel_thickness: PositiveNumber | None = None
     reel_diameter: Diameter | FiniteFloat | None = None
@@ -135,6 +138,7 @@ class Ng(Strict):
 
 class CountRequired(Strict):
     result: Literal["COUNT_REQUIRED"]
+    reel_thickness: PositiveNumber
 
 
 class Bypass(Strict):

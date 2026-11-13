@@ -89,6 +89,7 @@ def build_service(capabilities):
 无命令时显式写 `COMMANDS = ()`。catalog 内部编译清单：每个模型至少覆盖本业务一个已声明角色，
 所有模型角色必须存在于显式 catalog 的 definitions；本业务仅激活与自己角色的交集。
 其他业务未列同一模型时不会获得权限。共享角色/任务冲突、冲突附录或非法来源在资源创建前失败。
+升级设备合同时，composition 可在 `HISTORY_COMMANDS` 列出经相同装饰器声明的原命令模型。catalog 只保留其附录用于校验迟到 Result。
 仅有文件不会注册；该 composition 必须由 `catalog.entries()` 明确列出。
 业务自有来源是 `app.businesses.<business>.<module>`；显式 COMPONENTS 还可引用 `app.businesses._components.<key>.*`。平台固定清单仅加载平台自己拥有的入口。
 应用先加载全部正式入口，再交叉校验全部合同，之后才加载 local 入口、构造资源和业务工厂，最后受理请求。
