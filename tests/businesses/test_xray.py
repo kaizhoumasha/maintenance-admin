@@ -609,25 +609,17 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
     assert len(x.commands) == (4 if counted else 2)
     assert x.commands[-1] == put
     assert not x.facts
-    await x.result(
-        put,
-        status=400,
-        actual_qty=1,
-        position="TARGET",
-        actual_target=target
-        | {
-            "rack_id": "RACK-1",
-            "bin_id": "BIN-D",
-            "reel_thickness": 20,
-        },
-    )
     for invalid in ({"bin_type": 1}, {"bin_cell_location": "8"}, {"bin_location": "E"}):
         await x.result(
             put, status=400, actual_qty=1, position="TARGET", actual_target=target | invalid
         )
     for _ in range(2):
         await x.result(
-            put, barcode=effective_barcode, actual_qty=1, position="TARGET", actual_target=target
+            put,
+            barcode=effective_barcode,
+            actual_qty=1,
+            position="TARGET",
+            actual_target=target | {"rack_id": "RACK-1", "bin_id": "BIN-D", "reel_thickness": 20},
         )
         await x.drain()
     assert len(x.facts) == 1
@@ -965,19 +957,18 @@ async def test_failed_put_accepts_actual_position_of_a_different_type(xray, put_
     assert not x.facts
 
 
-async def test_strict_event_and_result_shapes_reject_coercion_and_extra_fields(xray):
+async def test_event_and_result_validate_known_fields_and_ignore_extensions(xray):
     x = xray
     await x.entry(status=400, barcode=None)
-    await x.entry(status=400, eventId=str(uuid4()))
-    await x.entry(status=400, extra="unexpected")
+    await x.entry(status=400, event_id="not-a-uuid")
     x.decisions["pkg_decide"] = {"result": "COUNT_REQUIRED", "reel_thickness": 8.1}
-    await x.entry()
+    await x.entry(extra=None)
     await x.drain()
     (cmd,) = x.commands
-    await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=0, reelId=str(uuid4()))
+    await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=0, reel_id="not-a-uuid")
     await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=True)
-    await x.result(cmd, status=400, decision="COUNT_REQUIRED", qty=0, extra="unexpected")
-    await x.result(cmd, decision="COUNT_REQUIRED", qty=0)
+    await x.result(cmd, status=400, failure=True, decision="COUNT_REQUIRED", qty=0, position="BAD")
+    await x.result(cmd, decision="COUNT_REQUIRED", qty=0, extra=None)
     await x.drain()
     assert len(x.requests) == 1
 

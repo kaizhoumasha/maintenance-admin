@@ -240,7 +240,7 @@ async def inbound_host(s5_roller, request, monkeypatch, arm_timeouts):
             claim, AttemptOutcome(MessageStatus.DONE, result=response, verdict=verdict)
         )
 
-    async def result(code, *, scan=False, status="SUCCESS", empty=False):
+    async def result(code, *, scan=False, status="SUCCESS", empty=False, **extra):
         store = MessageStore(
             host.factory, lifecycles=ecs.outbox.lifecycles, records=history_records
         )
@@ -260,7 +260,7 @@ async def inbound_host(s5_roller, request, monkeypatch, arm_timeouts):
                 device_code=view.device_code,
                 result=status,
                 finish_time=99,
-                data=data,
+                data=data | extra,
             )
             if status == "FAILED":
                 body["error_detail"] = dict(code="STOPPED", msg="stopped")
@@ -807,7 +807,7 @@ async def test_material_wait_retries_only_at_original_due_and_preserves_pick(rea
 
     async with host.factory.begin() as session:
         pick_code = (await advance(session, 40)).pick_command_code
-    assert (await host.arm_result(pick_code, scan=True)).status_code == 200
+    assert (await host.arm_result(pick_code, scan=True, location=None)).status_code == 200
     async with host.factory.begin() as session:
         await advance(session, 50)
         (first,) = await rounds(session)

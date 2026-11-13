@@ -84,7 +84,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
             row,
             command_code=put["command_code"],
             device_code=flow.output,
-            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1", "pick_and_put_result": "OK"},
             finish_time=1234,
         )
     ).status_code == 200
@@ -452,6 +452,8 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
 
 async def test_full_station_keeps_the_second_same_barcode_on_original_move(direct):
     flow = direct
+    now = datetime.now(UTC)
+    flow.outbox.clock = flow.store.clock = flow.sender.clock = lambda: now
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
     first_put = await dispatch_put(flow, first)
@@ -473,7 +475,7 @@ async def test_full_station_keeps_the_second_same_barcode_on_original_move(direc
     assert await flow.dispatch() == 1
     assert await flow.service.advance(first["id"]) == "COMPLETED"
     flow.peer.command = "ack"
-    flow.store.clock = flow.sender.clock = lambda: datetime.now(UTC) + timedelta(seconds=2)
+    now += timedelta(seconds=2)
     assert await flow.dispatch() == 1
     assert flow.peer.commands[-1] == full_move
     assert (await flow.result(second)).status_code == 200

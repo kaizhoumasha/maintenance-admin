@@ -12,7 +12,7 @@ from .contracts import BinLocation, CellIndex, ReelHeight, Reference
 
 
 class MoveForwardResult(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     # FAILED may have empty data; the business consumer requires quantity for SUCCESS.
     actual_qty: Annotated[int, Field(ge=1, le=1)] | None = None
@@ -39,7 +39,7 @@ class MoveForward(BaseModel):
 
 
 class MoveToLocationResult(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     actual_qty: Annotated[int, Field(ge=1, le=1)] | None = None
     location: Reference | None = None

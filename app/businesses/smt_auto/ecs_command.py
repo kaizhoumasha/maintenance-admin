@@ -79,6 +79,8 @@ class NgTarget(Data):
 
 
 class ArmResult(Data):
+    model_config = ConfigDict(extra="ignore")
+
     actual_qty: int
     pick_and_put_result: Literal["PICK_FAILED", "PUT_FAILED", "PUT_FINISHED", "PICK_EMPTY"]
     barcode: Barcode | None = None

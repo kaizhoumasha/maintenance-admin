@@ -1,6 +1,6 @@
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, RootModel, ValidationInfo, model_validator
+from pydantic import ConfigDict, Field, RootModel, ValidationInfo, model_validator
 
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
@@ -29,13 +29,34 @@ class XrayError(ErrorDetail):
 
 
 class ReelResult(Incoming):
+    model_config = ConfigDict(extra="ignore")
+
     reel_id: UUIDText
+
+    @model_validator(mode="after")
+    def matches_outcome(self, info: ValidationInfo) -> Self:
+        result = (info.context or {}).get("result")
+        if result and (result == "FAILED") != isinstance(self, Failed):
+            raise ValueError("data must match result")
+        return self
+
+
+class RackResultTarget(RackActual):
+    model_config = ConfigDict(extra="ignore")
+
+
+class BinResultTarget(BinActual):
+    model_config = ConfigDict(extra="ignore")
+
+
+class LegacyBinResultTarget(LegacyBinActual):
+    model_config = ConfigDict(extra="ignore")
 
 
 class Failed(ReelResult):
     position: Literal["SOURCE", "GRIPPER", "TARGET", "OTHER", "UNKNOWN"] | None = None
     failure_stage: Text | None = None
-    actual_target: RackActual | LegacyBinActual | None = None
+    actual_target: RackResultTarget | LegacyBinResultTarget | None = None
 
 
 class PutFailed(Failed):
@@ -79,18 +100,11 @@ class Placed(ReelResult):
 
 
 class LegacyPlacedInBin(Placed):
-    actual_target: LegacyBinActual
+    actual_target: LegacyBinResultTarget
 
 
 class Outcome[T](RootModel[T]):
     model_config = {"strict": True}
-
-    @model_validator(mode="after")
-    def matches_outcome(self, info: ValidationInfo) -> Self:
-        result = (info.context or {}).get("result")
-        if result and (result == "FAILED") != isinstance(self.root, Failed):
-            raise ValueError("data must match result")
-        return self
 
 
 class LegacyCommand(Strict):
@@ -174,7 +188,7 @@ class MaterialDischarged(Discharged):
 
 class MaterialFailed(Failed):
     barcode: Text
-    actual_target: RackActual | BinActual | None = None
+    actual_target: RackResultTarget | BinResultTarget | None = None
 
 
 class MaterialPutFailed(MaterialFailed):
@@ -183,11 +197,11 @@ class MaterialPutFailed(MaterialFailed):
 
 class PlacedInBin(Placed):
     barcode: Text
-    actual_target: BinActual
+    actual_target: BinResultTarget
 
 
 class LegacyPlacedInRack(Placed):
-    actual_target: RackActual
+    actual_target: RackResultTarget
 
 
 class PlacedInRack(LegacyPlacedInRack):

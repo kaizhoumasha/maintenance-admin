@@ -46,7 +46,7 @@ def command_evidence(reel, actions, views):
             else:
                 model = LegacyBinActual if "rack_id" in params["target"] else BinActual
             target = {key: params["target"][key] for key in model.model_fields}
-            if data["actual_target"] != target:
+            if any(data["actual_target"].get(key) != value for key, value in target.items()):
                 return "RESULT_TARGET_CONFLICT"
     return None
 

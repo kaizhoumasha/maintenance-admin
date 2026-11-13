@@ -44,9 +44,11 @@ async def test_actual_measurements_reach_wms_unchanged_after_service_rebuild(coa
 
 
 @pytest.mark.parametrize("device", [0, 1])
-async def test_original_role_command_completes_with_only_quantity(coarse_forward, device):
+async def test_original_role_command_completes_with_quantity_and_ignored_extensions(
+    coarse_forward, device
+):
     flow = coarse_forward
-    data = {"actual_qty": 1}
+    data = {"actual_qty": 1, "location": "STATION_OUTPUT1", "pick_and_put_result": None}
     row = await flow.prepare_command(device=device)
     assert row["conveyor_device_code"] == flow.conveyor_codes[device]
     await flow.dispatch()
@@ -225,7 +227,6 @@ async def test_applied_incomplete_or_failed_result_preserves_evidence_without_co
     [
         {"data": {"actual_qty": True}},
         {"data": {"actual_qty": 2}},
-        {"data": {"actual_qty": 1, "unexpected": "not part of the result contract"}},
         {"device_code": "WRONG_DEVICE"},
         {"command_code": "MISSING_COMMAND"},
     ],

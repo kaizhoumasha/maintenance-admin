@@ -912,7 +912,7 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 
 扫码接收事务只原子保存原收据、扫码记录和持久待办，不在该事务发送网络请求。由后续独立任务登记原验证及命令。扫码记录与持久去重依据不随公共收据清理删除，本阶段不增加业务清理作业。完整流程、真实设备上报及现场验收不在本轮内部开发验收范围内。
 
-2026-10-29 当前实施范围（含双机配置与按业务唤醒增量）：唯一正式 SCAN_COMPLETED 入口保存事实；扫码事实、原 WMS 决策和新 ECS Result 提交后唤醒 coarse_sorting，统一 `business.advance_pending("coarse_sorting")` 任务调用声明的 `scan_pending()`，Beat 每 5 秒调用同一任务兜底。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，新调用使用内部附录 coarse_sorting.move_forward/2）。按原 command_code + device_code 关联的已应用 SUCCESS 须含严格整数 actual_qty=1 且无待核对项，才进入 AWAITING_ALLOCATION_STAGE；MOVE_FORWARD 的 Result.data 仅包含 actual_qty，执行位置由 ECS 根据设备及动作管理。FAILED、缺数量或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围；原附录 /1 的历史设计及验收结论保持原时间范围。
+2026-10-29 当前实施范围（含双机配置与按业务唤醒增量）：唯一正式 SCAN_COMPLETED 入口保存事实；扫码事实、原 WMS 决策和新 ECS Result 提交后唤醒 coarse_sorting，统一 `business.advance_pending("coarse_sorting")` 任务调用声明的 `scan_pending()`，Beat 每 5 秒调用同一任务兜底。沿原 workline_code、barcode、尺寸及厚度登记唯一 validate_bind；合法 OK + binding_id 才向原 CONVEYOR 登记唯一 MOVE_FORWARD（timeout=30000ms，新调用使用内部附录 coarse_sorting.move_forward/2）。按原 command_code + device_code 关联的已应用 SUCCESS 须含严格整数 actual_qty=1 且无待核对项，才进入 AWAITING_ALLOCATION_STAGE；MOVE_FORWARD 的 Result.data 只校验 actual_qty，附加字段由 WES 忽略，执行位置由 ECS 根据设备及动作管理。FAILED、缺数量或未知结果保留原证据等待核对。WMS NG 停在 AWAITING_NG_STAGE。API/worker 共用 catalog，各自注入会话工厂；启动不创建测试绑定。操作见 [ECS Event 调试](ecs-event-debugging.md)，[扫码受理历史记录](../superpowers/plans/2026-10-29-coarse-sorting-scan-acceptance.md)保留首阶段验收范围；原附录 /1 的历史设计及验收结论保持原时间范围。
 
 ## 5. ECS 命令与结果示例
 
@@ -983,7 +983,7 @@ ACK 仅表示已接纳，WES 继续等待原命令 Result。移动完成后，EC
 }
 ```
 
-ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 command_code + device_code 核对动作完成结果；`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。MOVE_FORWARD 的 Result.data 仅包含 actual_qty，不携带固定位置。正式装配消费后停在待分配。显式隔离装配可按第 3.2 节继续登记原箱格分配请求。
+ECS 根据输送线设备及动作执行入口到出口的移动。WES 按原 command_code + device_code 核对动作完成结果；`actual_qty=1` 表示搬运一盘，不是条码内的物料数量。MOVE_FORWARD 的 Result.data 只校验 actual_qty。正式装配消费后停在待分配。显式隔离装配可按第 3.2 节继续登记原箱格分配请求。
 
 <a id="ecs-put-to-bin"></a>
 

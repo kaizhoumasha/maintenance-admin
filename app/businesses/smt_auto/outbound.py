@@ -74,7 +74,7 @@ class Outbound:
         try:
             result = ResultEnvelope.model_validate(view.result)
             data = ArmResult.model_validate(result.data)
-            if phase == "put" and set(result.data) != {"actual_qty", "pick_and_put_result"}:
+            if phase == "put" and data.model_fields_set != {"actual_qty", "pick_and_put_result"}:
                 return None
         except (ValidationError, TypeError):
             return None
