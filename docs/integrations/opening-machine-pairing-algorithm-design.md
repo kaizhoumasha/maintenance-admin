@@ -116,7 +116,8 @@ def quota_layers(s, box):
 def dual_carton_blocks(s):
     box = s.active
     return (
-        box is not None and s.cache is not None
+        box is not None
+        and s.cache is not None
         and box.remaining > min(box.usable_remaining, need(s, box.side))
         and any(need(s, side) > 0 for side in SIDES if side != box.side)
     )
@@ -256,9 +257,12 @@ def settle_quota(s, original, result):
             return  # 同身份异内容由该原语报告冲突。
 
         validate_original(s, original, result)
-        if (result.unsettled != 0 or result.box_remaining is None
-                or result.pick_count_unknown_or_partial
-                or (result.stop_reason == "PICK_FAILED" and not result.failed_attempt_confirmed_zero)):
+        if (
+            result.unsettled != 0
+            or result.box_remaining is None
+            or result.pick_count_unknown_or_partial
+            or (result.stop_reason == "PICK_FAILED" and not result.failed_attempt_confirmed_zero)
+        ):
             retain_pending_and_request_original_settlement(original, result)
             return
 
@@ -268,12 +272,16 @@ def settle_quota(s, original, result):
         expected = original.box_remaining - result.drawn
         delta = result.box_remaining - expected
         shortage = (
-            delta < 0 and result.stop_reason == "BOX_EMPTY"
-            and result.box_empty_confirmed and result.box_remaining == 0
+            delta < 0
+            and result.stop_reason == "BOX_EMPTY"
+            and result.box_empty_confirmed
+            and result.box_remaining == 0
         )
         excess = (
-            delta > 0 and result.stop_reason == "QUOTA_REACHED"
-            and result.drawn == original.max_get_layers and result.remainder_verified
+            delta > 0
+            and result.stop_reason == "QUOTA_REACHED"
+            and result.drawn == original.max_get_layers
+            and result.remainder_verified
         )
         if delta != 0 and not (shortage or excess):
             retain_pending_and_request_original_settlement(original, result)
