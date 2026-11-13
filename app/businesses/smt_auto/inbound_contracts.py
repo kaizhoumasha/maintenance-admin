@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from app.businesses._components.sorting_task.contracts import Identifier, NonNegative
 from app.businesses.bin_types import BinType
@@ -30,6 +30,8 @@ class Target(Data):
 
 
 class Scan(Data):
+    model_config = ConfigDict(extra="ignore")
+
     actual_qty: Literal[1]
     pick_and_put_result: Literal["PUT_FINISHED"]
     barcode: Barcode

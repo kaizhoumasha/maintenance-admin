@@ -251,7 +251,9 @@ async def outbound_host(s5_roller, request, monkeypatch):
             claim, AttemptOutcome(MessageStatus.DONE, result=response, verdict=verdict)
         )
 
-    async def result(code, *, scan=False, status="SUCCESS", empty=False, legacy_scan=False):
+    async def result(
+        code, *, scan=False, status="SUCCESS", empty=False, legacy_scan=False, **extra
+    ):
         store = MessageStore(
             host.factory, lifecycles=ecs.outbox.lifecycles, records=history_records
         )
@@ -272,7 +274,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
                 device_code=view.device_code,
                 result=status,
                 finish_time=99,
-                data=data,
+                data=data | extra,
             )
             if status == "FAILED":
                 body["error_detail"] = dict(code="STOPPED", msg="stopped")
@@ -509,7 +511,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         if disabled:
             (await session.get(WorkLine, 1)).is_enabled = False
     monkeypatch.setattr(PickAndPut, "from_millimeters", builder)
-    assert (await host.arm_result(put_code)).status_code == 200
+    assert (await host.arm_result(put_code, location=None)).status_code == 200
     async with host.factory.begin() as session:
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=180)
         assert plate.report_message_id

@@ -48,7 +48,9 @@ class Incoming(Strict):
     @model_validator(mode="before")
     @classmethod
     def no_null(cls, value):
-        if isinstance(value, dict) and any(item is None for item in value.values()):
+        if isinstance(value, dict) and any(
+            item is None and key in cls.model_fields for key, item in value.items()
+        ):
             raise ValueError("omit absent fields")
         return value
 

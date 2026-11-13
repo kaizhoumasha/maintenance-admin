@@ -84,7 +84,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
             row,
             command_code=put["command_code"],
             device_code=flow.output,
-            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1", "pick_and_put_result": "OK"},
             finish_time=1234,
         )
     ).status_code == 200

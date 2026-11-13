@@ -1,6 +1,6 @@
 from typing import Literal, Self
 
-from pydantic import model_validator
+from pydantic import ConfigDict, model_validator
 
 from app.integrations.wms_callback.operation import CallbackPayload
 
@@ -8,7 +8,7 @@ from .contracts import Incoming, Mode, NgStage, NonnegativeInt, Text, UUIDText
 
 
 class ReelEventData(Incoming, CallbackPayload):
-    model_config = Incoming.model_config
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     event_id: UUIDText
     reel_id: UUIDText

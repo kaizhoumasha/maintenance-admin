@@ -38,7 +38,6 @@ def test_move_result_accepts_empty_failure_data_and_physical_completion():
         {"actual_qty": 1.0},
         {"actual_qty": 0},
         {"actual_qty": 2},
-        {"extra": 1},
     ],
 )
 def test_move_result_rejects_invalid_completion_facts(data):
