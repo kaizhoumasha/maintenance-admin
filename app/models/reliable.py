@@ -6,9 +6,9 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -17,8 +17,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
-
-from app.database import SCHEMA
 
 from .base import Base
 
@@ -53,6 +51,7 @@ class ReliableMessage(Base):
         Index("reliable_message_lease_idx", "status", "lease_until"),
         Index("reliable_message_retention_idx", "status", "updated_at"),
         Index("reliable_message_business_key_idx", "business_key"),
+        Index("reliable_message_operation_id_idx", "operation_id"),
         *(
             Index(
                 f"reliable_message_{column}_idx",
@@ -75,17 +74,19 @@ class ReliableMessage(Base):
     operation_id: Mapped[str] = mapped_column(Text)
     delivery_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     pause_reason: Mapped[str | None] = mapped_column(String(64))
-    exchange_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_exchange.id", ondelete="RESTRICT")
-    )
-    request_record_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
-    )
-    terminal_response_record_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
-    )
-    last_response_record_id: Mapped[UUID | None] = mapped_column(
-        Uuid, ForeignKey(f"{SCHEMA}.integration_record.id", ondelete="RESTRICT")
+    exchange_id: Mapped[UUID] = mapped_column(Uuid)
+    request_record_id: Mapped[UUID] = mapped_column(Uuid)
+    frozen_request_wire: Mapped[bytes | None] = mapped_column(LargeBinary)
+    frozen_request_sha256: Mapped[str | None] = mapped_column(String(64))
+    terminal_response_record_id: Mapped[UUID | None] = mapped_column(Uuid)
+    last_response_record_id: Mapped[UUID | None] = mapped_column(Uuid)
+    terminal_response_wire: Mapped[bytes | None] = mapped_column(LargeBinary)
+    terminal_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_response_wire: Mapped[bytes | None] = mapped_column(LargeBinary)
+    protocol: Mapped[str | None] = mapped_column(Text)
+    superseded_by_message_id: Mapped[int | None] = mapped_column(Integer)
+    replacement_blocked: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
     )
     status: Mapped[str] = mapped_column(String(16), default="PENDING")
     fail_reason: Mapped[str | None] = mapped_column(String(32))
@@ -100,6 +101,7 @@ class ReliableMessage(Base):
     last_verdict: Mapped[str | None] = mapped_column(String(32))
     lease_id: Mapped[str | None] = mapped_column(String(64))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_not_started: Mapped[bool | None] = mapped_column(Boolean)
     scope_owner: Mapped[str | None] = mapped_column(Text)
     scope_kind: Mapped[str | None] = mapped_column(String(4))
     scope_id: Mapped[str | None] = mapped_column(Text)

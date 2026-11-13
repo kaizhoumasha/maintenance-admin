@@ -1,6 +1,8 @@
 # 部署到联调服务器(单机 Compose)
 
-本分支的 ECS / WMS 历史统一尚未执行真实上线切换。以下通用升级和旧镜像回退步骤不能直接用于已有数据的历史权威交接：必须按[统一历史 A / B 运行手册](integrations/integration-history.md#历史迁移与制品-a)，先用冻结的 authority-only 制品 A 完成真实停写、补录、最终对账和实际验收，再在独立维护窗口交付 contract 制品 B。最终源码 head 为 `integrationhistorycontract`，不可作为 A 的构建输入，也不可在旧库裸跑 `upgrade head` 后启动应用。本文保留的日期化部署记录不证明本次变更已部署。
+三张 HTTP 往来表的发布按[启用新写入、删除旧表与恢复](integrations/integration-history.md#启用新写入)执行。存量 PostgreSQL 的最终对账和写入围栏必须在同一维护窗口完成，普通升级命令会拒绝直接切换。
+
+本分支的 ECS / WMS 历史统一尚未执行真实上线切换。以下通用升级和旧镜像回退步骤不能直接用于已有数据的历史权威交接：必须按[统一历史 A / B 运行手册](integrations/integration-history.md#历史迁移与制品-a)，先用冻结的 authority-only 制品 A 完成真实停写、补录、最终对账和实际验收，再在独立维护窗口交付 contract 制品 B。此前统一历史收尾版本为 `integrationhistorycontract`，不可作为 A 的构建输入，也不可在旧库裸跑 `upgrade head` 后启动应用。本文保留的日期化部署记录不证明本次变更已部署。
 
 默认访问地址为 **[http://100.94.216.118:18080](http://100.94.216.118:18080)**，Swagger 为 **[http://100.94.216.118:18080/docs](http://100.94.216.118:18080/docs)**。客户端需能通过 Tailscale 访问该地址，不需要 SSH 转发；SSH 运维入口仍为 `ssh CANTAISYS@100.94.216.118`。本项目与现有 WES 共机独立运行。实际部署从[第 6 节](#6-发布准备与旧制品保存)开始，使用固定制品，不在联调服务器重新构建。第 1–5 节保留通用说明及本地构建演练命令；联调服务器上的应用操作统一使用第 6 节的 `dc` 函数，完整加载发布和站点配置。
 
@@ -541,7 +543,7 @@ curl --noproxy '*' --fail --head http://100.94.216.118:18081/
 
 PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 是两个独立概念，`DATABASE_URL` 仍连接原数据库。`app.database.create_database_engine` 统一给 API、可靠发送器及各 Celery 数据库连接设置会话 `search_path=enterprise_backend`，ORM 元数据也显式限定 schema。没有新增环境变量，不要对共享数据库执行全局 `ALTER DATABASE/ROLE ... SET search_path`。SQLite 测试通过 schema 映射继续使用无 schema 表。
 
-在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行所选制品的迁移，版本表同时移入新 schema。历史 revision 不重写，schema 隔离的搬迁基线仍为 `a023a20261024`；2026-10-27 部署记录的 head 为 `a6d464b20ab7`，当前最终源码 head 为 `integrationhistorycontract`，制品 A 则必须停在 `integrationhistoryauthority`。搬迁旧基线的白名单仍为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`，不代表最终运行模型仍包含旧收据/快照表。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
+在线 Alembic 入口在同一事务中校验旧库归属、创建 schema、移动现有表，再运行所选制品的迁移，版本表同时移入新 schema。历史 revision 不重写，schema 隔离的搬迁基线仍为 `a023a20261024`；2026-10-27 部署记录的 head 为 `a6d464b20ab7`，当前此前统一历史收尾版本为 `integrationhistorycontract`，制品 A 则必须停在 `integrationhistoryauthority`。搬迁旧基线的白名单仍为 `user`、`role`、`permission`、`user_role`、`role_permission`、`menu`、`audit_logs`、`audit_logs_archive`、`reliable_message`、`transport_task`、`callback_receipt`、`callback_snapshot`，另含 `alembic_version`，不代表最终运行模型仍包含旧收据/快照表。`ALTER TABLE SET SCHEMA` 原地保留数据及对象身份，所属索引和序列随表移动。
 
 - 仅自动搬迁版本为 `a023a20261024` 且白名单完整的旧 public 库。更早的旧库须先使用旧代码升级到该基线；不按完整白名单猜测历史版本的表归属。缺表、目标同名表冲突或等待锁超过 5 秒时整笔回滚，不覆盖、不合并、不清空。
 - 新库直接在独立 schema 建表。未知 revision 的 public 版本表视为其他系统所有，不读取为项目迁移进度、不移动；只读 `current`/`check` 不触发搬迁。已有项目 schema 版本表后不再扫描 public 同名表。

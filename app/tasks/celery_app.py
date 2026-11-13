@@ -1,9 +1,10 @@
-from celery import Celery
+from celery import Celery, bootsteps
 from celery.schedules import crontab
 
 from app.businesses import catalog
 from app.core import get_settings
 from app.integrations.discovery import load_runtime_contracts
+from app.tasks._db import check_worker_database
 from app.tasks.diagnostics import install_celery_diagnostics
 from app.xray_dispatch_trace import SOURCE
 
@@ -24,6 +25,14 @@ celery_app = Celery(
         "app.tasks.business_tasks",
     ],
 )
+
+
+class CheckRuntimeAuthority(bootsteps.StartStopStep):
+    def create(self, worker):
+        check_worker_database(get_settings().DATABASE_URL)
+
+
+celery_app.steps["worker"].add(CheckRuntimeAuthority)
 
 celery_app.conf.update(
     task_serializer="json",

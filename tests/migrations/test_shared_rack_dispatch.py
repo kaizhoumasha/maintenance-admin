@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from app.integrations import history as history_records
 from tests.helpers import run_alembic as migrate
+from tests.migration_helpers import add_http_runtime_test_schema
 
 ACTIVE = "019a1111-2222-7333-8444-555555555561"
 CANCELLED = "019a1111-2222-7333-8444-555555555562"
@@ -95,6 +96,7 @@ async def isolate_retained_manual_runtime(url, engine):
             "sorting_task_authority",
         )
         assert result.returncode == 0, result.stdout + result.stderr
+    await add_http_runtime_test_schema(engine)
     await engine.dispose()
 
 

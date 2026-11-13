@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from app.diagnostics import log_exception
@@ -63,7 +64,7 @@ async def send_one(
             outcome = AttemptOutcome(MessageStatus.EXPIRED)
         else:
             phase = "before_send"
-            until = await store.before_send(claim, target)
+            until = await store.before_send(replace(claim, request=request), target)
             if until is None:
                 return
             phase = "send"
@@ -189,7 +190,7 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         async with provider.borrow(effective.http_config()) as client:
             phase = "before_send"
             try:
-                until = await store.before_send(claim, target)
+                until = await store.before_send(replace(claim, request=request), target)
             except PreDispatchTimeout:
                 result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
             else:

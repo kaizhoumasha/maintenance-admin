@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import canonical_digest, json_object
 from app.integrations import history
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_envelope import (
     outgoing_message,
     response_projection,
@@ -66,6 +67,9 @@ class TransportTaskResult:
     member_facts: dict | None = None
     has_pending_outcome: bool = False
     pending_revision: int | None = None
+    pending_result_receipt_id: int | None = None
+    applied_result_receipt_id: int | None = None
+    applied_trigger_receipt_id: int | None = None
     closure: str = "UNDETERMINED"
     closure_reason: str = "TASK_NOT_FOUND"
     closure_basis: dict | None = None
@@ -83,13 +87,22 @@ async def read_rows(
     columns.update({n: message.c[n] for n in ("dispatch_started_at", "scope_owner")})
     if check_conflicts:
         columns["delivery_snapshot"] = message.c.delivery_snapshot
-    task_columns = [c for c in task.c if c.name != "submission_acceptance"]
+    fields = {
+        "submission_acceptance",
+        "pending_result_source_unknown",
+        "pending_result_receipt_id",
+        "applied_result_receipt_id",
+        "applied_trigger_receipt_id",
+    }
+    if enabled():
+        fields = {"submission_acceptance"}
+    task_columns = [c for c in task.c if c.name not in fields]
     task_columns.append(task.c.submission_acceptance.is_not(None).label("has_acceptance"))
     if check_conflicts:
         task_columns.append(task.c.submission_acceptance)
     acceptance_columns = {}
     task_from = task
-    if check_conflicts:
+    if check_conflicts and not enabled():
         for name, reference in (
             ("acceptance_request", task.c.acceptance_request_record_id),
             ("acceptance_response", task.c.acceptance_response_record_id),
@@ -381,6 +394,9 @@ def project(
         member_facts=deepcopy(facts or {}),
         has_pending_outcome=pending is not None,
         pending_revision=pending["revision"] if pending else None,
+        pending_result_receipt_id=task.get("pending_result_receipt_id"),
+        applied_result_receipt_id=task.get("applied_result_receipt_id"),
+        applied_trigger_receipt_id=task.get("applied_trigger_receipt_id"),
     )
     if len(submissions) > 1:
         result = replace(result, submission_state="AMBIGUOUS")

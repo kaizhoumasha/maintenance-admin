@@ -5,6 +5,7 @@ import math
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 from sqlalchemy import func, select, text
 
@@ -15,6 +16,7 @@ from app.integrations.ecs_status import (
     normalize_status_origin,
     query,
 )
+from app.integrations.http_exchanges import capture_status
 from app.models import Device, DeviceRoute
 from app.schemas.device import DevicePreviewRead, DeviceStatusRead, PreviewEntry, PreviewSnapshot
 from app.services.device_service import cache_call
@@ -60,7 +62,12 @@ class Target:
 
 class DeviceStatusService:
     def __init__(self, factory, redis, *, query_fn=query, clock=utc_now):
-        self.factory, self.redis, self.query_fn, self.clock = factory, redis, query_fn, clock
+        self.factory, self.redis, self.clock = factory, redis, clock
+        self.query_fn = (
+            partial(query, observe=partial(capture_status, factory))
+            if query_fn is query
+            else query_fn
+        )
 
     @staticmethod
     def origin_key(origin):

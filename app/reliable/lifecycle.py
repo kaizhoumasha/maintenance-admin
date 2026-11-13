@@ -40,9 +40,11 @@ def database_failure_code(error):
 class DeliveryRecords(Protocol):
     async def register(self, session, *, message, protocol, exchange_id=None): ...
     async def requests(self, session, *, record_ids): ...
+    async def frozen_requests(self, session, *, rows): ...
     async def link_message(self, session, *, exchange_id, message_id, at): ...
     async def opened(self, session, *, claim, at): ...
     async def finished(self, session, *, claim, outcome, at, late): ...
+    async def close_attempt(self, session, *, message_id, lease_id, at, reason, outcome=None): ...
 
 
 @asynccontextmanager
@@ -156,6 +158,7 @@ class SnapshotTransactions:
                         session,
                         claim=replace(
                             claim,
+                            dispatch_protocol=target.protocol,
                             dispatch_origin=target.effective(
                                 claim.message.delivery_snapshot
                             ).base_url,
@@ -169,7 +172,7 @@ class SnapshotTransactions:
             await self.apply(session, port, context, row, claim, outcome)
             return None
 
-    async def finish(self, claim, outcome):
+    async def finish(self, claim, outcome, *, close_reason="FINISHED"):
         allowed = {
             MessageStatus.PENDING,
             MessageStatus.HELD,
@@ -208,7 +211,7 @@ class SnapshotTransactions:
                 outcome = replace(outcome, observation_record_id=observation)
                 await port.observe_late(session, context, claim, outcome)
                 return False
-            await self.apply(session, port, context, row, claim, outcome)
+            await self.apply(session, port, context, row, claim, outcome, close_reason=close_reason)
             return True
 
     @staticmethod
@@ -223,7 +226,7 @@ class SnapshotTransactions:
             return replace(outcome, delivery_uncertain=False)
         return outcome
 
-    async def apply(self, session, port, context, row, claim, outcome):
+    async def apply(self, session, port, context, row, claim, outcome, *, close_reason="FINISHED"):
         outcome = self._interruption(row, outcome)
         snapshot = claim.message.delivery_snapshot
         if (
@@ -247,6 +250,14 @@ class SnapshotTransactions:
             session, claim=claim, outcome=outcome, at=now, late=False
         )
         outcome = replace(outcome, observation_record_id=observation)
+        await self.store.records.close_attempt(
+            session,
+            message_id=row.id,
+            lease_id=row.lease_id,
+            at=now,
+            reason=close_reason,
+            outcome=outcome,
+        )
         row.status = outcome.status
         row.pause_reason = outcome.pause_reason
         row.fail_reason = outcome.fail_reason
@@ -262,6 +273,7 @@ class SnapshotTransactions:
             row.not_received_count = outcome.not_received_count
         if outcome.result:
             row.last_response_record_id = observation
+            row.last_response_wire = outcome.result.body
             row.last_http_status = outcome.result.status_code
             row.last_failure_kind = outcome.result.failure_kind
         if outcome.verdict:
@@ -271,6 +283,8 @@ class SnapshotTransactions:
                 or outcome.status == MessageStatus.FAILED
             ):
                 row.terminal_response_record_id = observation
+                row.terminal_response_wire = outcome.result.body if outcome.result else None
+                row.terminal_response_at = now
         await port.apply_transition(session, context, claim, outcome)
 
     async def release(self, claim):
@@ -281,6 +295,7 @@ class SnapshotTransactions:
             AttemptOutcome(
                 MessageStatus.HELD, pause_reason="LEASE_INTERRUPTED", delivery_uncertain=True
             ),
+            close_reason="LEASE_RELEASED",
         )
 
     async def maintain(self, limit, targets, deadline):
@@ -370,7 +385,17 @@ class SnapshotTransactions:
                                 outcome = AttemptOutcome(MessageStatus.EXPIRED)
                             else:
                                 continue
-                            await self.apply(session, port, context, row, claim, outcome)
+                            await self.apply(
+                                session,
+                                port,
+                                context,
+                                row,
+                                claim,
+                                outcome,
+                                close_reason="LEASE_EXPIRED"
+                                if reason == "LEASE_INTERRUPTED"
+                                else "FINISHED",
+                            )
                             count += 1
                     except Exception as error:
                         log_exception(

@@ -1179,6 +1179,9 @@ async def _run(args):
     try:
         async with engine.connect() as coordinator:
             pg = coordinator.dialect.name == "postgresql"
+            revision = await coordinator.scalar(text("SELECT version_num FROM alembic_version"))
+            if revision in {"http_exchange_runtime_authority", "http_exchange_query_views"}:
+                raise ValueError("legacy integration history backfill has retired")
             if pg and not await coordinator.scalar(
                 text("SELECT pg_try_advisory_lock(:key)"), {"key": LOCK_KEY}
             ):

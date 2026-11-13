@@ -1,8 +1,107 @@
 # ECS / WMS 对接历史
 
-本页描述统一历史的查询合同。运行启用需要先完成维护窗口的最终补录和对账；不能把开发任务的中间状态直接作为生产兼容版本。
+## 三张 HTTP 往来表启用后的查询
 
-当前最终模型为 `IntegrationExchange`（原交互与状态）、`IntegrationRecord`（原请求、回复、发送及采用证据）和 `IntegrationReference`（可证明的关联），加上保留执行职责的 `ReliableMessage` 与 `TransportTask`。原命令、收据、发送/Result 证据和诊断快照统一写入前三类；旧 ORM 只在迁移来源与制品 A 中保留。统一存储不改变原协议身份、幂等、冲突检测或长期 ECS Result 重放。
+启用独立运行证据后，日常查询使用 `GET /api/v1/integrations/diagnostics`。传入 `peer` 和一个原编号 `reference`。WMS 用 `operation_id`，ECS 用 `command_code`，Transport 用 `transport_task_id`。即使还没有 HTTP 往来，入口也会查询原运行状态。
+
+### 启用新写入
+
+先载入[联调 Compose 配置](../deploy.md#固定镜像部署与升级)，沿用原项目名和数据卷。维护窗口前，在新包目录检查固定镜像，留存旧包、共享配置和当前镜像 ID。预先确认数据库版本。已完成此前统一历史交接、停在 `coarse_sorting_mock_round` 的数据库可以执行本节。更早的版本按[历史迁移与制品 A](#历史迁移与制品-a)先完成所需交接。
+
+```bash
+cd "/srv/enterprise-backend/releases/<新包目录>"
+python3 scripts/release_bundle.py load .
+ln -s /srv/enterprise-backend/shared/.env .env  # 已有链接时核对指向
+. /srv/enterprise-backend/shared/compose.sh
+dc config --quiet
+dc config --images
+```
+
+在当前发布目录关闭上游入口，暂停清理、补录、人工写入等所有旧写入者，再停服务。确认发送器已随 API 停止、原进程均已排空、没有外部或预备事务。备份用绝对路径，在异机存储中保存归档和摘要，并确认可取回。
+
+```bash
+cd /srv/enterprise-backend/current
+dc stop nginx api worker beat
+dc ps -a
+dc exec -T postgres psql -X -U admin -d enterprise_backend -v ON_ERROR_STOP=1 \
+  -c 'SELECT version_num FROM enterprise_backend.alembic_version' \
+  -c "SELECT pid, application_name, state FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend' AND (xact_start IS NOT NULL OR state IS NULL)" \
+  -c 'SELECT gid, prepared FROM pg_prepared_xacts WHERE database=current_database()'
+backup="$(BACKUP_DIR=/srv/enterprise-backend/shared/backups/http-exchange scripts/backup_pg.sh)"
+test -s "$backup"
+dc exec -T postgres pg_restore --list < "$backup"
+sha256sum "$backup"
+```
+
+保持停写和原共享配置，在新包目录执行最终对账。每条命令成功后才执行下一条。
+
+```bash
+cd "/srv/enterprise-backend/releases/<新包目录>"
+dc run --rm --no-deps migrate alembic -x fence_legacy_writes=true upgrade http_exchange_query_views
+```
+
+迁移在同一事务核对冻结请求、原租约、回执、ECS 裁决及 Transport 结果来源，安装旧表写入围栏并替换查询视图。失败时保留原版本和旧表；继续停写，按错误给出的原身份调查，确认后重跑。未决旧租约缺少开启记录且无法证明未发送时，按原编号核对对端并保全交付事实。Transport 缺少结果来源时，只有此前留档能证明该结果原本就缺少来源，才按历史未知迁移。禁止填造记录、换号重发和手工改迁移版本。普通 `upgrade head` 会拒绝直接切换有存量的数据库。
+
+迁移成功后，在共享 `.env` 写入 `INTEGRATION_RUNTIME_AUTHORITY=true`。启动 API 即可能恢复发送与新写入。从启动此步骤起保留新产生的事实，并用实际业务任务验证 worker。确认原收据重放、待办恢复、三类原编号查询、正文权限及审计后，再启动 nginx、切换 `current` 并恢复入口。
+
+```bash
+dc up -d --no-build --pull never --force-recreate --wait --wait-timeout 90 api worker beat
+dc exec -T api python -c "import urllib.request as u; print(u.urlopen('http://localhost:8000/ready').read().decode())"
+python3 scripts/release_bundle.py check . --project "$COMPOSE_PROJECT_NAME"
+dc exec -T api alembic current
+dc exec -T api alembic check
+dc exec -T worker celery -A app.tasks.celery_app inspect ping --timeout=5
+# 完成实际队列任务和业务验收后执行
+dc up -d --no-build --pull never nginx
+ln -sfn "releases/$(basename "$PWD")" /srv/enterprise-backend/current
+```
+
+已提前推进到无围栏的最终版本时，重跑指定迁移会失败。使用切换前备份恢复原版本前，须确认恢复点之后未产生新事实。已经产生新事实时，先完整保全现场数据库和对应镜像，再按下文恢复。
+
+原 `/integrations/exchanges`、详情、`/records` 时间线和正文路径继续使用原权限。列表以一次 HTTP 尝试为一条，时间线给出请求及可确认的响应两侧。两侧标识由往来 UUID 派生，在往来保留期内稳定。正文路径可以使用时间线返回的 ID，也可用 `/integrations/http-exchanges/{peer}/{exchange_id}/{side}` 并以 `representation=payload` 查看结构化数据。原过程历史及旧正文标识省略补迁。
+
+`integration_exchange_summary` 与 `integration_record_summary` 保留原名称并继续排除正文和 payload。第一张视图按往来提供原编号、交付与应用状态，第二张按请求和响应提供正文可用性、摘要与长度。Transport 的任务编号在 `transport_task_id`，ECS 的命令编号在 `command_code`。查某个设备的 ECS 事件可按 `device_code` 和时间过滤。运行状态、HTTP 状态和本次响应各自表达对应事实。
+
+普通数据库只读角色通过这两个视图查询。部署时核对该角色的继承权限和默认授权，确保它无法直接读取包含正文的往来表或运行表。
+
+### 旧三表删除窗口
+
+旧表写入围栏及查询迁移须已完成。验收证据 JSON 包含 `isolated_acceptance`、`integration_acceptance`、`running_version`、`backup` 的实际记录编号。将 `api`、`sender`、`worker`、`beat`、`background`、`one_off`、`manual`、`database_transactions` 逐项核对为 `DRAINED`，将 `cleanup`、`backfill`、`scripts` 逐项核对为 `RETIRED`。未确认项会阻止删除。
+
+在独立删除窗口，用当前固定发布镜像挂载已核实的证据文件。预检在保存点内试行同一组 `RESTRICT` 检查并回滚。数据库依赖可自动阻止删除，字符串 SQL、人工脚本和外部调用由操作者核对留证。预检通过后，实际删除命令再次检查准入并在同一事务删表和留证。
+
+```bash
+dc run --rm --no-deps -v /absolute/path/evidence.json:/tmp/evidence.json:ro migrate \
+  python -m scripts.retire_http_exchange_legacy --evidence /tmp/evidence.json
+# 取得本次独立删除窗口的实际验收证据后执行
+dc run --rm --no-deps -v /absolute/path/evidence.json:/tmp/evidence.json:ro migrate \
+  python -m scripts.retire_http_exchange_legacy --evidence /tmp/evidence.json --apply
+```
+
+### 切换后恢复
+
+保留含新运行证据的备份与同一发布包。先在隔离库用它们恢复并验收。现场需要恢复时，再关闭入口并排空全部写入者，保全待恢复的原现场，核对备份的摘要、恢复点及对应镜像，并在共享 `.env` 轮换 `JWT_SECRET_KEY`。数据库和 Redis 必须属于原 Compose 项目。在对应发布目录运行：
+
+```bash
+dc stop nginx api worker beat
+# 核对恢复点与目标 Compose 项目后执行
+JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh "/absolute/path/db-<恢复点>.dump"
+# 有新运行证据的备份使用共享 .env 内的 INTEGRATION_RUNTIME_AUTHORITY=true
+dc run --rm --no-deps migrate alembic upgrade head
+dc up -d --no-build --pull never --force-recreate --wait --wait-timeout 90 api worker beat
+dc exec -T api python -c "import urllib.request as u; print(u.urlopen('http://localhost:8000/ready').read().decode())"
+python3 scripts/release_bundle.py check . --project "$COMPOSE_PROJECT_NAME"
+# 完成原收据、原租约补写、视图、调试接口和实际队列任务验收后执行
+dc up -d --no-build --pull never nginx
+```
+
+恢复脚本会清理原 Redis 登录会话及待执行和未确认队列任务。如果数据库已切换、Redis 清理报错，保持服务停止，修复后单独执行 `scripts/clear_redis_after_restore.sh`。已产生新受理或裁决时，直接恢复切换前备份会失去这些新事实。恢复切换前备份的旧模式路径须使用其原发布镜像及对应配置，详见[旧镜像回退](../deploy.md#使用旧镜像回退禁止现场重建)。
+
+## 切换前的统一历史合同
+
+以下各节保留旧统一历史结构的查询和运维合同，适用于切换前三张旧表仍承担运行权威的版本。启用新存储后的操作见本文开头。
+
+此前统一历史模型为 `IntegrationExchange`（原交互与状态）、`IntegrationRecord`（原请求、回复、发送及采用证据）和 `IntegrationReference`（可证明的关联），加上保留执行职责的 `ReliableMessage` 与 `TransportTask`。原命令、收据、发送/Result 证据和诊断快照统一写入前三类；旧 ORM 只在迁移来源与制品 A 中保留。统一存储不改变原协议身份、幂等、冲突检测或长期 ECS Result 重放。
 
 应用在 `app/reliable_runtime.py` 注入 `app.integrations.history` 作为 `Outbox(..., records=...)` 和 `MessageStore(..., records=...)` 的同一记录端口；独立运行时也须显式注入。可靠层通过端口保存证据，不导入协议或历史 ORM；原文由证据指针读取，不再从 ReliableMessage 的旧原文列取值。独立装配示例见[离线实验](../reliable-transport-lab.md)，业务仍使用公开结果读口。
 
@@ -104,7 +203,7 @@ RESPONSE_PREPARED 表示服务器准备的协议回复，不证明对方已经�
 
 ## 独立收缩与制品 B
 
-最终源码的唯一 head 是 `integrationhistorycontract`，因此不能把此工作区直接当作制品 A 的构建输入。先使用已冻结且 head=authority 的 A，实际启用并完成原身份贯通验证，再在另一个维护窗口交付 B。开发测试中的成功不代替现场的 A 验收。
+此前统一历史的第二阶段止于 `integrationhistorycontract`。本次 HTTP 往来表制品止于 `http_exchange_query_views`。执行前一阶段时须使用当时冻结的发布镜像。先使用已冻结且 head=authority 的 A，实际启用并完成原身份贯通验证，再在另一个维护窗口交付 B。开发测试中的成功不代替现场的 A 验收。
 
 B 的收缩命令：
 

@@ -18,11 +18,13 @@ from app.integrations.callback_diagnostics import queue_diagnostics
 from app.integrations.callback_receipts import (
     LOCK_TIMEOUT,
     ReceiptView,
+    active_receipt,
     find_receipt,
     insert_receipt,
+    receipt_model,
     save_receipt_response,
 )
-from app.models import IntegrationExchange
+from app.integrations.http_exchanges import operation_uuid
 from app.transactions import after_commit
 
 from .registry import (
@@ -50,6 +52,10 @@ class CallbackResponse:
     pure_replay: bool = field(default=False, kw_only=True)
     exchange_id: UUID | None = field(default=None, kw_only=True)
     attempt_id: str | None = field(default=None, kw_only=True)
+    receipt_id: int | None = field(default=None, kw_only=True)
+    diagnostic_reason: str | None = field(default=None, kw_only=True)
+    replayed_from_id: UUID | None = field(default=None, kw_only=True)
+    deferred: bool = field(default=False, kw_only=True)
 
     def __post_init__(self):
         if self.prepared_body is None:
@@ -93,10 +99,17 @@ def unavailable(raw: bytes) -> CallbackResponse:
 
 def _replay(existing: ReceiptView) -> CallbackResponse:
     body = dict(existing.body)
+    reason = existing.diagnostic[0].get("reason_code") if existing.diagnostic else None
     if body["code"] == "RECEIVED":
         body["code"] = "DUPLICATE"
         return CallbackResponse(
-            200, body, "duplicate", pure_replay=True, exchange_id=existing.exchange_id
+            200,
+            body,
+            "duplicate",
+            pure_replay=True,
+            exchange_id=existing.exchange_id,
+            receipt_id=existing.id,
+            diagnostic_reason=reason,
         )
     return CallbackResponse(
         existing.status_code,
@@ -105,6 +118,9 @@ def _replay(existing: ReceiptView) -> CallbackResponse:
         pure_replay=True,
         exchange_id=existing.exchange_id,
         prepared_body=existing.prepared_body,
+        receipt_id=existing.id,
+        diagnostic_reason=reason,
+        replayed_from_id=operation_uuid(existing.reply_attempt_id),
     )
 
 
@@ -253,13 +269,10 @@ async def _handle(
         raw_body=raw,
         owner_domain=context.business_code,
     )
+    receipt_table = receipt_model()
     await session.execute(
-        update(IntegrationExchange)
-        .where(
-            IntegrationExchange.role == "RECEIPT",
-            IntegrationExchange.receipt_active.is_(True),
-            IntegrationExchange.receipt_id == receipt_id,
-        )
+        update(receipt_table)
+        .where(active_receipt(receipt_table), receipt_table.receipt_id == receipt_id)
         .values(
             diagnostic=context.notes or None,
         )
@@ -281,7 +294,14 @@ async def _handle(
             after_commit(session, partial(on_business_committed, context.business_code))
         elif not shared and on_committed is not None:
             after_commit(session, partial(on_committed, handler.registration_source))
-    return replace(response, exchange_id=exchange_id, attempt_id=attempt_id)
+    return replace(
+        response,
+        exchange_id=exchange_id,
+        attempt_id=attempt_id,
+        receipt_id=receipt_id,
+        diagnostic_reason=context.notes[0]["reason_code"] if context.notes else None,
+        deferred=pending,
+    )
 
 
 async def _receive(
@@ -366,7 +386,9 @@ async def _receive(
     if receipt_id is not None:
         if reason:
             stored = await find_receipt(session, operation, operation_id)
-            return replace(reply, exchange_id=stored.exchange_id, attempt_id=attempt_id)
+            return replace(
+                reply, exchange_id=stored.exchange_id, attempt_id=attempt_id, receipt_id=receipt_id
+            )
         context = _context(
             session,
             handler,
@@ -391,7 +413,9 @@ async def _receive(
                 raw_body=raw,
                 owner_domain=context.business_code,
             )
-            return replace(guarded, exchange_id=exchange_id, attempt_id=attempt_id)
+            return replace(
+                guarded, exchange_id=exchange_id, attempt_id=attempt_id, receipt_id=receipt_id
+            )
         response = await _handle(
             session,
             handler,
@@ -433,6 +457,7 @@ async def _receive(
             pure_replay=True,
             exchange_id=existing.exchange_id,
             attempt_id=attempt_id,
+            receipt_id=existing.id,
         )
     if handler is not None and parsed is not None:
         context = _context(

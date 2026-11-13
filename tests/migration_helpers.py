@@ -14,6 +14,31 @@ from app.database import create_database_engine
 from tests.helpers import run_alembic
 
 
+async def add_http_runtime_test_schema(engine):
+    """Provide current ORM columns while preserving the revision under test."""
+    from importlib import import_module
+
+    import sqlalchemy as sa
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    def expand(connection):
+        schema = "enterprise_backend" if connection.dialect.name == "postgresql" else None
+        context = MigrationContext.configure(connection)
+        with Operations.context(context) as operations:
+            for name, kind in (
+                ("frozen_request_wire", sa.LargeBinary()),
+                ("frozen_request_sha256", sa.String(64)),
+            ):
+                operations.add_column("reliable_message", sa.Column(name, kind), schema=schema)
+            for revision in ("http_exchange_expand", "http_exchange_runtime_expand"):
+                migration = import_module(f"migrations.versions.2026-11-13_{revision}")
+                migration.upgrade()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(expand)
+
+
 @pytest.fixture(scope="session")
 def sqlite_migration_start(tmp_path_factory):
     templates = {}

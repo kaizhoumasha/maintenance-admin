@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import get_settings
 from app.core.identifiers import uuid7
 from app.integrations import history as history_records
+from app.integrations.runtime_authority import enabled
 from app.models.integration_history import IntegrationExchange
 from app.models.transport import TransportTask
 from app.reliable import MessageDraft, Outbox
@@ -237,27 +238,30 @@ class TransportService:
         insert = pg_insert if dialect == "postgresql" else sqlite_insert
         await ensure_savepoint_transaction(session)
         async with session.begin_nested() as registration:
-            exchange = IntegrationExchange(
-                role="OUTGOING",
-                peer_system="WMS",
-                protocol=PROTOCOL,
-                direction="OUTBOUND",
-                interaction_kind="REQUEST",
-                operation=OPERATION,
-                operation_id=operation_id,
-                identity_kind="OPERATION_ID",
-                identity_value=operation_id,
-                target_key=target,
-                owner_domain=self.owner_domain,
-                created_at=now,
-            )
-            session.add(exchange)
-            await session.flush()
+            exchange_id = uuid7()
+            if not enabled():
+                exchange = IntegrationExchange(
+                    id=exchange_id,
+                    role="OUTGOING",
+                    peer_system="WMS",
+                    protocol=PROTOCOL,
+                    direction="OUTBOUND",
+                    interaction_kind="REQUEST",
+                    operation=OPERATION,
+                    operation_id=operation_id,
+                    identity_kind="OPERATION_ID",
+                    identity_value=operation_id,
+                    target_key=target,
+                    owner_domain=self.owner_domain,
+                    created_at=now,
+                )
+                session.add(exchange)
+                await session.flush()
             task_row_id = await session.scalar(
                 insert(TransportTask)
                 .values(
                     client_request_id=client_request_id,
-                    submission_exchange_id=exchange.id,
+                    submission_exchange_id=exchange_id,
                     transport_task_id=task_id,
                     operation_id=operation_id,
                     kind=data["kind"],
@@ -275,24 +279,25 @@ class TransportService:
             if task_row_id is None:
                 await registration.rollback()
             else:
-                await history_records.write_reference(
-                    session,
-                    exchange_id=exchange.id,
-                    reference_kind="TRANSPORT_TASK",
-                    namespace="id",
-                    value=task_id,
-                    relation_role="SUBMISSION",
-                    created_at=now,
-                )
-                await history_records.write_reference(
-                    session,
-                    exchange_id=exchange.id,
-                    reference_kind="WORKLINE",
-                    namespace="code",
-                    value=caller.workline_id,
-                    relation_role="CALLER",
-                    created_at=now,
-                )
+                if not enabled():
+                    await history_records.write_reference(
+                        session,
+                        exchange_id=exchange_id,
+                        reference_kind="TRANSPORT_TASK",
+                        namespace="id",
+                        value=task_id,
+                        relation_role="SUBMISSION",
+                        created_at=now,
+                    )
+                    await history_records.write_reference(
+                        session,
+                        exchange_id=exchange_id,
+                        reference_kind="WORKLINE",
+                        namespace="code",
+                        value=caller.workline_id,
+                        relation_role="CALLER",
+                        created_at=now,
+                    )
                 await outbox.enqueue(
                     session,
                     MessageDraft(
@@ -303,7 +308,7 @@ class TransportService:
                         business_key=task_id,
                         ttl=SUBMIT_TTL,
                         scope=scope,
-                        exchange_id=exchange.id,
+                        exchange_id=exchange_id,
                     ),
                 )
         if task_row_id is None:

@@ -2,6 +2,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 from sqlalchemy import event, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -123,12 +124,15 @@ class Outbox:
             scope_kind=draft.scope.kind if draft.scope else None,
             scope_id=draft.scope.scope_id if draft.scope else None,
             target=message.target,
+            protocol=target.protocol,
             operation=message.operation,
             operation_id=message.operation_id,
             status=MessageStatus.PENDING,
             attempts=0,
             next_attempt_at=now,
             expires_at=expires_at,
+            frozen_request_wire=message.request_raw,
+            frozen_request_sha256=sha256(message.request_raw).hexdigest(),
             business_key=message.business_key,
             trace_id=message.trace_id,
             created_at=now,
@@ -174,8 +178,9 @@ class Outbox:
         snapshot = asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None
         if existing.delivery_snapshot != snapshot:
             raise DuplicateMessage("identity already has different delivery snapshot")
-        bodies = await self.records.requests(session, record_ids=(existing.request_record_id,))
-        raw = bodies[existing.request_record_id]
+        raw = (await self.records.frozen_requests(session, rows=(existing,)))[
+            existing.request_record_id
+        ]
         if raw != draft.request_raw and not self._same_request(raw, draft):
             raise DuplicateMessage("identity already has different bytes")
         return EnqueueResult(existing.id, MessageStatus(existing.status), existing.business_key)
@@ -271,10 +276,14 @@ class Outbox:
                         pause_reason=reason,
                     ),
                 )
+            now = utc_datetime(self.clock())
+            await self.records.close_attempt(
+                session, message_id=row.id, lease_id=row.lease_id, at=now, reason="SCOPE_STOPPED"
+            )
             row.status = MessageStatus.ABANDONED
             row.pause_reason = reason
             row.lease_id = row.lease_until = row.next_attempt_at = None
-            row.updated_at = utc_datetime(self.clock())
+            row.updated_at = now
             stopped.append(ScopeStopItem(row.id, previous, dispatch))
         await session.flush()
         return tuple(stopped)
@@ -334,6 +343,9 @@ class Outbox:
         if snapshot_changed is not None:
             return snapshot_changed
         now = utc_datetime(self.clock())
+        await self._close_active_attempt(
+            session, target, operation, operation_id, now, "SETTLED_BY_CALLBACK"
+        )
         row = (
             await session.execute(
                 update(ReliableMessage)
@@ -383,6 +395,8 @@ class Outbox:
         )
         if snapshot_changed is not None:
             return snapshot_changed
+        now = utc_datetime(self.clock())
+        await self._close_active_attempt(session, target, operation, operation_id, now, "HELD")
         row = await session.scalar(
             update(ReliableMessage)
             .where(
@@ -402,6 +416,27 @@ class Outbox:
             .returning(ReliableMessage.id)
         )
         return row is not None
+
+    async def _close_active_attempt(self, session, target, operation, operation_id, now, reason):
+        row = (
+            await session.execute(
+                select(ReliableMessage.id, ReliableMessage.lease_id)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                )
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is not None:
+            await self.records.close_attempt(
+                session,
+                message_id=row.id,
+                lease_id=row.lease_id,
+                at=now,
+                reason=reason,
+            )
 
     async def _snapshot_transition(
         self, session, target, operation, operation_id, status, reason=None
@@ -438,9 +473,7 @@ class Outbox:
                 row.target,
                 row.operation,
                 row.operation_id,
-                (await self.records.requests(session, record_ids=(row.request_record_id,)))[
-                    row.request_record_id
-                ],
+                (await self.records.frozen_requests(session, rows=(row,)))[row.request_record_id],
                 row.business_key,
                 row.trace_id,
                 utc_datetime(row.created_at, known_sqlite_utc=True),
@@ -457,6 +490,13 @@ class Outbox:
                 row.attempts + 1,
                 row.not_received_count,
                 bool(row.delivery_uncertain),
+            )
+            await self.records.close_attempt(
+                session,
+                message_id=row.id,
+                lease_id=row.lease_id,
+                at=now,
+                reason="SETTLED_BY_CALLBACK" if status == "DONE" else "HELD",
             )
             row.status = status
             row.pause_reason = reason

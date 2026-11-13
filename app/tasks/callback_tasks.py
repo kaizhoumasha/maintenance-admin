@@ -15,11 +15,14 @@ from sqlalchemy import (
 )
 
 from app.core import get_settings
+from app.integrations.runtime_authority import enabled, require_reconciled
 from app.models import (
+    CallbackReceipt,
     IntegrationExchange,
     IntegrationRecord,
     IntegrationReference,
     ReliableMessage,
+    RuntimeRetentionHold,
     TransportTask,
 )
 from app.reliable.config import positive
@@ -184,7 +187,7 @@ async def _remove_legacy_sources(session, removals):
         await session.execute(delete(table).where(pk == value))
 
 
-async def _protected_roots(session, roots):
+async def _protected_roots(session, roots, *, runtime=False, message_ids=()):
     """Original business locks precede history locks for purge and summary deletion."""
     from app.businesses._components.bin_roller.retention import (
         _lock_lines,
@@ -206,30 +209,58 @@ async def _protected_roots(session, roots):
     ids = tuple(row.id for row in roots)
     receipts = {row.receipt_id: row.id for row in roots if row.receipt_id is not None}
     protected = set()
-    messages = dict(
-        (
+    if runtime:
+        messages = {value: value for value in message_ids}
+        subjects = {("RECEIPT", str(value)): root for value, root in receipts.items()} | {
+            ("WMS_MESSAGE", str(value)): value for value in message_ids
+        }
+        reference_rows = (
             await session.execute(
-                select(ReliableMessage.id, ReliableMessage.exchange_id).where(
-                    ReliableMessage.exchange_id.in_(ids)
+                select(
+                    RuntimeRetentionHold.subject_kind,
+                    RuntimeRetentionHold.subject_id,
+                    RuntimeRetentionHold.owner_kind,
+                    RuntimeRetentionHold.owner_domain,
+                    RuntimeRetentionHold.owner_id,
+                ).where(
+                    tuple_(RuntimeRetentionHold.subject_kind, RuntimeRetentionHold.subject_id).in_(
+                        list(subjects)
+                    ),
                 )
             )
         ).all()
-    )
-    reference_rows = (
-        await session.execute(
-            select(
-                IntegrationReference.exchange_id,
-                IntegrationReference.reference_kind,
-                IntegrationReference.namespace,
-                IntegrationReference.reference_value,
-                IntegrationReference.id,
-            ).where(IntegrationReference.exchange_id.in_(ids))
+        references = [
+            (subjects[(subject, identity)], kind, domain, value)
+            for subject, identity, kind, domain, value in reference_rows
+        ]
+        observed = {root: set() for root in subjects.values()}
+        for root, kind, domain, value in references:
+            observed[root].add((kind, domain, value))
+    else:
+        messages = dict(
+            (
+                await session.execute(
+                    select(ReliableMessage.id, ReliableMessage.exchange_id).where(
+                        ReliableMessage.exchange_id.in_(ids)
+                    )
+                )
+            ).all()
         )
-    ).all()
-    references = [tuple(row[:4]) for row in reference_rows]
-    observed = {identity: set() for identity in ids}
-    for row in reference_rows:
-        observed[row.exchange_id].add(row.id)
+        reference_rows = (
+            await session.execute(
+                select(
+                    IntegrationReference.exchange_id,
+                    IntegrationReference.reference_kind,
+                    IntegrationReference.namespace,
+                    IntegrationReference.reference_value,
+                    IntegrationReference.id,
+                ).where(IntegrationReference.exchange_id.in_(ids))
+            )
+        ).all()
+        references = [tuple(row[:4]) for row in reference_rows]
+        observed = {identity: set() for identity in ids}
+        for row in reference_rows:
+            observed[row.exchange_id].add(row.id)
     for root, kind, namespace, value in references:
         if kind == "RELIABLE_MESSAGE" and namespace == "id":
             if (
@@ -623,6 +654,8 @@ async def run_cleanup(factory, days, *, now=None, batch=500) -> int:
 
 async def run_receipt_cleanup(factory, days, *, now=None, batch=500) -> int:
     """Release original slots; bodies and searchable facts have separate clocks."""
+    if enabled():
+        return await _run_runtime_receipt_cleanup(factory, days, now=now, batch=batch)
     positive(days, "RELIABLE_RETENTION_DAYS")
     positive(batch, "batch")
     if not await history_cleanup_ready(factory):
@@ -689,6 +722,77 @@ async def run_receipt_cleanup(factory, days, *, now=None, batch=500) -> int:
             cursor = roots[-1].receipt_id
 
 
+async def _run_runtime_receipt_cleanup(factory, days, *, now, batch):
+    positive(days, "RELIABLE_RETENTION_DAYS")
+    positive(batch, "batch")
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=days)
+    total = cursor = 0
+    receipt = CallbackReceipt
+    while True:
+        async with factory.begin() as session:
+            if session.get_bind().dialect.name == "postgresql":
+                await session.connection(execution_options={"isolation_level": "READ COMMITTED"})
+            candidates = (
+                await session.execute(
+                    select(receipt.id, receipt.receipt_id)
+                    .where(
+                        receipt.active.is_(True),
+                        receipt.receipt_id > cursor,
+                        receipt.created_at < cutoff,
+                    )
+                    .order_by(receipt.receipt_id)
+                    .limit(batch)
+                )
+            ).all()
+            if not candidates:
+                return total
+            protected, holds = await _protected_roots(session, candidates, runtime=True)
+            ids = tuple(row.receipt_id for row in candidates if row.id not in protected)
+            locked = (
+                await session.scalars(
+                    select(receipt)
+                    .where(receipt.active.is_(True), receipt.receipt_id.in_(ids))
+                    .order_by(receipt.receipt_id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).all()
+            from app.models import TransportTask
+
+            for row in locked:
+                current = set(
+                    (
+                        await session.execute(
+                            select(
+                                RuntimeRetentionHold.owner_kind,
+                                RuntimeRetentionHold.owner_domain,
+                                RuntimeRetentionHold.owner_id,
+                            ).where(
+                                RuntimeRetentionHold.subject_kind == "RECEIPT",
+                                RuntimeRetentionHold.subject_id == str(row.receipt_id),
+                            )
+                        )
+                    ).all()
+                )
+                if current != holds[row.id]:
+                    continue
+                if await session.scalar(
+                    select(TransportTask.id)
+                    .where(
+                        or_(
+                            TransportTask.pending_result_receipt_id == row.receipt_id,
+                            TransportTask.applied_result_receipt_id == row.receipt_id,
+                            TransportTask.applied_trigger_receipt_id == row.receipt_id,
+                        )
+                    )
+                    .limit(1)
+                ):
+                    continue
+                row.active = False
+                row.reply_wire = row.reply_sha256 = None
+                total += 1
+            cursor = candidates[-1].receipt_id
+
+
 def _run(cleanup, days_setting: str) -> int:
     settings = get_settings()
     return run_with_factory(
@@ -698,7 +802,7 @@ def _run(cleanup, days_setting: str) -> int:
 
 @celery_app.task(name="callback.cleanup_snapshots")
 def cleanup_snapshots() -> int:
-    return _run(run_cleanup, "CALLBACK_SNAPSHOT_RETENTION_DAYS")
+    return 0 if enabled() else _run(run_cleanup, "CALLBACK_SNAPSHOT_RETENTION_DAYS")
 
 
 @celery_app.task(name="callback.cleanup_receipts")
@@ -706,8 +810,13 @@ def cleanup_receipts() -> int:
     settings = get_settings()
 
     async def cleanup(factory):
+        from app.integrations.http_exchanges import cleanup_exchanges
+
+        await require_reconciled(factory)
         released = await run_receipt_cleanup(factory, settings.RELIABLE_RETENTION_DAYS)
-        await run_history_cleanup(factory, settings.INTEGRATION_HISTORY_RETENTION_DAYS)
+        if not enabled():
+            await run_history_cleanup(factory, settings.INTEGRATION_HISTORY_RETENTION_DAYS)
+        await cleanup_exchanges(factory, settings.INTEGRATION_HISTORY_RETENTION_DAYS)
         return released
 
     return run_with_factory(settings.DATABASE_URL, cleanup)

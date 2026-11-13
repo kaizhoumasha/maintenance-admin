@@ -6,6 +6,7 @@ import ssl
 import time
 from collections.abc import Callable
 from contextvars import ContextVar
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -117,6 +118,7 @@ class AsyncHttpClient:
         remaining = self._config.total_timeout_s - (self._clock() - started)
         response = None
         status = None
+        response_at = None
         headers = ()
         body = None
         failure = None
@@ -135,6 +137,7 @@ class AsyncHttpClient:
                     # 直接调用单次 transport,避免 AsyncClient 记录含查询串的完整 URL。
                     response = await self._transport.handle_async_request(built)
                     response.request = built
+                    response_at = datetime.now(UTC)
                     status = response.status_code
                     headers = tuple(response.headers.multi_items())
                     encodings = response.headers.get_list("content-encoding")
@@ -182,7 +185,7 @@ class AsyncHttpClient:
                             )
                 finally:
                     _http_call_active.reset(log_token)
-        result = HttpResult(state, failure, status, headers, body)
+        result = HttpResult(state, failure, status, headers, body, response_at, datetime.now(UTC))
         logger.log(
             logging.DEBUG if failure is None else logging.WARNING,
             "http_client request",

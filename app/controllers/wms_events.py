@@ -5,10 +5,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import Response
 
 from app.core.database import session_factory
+from app.core.identifiers import uuid7
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
 from app.diagnostics import log_exception
+from app.integrations.http_exchanges import capture_callback
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_callback import MAX_BODY_BYTES, CallbackResponse, receive, unavailable
 from app.integrations.wms_callback.registry import operations
 from app.integrations.wms_callback.snapshots import (
@@ -61,6 +64,9 @@ router = APIRouter(tags=["WMS callbacks"], dependencies=[Depends(RateLimit(None)
 )
 async def events(request: Request, background_tasks: BackgroundTasks) -> Response:
     received_at = datetime.now(UTC)
+    exchange_id = uuid7()
+    commit_pending = False
+    transaction_failed = False
     body = b""
     body_available = False
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
@@ -78,13 +84,27 @@ async def events(request: Request, background_tasks: BackgroundTasks) -> Respons
                     on_committed=getattr(request.app.state, "business_event_committed", None),
                     on_business_committed=getattr(request.app.state, "business_committed", None),
                     on_owner_committed=getattr(request.app.state, "business_committed", None),
+                    attempt_id=str(exchange_id),
                 )
+                commit_pending = True
     except Exception as error:
+        transaction_failed = True
         log_exception(
             logger, "callback receive failed", error, component="http", phase="wms_callback"
         )
         result = unavailable(body)
-    if allow_snapshot():  # 被限流丢弃的请求不再把请求体挂到后台任务上
+    await capture_callback(
+        factory,
+        identity=exchange_id,
+        source="wms",
+        request=request,
+        started_at=received_at,
+        raw=body if body_available else None,
+        limit=MAX_BODY_BYTES,
+        result=result,
+        commit_unknown=commit_pending and result.status_code == 503 and transaction_failed,
+    )
+    if not enabled() and allow_snapshot():  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(
             record_snapshot,
             factory,

@@ -3,7 +3,8 @@
 import math
 import re
 import ssl
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
@@ -51,6 +52,8 @@ class HttpResult:
     status_code: int | None
     headers: tuple[tuple[str, str], ...]
     body: bytes | None
+    response_observed_at: datetime | None = field(default=None, compare=False)
+    completed_at: datetime | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

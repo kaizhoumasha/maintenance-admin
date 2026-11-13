@@ -14,6 +14,8 @@ _CONTEXT_FIELDS = {
     "task",
     "task_id",
     "message_id",
+    "exchange_id",
+    "trace_id",
     "target",
     "source",
     "request_id",

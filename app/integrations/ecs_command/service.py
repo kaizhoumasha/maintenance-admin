@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest
 from app.integrations.model_payload import validated_model_payload
-from app.models import IntegrationExchange, IntegrationRecord
+from app.integrations.runtime_authority import enabled
+from app.models import EcsCommand, EcsResultEvidence, IntegrationExchange, IntegrationRecord
 from app.reliable import MessageDraft
 from app.reliable.lifecycle import ensure_savepoint_transaction
 from app.reliable.types import RETRY_ACK_TIMEOUT, DeliverySnapshot
@@ -121,11 +122,12 @@ class EcsCommands:
             separators=(",", ":"),
             allow_nan=False,
         ).encode()
-        query = select(IntegrationExchange).where(
-            IntegrationExchange.role == "ECS_COMMAND",
-            IntegrationExchange.owner_domain == owner.domain,
-            IntegrationExchange.call_key_digest == key,
+        model = EcsCommand if enabled() else IntegrationExchange
+        query = select(model).where(
+            model.owner_domain == owner.domain, model.call_key_digest == key
         )
+        if model is IntegrationExchange:
+            query = query.where(model.role == "ECS_COMMAND")
 
         def compare(row):
             if row.call_key != call_key or row.input_raw != raw_input:
@@ -205,18 +207,23 @@ class EcsCommands:
             blocked=False,
             needs_reconciliation=False,
         )
+        if model is EcsCommand:
+            values = {key: value for key, value in values.items() if key in model.__table__.c}
+            values.update(id=uuid7(), request_wire=raw)
         insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
         # Savepoint isolates a failed enqueue without rolling back the caller's work.
         await ensure_savepoint_transaction(session)
         async with session.begin_nested():
             winner = await session.scalar(
-                insert(IntegrationExchange)
+                insert(model)
                 .values(**values)
                 .on_conflict_do_nothing(
                     index_elements=["owner_domain", "call_key_digest"],
-                    index_where=text("role='ECS_COMMAND'"),
+                    index_where=text("role='ECS_COMMAND'")
+                    if model is IntegrationExchange
+                    else None,
                 )
-                .returning(IntegrationExchange.id)
+                .returning(model.id)
             )
             row = await session.scalar(query.execution_options(populate_existing=True))
             compare(row)
@@ -259,13 +266,18 @@ class EcsCommands:
         )
         result = None
         if row.applied_result_id:
-            evidence = await session.scalar(
-                select(IntegrationRecord).where(
-                    IntegrationRecord.exchange_id == row.id,
-                    IntegrationRecord.record_kind == "RESULT_EVIDENCE",
-                    IntegrationRecord.semantic_digest == row.applied_result_id,
+            if isinstance(row, EcsCommand):
+                evidence = await session.get(
+                    EcsResultEvidence, (row.command_code, row.applied_result_id)
                 )
-            )
+            else:
+                evidence = await session.scalar(
+                    select(IntegrationRecord).where(
+                        IntegrationRecord.exchange_id == row.id,
+                        IntegrationRecord.record_kind == "RESULT_EVIDENCE",
+                        IntegrationRecord.semantic_digest == row.applied_result_id,
+                    )
+                )
             result = evidence.effective_payload
         return CommandView(
             row.command_code,
@@ -299,14 +311,14 @@ class EcsCommands:
     async def get_by_call(
         self, session: AsyncSession, *, owner: CommandOwner, call_key: str
     ) -> CommandView | None:
-        row = await session.scalar(
-            select(IntegrationExchange).where(
-                IntegrationExchange.role == "ECS_COMMAND",
-                IntegrationExchange.owner_domain == owner.domain,
-                IntegrationExchange.call_key_digest
-                == hashlib.sha256(call_key.encode()).hexdigest(),
-            )
+        model = EcsCommand if enabled() else IntegrationExchange
+        query = select(model).where(
+            model.owner_domain == owner.domain,
+            model.call_key_digest == hashlib.sha256(call_key.encode()).hexdigest(),
         )
+        if model is IntegrationExchange:
+            query = query.where(model.role == "ECS_COMMAND")
+        row = await session.scalar(query)
         if row is not None and row.call_key != call_key:
             raise ValueError("business key digest collision")
         return await self._view(session, row) if row else None

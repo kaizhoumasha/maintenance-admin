@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.identifiers import uuid7
 from app.diagnostics import log_exception
-from app.http_client import DeliveryState, HttpResult
+from app.http_client import DeliveryState, HttpRequest, HttpResult
 from app.models.reliable import ReliableMessage
 from app.transactions import after_commit
 
@@ -47,7 +47,10 @@ class Claim:
     not_received_count: int = 0
     delivery_uncertain: bool = False
     dispatch_started_at: datetime | None = None
+    lease_not_started: bool | None = field(default=None, kw_only=True)
     dispatch_origin: str | None = field(default=None, kw_only=True)
+    dispatch_protocol: str | None = field(default=None, kw_only=True)
+    request: HttpRequest | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -110,7 +113,7 @@ class MessageStore:
 
     async def _claim(self, session, row, *, include_snapshot=True, bodies=None):
         if bodies is None:
-            bodies = await self.records.requests(session, record_ids=(row.request_record_id,))
+            bodies = await self.records.frozen_requests(session, rows=(row,))
         message = OutgoingMessage(
             row.target,
             row.operation,
@@ -138,6 +141,7 @@ class MessageStore:
             row.not_received_count,
             bool(row.delivery_uncertain),
             self._time(session, row.dispatch_started_at),
+            lease_not_started=row.lease_not_started,
         )
 
     async def claim(self, limit: int, targets: Mapping[str, TargetConfig]) -> tuple[Claim, ...]:
@@ -175,9 +179,7 @@ class MessageStore:
                 .with_for_update(skip_locked=True)
             )
             rows = list(rows)
-            bodies = await self.records.requests(
-                session, record_ids=tuple(row.request_record_id for row in rows)
-            )
+            bodies = await self.records.frozen_requests(session, rows=rows)
             if not rows:
                 self._skipped_claim_cursor = None
             claims = []
@@ -210,6 +212,7 @@ class MessageStore:
                 timeout = targets[row.target].timeout_ms / 1000
                 row.status = MessageStatus.SENDING
                 row.lease_id = self.lease_id_factory()
+                row.lease_not_started = True
                 row.lease_until = now + timedelta(seconds=timeout + self.lease_margin_s)
                 row.last_attempt_at = now
                 row.updated_at = now
@@ -240,6 +243,15 @@ class MessageStore:
                 and not row.delivery_uncertain
                 and row.attempts == row.not_received_count
             ):
+                if row.lease_not_started is not True:
+                    return None
+                await self.records.close_attempt(
+                    session,
+                    message_id=row.id,
+                    lease_id=row.lease_id,
+                    at=now,
+                    reason="SUPERSEDED",
+                )
                 row.status = MessageStatus.PENDING
                 row.lease_id = row.lease_until = None
                 row.next_attempt_at = row.updated_at = now
@@ -248,12 +260,17 @@ class MessageStore:
                 claim.message.expires_at is not None and claim.message.expires_at <= now
             ):
                 return None
+            row.lease_not_started = False
             if row.scope_owner is not None:
                 row.dispatch_started_at = row.dispatch_started_at or now
             until = now + timedelta(seconds=target.timeout_ms / 1000 + self.lease_margin_s)
             row.lease_until = until
             await self.records.opened(
-                session, claim=replace(claim, dispatch_origin=target.base_url), at=now
+                session,
+                claim=replace(
+                    claim, dispatch_origin=target.base_url, dispatch_protocol=target.protocol
+                ),
+                at=now,
             )
             return until
 
@@ -351,9 +368,23 @@ class MessageStore:
             observation = await self.records.finished(
                 session, claim=claim, outcome=outcome, at=now, late=not active
             )
+            if active:
+                await self.records.close_attempt(
+                    session,
+                    message_id=claim.message_id,
+                    lease_id=claim.lease_id,
+                    at=now,
+                    reason="FINISHED",
+                    outcome=outcome,
+                )
             values["last_response_record_id"] = None if keeps_final_response else observation
+            values["last_response_wire"] = (
+                result.body if result and not keeps_final_response else None
+            )
             if keeps_final_response:
                 values["terminal_response_record_id"] = observation
+                values["terminal_response_wire"] = result.body if result else None
+                values["terminal_response_at"] = now
             changed = await session.scalar(
                 update(ReliableMessage)
                 .where(
@@ -405,9 +436,7 @@ class MessageStore:
                     .with_for_update(skip_locked=True)
                 )
             )
-            bodies = await self.records.requests(
-                session, record_ids=tuple(row.request_record_id for row in rows)
-            )
+            bodies = await self.records.frozen_requests(session, rows=rows)
             claims = [await self._claim(session, row, bodies=bodies) for row in rows]
             if claims:
                 # 行已被 FOR UPDATE 锁定,无需再带租约条件;一次批量执行代替逐行往返。
@@ -415,6 +444,14 @@ class MessageStore:
                 recoveries = [
                     (claim, self._recovery_values(claim, now, targets)) for claim in claims
                 ]
+                for claim in claims:
+                    await self.records.close_attempt(
+                        session,
+                        message_id=claim.message_id,
+                        lease_id=claim.lease_id,
+                        at=now,
+                        reason="LEASE_EXPIRED",
+                    )
                 await session.execute(
                     update(table).where(table.c.id == bindparam("row_id")),
                     [
@@ -483,8 +520,10 @@ class MessageStore:
             last_failure_kind=None,
             last_verdict=None,
             last_response_record_id=None,
+            last_response_wire=None,
             # 租约中断后请求可能已送达:一旦未知,预算不再适用(合同 §4.3)。
             delivery_uncertain=claim.delivery_uncertain
+            or claim.lease_not_started is not True
             or claim.dispatch_started_at is not None
             or claim.message.scope is None,
             next_attempt_at=now
@@ -492,19 +531,31 @@ class MessageStore:
         )
 
     async def _recover(self, session, claim, now, targets):
+        active = (
+            ReliableMessage.id == claim.message_id,
+            ReliableMessage.lease_id == claim.lease_id,
+            ReliableMessage.status == MessageStatus.SENDING,
+        )
+        identity = await session.scalar(select(ReliableMessage.id).where(*active).with_for_update())
+        if identity is None:
+            return False
+        await self.records.close_attempt(
+            session,
+            message_id=identity,
+            lease_id=claim.lease_id,
+            at=now,
+            reason="LEASE_RELEASED",
+        )
         values = self._recovery_values(claim, now, targets)
         values["delivery_uncertain"] = or_(
             ReliableMessage.delivery_uncertain,
+            ReliableMessage.lease_not_started.is_not(True),
             ReliableMessage.dispatch_started_at.is_not(None),
             ReliableMessage.scope_owner.is_(None),
         )
         changed = await session.scalar(
             update(ReliableMessage)
-            .where(
-                ReliableMessage.id == claim.message_id,
-                ReliableMessage.lease_id == claim.lease_id,
-                ReliableMessage.status == MessageStatus.SENDING,
-            )
+            .where(*active)
             .values(
                 attempts=ReliableMessage.attempts + 1,
                 **values,

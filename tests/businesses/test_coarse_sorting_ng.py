@@ -2,6 +2,7 @@
 
 import json
 import runpy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -206,6 +207,8 @@ async def test_original_ng_closes_only_after_matching_applied_success(ng, prior)
 )
 async def test_rejected_unavailable_or_invalid_validation_creates_no_ng(ng, data, code, status):
     ng.assemble(enabled=True)
+    target = ng.sender.targets["coarse-wms"]
+    ng.sender.targets[target.name] = replace(target, fixed_retry_interval_s=60)
     ng.peer.decision, ng.peer.decision_code, ng.peer.decision_status = data, code, status
     row = await accept_and_validate(ng)
     await ng.service.scan_pending()

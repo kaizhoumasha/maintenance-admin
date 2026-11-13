@@ -116,8 +116,10 @@ async def test_original_prepare_and_receipt_recover_after_cutover(state_migratio
     from app.reliable.store import AttemptOutcome, MessageStore
     from app.reliable.types import MessageStatus
     from tests.helpers import run_alembic
+    from tests.migration_helpers import add_http_runtime_test_schema
 
     store = state_migration
+    await add_http_runtime_test_schema(store.engine)
     factory = async_sessionmaker(store.engine, expire_on_commit=False)
     legacy_shapes = {
         name: (await store.schema_snapshot(name))[name]

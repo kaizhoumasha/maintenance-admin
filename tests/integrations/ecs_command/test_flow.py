@@ -1061,3 +1061,58 @@ async def test_original_gate_finish_and_result_cost_with_retained_history(ecs):
             {"backend": ecs.factory.kw["bind"].dialect.name, "diagnostic_rows": 5000, **durations}
         )
     )
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_result_settles_open_http_exchange_and_restart_restores_it(ecs, late):
+    from dataclasses import replace
+
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.integrations.http_exchanges import reconcile_outbound
+    from app.models import EcsHttpExchange
+    from app.reliable import Verdict, VerdictKind
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    target = ecs.targets["ecs"]
+    request = ecs.adapters[PROTOCOL].build_request(claim.message, target)
+    assert await store.before_send(replace(claim, request=request), target)
+
+    async with ecs.factory.begin() as session:
+        result = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert result.status_code == 200
+
+    # No projection has run since the gate or settlement.
+    async with ecs.factory() as session:
+        query = select(EcsHttpExchange).where(EcsHttpExchange.command_code == command.command_code)
+        assert await session.scalar(query) is None
+    await reconcile_outbound(ecs.factory)
+    async with ecs.factory() as session:
+        row = (await session.scalars(query)).one()
+        assert (row.close_reason, row.attempt_state) == ("SETTLED_BY_CALLBACK", "DELIVERY_UNKNOWN")
+        assert row.response_wire is None
+        identity, finished_at = row.id, row.finished_at
+
+    if late:
+        observed = response()
+        assert not await store.finish(
+            claim,
+            AttemptOutcome(
+                MessageStatus.DONE,
+                result=observed,
+                verdict=Verdict(VerdictKind.DELIVERED, response=observed.body),
+            ),
+        )
+        await reconcile_outbound(ecs.factory)
+        async with ecs.factory() as session:
+            row = (await session.scalars(query)).one()
+            assert (row.id, row.finished_at, row.close_reason) == (
+                identity,
+                finished_at,
+                "SETTLED_BY_CALLBACK",
+            )
+            assert row.response_wire == observed.body and row.late_response_at is not None

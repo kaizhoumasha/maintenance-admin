@@ -3,6 +3,7 @@
 from app.core.strict_json import canonical_digest, json_object
 from app.http_client import DeliveryState, HttpResult
 from app.integrations import history
+from app.integrations.runtime_authority import enabled
 from app.reliable import FailReason, OutgoingMessage, ProtocolAdapter, Verdict, VerdictKind
 
 INT64_MAX = 2**63 - 1
@@ -66,6 +67,13 @@ RESPONSE_COLUMNS = (
 def response_projection(message):
     clause = message
     columns = {name: message.c[name] for name in RESPONSE_COLUMNS}
+    if enabled():
+        columns.update(
+            request_raw=message.c.frozen_request_wire,
+            response_raw=message.c.terminal_response_wire,
+            terminal_occurred_at=message.c.terminal_response_at,
+        )
+        return clause, columns
     for name, ref in (
         ("request", message.c.request_record_id),
         ("terminal", message.c.terminal_response_record_id),
@@ -77,8 +85,9 @@ def response_projection(message):
 
 def response_row(row):
     row = dict(row)
-    row["request_raw"] = history.projected_body(row, name="request")
-    row["response_raw"] = history.projected_body(row, name="terminal")
+    if not enabled():
+        row["request_raw"] = history.projected_body(row, name="request")
+        row["response_raw"] = history.projected_body(row, name="terminal")
     return row
 
 

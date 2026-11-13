@@ -65,26 +65,47 @@ async def archive_old(session: AsyncSession, days: int) -> int:
 
 
 async def record_payload_read(
-    factory, *, user_id: int, record_id, trace_id: str, ip: str | None, user_agent: str | None
+    factory,
+    *,
+    user_id: int,
+    record_id,
+    trace_id: str,
+    ip: str | None,
+    user_agent: str | None,
+    side: str | None = None,
+    peer: str | None = None,
+    representation: str | None = None,
+    exchange_id=None,
 ) -> None:
     """Audit only the authorized resource identity; payload bytes never enter this port."""
     from app.diagnostics import log_exception
 
+    legacy_route = side is None or record_id != exchange_id
     try:
         async with factory() as session, session.begin():
             session.add(
                 AuditLog(
                     user_id=user_id,
                     action="integration:payload:read",
-                    resource="integration_record",
+                    resource="integration_record" if legacy_route else "http_exchange",
                     resource_id=None,
                     trace_id=trace_id[:64],
                     ip=ip[:45] if ip else None,
                     user_agent=user_agent[:255] if user_agent else None,
                     detail={
                         "method": "GET",
-                        "route": "/api/v1/integrations/records/{record_id}/body",
+                        "route": (
+                            "/api/v1/integrations/records/{record_id}/body"
+                            if legacy_route
+                            else "/api/v1/integrations/http-exchanges/{peer}/{exchange_id}/{side}"
+                        ),
                         "record_id": str(record_id),
+                        **({"exchange_id": str(exchange_id)} if exchange_id is not None else {}),
+                        **(
+                            {"side": side, "peer": peer, "representation": representation}
+                            if side is not None
+                            else {}
+                        ),
                     },
                 )
             )

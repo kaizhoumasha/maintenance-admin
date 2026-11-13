@@ -2996,10 +2996,20 @@ async def seed_reliable_message(session, **values):
 def copy_history_tables(metadata):
     from sqlalchemy import Sequence
 
-    from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
+    from app.models import (
+        IntegrationExchange,
+        IntegrationRecord,
+        IntegrationReference,
+        ReliableDeliveryAttempt,
+    )
     from app.models.integration_history import RECEIPT_SEQUENCE
 
-    for model in (IntegrationExchange, IntegrationRecord, IntegrationReference):
+    for model in (
+        IntegrationExchange,
+        IntegrationRecord,
+        IntegrationReference,
+        ReliableDeliveryAttempt,
+    ):
         if model.__table__.key not in metadata.tables:
             model.__table__.to_metadata(metadata)
     Sequence(RECEIPT_SEQUENCE.name, schema=RECEIPT_SEQUENCE.schema, metadata=metadata)

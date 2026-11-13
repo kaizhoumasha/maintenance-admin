@@ -3,7 +3,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.core import get_settings
-from app.models import ReliableMessage
+from app.integrations.runtime_authority import enabled, require_reconciled
+from app.models import ReliableMessage, RuntimeRetentionHold
 from app.reliable.config import positive
 from app.reliable.store import CLEANUP_BATCH_SIZE, TERMINAL
 from app.reliable.store import cleanup_terminal as delete_terminal
@@ -15,7 +16,8 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
     positive(days, "retention_days")
     from app.tasks.callback_tasks import history_cleanup_ready
 
-    if not await history_cleanup_ready(factory):
+    await require_reconciled(factory)
+    if not enabled() and not await history_cleanup_ready(factory):
         return 0
     now = now or datetime.now(UTC)
     from app.businesses._components.bin_roller.retention import (
@@ -60,11 +62,48 @@ async def run_cleanup(factory, days, *, now=None, batch=CLEANUP_BATCH_SIZE) -> i
             )
             if not ids:
                 return total
-            protected = await protected_message_ids(
-                session, candidate_ids=ids, business_references=wms_message_references
-            )
+            if enabled():
+                from app.tasks.callback_tasks import _protected_roots
+
+                protected, holds = await _protected_roots(
+                    session, (), runtime=True, message_ids=ids
+                )
+                candidates = (
+                    await session.scalars(
+                        select(ReliableMessage.id)
+                        .where(ReliableMessage.id.in_(set(ids) - protected))
+                        .order_by(ReliableMessage.id)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).all()
+                current = {identity: set() for identity in candidates}
+                rows = await session.execute(
+                    select(
+                        RuntimeRetentionHold.subject_id,
+                        RuntimeRetentionHold.owner_kind,
+                        RuntimeRetentionHold.owner_domain,
+                        RuntimeRetentionHold.owner_id,
+                    ).where(
+                        RuntimeRetentionHold.subject_kind == "WMS_MESSAGE",
+                        RuntimeRetentionHold.subject_id.in_([str(value) for value in candidates]),
+                    )
+                )
+                for identity, kind, owner, value in rows:
+                    current[int(identity)].add((kind, owner, value))
+                ids_to_delete = tuple(
+                    identity for identity in candidates if current[identity] == holds[identity]
+                )
+            else:
+                protected = await protected_message_ids(
+                    session, candidate_ids=ids, business_references=wms_message_references
+                )
+                ids_to_delete = ids
             total += await delete_terminal(
-                session, now=now, retention_days=days, protected_ids=protected, candidate_ids=ids
+                session,
+                now=now,
+                retention_days=days,
+                protected_ids=protected,
+                candidate_ids=ids_to_delete,
             )
             cursor = ids[-1]
 

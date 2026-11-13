@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import Response
 
 from app.core.database import session_factory
+from app.core.identifiers import uuid7
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.core.request_context import get_trace_id
@@ -20,6 +21,8 @@ from app.integrations.ecs_callback.receiver import (
     render_untrusted,
 )
 from app.integrations.ecs_callback.registry import events
+from app.integrations.http_exchanges import capture_callback
+from app.integrations.runtime_authority import enabled
 from app.integrations.wms_callback.snapshots import (
     SNAPSHOT_PREVIEW_BYTES,
     allow_snapshot,
@@ -74,6 +77,9 @@ async def receive_event_request(
 ) -> EcsResponse:
     started = perf_counter()
     received_at = datetime.now(UTC)
+    exchange_id = uuid7()
+    commit_pending = False
+    transaction_failed = False
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
     raw = b""
     body_available = False
@@ -100,8 +106,11 @@ async def receive_event_request(
                     on_committed=getattr(request.app.state, "business_event_committed", None),
                     on_business_committed=getattr(request.app.state, "business_committed", None),
                     resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
+                    attempt_id=str(exchange_id),
                 )
+                commit_pending = True
     except Exception as error:  # 含提交失败:整个事务已回滚
+        transaction_failed = True
         log_exception(
             logger, "ecs callback receive failed", error, component="http", phase="ecs_event"
         )
@@ -114,8 +123,20 @@ async def receive_event_request(
             device_code,
         )
     _log_request(result, started)
-    if result.status_code != 403 and allow_snapshot(
-        "ecs"
+    if response_scope == "HTTP":
+        await capture_callback(
+            factory,
+            identity=exchange_id,
+            source="ecs_event",
+            request=request,
+            started_at=received_at,
+            raw=raw if body_available else None,
+            limit=MAX_BODY_BYTES,
+            result=result,
+            commit_unknown=commit_pending and result.status_code == 503 and transaction_failed,
+        )
+    if (
+        not enabled() and result.status_code != 403 and allow_snapshot("ecs")
     ):  # 被限流丢弃的请求不再把请求体挂到后台任务上
         background_tasks.add_task(
             record_snapshot,

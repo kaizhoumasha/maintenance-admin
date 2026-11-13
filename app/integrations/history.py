@@ -6,12 +6,15 @@ from datetime import datetime
 from hashlib import sha256
 from uuid import UUID
 
-from sqlalchemy import case, select
+from sqlalchemy import case, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import aliased
 
 from app.core.identifiers import uuid7
-from app.models import IntegrationExchange, IntegrationRecord, IntegrationReference
+from app.integrations.http_exchanges import close_attempt as close_attempt
+from app.integrations.http_exchanges import note_response, open_attempt
+from app.integrations.runtime_authority import enabled
+from app.models import EcsSendEvidence, IntegrationExchange, IntegrationRecord, IntegrationReference
 from app.reliable.lifecycle import (
     EvidenceIntegrityError,
     EvidencePersistenceError,
@@ -325,6 +328,8 @@ async def matching_body_reference(session, *, record_id: UUID | None, raw_body: 
 
 async def register(session, *, message, protocol: str, exchange_id: UUID | None = None):
     exchange_id = exchange_id or message.exchange_id
+    if enabled():
+        return exchange_id or uuid7(), message.request_record_id or uuid7()
     if exchange_id is None:
         exchange = IntegrationExchange(
             id=uuid7(),
@@ -385,9 +390,46 @@ async def requests(session, *, record_ids: tuple[UUID, ...]) -> dict[UUID, bytes
     return {identity: bodies[identity].raw_body for identity in record_ids}
 
 
+async def frozen_requests(session, *, rows):
+    legacy = []
+    bodies = {}
+    for row in rows:
+        raw, digest = row.frozen_request_wire, row.frozen_request_sha256
+        if raw is None and digest is None and not enabled():
+            legacy.append(row.request_record_id)
+        elif raw is None or sha256(raw).hexdigest() != digest:
+            raise EvidenceIntegrityError("frozen request integrity mismatch")
+        else:
+            bodies[row.request_record_id] = raw
+    if legacy:
+        bodies.update(await requests(session, record_ids=tuple(legacy)))
+    return bodies
+
+
 async def opened(session, *, claim, at: datetime) -> UUID:
     if not claim.lease_id or claim.message.exchange_id is None:
         raise EvidenceIntegrityError("send gate requires original identity")
+    if enabled():
+        from app.models import ReliableDeliveryAttempt
+
+        attempt = await session.get(ReliableDeliveryAttempt, (claim.message_id, claim.lease_id))
+        if attempt is not None:
+            return attempt.id
+        identity = uuid7(at)
+        await open_attempt(
+            session, claim=claim, protocol=claim.dispatch_protocol, at=at, identity=identity
+        )
+        if claim.dispatch_protocol == "ecs-command":
+            session.add(
+                EcsSendEvidence(
+                    command_code=claim.message.operation_id,
+                    lease_id=claim.lease_id,
+                    attempt_revision=0,
+                    outcome="OPEN_ATTEMPT",
+                    occurred_at=at,
+                )
+            )
+        return identity
     key = f"OPEN:{claim.lease_id}"
     original = await session.scalar(
         select(IntegrationRecord).where(
@@ -395,7 +437,7 @@ async def opened(session, *, claim, at: datetime) -> UUID:
             IntegrationRecord.event_key == key,
         )
     )
-    return await write_record(
+    identity = await write_record(
         session,
         draft=RecordDraft(
             exchange_id=claim.message.exchange_id,
@@ -408,14 +450,66 @@ async def opened(session, *, claim, at: datetime) -> UUID:
             details={"origin": claim.dispatch_origin},
         ),
     )
+    await open_attempt(
+        session, claim=claim, protocol=claim.dispatch_protocol, at=at, identity=identity
+    )
+    return identity
 
 
-async def observe_response(session, *, claim, outcome) -> UUID | None:
+async def observe_response(session, *, claim, outcome, at=None, late=False) -> UUID | None:
     if outcome.result is None or (
         outcome.result.body is None and outcome.result.status_code is None
     ):
         return None
-    return await write_record(
+    if enabled():
+        from app.models import ReliableDeliveryAttempt, ReliableMessage
+        from app.reliable.types import VerdictKind
+
+        # Transport saves acceptance separately while holding the task lock. WMS
+        # replacement facts are only written by the message-locked finish path.
+        if (
+            claim.message.delivery_snapshot is None
+            and claim.message.operation != "transport.task.submit@v1"
+        ):
+            if outcome.verdict is None or outcome.verdict.kind != VerdictKind.NOT_RECEIVED:
+                await session.execute(
+                    update(ReliableMessage)
+                    .where(ReliableMessage.id == claim.message_id)
+                    .values(replacement_blocked=True)
+                )
+        attempt = await session.get(
+            ReliableDeliveryAttempt, (claim.message_id, claim.lease_id), with_for_update=True
+        )
+        if attempt is None:
+            return None
+        if attempt.response_state == "RESPONSE_OBSERVED" and (
+            outcome.result.delivery_state != "HTTP_RESPONSE_COMPLETE"
+        ):
+            return attempt.response_record_id
+        if (
+            attempt.response_record_id is not None
+            and (
+                attempt.response_wire != outcome.result.body
+                or attempt.response_http_status != outcome.result.status_code
+                or attempt.response_verdict != (outcome.verdict.kind if outcome.verdict else None)
+            )
+            and not (
+                attempt.response_state == "RESPONSE_INCOMPLETE"
+                and outcome.result.delivery_state == "HTTP_RESPONSE_COMPLETE"
+                and attempt.response_http_status == outcome.result.status_code
+                and (
+                    attempt.response_wire is None
+                    or (outcome.result.body or b"").startswith(attempt.response_wire)
+                )
+            )
+        ):
+            raise EvidenceIntegrityError("original attempt has a different response")
+        identity = attempt.response_record_id or uuid7()
+        await note_response(
+            session, claim=claim, outcome=outcome, record_id=identity, at=at, late=late
+        )
+        return identity
+    identity = await write_record(
         session,
         draft=RecordDraft(
             exchange_id=claim.message.exchange_id,
@@ -436,10 +530,14 @@ async def observe_response(session, *, claim, outcome) -> UUID | None:
             details={"failure_kind": outcome.result.failure_kind},
         ),
     )
+    await note_response(session, claim=claim, outcome=outcome, record_id=identity, at=at, late=late)
+    return identity
 
 
 async def finished(session, *, claim, outcome, at: datetime, late: bool) -> UUID | None:
-    response_id = await observe_response(session, claim=claim, outcome=outcome)
+    response_id = await observe_response(session, claim=claim, outcome=outcome, at=at, late=late)
+    if enabled():
+        return response_id
     key = f"FINISH:{claim.lease_id}:{outcome.status}:{outcome.pause_reason}:{int(late)}"
     original = await session.scalar(
         select(IntegrationRecord).where(
@@ -528,6 +626,8 @@ async def write_reference(
 
 
 async def link_message(session, *, exchange_id, message_id, at):
+    if enabled():
+        return None
     return await write_reference(
         session,
         exchange_id=exchange_id,
@@ -618,6 +718,17 @@ async def _source_fact(session, source, owner_domain):
 async def link_source(
     session, *, source, owner_domain, reference_kind, namespace, value, relation_role, at
 ):
+    if enabled():
+        if source.kind == "WMS_MESSAGE" and reference_kind.startswith("BUSINESS_"):
+            from app.models import ReliableMessage
+
+            message = await session.get(ReliableMessage, int(source.identity), with_for_update=True)
+            if message is not None:
+                await _save_retention_hold(
+                    session, source.kind, source.identity, reference_kind, namespace, value
+                )
+                return message.exchange_id
+        return None
     exchange_id, _ = await _source_fact(session, source, owner_domain)
     if exchange_id is None:
         return None
@@ -635,6 +746,8 @@ async def link_source(
 async def record_consumption(
     session, *, owner_domain: str, action_id: str, source: SourceRef, consumed_at: datetime
 ) -> UUID | None:
+    if enabled():
+        return None  # The original action records consumption and version in its own transaction.
     exchange_id, parent_id = await _source_fact(session, source, owner_domain)
     if exchange_id is None:
         return None
@@ -699,6 +812,18 @@ async def link_receipt(
     at,
     related_exchange_id=None,
 ):
+    if enabled():
+        if reference_kind.startswith("BUSINESS_"):
+            from app.models import CallbackReceipt
+
+            receipt = await session.get(CallbackReceipt, receipt_id, with_for_update=True)
+            if receipt is None:
+                return None
+            await _save_retention_hold(
+                session, "RECEIPT", str(receipt_id), reference_kind, namespace, value
+            )
+            return receipt.id
+        return None
     exchange_id = await session.scalar(
         select(IntegrationExchange.id).where(
             IntegrationExchange.role == "RECEIPT", IntegrationExchange.receipt_id == receipt_id
@@ -715,4 +840,24 @@ async def link_receipt(
         relation_role=relation_role,
         created_at=at,
         related_exchange_id=related_exchange_id,
+    )
+
+
+async def _save_retention_hold(session, subject, identity, kind, owner, value):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    from app.models import RuntimeRetentionHold
+
+    insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+    await session.execute(
+        insert(RuntimeRetentionHold)
+        .values(
+            subject_kind=subject,
+            subject_id=identity,
+            owner_kind=kind,
+            owner_domain=owner,
+            owner_id=value,
+        )
+        .on_conflict_do_nothing()
     )
