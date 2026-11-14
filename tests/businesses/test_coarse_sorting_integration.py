@@ -8,7 +8,7 @@ import sys
 
 from fastapi import FastAPI, Request
 
-from tests.helpers import loopback_app, run_alembic
+from tests.helpers import ecs_status_document, loopback_app, run_alembic
 from tests.migration_helpers import schema_database  # noqa: F401
 
 VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
@@ -93,29 +93,7 @@ async def exercise_integration(integration_database, *, mock=None):
     @peer.get("/api/v1/device/status")
     async def status(device_code: str):
         status_checks.append(device_code)
-        return {
-            "devices": [
-                {
-                    "device": {
-                        "device_code": device_code,
-                        "device_name": None,
-                        "device_type": None,
-                        "role": None,
-                        "supported_commands": None,
-                        "supported_events": None,
-                    },
-                    "state": {
-                        "device_code": device_code,
-                        "mode": "AUTO",
-                        "status": "IDLE",
-                        "is_online": True,
-                        "current_command_code": None,
-                        "scenario": None,
-                        "updated_at": 1,
-                    },
-                }
-            ]
-        }
+        return ecs_status_document(device_code, status="IDLE")
 
     @peer.post("/api/v1/device/command")
     async def command(request: Request):

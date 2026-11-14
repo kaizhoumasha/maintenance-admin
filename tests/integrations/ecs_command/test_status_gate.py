@@ -10,7 +10,7 @@ from sqlalchemy import select
 from app.core.identifiers import uuid7
 from app.integrations.ecs_command.service import CommandOwner
 from app.models import ReliableDeliveryAttempt, ReliableMessage
-from tests.helpers import EcsMove, loopback_app, simulator_sender
+from tests.helpers import EcsMove, ecs_status_document, loopback_app, simulator_sender
 
 
 @pytest.mark.parametrize("owner", ["coarse_sorting", "xray"])
@@ -23,33 +23,7 @@ async def test_coarse_command_waits_for_fresh_idle_and_sends_original(ecs, owner
     async def status(device_code: str):
         requests.append(("status", device_code))
         state = next(states)
-        return {
-            "devices": []
-            if state is None
-            else [
-                {
-                    "device": dict.fromkeys(
-                        (
-                            "device_name",
-                            "device_type",
-                            "role",
-                            "supported_commands",
-                            "supported_events",
-                        )
-                    )
-                    | {"device_code": device_code},
-                    "state": {
-                        "device_code": device_code,
-                        "mode": "AUTO",
-                        "status": state,
-                        "is_online": True,
-                        "current_command_code": None,
-                        "scenario": None,
-                        "updated_at": 1,
-                    },
-                }
-            ]
-        }
+        return {"devices": []} if state is None else ecs_status_document(device_code, status=state)
 
     @peer.post("/api/v1/device/command")
     async def command(request: Request):
