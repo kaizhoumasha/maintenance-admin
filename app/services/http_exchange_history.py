@@ -20,6 +20,7 @@ from sqlalchemy import (
 from app.core.errors import AppError, ErrorCode
 from app.database import SCHEMA
 from app.models import RuntimeRetentionHold, TransportTask
+from app.schemas.integration_history import HttpInitiator
 from app.schemas.query import parse_filter
 from app.services import integration_history_service as legacy
 from app.services.filtering import FieldSpec, apply_filter
@@ -30,7 +31,7 @@ SUMMARY = (
     "role",
     "peer_system",
     "protocol",
-    "direction",
+    "initiator",
     "interaction_kind",
     "operation",
     "operation_id",
@@ -79,7 +80,8 @@ SUMMARY_EXTRA = (
     "attempt_state",
 )
 RECORDS = (
-    *legacy.RECORD_FIELDS,
+    *(name for name in legacy.RECORD_FIELDS if name != "direction"),
+    "initiator",
     "body_state",
     "body_sha256",
     "stored_bytes",
@@ -234,11 +236,13 @@ def _reference(kind, namespace, value):
 
 
 async def list_exchanges(session, params):
+    if params.direction is not None:
+        raise legacy._invalid()
     h = EXCHANGE.c
     statement = select(EXCHANGE)
     for name in (
         "peer_system",
-        "direction",
+        "initiator",
         "operation",
         "device_code",
         "owner_domain",
@@ -253,11 +257,11 @@ async def list_exchanges(session, params):
             raise legacy._invalid()
         statement = statement.where(_reference(*reference))
     fields = {
-        name: FieldSpec(h[name], str, ("eq", "in"))
+        name: FieldSpec(h[name], HttpInitiator if name == "initiator" else str, ("eq", "in"))
         for name in (
             "peer_system",
             "protocol",
-            "direction",
+            "initiator",
             "operation",
             "device_code",
             "owner_domain",
@@ -399,8 +403,8 @@ async def list_records(session, exchange_id, params):
         statement,
         parse_filter(params.filter),
         {
-            name: FieldSpec(r[name], str, ("eq", "in"))
-            for name in ("record_kind", "evidence_class", "direction", "capture_origin")
+            name: FieldSpec(r[name], HttpInitiator if name == "initiator" else str, ("eq", "in"))
+            for name in ("record_kind", "evidence_class", "initiator", "capture_origin")
         },
     )
     rows, cursor = await legacy._page(

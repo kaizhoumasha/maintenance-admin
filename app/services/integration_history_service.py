@@ -168,6 +168,9 @@ async def _page(session, statement, *, params, at, identity, endpoint, exact):
     for name in ("from_at", "until_at"):
         if getattr(params, name) is not None:
             query[name] = _stamp(getattr(params, name))
+    # A new optional filter must not invalidate existing unfiltered cursors.
+    if query.get("initiator") is None:
+        query.pop("initiator", None)
     query["filter"] = parse_filter(params.filter).model_dump(mode="json") if params.filter else None
     digest = sha256(
         json.dumps([endpoint, query], sort_keys=True, separators=(",", ":")).encode()
@@ -398,6 +401,8 @@ async def _summaries(session, rows):
 
 
 async def list_exchanges(session, params):
+    if params.initiator is not None:
+        raise _invalid()
     statement = _exchange_statement()
     for name in (
         "peer_system",

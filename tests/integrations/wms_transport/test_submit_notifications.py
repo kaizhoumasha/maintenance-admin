@@ -575,6 +575,7 @@ async def test_transport_callback_closes_exchange_before_http_response(
     )
     async with rig.factory() as session:
         row = (await session.scalars(query)).one()
+        assert row.initiator == "WES"
         identity, finished = row.id, row.finished_at
         assert row.close_reason == "SETTLED_BY_CALLBACK"
         assert row.attempt_state == "DELIVERY_UNKNOWN" and row.response_wire is None

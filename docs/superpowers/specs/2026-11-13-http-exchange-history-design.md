@@ -23,7 +23,7 @@
 | 字段 | PostgreSQL 类型 | 规则 |
 | --- | --- | --- |
 | `id` | `uuid`，主键 | WES 为本次 HTTP 往来生成的 UUIDv7。入站在读取正文前分配。写入重试复用该 ID。 |
-| `direction`, `interaction_kind`, `traffic_source` | `text`，非空 | 方向为 `INBOUND` 或 `OUTBOUND`，以请求方向为准。各表约束自己的交互类型。流量来源为 `PEER` 或 `MOCK`。 |
+| `initiator`, `interaction_kind`, `traffic_source` | `text`，非空 | 请求由 WES 发起时为 `WES`，由对端发起时为 `PEER`。各表约束自己的交互类型。流量来源为 `PEER` 或 `MOCK`。 |
 | `started_at`, `finished_at`, `response_observed_at` | `timestamptz` | `started_at` 非空。入站取接收入口时间，可靠出站取发送门槛记录时间，Status 取发起调用前的时间。`finished_at` 保存首次关闭尝试的原时间。出站 `response_observed_at` 取客户端收到响应头的时间，入站回复准备时间用 `finished_at`。这些时间随事实传入，补写时间另由日志记录。 |
 | `http_method`, `endpoint_path`, `peer_endpoint`, `trace_id` | `text` | 方法和路径非空。路径不带查询串。对端取可信的逻辑目标或脱敏地址，未知时为空。trace 用于查日志和往来，允许跨行重复。 |
 | `request_headers`, `response_headers`, `request_query` | `jsonb`，可空 | 仅采集白名单字段。首版请求头保留 `Content-Type`、`Accept`、`Content-Encoding`，响应头保留 `Content-Type`、`Content-Encoding`、`Retry-After`，Status 查询参数保留 `device_code`。 |

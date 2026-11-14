@@ -2,7 +2,8 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 
-QUERY_REVISION = "http_exchange_query_views"
+PREVIOUS_QUERY_REVISION = "http_exchange_query_views"
+QUERY_REVISION = "http_exchange_initiator"
 LEGACY_TABLES = ("integration_exchange", "integration_record", "integration_reference")
 
 
@@ -10,7 +11,7 @@ def enabled() -> bool:
     return get_settings().INTEGRATION_RUNTIME_AUTHORITY
 
 
-def check_reconciled(connection, *, use_runtime):
+def check_reconciled(connection, *, use_runtime, query_revision=QUERY_REVISION):
     postgres = connection.dialect.name == "postgresql"
     retired = False
     has_runtime_tables = False
@@ -55,6 +56,9 @@ def check_reconciled(connection, *, use_runtime):
     if not use_runtime:
         if retired or fences or (has_runtime_tables or present) and present != len(LEGACY_TABLES):
             raise RuntimeError("database requires INTEGRATION_RUNTIME_AUTHORITY=true")
+        # HTTP capture also runs in legacy authority mode.
+        if query_revision == QUERY_REVISION and _has_http_direction(connection):
+            raise RuntimeError("HTTP exchanges require the initiator migration")
         return
     ledger = "enterprise_backend.alembic_version" if postgres else "alembic_version"
     if not postgres:
@@ -65,7 +69,7 @@ def check_reconciled(connection, *, use_runtime):
         )
     if (
         not has_runtime_tables
-        or connection.scalar(text(f"SELECT version_num FROM {ledger}")) != QUERY_REVISION
+        or connection.scalar(text(f"SELECT version_num FROM {ledger}")) != query_revision
     ):
         raise RuntimeError("integration runtime authority requires successful reconciliation")
     if retired:
@@ -90,6 +94,28 @@ def check_reconciled(connection, *, use_runtime):
         )
     if present != len(LEGACY_TABLES) or fences != (3 if postgres else 9):
         raise RuntimeError("integration runtime authority requires fencing all legacy writers")
+
+
+def _has_http_direction(connection):
+    if connection.dialect.name == "postgresql":
+        return connection.scalar(
+            text("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema='enterprise_backend' AND column_name='direction'
+                  AND table_name IN (
+                      'wms_http_exchange', 'ecs_http_exchange', 'transport_http_exchange'
+                  )
+            )
+        """)
+        )
+    return any(
+        any(
+            row["name"] == "direction"
+            for row in connection.exec_driver_sql(f"PRAGMA table_info({table})").mappings()
+        )
+        for table in ("wms_http_exchange", "ecs_http_exchange", "transport_http_exchange")
+    )
 
 
 async def require_reconciled(factory):

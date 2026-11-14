@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.core.config import get_settings
 from app.database import create_database_engine
+from app.integrations.runtime_authority import QUERY_REVISION
 
 TABLES = ("integration_reference", "integration_record", "integration_exchange")
 WRITERS = (
@@ -72,9 +73,7 @@ async def retire(connection, evidence, *, apply):
     validate_evidence(evidence)
     if connection.dialect.name != "postgresql":
         raise RetirementRefused("删除准入需要 PostgreSQL")
-    if await connection.scalar(text("SELECT version_num FROM alembic_version")) != (
-        "http_exchange_query_views"
-    ):
+    if await connection.scalar(text("SELECT version_num FROM alembic_version")) != QUERY_REVISION:
         raise RetirementRefused("查询视图迁移尚未完成")
     names = ", ".join(f"enterprise_backend.{name}" for name in TABLES)
     await connection.exec_driver_sql(f"LOCK TABLE {names} IN ACCESS EXCLUSIVE MODE NOWAIT")

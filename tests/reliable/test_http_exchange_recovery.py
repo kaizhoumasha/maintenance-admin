@@ -52,12 +52,13 @@ async def test_settlement_can_restore_original_exchange_without_sender(storage, 
             await session.execute(
                 text(
                     "SELECT close_reason, attempt_state, request_wire, response_wire, "
-                    "late_response_at FROM wms_http_exchange WHERE message_id=:id"
+                    "late_response_at, initiator FROM wms_http_exchange WHERE message_id=:id"
                 ),
                 {"id": claim.message_id},
             )
         ).one()
         assert result[:3] == ("SETTLED_BY_CALLBACK", "DELIVERY_UNKNOWN", request.body)
+        assert result.initiator == "WES"
         assert result.response_wire == (b"ok" if late else None)
         assert (result.late_response_at is not None) == late
 

@@ -17,6 +17,9 @@ from app.schemas.integration_history import (
     ExchangeDetail,
     ExchangeListParams,
     ExchangeSummary,
+    HttpExchangeDetail,
+    HttpExchangeSummary,
+    HttpRecordSummary,
     RecordListParams,
     RecordSummary,
 )
@@ -41,7 +44,9 @@ async def _reader(request):
 
 
 @router.get(
-    "/exchanges", response_model=CursorPage[ExchangeSummary], responses=error_responses(503)
+    "/exchanges",
+    response_model=CursorPage[HttpExchangeSummary | ExchangeSummary],
+    responses=error_responses(503),
 )
 async def list_exchanges(
     request: Request,
@@ -55,7 +60,9 @@ async def list_exchanges(
 
 
 @router.get(
-    "/exchanges/{exchange_id}", response_model=ExchangeDetail, responses=error_responses(404, 503)
+    "/exchanges/{exchange_id}",
+    response_model=HttpExchangeDetail | ExchangeDetail,
+    responses=error_responses(404, 503),
 )
 async def get_exchange(
     request: Request, exchange_id: UUID, user: Annotated[User, Depends(read_history)]
@@ -68,7 +75,7 @@ async def get_exchange(
 
 @router.get(
     "/exchanges/{exchange_id}/records",
-    response_model=CursorPage[RecordSummary],
+    response_model=CursorPage[HttpRecordSummary | RecordSummary],
     responses=error_responses(404, 503),
 )
 async def list_records(

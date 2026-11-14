@@ -37,10 +37,12 @@ sha256sum "$backup"
 
 ```bash
 cd "/srv/enterprise-backend/releases/<新包目录>"
-dc run --rm --no-deps migrate alembic -x fence_legacy_writes=true upgrade http_exchange_query_views
+dc run --rm --no-deps migrate alembic -x fence_legacy_writes=true upgrade http_exchange_initiator
 ```
 
 迁移在同一事务核对冻结请求、原租约、回执、ECS 裁决及 Transport 结果来源，安装旧表写入围栏并替换查询视图。失败时保留原版本和旧表；继续停写，按错误给出的原身份调查，确认后重跑。未决旧租约缺少开启记录且无法证明未发送时，按原编号核对对端并保全交付事实。Transport 缺少结果来源时，只有此前留档能证明该结果原本就缺少来源，才按历史未知迁移。禁止填造记录、换号重发和手工改迁移版本。普通 `upgrade head` 会拒绝直接切换有存量的数据库。
+
+已处于 `http_exchange_query_views` 的环境也在停写窗口执行同一条升级命令。新增迁移把已有 HTTP 记录的 `OUTBOUND` 映射为 `WES`、`INBOUND` 映射为 `PEER`，保留原编号和正文。旧三表已删除的环境继续使用 `INTEGRATION_RUNTIME_AUTHORITY=true`。恢复旧镜像时，在停写窗口先用新包执行 `alembic downgrade http_exchange_query_views`，把三张表和两张视图恢复到旧镜像能读取的形态，再启动对应旧版 API 和 worker。
 
 迁移成功后，在共享 `.env` 写入 `INTEGRATION_RUNTIME_AUTHORITY=true`。启动 API 即可能恢复发送与新写入。从启动此步骤起保留新产生的事实，并用实际业务任务验证 worker。确认原收据重放、待办恢复、三类原编号查询、正文权限及审计后，再启动 nginx、切换 `current` 并恢复入口。
 
@@ -59,6 +61,8 @@ ln -sfn "releases/$(basename "$PWD")" /srv/enterprise-backend/current
 已提前推进到无围栏的最终版本时，重跑指定迁移会失败。使用切换前备份恢复原版本前，须确认恢复点之后未产生新事实。已经产生新事实时，先完整保全现场数据库和对应镜像，再按下文恢复。
 
 原 `/integrations/exchanges`、详情、`/records` 时间线和正文路径继续使用原权限。列表以一次 HTTP 尝试为一条，时间线给出请求及可确认的响应两侧。两侧标识由往来 UUID 派生，在往来保留期内稳定。正文路径可以使用时间线返回的 ID，也可用 `/integrations/http-exchanges/{peer}/{exchange_id}/{side}` 并以 `representation=payload` 查看结构化数据。原过程历史及旧正文标识省略补迁。
+
+三张 HTTP 往来表、单编号诊断、历史列表和详情使用 `initiator` 表示 HTTP 请求发起方。WES 发起取 `WES`，对端发起取 `PEER`。列表使用 `initiator=WES` 或 `initiator=PEER` 筛选。两张视图和证据时间线都使用该字段，请求和响应的 `initiator` 相同，用 `side` 区分请求和响应。
 
 `integration_exchange_summary` 与 `integration_record_summary` 保留原名称并继续排除正文和 payload。第一张视图按往来提供原编号、交付与应用状态，第二张按请求和响应提供正文可用性、摘要与长度。Transport 的任务编号在 `transport_task_id`，ECS 的命令编号在 `command_code`。查某个设备的 ECS 事件可按 `device_code` 和时间过滤。运行状态、HTTP 状态和本次响应各自表达对应事实。
 
@@ -203,7 +207,7 @@ RESPONSE_PREPARED 表示服务器准备的协议回复，不证明对方已经�
 
 ## 独立收缩与制品 B
 
-此前统一历史的第二阶段止于 `integrationhistorycontract`。本次 HTTP 往来表制品止于 `http_exchange_query_views`。执行前一阶段时须使用当时冻结的发布镜像。先使用已冻结且 head=authority 的 A，实际启用并完成原身份贯通验证，再在另一个维护窗口交付 B。开发测试中的成功不代替现场的 A 验收。
+此前统一历史的第二阶段止于 `integrationhistorycontract`。本次 HTTP 往来表制品止于 `http_exchange_initiator`。执行前一阶段时须使用当时冻结的发布镜像。先使用已冻结且 head=authority 的 A，实际启用并完成原身份贯通验证，再在另一个维护窗口交付 B。开发测试中的成功不代替现场的 A 验收。
 
 B 的收缩命令：
 
