@@ -59,6 +59,8 @@ async def evidence_transaction(factory):
 class DeliveryLifecycle(Protocol):
     async def lock_context(self, session, identity, *, nowait=False): ...
     async def authorize(self, session, context): ...
+    async def check_dispatch(self, factory, claim, clock): ...
+    def may_reclaim_unstarted(self, context): ...
     async def before_send(self, session, context, claim, now): ...
     async def apply_transition(self, session, context, claim, outcome): ...
     async def observe_late(self, session, context, claim, outcome): ...
@@ -110,6 +112,55 @@ class SnapshotTransactions:
         )
         return port, context, row, authorization
 
+    async def check_dispatch(self, claim):
+        outcome = await self.port(claim.message).check_dispatch(
+            self.store.session_factory, claim, self.store.clock
+        )
+        if outcome is None:
+            return True
+        if outcome.status == MessageStatus.PENDING:
+            async with evidence_transaction(self.store.session_factory) as session:
+                row = await session.get(ReliableMessage, claim.message_id, with_for_update=True)
+                if self.unstarted(row, claim):
+                    self.defer(row, outcome.next_attempt_at, outcome.pause_reason)
+        else:
+            await self.finish(claim, outcome)
+        return False
+
+    @staticmethod
+    def unstarted(row, claim):
+        return (
+            row is not None
+            and row.status == "SENDING"
+            and row.lease_id == claim.lease_id
+            and row.lease_not_started is True
+        )
+
+    def defer(self, row, next_attempt_at, reason=None):
+        row.status = MessageStatus.PENDING
+        row.pause_reason = reason
+        row.next_attempt_at = next_attempt_at
+        row.updated_at = self.store.clock()
+        row.lease_id = row.lease_until = None
+
+    async def reclaim_unstarted(self, session, port, context, row, claim):
+        if not (
+            self.unstarted(row, claim)
+            and not row.delivery_uncertain
+            and port.may_reclaim_unstarted(context)
+        ):
+            return False
+        now = self.store.clock()
+        if claim.message.expires_at is not None and claim.message.expires_at <= now:
+            from .store import AttemptOutcome
+
+            await self.apply(
+                session, port, context, row, claim, AttemptOutcome(MessageStatus.EXPIRED)
+            )
+        else:
+            self.defer(row, now)
+        return True
+
     async def gate(self, claim, target):
         async with evidence_transaction(self.store.session_factory) as session:
             try:
@@ -154,6 +205,7 @@ class SnapshotTransactions:
                     if row.scope_owner is not None:
                         row.dispatch_started_at = row.dispatch_started_at or now
                     row.lease_until = until
+                    row.lease_not_started = False
                     await self.store.records.opened(
                         session,
                         claim=replace(
@@ -203,6 +255,10 @@ class SnapshotTransactions:
             raise ValueError("FAILED requires matching rejection evidence")
         async with evidence_transaction(self.store.session_factory) as session:
             port, context, row, _ = await self.locked(session, claim)
+            if outcome.pause_reason == "LEASE_INTERRUPTED" and await self.reclaim_unstarted(
+                session, port, context, row, claim
+            ):
+                return True
             outcome = self._interruption(row, outcome)
             if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
                 observation = await self.store.records.finished(
@@ -356,6 +412,9 @@ class SnapshotTransactions:
                                 reason = "CONFIG_DRIFT"
                             if not reason and row.status == "SENDING":
                                 if self.store._time(session, row.lease_until) > now:
+                                    continue
+                                if await self.reclaim_unstarted(session, port, context, row, claim):
+                                    count += 1
                                     continue
                                 reason = "LEASE_INTERRUPTED"
                             elif not reason:

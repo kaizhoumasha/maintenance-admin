@@ -42,6 +42,7 @@ async def test_postgres_mock_round_with_real_outbox_transactions(schema_database
 async def exercise_integration(integration_database, *, mock=None):
     peer = FastAPI()
     requests, commands, reports, transports = [], [], [], []
+    status_checks = []
     allocation = {
         "result": "ALLOCATED",
         "workline_code": "COARSE",
@@ -89,9 +90,39 @@ async def exercise_integration(integration_database, *, mock=None):
             "data": decision,
         }
 
+    @peer.get("/api/v1/device/status")
+    async def status(device_code: str):
+        status_checks.append(device_code)
+        return {
+            "devices": [
+                {
+                    "device": {
+                        "device_code": device_code,
+                        "device_name": None,
+                        "device_type": None,
+                        "role": None,
+                        "supported_commands": None,
+                        "supported_events": None,
+                    },
+                    "state": {
+                        "device_code": device_code,
+                        "mode": "AUTO",
+                        "status": "IDLE",
+                        "is_online": True,
+                        "current_command_code": None,
+                        "scenario": None,
+                        "updated_at": 1,
+                    },
+                }
+            ]
+        }
+
     @peer.post("/api/v1/device/command")
     async def command(request: Request):
-        commands.append(await request.json())
+        wire = await request.json()
+        assert wire["device_code"] in status_checks
+        status_checks.remove(wire["device_code"])
+        commands.append(wire)
         return {"code": 200, "message": "ACK"}
 
     @peer.post("/api/v1/wes/facts")

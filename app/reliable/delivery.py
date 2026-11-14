@@ -188,6 +188,9 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         validate_request(effective.http_config(), request)
         phase = "acquire_client"
         async with provider.borrow(effective.http_config()) as client:
+            phase = "check_dispatch"
+            if not await store.snapshots.check_dispatch(claim):
+                return
             phase = "before_send"
             try:
                 until = await store.before_send(replace(claim, request=request), target)
