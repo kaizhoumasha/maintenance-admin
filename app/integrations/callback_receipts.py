@@ -177,6 +177,7 @@ async def insert_receipt(
     defer_response: bool = False,
     request_record_id: UUID | None = None,
     response_record_id: UUID | None = None,
+    message_type: str | None = None,
     **values,
 ) -> int | None:
     postgresql = session.get_bind().dialect.name == "postgresql"
@@ -224,6 +225,7 @@ async def insert_receipt(
         insert(IntegrationExchange)
         .values(
             **values,
+            message_type=message_type,
             role="RECEIPT",
             peer_system=peer_system,
             protocol=protocol,
