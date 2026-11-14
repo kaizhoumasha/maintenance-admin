@@ -10,6 +10,7 @@ from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.wms_request import WmsRequests
 from app.models import WorkLine
 
+from ._execution_facts import read_decision
 from .inbound_contracts import SourceAbsent, Target
 from .locking import lock_line
 from .models import (
@@ -24,7 +25,7 @@ from .models import (
     AutoTaskInput,
 )
 from .roller_ports import RollerPorts, matching_arrival
-from .work_plan_contracts import DECISIONS
+from .work_plan_contracts import DECISIONS, RackReady
 
 
 async def outbound_locator_closed(
@@ -674,7 +675,14 @@ class WorkPlans:
         )
 
     async def start_return_face(
-        self, session, *, work_line_id, member_id, now_ms, trigger_plate_id=None
+        self,
+        session,
+        *,
+        work_line_id,
+        member_id,
+        now_ms,
+        trigger_plate_id=None,
+        correct_operation_id=None,
     ):
         current_bindings = await self._lock_line(session, work_line_id)
         member = await session.get(AutoOutboundSourceMember, member_id, with_for_update=True)
@@ -715,10 +723,50 @@ class WorkPlans:
             )
             if existing is not None:
                 return existing
-        if original is not None and (
-            original.unresolved
-            or (trigger_plate_id is None and original.next_eligible_at_ms is None)
-            or (original.next_eligible_at_ms is not None and now_ms < original.next_eligible_at_ms)
+        correction = None
+        if correct_operation_id is not None:
+            if (
+                first is None
+                or first.operation_id != correct_operation_id
+                or trigger_plate_id is not None
+                or member.withdrawn_at_ms is not None
+                or member.withdrawn_by_input_id is not None
+                or task.status != "EXECUTING"
+                or not task.pending
+                or await self._confirmation(session, task.task_id)
+            ):
+                return None
+            if original is not first:
+                if original and original.previous_round_id == first.id:
+                    result = await self._invalid_first_rack_ready(session, first)
+                    if result and await self.requests.has_decision_correction(
+                        session,
+                        original=result,
+                        replacement_operation_id=original.operation_id,
+                        replacement_message_id=original.message_id,
+                    ):
+                        return original
+                return None
+            if not first.unresolved:
+                return None
+            correction = await self._invalid_first_rack_ready(session, first)
+            if correction is None or (
+                correction.response_data["rack_id"],
+                correction.response_data["rack_face"],
+            ) != (member.rack_id, member.rack_face):
+                return None
+
+        if (
+            correction is None
+            and original is not None
+            and (
+                original.unresolved
+                or (trigger_plate_id is None and original.next_eligible_at_ms is None)
+                or (
+                    original.next_eligible_at_ms is not None
+                    and now_ms < original.next_eligible_at_ms
+                )
+            )
         ):
             return original
         if original is None:
@@ -754,7 +802,28 @@ class WorkPlans:
             )
         )
         operation_id = str(uuid7())
-        reference = await self.requests.send(session, WorkPlan(**data), operation_id=operation_id)
+        if correction is None:
+            reference = await self.requests.send(
+                session, WorkPlan(**data), operation_id=operation_id
+            )
+        else:
+            if original.source_rack_bindings != proof or original.request_data != dict(
+                task_id=task.task_id,
+                rack_id=member.rack_id,
+                rack_face=member.rack_face,
+                arrived_at=member.arrived_at_ms,
+            ):
+                return None
+            reference = await self.requests.record_decision_correction(
+                session,
+                WorkPlan(**data),
+                original=correction,
+                replacement_operation_id=operation_id,
+            )
+            if reference is None:
+                return None
+            original.unresolved = False
+            await session.flush()
         round_ = AutoOutboundDecisionRound(
             task_id=task.task_id,
             purpose="WORK_PLAN",
@@ -777,6 +846,61 @@ class WorkPlans:
         await self.dispatch.note_facts_changed(session, job_ids=(member.rack_job_id,))
         await session.flush()
         return round_
+
+    async def _invalid_first_rack_ready(self, session, round_):
+        if (
+            round_.operation != "outbound.return_rack.work_plan@v1"
+            or round_.purpose != "WORK_PLAN"
+            or round_.round_no != 1
+            or round_.previous_round_id is not None
+            or round_.trigger_plate_id is not None
+            or round_.consumed_at_ms is not None
+            or round_.response_snapshot is not None
+            or await session.scalar(
+                select(AutoOutboundPlate.id)
+                .where(AutoOutboundPlate.grant_round_id == round_.id)
+                .limit(1)
+            )
+            is not None
+        ):
+            return None
+        result = await read_decision(self.requests, session, round_)
+        data = result.response_data if result else None
+        if (
+            not isinstance(data, dict)
+            or "reel_thickness" not in data
+            or "reel_diameter" not in data
+            or data["reel_thickness"] is not None
+            or data["reel_diameter"] is not None
+        ):
+            return None
+        try:
+            RackReady.model_validate({**data, "reel_thickness": 0, "reel_diameter": 0})
+        except ValidationError:
+            return None
+        return result
+
+    async def corrected_rack_ready(self, session, previous, current, data=None):
+        data = data if data is not None else (current.response_snapshot or {}).get("data", {})
+        if (
+            data.get("result") != "READY"
+            or current.previous_round_id != previous.id
+            or previous.unresolved
+            or previous.source_rack_bindings != current.source_rack_bindings
+            or previous.request_data != current.request_data
+        ):
+            return False
+        result = await self._invalid_first_rack_ready(session, previous)
+        return (
+            result is not None
+            and result.response_data == {**data, "reel_thickness": None, "reel_diameter": None}
+            and await self.requests.has_decision_correction(
+                session,
+                original=result,
+                replacement_operation_id=current.operation_id,
+                replacement_message_id=current.message_id,
+            )
+        )
 
     async def consume_return_face(self, session, *, work_line_id, member_id, now_ms):
         await self._lock_line(session, work_line_id)
@@ -832,6 +956,12 @@ class WorkPlans:
         try:
             DECISIONS["rack"].validate_python(data)
         except (ValidationError, TypeError):
+            return round_
+        if (
+            round_.previous_round_id == first.id
+            and await self._invalid_first_rack_ready(session, first)
+            and not await self.corrected_rack_ready(session, first, round_, data)
+        ):
             return round_
         if data["result"] == "READY" and (data["rack_id"], data["rack_face"]) != (
             member.rack_id,

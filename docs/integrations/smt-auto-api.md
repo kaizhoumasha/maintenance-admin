@@ -219,7 +219,7 @@ flowchart TD
 | RackSlot | R3 | WMS → WES | [原 Transport 结果](#rackslot-order) | 保存来源架真实到位事实 | 原成功结果、实际工作位及面向匹配并已可靠应用 |
 | RackSlot | R4 | WES → WMS | [outbound.return_rack.work_plan@v1](#rack-work-plan) | 取得当前面首个储位授权 | READY 才取盘；NO_WORK 进入面级收口；WAIT 等待 |
 | RackSlot | R5 | WES → ECS | [ARM02 来源取盘 / PICK_AND_PUT](#rack-pick-params) | 从授权储位取单盘到扫码台 | 原授权有效，含 WMS 取盘前提供的来源层/列及本盘厚度/直径 |
-| RackSlot | R6 | ECS → WES | [原取盘 Result（含扫码）](#rack-pick-params) | 保存取出结果和本盘条码 | 沿同一原命令关联，barcode/scanned_at 已本方确认，设备附录仍须签认 |
+| RackSlot | R6 | ECS → WES | [原取盘 Result 与扫码](#ecs-success-1) | 保存取出结果和本盘条码 | 扫码事件或原 Result 的完整扫码字段按同一取盘指令关联 |
 | RackSlot | R7 | WES → WMS | [outbound.rackslot.material.decide@v1](#rack-decide) | 决定本盘去向及同面下一储位 | next_source_action 只允许当前架、当前面；有效后继按设备条件返回 R5 |
 | RackSlot | R8 | WES → ECS | [ARM02 目标放盘 / PICK_AND_PUT](#transfer-put-params-1) | 从扫码平台取盘，放到转运货架储位 | 目标可靠就绪，使用本盘参数 |
 | RackSlot | R9 | ECS → WES | [原目标放盘结果](#ecs-success-2) | 保存本盘实际位置 | 匹配的确定成功结果及位置事实齐备 |
@@ -230,7 +230,7 @@ flowchart TD
 | 无下一架面 | R12c | WES → WMS | [sorting.task.completion_confirm@v1](#task-completion) | 确认整单状态 | 本地条件成立后请求；COMPLETED 才结束，不能仅凭当前计划耗尽 |
 | NG / 空取 | 分支 | 按各自合同 | [异常续问与明确空取](#outbound-exception-example) | NG 成功且原报告收妥，或明确 SOURCE_DONE 后按原条件复用所属 work_plan | BIN CONTINUE 允许原 Cell 再参与新授权；CLOSE/SOURCE_DONE 仅关闭对应 Cell/SLOT，均不作为箱/面终局。已有有效授权继续，原上下文及无重复求值/取盘条件成立才开一次异常续问 |
 
-BIN 取放 Result 和扫码平台事件独立上报，RackSlot 仍从原取盘 Result 读取扫码字段。Result 与命令 ACK 的到达顺序沿公共 ECS 合同，表中列序仅用于阅读导航。任何提交 ACK 都不代表物理完成；表中的后继循环表示授权推进，实际运动仍由对应设备合同及 ECS/PLC 互锁裁决。
+BIN 和 RackSlot 取放 Result 均可与扫码平台事件独立上报。RackSlot 也支持从原取盘 Result 读取完整扫码字段。Result 与命令 ACK 的到达顺序沿公共 ECS 合同，表中列序仅用于阅读导航。任何提交 ACK 都不代表物理完成；表中的后继循环表示授权推进，实际运动仍由对应设备合同及 ECS/PLC 互锁裁决。
 
 同一出库工作线共用一个扫码平台。WES 在登记取盘指令时即保留平台，直到原平台取出并放至目标或 NG 的指令确认成功，或原取料指令明确空取。结果未决、失败且盘位不明、仅收到扫码事件或 ACK 时，保留占用。正常放盘成功后即可取下一盘，无需等待移库报告。
 
@@ -314,7 +314,7 @@ flowchart TB
     R2 -->|未知 / 503| RWP["只恢复原 work_plan 身份、时间和正文"]
     RWP --> R2
     R2 -->|NO_WORK 已应用| RT["保存本面取料终局"]
-    R3 -->|原成功 Result 含完整扫码| R4{"rackslot.material.decide"}
+    R3 -->|原取盘成功且扫码数据齐备| R4{"rackslot.material.decide"}
     R4 -->|ACCEPT| R5["目标准备；机器人 2 / ARM02：扫码平台 → 转运货架储位"]
     R4 -->|ACCEPT 有同架同面后继| R3
     R4 -->|正常 ACCEPT 明确无后继| RT
@@ -1220,6 +1220,15 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 
 <a id="rack-work-plan"></a>
 #### 4.2.3 outbound RackSlot：outbound.return_rack.work_plan@v1
+
+若首轮 `READY` 的 `reel_thickness` 和 `reel_diameter` 均为 `null`，WES 保存原回复并等待，不能据此取盘。WMS 明确同意按原请求重新评估后，由有数据库权限的值班人员在当前版本环境中运行：
+
+```bash
+uv run python -m scripts.correct_smt_return_work_plan <原-operation_id> --wms-approved
+```
+
+首次登记要求工作线配置有效、任务正在执行且尚未进入完成确认、原架面未撤回或收口，并且原首轮授权未消费、未生成取盘指令、货架到位证据仍有效。登记时保留原请求、原回复和同一储位，只用新 `operation_id` 登记一次相同请求。命令输出替换请求号。在工作线配置、任务及架面状态仍符合条件时，重复执行返回已登记的替换请求号。只有新 `READY` 补齐两项尺寸且其余字段一致时，WES 才使用更正后的授权。若回复改变储位、仍缺尺寸或返回其他结果，原任务继续等待核对。
+
 
 <a id="rack-work-plan-1"></a>
 ##### 4.2.3.1 接口与请求
@@ -2255,7 +2264,7 @@ READY.source或最终决定中的next_source_action只消费一次。响应最�
 <a id="scan-result-correlation"></a>
 ### 5.2 原取盘 Result 与扫码关联
 
-WES 消费原授权时保存本地盘、原任务及到箱或架面到位、来源参数与唯一取盘命令的关联。出库 BIN 取放 Result 只报告取放事实，扫码数据取自 [扫码平台事件](#bin-platform-scan-event)。入库与出库 RackSlot 仍从原取盘 Result 取得扫码数据。
+WES 消费原授权时保存本地盘、原任务及到箱或架面到位、来源参数与唯一取盘命令的关联。出库 BIN 的扫码数据取自 [扫码平台事件](#bin-platform-scan-event)。出库 RackSlot 可使用同一事件，或从原取盘 Result 取得完整扫码数据。入库仍从原取盘 Result 读取。
 
 原取放成功 Result 已应用，且完整 barcode/scanned_at 齐备后，WES 才登记一次对应的 material.decide。source 取原授权，scanned_at 取实际扫码时间。inbound 本次求值另携最新 source_racks，outbound 按原 BIN/RackSlot 来源接口调用。
 
@@ -3485,7 +3494,7 @@ WMS `READY` 或后续 `next_source_action` 授权了精确储位，当前架面�
 ```
 
 来源参数、原授权及其消费关联与原取盘命令同事务保存，随原命令冻结；后续目标放盘仍复用本盘原来源尺寸，目标层列取本盘 ACCEPT.target_locator。缺失或非法来源参数不消费授权、不创建取盘命令；已有原命令优先恢复原身份/原正文，不因重启或后继参数变化重新组装。
-ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘成功 Result 内的完整条码和实际扫码时间后，调用[RackSlot 物料决定 API](#rack-decide)。
+ARM02 将单盘放到扫码台并完成命令触发扫码，WES 取得原取盘成功 Result 和完整扫码数据后，调用[RackSlot 物料决定 API](#rack-decide)。扫码数据可来自原 Result 或关联原指令的扫码平台事件。
 
 <a id="transfer-put-params"></a>
 #### 7.4.3 扫码台 → 转运架：ARM02
@@ -3542,7 +3551,7 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 <a id="ecs-success-1"></a>
 #### 7.5.1 取盘成功回调
 
-以下是 §7.4.1 出库 BIN 来源取放成功示例，匹配原 ARM01 命令。取放完成后，扫码平台通过独立事件上报扫码结果。RackSlot 仍在自己的原 ARM02 取盘 Result.data 中同时携带 barcode 和 scanned_at。
+以下是 §7.4.1 出库 BIN 来源取放成功示例，匹配原 ARM01 命令。取放完成后，扫码平台通过独立事件上报扫码结果。RackSlot 也可按原取盘指令号独立上报扫码事件，或在原取盘 Result.data 中同时携带 barcode 和 scanned_at。
 
 ```json
 {
@@ -3559,9 +3568,9 @@ ARM02 将单盘放到扫码台并完成命令触发扫码，取得该原取盘�
 ```
 
 <a id="bin-platform-scan-event"></a>
-##### 出库 BIN 扫码平台事件
+##### 出库扫码平台事件
 
-ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `timestamp` 为实际扫码的 UTC Unix 毫秒，WES 将其作为 `scanned_at`。`location`、`barcode` 和 `previous_command_code` 必填。`location` 固定为 `SCAN_PLATFORM`，`barcode` 保留完整原文，`previous_command_code` 为把本盘从工作位料箱放到扫码平台的原命令号。
+ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `timestamp` 为实际扫码的 UTC Unix 毫秒，WES 将其作为 `scanned_at`。`location`、`barcode` 和 `previous_command_code` 必填。`location` 固定为 `SCAN_PLATFORM`，`barcode` 保留完整原文，`previous_command_code` 为把本盘从工作位料箱或退料货架送到扫码平台的原取盘命令号。
 
 ```json
 {
@@ -3576,9 +3585,9 @@ ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `ti
 }
 ```
 
-在工作线配置中，将实际扫码平台设备绑定到 `PLATFORM_SCANNER`。新 BIN 取盘需有此绑定，WES 保存原指令对应的扫码设备。绑定更新后，将 `SMT_AUTO_WORKLINES` 中对应的 `work_line_version` 同步到工作线的新版本。Result 与事件可以乱序到达。重复事件只应用一次，关联错误或扫码值冲突的事件保留诊断，原扫码值继续保留。如果已保存扫码事实而取盘结果报告空取，保留两条事实，暂停该盘推进。旧指令可凭带原指令号的真实扫码事件继续，已带完整扫码字段的历史 Result 也可继续使用。此前未携带原指令号的事件需要 ECS 以原扫码事实补报，按时间接近无法可靠关联。
+在工作线配置中，将实际扫码平台设备绑定到 `PLATFORM_SCANNER`。新 BIN 取盘需有此绑定，WES 保存原指令对应的扫码设备。绑定更新后，将 `SMT_AUTO_WORKLINES` 中对应的 `work_line_version` 同步到工作线的新版本。Result 与事件可以乱序到达。重复事件只应用一次，关联错误或扫码值冲突的事件保留诊断，原扫码值继续保留。如果已保存扫码事实而取盘结果报告空取，保留两条事实，暂停该盘推进。旧指令可凭带原指令号的真实扫码事件继续，已带完整扫码字段的历史 Result 也可继续使用。RackSlot 的首次事件与原 Result 都带扫码数据时，若两者不一致且尚未登记本盘物料判定，WES 保留两份原始事实并暂停，直到同一原取盘指令收到有效的下一版扫码。两条回报可以任意顺序到达。物料判定已经登记后，迟到的冲突扫码仍保留诊断，已经接纳的决定沿原身份处理。此前未携带原指令号的事件需要 ECS 以原扫码事实补报，按时间接近无法可靠关联。
 
-先升级所有 WES 回调实例并完成扫码设备绑定，再让 ECS 发送或补报新格式。旧实例收到事件会返回 ACK 并记录为未注册，同一事件随后重报会走收据去重。
+先升级所有 WES 回调实例并完成扫码设备绑定，再让 ECS 发送或补报关联 RackSlot 取盘的事件。仅支持 BIN 扫码的旧实例可能返回 ACK 并保存回执，但不会关联 RackSlot 取盘。升级后原样重报仍可能命中旧回执去重，因此需要分别核对回执与取盘关联。
 
 可选整数 `data.scan_revision` 默认为 `1`。ECS 确认需要纠正条码时，沿用原取盘指令号，提交当前生效版本的下一版及实际重扫时间。重传沿用同版本和同一报文。WES 保留原回执与更正回执。旧 WMS 请求尚未发送或已确认未接纳时，WES 原子停发旧消息，并用新 `operation_id` 重新发起判定。旧请求在途、接纳状态不明、已经接纳或 ARM04 放盘已下发时，更正保留为待核对，已下发的 ARM04 仍按原指令接收结果。
 
@@ -3604,7 +3613,7 @@ ECS 向 `POST /api/v1/callback/event` 上报 `SCAN_COMPLETED`。事件顶层 `ti
 
 取盘扫码的完整字段、原命令关联和重复/迟到规则见 §5.2；设备回调公共字段及失败阶段含义见 §7.1.3。
 
-正常取盘须有已应用的 SUCCESS/1/PUT_FINISHED，且 barcode 为非空完整原文，scanned_at 为 0～9223372036854775807 的严格 UTC 毫秒整数。出库 BIN 从扫码事件取得扫码字段，其他取盘路径沿 §5.2 读取原 Result。Result 先于 ACK 时沿公共派发证据应用。
+正常取盘须有已应用的 SUCCESS/1/PUT_FINISHED，且 barcode 为非空完整原文，scanned_at 为 0～9223372036854775807 的严格 UTC 毫秒整数。出库 BIN 从扫码事件取得扫码字段，出库 RackSlot 可使用扫码事件或原 Result，入库沿 §5.2 读取原 Result。Result 先于 ACK 时沿公共派发证据应用。
 
 <a id="bin-layout"></a>
 ### 7.6 箱型与格位：WMS 单一责任
@@ -4347,7 +4356,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | A01 | 共同（按方向合同） | 新增AUTO任务使用统一任务族 | 六类任务全部使用sorting.task.*@v1；issued显式提供task_type=AUTO及本任务的business_type=inbound或outbound，其余操作沿原最小字段；方向计划/取消形态保留，不因改名重建任务 |
 | A02 | outbound | BIN 正常取放：SCAN2 滚筒线料箱 → 扫码平台 → 转运货架储位 | ARM01 执行授权 Cell 到 SCAN_PLATFORM 的取盘；原取放成功 Result 与同盘扫码事件到齐，取得本盘 ACCEPT 且目标就绪后由 ARM02 从 SCAN_PLATFORM 投入授权位置。两段命令/结果分别关联，不把目标放盘交给 ARM01 |
 | A03 | outbound | RackSlot 正常取放：退料货架 → 扫码平台 → 转运货架储位 | 两段均由 ARM02 执行：先按原完整来源参数取到 SCAN_PLATFORM，再按本盘 ACCEPT 投入授权位置；分别保存取盘和放盘原命令/结果，不交给 ARM01，不跳过扫码决定，不将授权循环当成 ARM02 同时执行两个物理动作 |
-| A04 | outbound | BIN/RackSlot 取得有效后继，或原取盘 Result 迟到/重复 | BIN 按六字段用 ARM01 取盘，RackSlot 按同架同面七字段用 ARM02 取盘；BIN 扫码事件和 RackSlot 扫码 Result 各归原命令，分别调用 bin.material.decide/rackslot.material.decide，不因共用平台套用另一来源接口，不覆盖当前盘目标或尺寸 |
+| A04 | outbound | BIN/RackSlot 取得有效后继，或原取盘 Result 迟到/重复 | BIN 按六字段用 ARM01 取盘，RackSlot 按同架同面七字段用 ARM02 取盘；BIN/RackSlot 扫码事件及原 Result 各归原命令，分别调用 bin.material.decide/rackslot.material.decide，不因共用平台套用另一来源接口，不覆盖当前盘目标或尺寸 |
 | A05 | outbound | 首版 target_rack、当前本盘 ACCEPT 和实际正常报告分别核对 | target_rack 只准备初始架面，不能单独授权 PUT；本盘 target_locator 保持 RACK_SLOT 六字段，ECS 取其架号/面和明确层/列，不解析 slot_id；成功实际位置匹配后 to_locator 仅报告 RACK_SLOT 四字段，不复制设备层/列或来源箱格。换架后取本盘新目标，不沿用首版旧架 |
 | A06 | outbound | 两类来源正常目标与现有合同一致，或误将来源箱参数用于目标 | 正常目标统一为转运货架储位，目标授权与报告均为 RACK_SLOT，ECS 目标为 FIVE_LAYER_RACK；本项无额外映射依赖。不把目标改为 BIN，不复制来源 bin_code/cell_id/bin_type 或新增字段；现场动作仍按原验收要求验证 |
 | A07 | outbound | 对照原始供应商 PDF 核对正常目标路径及字段 | 第42页 PDF §9.6 出库图与 BIN 机器人1取盘、机器人2放到五层料架一致；第10/12页场景4/6及第37页必填表支持现有 FIVE_LAYER_RACK 目标。保留本稿 rack_id、rack_face、params 和数值规则，不复制旧漏字段示例；第42页 PDF §9.7 无图，RackSlot 路径按已确认分工及场景5/6核对，不据标题补造移库流程 |
@@ -4429,7 +4438,7 @@ outbound既有四项业务裁决均已本方确认：P01 首次生产准入、P0
 | 原编号 / 范围 | 本方已确认内容 | 正文位置 |
 | --- | --- | --- |
 | P01（本方已确认关闭） | 三类资源/原计划追加撤销保持；可读箱有有效任务直接 work_plan，不要求 SCAN1/投箱成员；可读无任务且无原在制上下文走原释放，不可读只保留异常；既有在制段沿原 task/arrival 与 U03 | §3.5/§3.6、§8.2、§6.1、§9.5 |
-| P02 已确认业务边界 | 出库 BIN 扫码事件按 previous_command_code 关联原取放指令，RackSlot 原 Result 携带 barcode/scanned_at；明确的原取料失败按 §4.5.2 消费。未知结果沿原命令恢复。设备恢复与补报单列验收 | §7.5.1/§5.2、§7.10.2、交付依赖表 |
+| P02 已确认业务边界 | 出库 BIN/RackSlot 扫码事件按 previous_command_code 关联原取放指令，RackSlot 也支持原 Result 携带完整 barcode/scanned_at；明确的原取料失败按 §4.5.2 消费。未知结果沿原命令恢复。设备恢复与补报单列验收 | §7.5.1/§5.2、§7.10.2、交付依赖表 |
 | P06（本方已确认关闭） | NG 成功及原 NG 报告收口后、或明确 SOURCE_DONE 后，复用原 work_plan 取得完整授权；CLOSE/SOURCE_DONE 仅关闭对应 Cell/SLOT，不推定箱/面结束；empty_decide 沿原 RETRY/WAIT/SOURCE_DONE；BIN 解绑后仅按任务/箱格关联，不带原架号/面，RackSlot 保留自身原来源字段 | §4.5.2、§5.9.2 |
 | P07（本方已确认关闭） | WMS 保证同键单一未闭合最终授权，同码 WAIT、报告先去重后匹配、歧义拒绝；WES 不建业务锁，原报告独立恢复 | §5.7/§5.7.1 |
 | 完成确认期间新到位（本方已确认关闭） | 新计划正常应用交付，新增到位保存原关联并暂缓首盘；有效非终局消费后再按条件推进。原授权/报告/公共义务继续，不将有效任务当无任务放行 | §3.7.3 |

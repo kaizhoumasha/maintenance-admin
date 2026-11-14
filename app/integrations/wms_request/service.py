@@ -5,10 +5,12 @@ from datetime import UTC, datetime
 from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core import get_settings
 from app.core.clock import unix_ms
 from app.core.identifiers import validate_uuid7
+from app.core.strict_json import canonical_digest, json_object
 from app.integrations import history as history_records
 from app.integrations.model_payload import validated_model_payload
 from app.integrations.runtime_authority import enabled
@@ -18,7 +20,7 @@ from app.reliable.config import parse_reliable_config, target_config_hint, targe
 from app.reliable.types import REPLACEMENT_PENDING
 
 from .adapter import ADAPTERS, PROTOCOL_OF
-from .operation import InvalidRequestPayload, UnknownOperation, operations
+from .operation import Endpoint, InvalidRequestPayload, UnknownOperation, operations
 from .results import WmsRequestResult, get_result
 
 
@@ -74,6 +76,88 @@ class WmsRequests:
     ) -> WmsRequestResult:
         return await get_result(
             session, message_id=message_id, operation=operation, operation_id=operation_id
+        )
+
+    async def record_decision_correction(
+        self,
+        session: AsyncSession,
+        payload: BaseModel,
+        *,
+        original: WmsRequestResult,
+        replacement_operation_id: str,
+    ) -> EnqueueResult | None:
+        """Record an explicitly approved replacement without rewriting the terminal response."""
+        old = await self._lock_original(
+            session,
+            message_id=original.message_id,
+            operation=original.operation,
+            operation_id=original.operation_id,
+        )
+        if (
+            old is None
+            or old.status != MessageStatus.DONE
+            or old.superseded_by_message_id is not None
+            or old.pause_reason is not None
+        ):
+            return None
+        frozen = json_object(old.frozen_request_wire or b"")
+        if (
+            frozen is None
+            or (frozen.get("operation"), frozen.get("operation_id"))
+            != (old.operation, old.operation_id)
+            or canonical_digest(frozen.get("data"))
+            != canonical_digest(validated_model_payload(payload))
+        ):
+            return None
+        current = await self.get_result(
+            session, message_id=old.id, operation=old.operation, operation_id=old.operation_id
+        )
+        if (
+            current != original
+            or current.response_state != "VALID"
+            or (current.http_status, current.response_code) != (200, "DECIDED")
+            or old.target != self.target(PROTOCOL_OF[Endpoint.DECISIONS])
+        ):
+            return None
+        ref = await self.send(session, payload, operation_id=replacement_operation_id)
+        new = await session.get(ReliableMessage, ref.message_id)
+        if new.id == old.id or new.operation != old.operation or new.target != old.target:
+            raise InvalidRequestPayload("replacement changed the original operation or target")
+        old.superseded_by_message_id = new.id
+        old.pause_reason = "SUPERSEDED_BY_DECISION_CORRECTION"
+        return ref
+
+    async def has_decision_correction(
+        self,
+        session: AsyncSession,
+        *,
+        original: WmsRequestResult,
+        replacement_operation_id: str,
+        replacement_message_id: int,
+    ) -> bool:
+        if self.owner_domain is None or original.delivery_status != MessageStatus.DONE:
+            return False
+        replacement = aliased(ReliableMessage)
+        return (
+            await session.scalar(
+                select(replacement.id)
+                .select_from(ReliableMessage)
+                .join(replacement, replacement.id == ReliableMessage.superseded_by_message_id)
+                .where(
+                    ReliableMessage.id == original.message_id,
+                    ReliableMessage.operation == original.operation,
+                    ReliableMessage.operation_id == original.operation_id,
+                    ReliableMessage.status == MessageStatus.DONE,
+                    ReliableMessage.pause_reason == "SUPERSEDED_BY_DECISION_CORRECTION",
+                    ReliableMessage.business_key == f"business:{self.owner_domain}",
+                    replacement.id == replacement_message_id,
+                    replacement.operation_id == replacement_operation_id,
+                    replacement.operation == ReliableMessage.operation,
+                    replacement.target == ReliableMessage.target,
+                    replacement.business_key == ReliableMessage.business_key,
+                )
+            )
+            is not None
         )
 
     async def _lock_original(self, session, *, message_id, operation, operation_id):

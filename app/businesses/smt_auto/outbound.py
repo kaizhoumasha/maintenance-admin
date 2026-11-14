@@ -104,14 +104,22 @@ class Outbound:
             await ctx.session.scalars(
                 select(AutoOutboundPlate)
                 .join(AutoTask, AutoTask.task_id == AutoOutboundPlate.task_id)
-                .join(AutoBinWork, AutoBinWork.id == AutoOutboundPlate.bin_work_id)
+                .outerjoin(AutoBinWork, AutoBinWork.id == AutoOutboundPlate.bin_work_id)
                 .where(
                     AutoOutboundPlate.pick_command_code == payload.previous_command_code,
                     eligible,
                     AutoTask.work_line_id == ctx.work_line_id,
                     AutoTask.business_type == "outbound",
-                    AutoBinWork.task_id == AutoTask.task_id,
-                    AutoBinWork.work_line_id == ctx.work_line_id,
+                    or_(
+                        and_(
+                            AutoOutboundPlate.bin_work_id.is_(None),
+                            AutoOutboundPlate.source_member_id.is_not(None),
+                        ),
+                        and_(
+                            AutoBinWork.task_id == AutoTask.task_id,
+                            AutoBinWork.work_line_id == ctx.work_line_id,
+                        ),
+                    ),
                 )
                 .limit(2)
                 .with_for_update(of=AutoOutboundPlate)
@@ -124,8 +132,9 @@ class Outbound:
         snapshot = plate.source_arrival_snapshot
         command = snapshot.get("pick_command", {})
         params = command.get("params", {})
+        source_type = "BIN" if plate.bin_work_id is not None else "FIVE_LAYER_RACK"
         if (
-            params.get("source", {}).get("location_type") != "BIN"
+            params.get("source", {}).get("location_type") != source_type
             or params.get("target") != SCAN
             or command.get("platform_scanner_id", ctx.binding.device_id) != ctx.binding.device_id
         ):
@@ -185,6 +194,14 @@ class Outbound:
             ctx.note("PLATFORM_SCAN_CONFLICT")
             return
         if event_id is None:
+            if plate.bin_work_id is None:
+                pick = await self._result(ctx.session, plate, "pick")
+                if (
+                    pick is not None
+                    and pick.data.get("barcode") is not None
+                    and (pick.data["barcode"], pick.data["scanned_at"]) != scan
+                ):
+                    ctx.note("PLATFORM_SCAN_CONFLICT")
             event_id = ctx.receipt_id
             plate.barcode, plate.scanned_at_ms = scan
             plate.source_arrival_snapshot = {
@@ -221,8 +238,10 @@ class Outbound:
         original = rounds[0] if rounds else None
         data = {**context, "barcode": pending["barcode"], "scanned_at": pending["timestamp"]}
         identity = str(uuid7())
-        operation = "outbound.bin.material.decide@v1"
-        request = BinDecide(**data)
+        if plate.bin_work_id is not None:
+            operation, request = "outbound.bin.material.decide@v1", BinDecide(**data)
+        else:
+            operation, request = "outbound.rackslot.material.decide@v1", RackDecide(**data)
         if original is None:
             ref = await self.requests.send(session, request, operation_id=identity)
         else:
@@ -276,17 +295,25 @@ class Outbound:
         )
         await session.flush()
 
-    async def _pick_scan(self, session, plate):
+    async def _pick_scan(self, session, plate, *, correcting=False):
         pick = await self._result(session, plate, "pick")
         if pick is None:
             return None
         command = plate.source_arrival_snapshot["pick_command"]
         if "platform_scan_event_id" in command:
+            if (
+                plate.bin_work_id is None
+                and not correcting
+                and command.get("platform_scan_revision", 1) == 1
+                and pick.data.get("barcode") is not None
+                and (pick.data["barcode"], pick.data["scanned_at"])
+                != (plate.barcode, plate.scanned_at_ms)
+            ):
+                return None
             data = {**pick.data, "barcode": plate.barcode, "scanned_at": plate.scanned_at_ms}
-        elif "platform_scanner_id" in command:
+        elif plate.bin_work_id is not None and "platform_scanner_id" in command:
             return None
         else:
-            # Commands registered before scanner binding can still carry their original scan.
             data = pick.data
         try:
             return Scan.model_validate(data)
@@ -423,7 +450,11 @@ class Outbound:
                 or previous.bin_work_id != round_.bin_work_id
                 or previous.source_preparation_action_id != round_.source_preparation_action_id
                 or previous.request_data != round_.request_data
-                or not await self._recorded_wait(session, previous)
+            ):
+                return False
+            if not (
+                await self._recorded_wait(session, previous)
+                or await self.work_plans.corrected_rack_ready(session, previous, round_)
             ):
                 return False
             round_ = previous
@@ -693,7 +724,7 @@ class Outbound:
             original = dict(
                 device_code=role.device_code, timeout_ms=timeout, params=command.model_dump()
             )
-            if plate.bin_work_id is not None:
+            if scanner is not None and scanner.device_role == "PLATFORM_SCANNER":
                 original["platform_scanner_id"] = scanner.device_id
             plate.source_arrival_snapshot = {
                 **plate.source_arrival_snapshot,
@@ -708,7 +739,13 @@ class Outbound:
                 and await self._result(session, parent, "put") is None
             ):
                 return plate
-        scan = await self._pick_scan(session, plate)
+        pending_scan = plate.source_arrival_snapshot.get("pending_platform_scan")
+        correcting = (
+            pending_scan is not None
+            and plate.put_command_code is None
+            and plate.final_decision_round_id is None
+        )
+        scan = await self._pick_scan(session, plate, correcting=correcting)
         if scan is None:
             empty = await self._result(session, plate, "pick", empty=True)
             if empty is not None and await self._grant(session, plate):
@@ -725,7 +762,6 @@ class Outbound:
             else "outbound.rackslot.material.decide@v1"
         )
         rounds = await self._material_rounds(session, plate)
-        pending_scan = plate.source_arrival_snapshot.get("pending_platform_scan")
         if pending_scan is not None and plate.put_command_code is None:
             await self._apply_platform_scan_correction(
                 session, plate, pending_scan, context, rounds
