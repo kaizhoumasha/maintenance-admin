@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import event, select
 
 from app.controllers import ecs_callback as ecs_controller
+from app.core.config import get_settings
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback import registry
 from app.integrations.ecs_callback.receiver import MAX_BODY_BYTES
@@ -12,7 +13,7 @@ from app.integrations.ecs_callback.registry import ecs_event
 from app.integrations.wms_callback import snapshots
 from app.integrations.wms_callback.operation import CallbackPayload
 from app.main import app
-from app.models import IntegrationExchange, IntegrationRecord
+from app.models import EcsHttpExchange, IntegrationExchange, IntegrationRecord
 from tests.helpers import ecs_binding, legacy_ecs_receipt, read_diagnostic_snapshots, read_receipts
 
 PATH = "/api/v1/callback/event"
@@ -49,6 +50,31 @@ async def test_valid_event_is_acked(callback_client, callback_store):
     response = await callback_client.post(PATH, json=body())
     assert response.status_code == 200 and response.json() == ACK
     assert calls == ["D1"]
+
+
+async def test_runtime_scan_is_acked_and_applied_once(callback_client, callback_store, monkeypatch):
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
+    calls = []
+
+    @ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=CallbackPayload)
+    async def handler(ctx, data):
+        calls.append(ctx.receipt_id)
+
+    scan = body(device_code=f"SCAN-{uuid7()}")
+    first = await callback_client.post(PATH, json=scan)
+    repeat = await callback_client.post(PATH, json=scan)
+
+    assert first.status_code == repeat.status_code == 200
+    assert first.json() == ACK and repeat.content == first.content
+    [receipt_id] = calls
+    async with callback_store() as session:
+        exchanges = list(
+            await session.scalars(
+                select(EcsHttpExchange).where(EcsHttpExchange.receipt_id == receipt_id)
+            )
+        )
+        assert len(exchanges) == 2
+        assert all(exchange.event_type == "SCAN_COMPLETED" for exchange in exchanges)
 
 
 @pytest.mark.parametrize(
