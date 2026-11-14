@@ -501,6 +501,7 @@ async def test_original_report_survives_cleanup_until_consumed(direct):
 
 async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direct):
     flow = direct
+    flow.sender.uniform = lambda _lower, upper: upper
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
     first_put = await dispatch_put(flow, first)

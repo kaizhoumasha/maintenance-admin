@@ -413,7 +413,7 @@ async def add_bound_device(session, code, origin, *, role="SCAN1", line_code=Non
     return line, device, route
 
 
-def ecs_status_document(*codes):
+def ecs_status_document(*codes, status="OFFLINE"):
     """Fresh Status wire document shared by protocol and debug-HTTP tests."""
     return {
         "devices": [
@@ -429,8 +429,8 @@ def ecs_status_document(*codes):
                 "state": {
                     "device_code": code,
                     "mode": "AUTO",
-                    "status": "OFFLINE",
-                    "is_online": False,
+                    "status": status,
+                    "is_online": status != "OFFLINE",
                     "current_command_code": None,
                     "scenario": "error",
                     "updated_at": 1793029419104,

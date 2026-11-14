@@ -40,6 +40,7 @@ from app.services.workline_service import business_configuration_issue
 from tests.helpers import (
     FlowService,
     business_flow_fixture,
+    ecs_status_document,
     loopback_app,
     simulator_client_factory,
 )
@@ -665,6 +666,10 @@ async def coarse_forward(coarse_scan, monkeypatch):
             "timestamp": 1,
             "data": {},
         }
+
+    @peer.get("/api/v1/device/status")
+    async def status(device_code: str):
+        return ecs_status_document(device_code, status="IDLE")
 
     @peer.post("/api/v1/device/command")
     async def command(request: Request):

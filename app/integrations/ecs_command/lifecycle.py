@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from hashlib import sha256
 from uuid import UUID
@@ -10,7 +10,9 @@ from app.http_client import DeliveryState
 from app.integrations.history import RecordDraft, read_bodies, write_record
 from app.integrations.runtime_authority import enabled
 from app.models import EcsCommand, EcsSendEvidence, IntegrationExchange, IntegrationRecord
-from app.reliable.types import VerdictKind
+from app.reliable.lifecycle import evidence_transaction, transaction_limits
+from app.reliable.store import AttemptOutcome
+from app.reliable.types import MessageStatus, VerdictKind
 from app.transactions import after_commit
 
 from .contracts import PauseReason
@@ -95,6 +97,52 @@ class EcsLifecycle:
                 else "PRE_GATE_VALIDATION"
             )
         return None
+
+    def may_reclaim_unstarted(self, command):
+        return command.owner_domain == "coarse_sorting" and command.status == "QUEUED"
+
+    async def check_dispatch(self, factory, claim, clock):
+        model = EcsCommand if enabled() else IntegrationExchange
+        async with evidence_transaction(factory) as session:
+            command = await session.scalar(
+                select(model).where(
+                    model.command_code == claim.message.operation_id,
+                    model.owner_domain == "coarse_sorting",
+                )
+            )
+            if command is None:
+                return None
+            await transaction_limits(session)
+            device_code, route = command.device_code, command.route
+            if route.get("origin") != claim.message.delivery_snapshot.origin:
+                return AttemptOutcome(MessageStatus.HELD, pause_reason="CONFIG_DRIFT")
+            reason = await self.authorize(session, command)
+            if reason:
+                return AttemptOutcome(MessageStatus.HELD, pause_reason=reason)
+
+        # No database locks across the Status request. The send gate rechecks the route and lease.
+        from app.integrations.ecs_status import StatusQueryError, query
+
+        retry_after = None
+        try:
+            result = await query(route["origin"], device_code=device_code, clock=clock)
+        except StatusQueryError as error:
+            retry_after = error.retry_after_at
+            reason = "DEVICE_STATUS_UNAVAILABLE"
+        except ValueError:
+            reason = "DEVICE_STATUS_UNAVAILABLE"
+        else:
+            if result.devices and result.devices[0].state.status == "IDLE":
+                return None
+            reason = "DEVICE_NOT_IDLE" if result.devices else "DEVICE_STATUS_UNAVAILABLE"
+        next_check = clock() + timedelta(seconds=5)
+        if retry_after is not None:
+            next_check = max(next_check, retry_after)
+        return AttemptOutcome(
+            MessageStatus.PENDING,
+            pause_reason=reason,
+            next_attempt_at=min(next_check, claim.message.expires_at or next_check),
+        )
 
     async def before_send(self, session, command, claim, now):
         if (
