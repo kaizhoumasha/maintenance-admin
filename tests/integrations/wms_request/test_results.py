@@ -1,9 +1,12 @@
 import json
 from dataclasses import FrozenInstanceError
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import delete, select, update
 
+from app.core.clock import unix_ms
+from app.core.config import get_settings
 from app.core.identifiers import uuid7
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_request.operation import lookup
@@ -38,6 +41,37 @@ async def test_request_result_uses_original_message_identity(sessions, wms):
             session, message_id=mid + 1, operation=OP, operation_id=oid
         )
         assert missing.availability == "NOT_FOUND" and missing.delivery_status is None
+
+
+async def test_cutover_reads_original_terminal_response_and_received_time(
+    sessions, wms, monkeypatch
+):
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
+    mid, oid = await registered(sessions, wms)
+    received = datetime(2026, 11, 13, 1, 2, 3, 456000, tzinfo=UTC)
+    async with sessions.begin() as session:
+        row = await session.get(ReliableMessage, mid)
+        row.status = "DONE"
+        row.last_http_status = 200
+        row.last_verdict = "DELIVERED"
+        row.terminal_response_wire = json.dumps(
+            dict(operation_id=oid, code="DECIDED", timestamp=10, data={"ok": True})
+        ).encode()
+        row.terminal_response_at = received
+    async with sessions() as session:
+        result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
+        assert (result.availability, result.delivery_status, result.response_state) == (
+            "FOUND",
+            "DONE",
+            "VALID",
+        )
+        assert (result.http_status, result.response_code, result.response_data) == (
+            200,
+            "DECIDED",
+            {"ok": True},
+        )
+        assert result.response_timestamp == 10
+        assert result.response_received_at_ms == unix_ms(received)
 
 
 @pytest.mark.parametrize("raw", [b"{}", b"[]", b'{"operation":"other.op@v1"}'])
