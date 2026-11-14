@@ -558,7 +558,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         )
 
 
-async def return_face(host, *, ready=True):
+async def return_face(host, *, ready=True, consume=True):
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     racks = OutboundRacks(host.outbound, station_id="station")
@@ -601,15 +601,217 @@ async def return_face(host, *, ready=True):
             reel_thickness=15.3,
             reel_diameter=330.2,
         )
+        if ready is True
+        else ready
         if ready
         else {"result": "WAIT", "retry_after_ms": 100},
     )
     async with host.factory.begin() as session:
-        await racks.advance(session, task_id="t", now_ms=40)
+        if consume:
+            await racks.advance(session, task_id="t", now_ms=40)
         plate = await session.scalar(
             select(AutoOutboundPlate).where(AutoOutboundPlate.source_member_id == member_id)
         )
         return racks, member_id, plate.id if plate else None
+
+
+@pytest.mark.parametrize("runtime_authority", [False, True])
+@pytest.mark.parametrize("correction", ["recorded", "missing", "different_slot", "valid_old"])
+async def test_return_face_pick_requires_recorded_correction_of_invalid_ready(
+    outbound_host, monkeypatch, runtime_authority, correction
+):
+    from app.core.config import get_settings
+
+    host = outbound_host
+    operation = "outbound.return_rack.work_plan@v1"
+    ready = dict(
+        result="READY",
+        rack_id="return",
+        rack_face="A",
+        slot_id="S1",
+        rack_layer=2,
+        rack_column=3,
+        reel_thickness=20,
+        reel_diameter=330,
+    )
+    # Retained original evidence and the operational projection are both populated
+    # on an ordinary response. Switch readers after saving these original facts.
+    original_reply = (
+        ready
+        if correction == "valid_old"
+        else {**ready, "reel_thickness": None, "reel_diameter": None}
+    )
+    racks, member_id, _ = await return_face(host, ready=original_reply, consume=False)
+    if runtime_authority:
+        from app.models import EcsCommand, EcsResultEvidence, IntegrationReference
+
+        async with host.factory.kw["bind"].begin() as connection:
+            for model in (IntegrationReference, IntegrationRecord, IntegrationExchange):
+                await connection.run_sync(model.__table__.drop)
+            for model in (EcsCommand, EcsResultEvidence):
+                await connection.run_sync(model.__table__.create)
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime_authority)
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.businesses.smt_auto.service import SmtAutoService
+    from app.businesses.smt_auto.transactions import AutoS1Transactions
+    from scripts.correct_smt_return_work_plan import correct
+
+    service = SmtAutoService.__new__(SmtAutoService)
+    service.dispatch, service.roller, service.wms = host.dispatch, host.roller, host.requests
+    service.inbound = host.outbound
+    service.work_plans = host.outbound.work_plans
+    factory = async_sessionmaker(host.factory.kw["bind"])
+    service.transactions = AutoS1Transactions(
+        SimpleNamespace(session_factory=factory), service=service
+    )
+    monkeypatch.setattr(
+        "app.tasks.business_tasks._runtime",
+        lambda factory, business: SimpleNamespace(services={"smt_auto": service}),
+    )
+
+    async with host.factory.begin() as session:
+        member = await session.get(AutoOutboundSourceMember, member_id)
+        old = await session.get(AutoOutboundDecisionRound, member.first_work_plan_round_id)
+        original_id = old.operation_id
+        if correction == "missing":
+            await racks.advance(session, task_id="t", now_ms=40)
+
+    replacement = None if correction == "missing" else await correct(factory, original_id)
+    if correction in ("missing", "valid_old"):
+        assert replacement is None
+    else:
+        assert replacement and replacement != original_id
+        assert await correct(factory, original_id) == replacement
+
+    async with host.factory() as session:
+        member = await session.get(AutoOutboundSourceMember, member_id)
+        old = await session.get(AutoOutboundDecisionRound, member.first_work_plan_round_id)
+        if correction in ("missing", "valid_old"):
+            assert old.unresolved
+        else:
+            successor = await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.previous_round_id == old.id
+                )
+            )
+            assert successor.operation_id == replacement
+            assert not old.unresolved and old.consumed_at_ms is None
+    if correction in ("missing", "valid_old"):
+        return
+
+    await host.settle(
+        operation, {**ready, "slot_id": "S2"} if correction == "different_slot" else ready
+    )
+    async with host.factory.begin() as session:
+        await racks.advance(session, task_id="t", now_ms=50)
+        plate_id = await session.scalar(select(AutoOutboundPlate.id))
+        if correction == "different_slot":
+            assert plate_id is None
+            return
+        assert plate_id is not None
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=60)
+        assert plate.pick_command_code is not None
+        command_code = plate.pick_command_code
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=70)
+        assert plate.pick_command_code == command_code
+
+
+@pytest.mark.parametrize("event_first", [False, True])
+async def test_return_rack_pick_uses_independent_platform_scan(outbound_host, event_first):
+    host = outbound_host
+    _, _, plate_id = await return_face(host)
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
+        pick_code = plate.pick_command_code
+
+    if event_first:
+        assert (await host.platform_scan(pick_code)).status_code == 200
+    else:
+        assert (await host.arm_result(pick_code, barcode=None, scanned_at=None)).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=100)
+        assert (
+            await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.plate_id == plate_id
+                )
+            )
+            is None
+        )
+
+    if event_first:
+        assert (await host.arm_result(pick_code)).status_code == 200
+    else:
+        event = await host.platform_scan(pick_code)
+        assert event.status_code == 200
+        assert not event.diagnostic
+    assert (await host.platform_scan(pick_code)).outcome == "duplicate"
+    async with host.factory.begin() as session:
+        for now_ms in (110, 120):
+            plate = await host.outbound.advance(
+                session, work_line_id=1, plate_id=plate_id, now_ms=now_ms
+            )
+        assert plate.pick_command_code == pick_code
+        assert plate.scanned_at_ms == 88
+        (decision,) = tuple(
+            await session.scalars(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.plate_id == plate_id
+                )
+            )
+        )
+        assert decision.operation == "outbound.rackslot.material.decide@v1"
+        assert decision.request_data["slot_id"] == "S1"
+        assert decision.request_data["barcode"] == "原始料盘," * 60
+        assert decision.request_data["scanned_at"] == 88
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(IntegrationExchange)
+                .where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+            == 1
+        )
+
+
+@pytest.mark.parametrize("event_first", [False, True])
+async def test_return_rack_scan_conflict_waits_for_linked_correction(outbound_host, event_first):
+    host = outbound_host
+    _, _, plate_id = await return_face(host)
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
+        code = plate.pick_command_code
+
+    async def result():
+        assert (await host.arm_result(code, barcode="result", scanned_at=88)).status_code == 200
+
+    async def scan():
+        assert (await host.platform_scan(code, barcode="event")).status_code == 200
+
+    if event_first:
+        await scan()
+        await result()
+    else:
+        await result()
+        await scan()
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=100)
+        rounds = select(AutoOutboundDecisionRound).where(
+            AutoOutboundDecisionRound.plate_id == plate_id
+        )
+        assert await session.scalar(rounds) is None
+
+    assert (
+        await host.platform_scan(code, barcode="confirmed", timestamp=101, scan_revision=2)
+    ).status_code == 200
+    async with host.factory.begin() as session:
+        for now in (110, 120):
+            await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=now)
+        (decision,) = (await session.scalars(rounds)).all()
+        assert decision.operation == "outbound.rackslot.material.decide@v1"
+        assert decision.request_data["barcode"] == "confirmed"
+        assert decision.request_data["scanned_at"] == 101
 
 
 @pytest.mark.parametrize("next_mode", [None, "valid", "invalid", "ng"])
@@ -1418,7 +1620,10 @@ async def test_put_reuses_current_arrival_after_unrelated_line_change(decided_ou
 
 
 @pytest.mark.parametrize("invalid_next", [False, True])
-async def test_target_rotation_requires_original_applied_action(decided_outbound, invalid_next):
+@pytest.mark.parametrize("rescan", [False, True])
+async def test_target_rotation_requires_original_applied_action(
+    decided_outbound, invalid_next, rescan
+):
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = decided_outbound
@@ -1444,6 +1649,7 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
         assert plate.put_command_code is None
+        assert plate.final_decision_round_id is not None
         await racks.advance(session, task_id="t", now_ms=70)
         assert plate.target_preparation_action_id
         job = await host.dispatch.progress(session, job_id=plate.target_rack_job_id)
@@ -1457,8 +1663,16 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
         )
         await racks.advance(session, task_id="t", now_ms=90)
         assert not await host.outbound.target_clear(session, job_id=plate.target_rack_job_id)
-        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=100)
-        assert plate.put_command_code
+        pick_code = plate.pick_command_code
+    if rescan:
+        assert (
+            await host.platform_scan(pick_code, barcode="corrected", timestamp=105, scan_revision=2)
+        ).status_code == 200
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=100
+        )
+        assert bool(plate.put_command_code) is not rescan
 
 
 @pytest.mark.parametrize(

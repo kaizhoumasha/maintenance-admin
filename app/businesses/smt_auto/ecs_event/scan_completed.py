@@ -1,4 +1,4 @@
-"""Accept scanner evidence for the original BIN-to-platform movement."""
+"""Accept scanner evidence for the original outbound movement to the scan platform."""
 
 from typing import Annotated, Literal
 

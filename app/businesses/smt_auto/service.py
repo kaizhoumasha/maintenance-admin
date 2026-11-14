@@ -279,6 +279,23 @@ class SmtAutoService(AutoTaskService):
     async def advance_original(
         self, session, kind, record_id, *, now_ms, operation=None, timing=None
     ):
+        if kind == "CORRECT_RETURN_FACE_READY":
+            first = await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.operation == "outbound.return_rack.work_plan@v1",
+                    AutoOutboundDecisionRound.operation_id == record_id,
+                )
+            )
+            if first is None:
+                return None
+            original_id = first.operation_id
+            record_id = await session.scalar(
+                select(AutoOutboundSourceMember.id).where(
+                    AutoOutboundSourceMember.first_work_plan_round_id == first.id
+                )
+            )
+            if record_id is None:
+                return None
         decision = None
         if kind == "OUTBOUND_DECISION":
             decision_identity = record_id
@@ -349,16 +366,17 @@ class SmtAutoService(AutoTaskService):
             "TASK": AutoTask,
             "BIN": AutoBinWork,
             "OUTBOUND_FACE": AutoOutboundSourceMember,
+            "CORRECT_RETURN_FACE_READY": AutoOutboundSourceMember,
             **PLATE_MODELS,
         }.get(kind)
         if model is None:
             raise ValueError("unsupported AUTO work kind")
         subject = await session.get(model, record_id)
         if subject is None:
-            return "NOT_FOUND"
+            return None if kind == "CORRECT_RETURN_FACE_READY" else "NOT_FOUND"
         task = await session.get(AutoTask, subject.task_id) if subject.task_id else None
         if task is None and kind != "BIN":
-            return "NOT_FOUND"
+            return None if kind == "CORRECT_RETURN_FACE_READY" else "NOT_FOUND"
         line_id = subject.work_line_id if kind == "BIN" else task.work_line_id
         if timing is not None:
             timing["work_line_id"] = line_id
@@ -402,6 +420,17 @@ class SmtAutoService(AutoTaskService):
             return await self.task_flow.start_release(
                 session, work_line_id=line_id, arrival_id=subject.arrival_id, now_ms=now_ms
             )
+        if kind == "CORRECT_RETURN_FACE_READY":
+            if not configured:
+                return None
+            replacement = await self.work_plans.start_return_face(
+                session,
+                work_line_id=line_id,
+                member_id=record_id,
+                now_ms=now_ms,
+                correct_operation_id=original_id,
+            )
+            return replacement.operation_id if replacement else None
         if kind == "OUTBOUND_FACE":
             await self.work_plans.consume_return_face(
                 session, work_line_id=line_id, member_id=record_id, now_ms=now_ms
