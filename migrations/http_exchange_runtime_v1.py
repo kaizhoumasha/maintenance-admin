@@ -7,6 +7,7 @@ from uuid import UUID
 import sqlalchemy as sa
 from alembic.util import CommandError
 
+from app.strict_json import json_object
 from migrations.integration_history_v1 import SOURCES, snapshot_version
 
 
@@ -50,6 +51,7 @@ def reconcile(bind, schema):
             "integration_runtime_retention_hold",
         ),
     )
+    audit = tuple(map(table, ("audit_logs", "audit_logs_archive")))
 
     def record(identity):
         return (
@@ -177,12 +179,11 @@ def reconcile(bind, schema):
             or digest(root["call_key"].encode()) != root["call_key_digest"]
         ):
             mismatch("ECS command digest", code)
-        ack = record(root["ack_record_id"])
         ack_wire = None
         if root["ack_record_id"]:
-            if ack is None or ack["exchange_id"] != root["id"] or ack["http_status"] != 200:
-                mismatch("ECS ACK identity/status", code)
-            ack_wire = body(ack, "ECS ACK", code)
+            ack_wire = _ecs_ack(
+                bind, records, refs, root, request, record(root["ack_record_id"]), record, body
+            )
         values = {
             key: root[key]
             for key in (
@@ -242,7 +243,7 @@ def reconcile(bind, schema):
                 ):
                     mismatch("ECS result identity/digest", code)
                 if fact["applied"]:
-                    applied.append(semantic)
+                    applied.append(fact)
                 response = record(fact["response_record_id"])
                 response_wire, _ = reply(
                     response, "ECS result", code, status=fact["http_status"], root=root["id"]
@@ -300,7 +301,12 @@ def reconcile(bind, schema):
                     response_wire=body(parent or fact, "ECS attempt", code, required=False),
                 )
             )
-        if applied != ([root["applied_result_id"]] if root["applied_result_id"] else []):
+        current_result = root["applied_result_id"]
+        if current_result is None and len(applied) == 1:
+            _verify_ecs_result_reset(bind, audit, receipts, root, applied[0], record, body)
+        elif [fact["semantic_digest"] for fact in applied] != (
+            [current_result] if current_result else []
+        ):
             mismatch("ECS applied result missing or conflicting", code)
 
     messages, attempts = map(table, ("reliable_message", "reliable_delivery_attempt"))
@@ -399,6 +405,173 @@ def reconcile(bind, schema):
     _restore_static_openings(bind, messages, roots, records, attempts)
     _transport(bind, tasks, records, refs, receipts, record, body)
     _retention(bind, roots, refs, holds, messages, tasks)
+
+
+def _verify_ecs_result_reset(bind, audit, receipts, root, fact, record, body):
+    code = root["command_code"]
+    exchange_id = str(root["id"])
+    result_id = str(fact["id"])
+    semantic = fact["semantic_digest"]
+    candidates = sa.union_all(
+        *(
+            sa.select(log.c.resource, log.c.created_at, log.c.detail).where(
+                log.c.action == "ops:ecs-result:reset",
+                sa.or_(
+                    log.c.detail["command_code"].as_string() == code,
+                    log.c.detail["exchange_id"].as_string() == exchange_id,
+                    log.c.detail["retained_result_record_id"].as_string() == result_id,
+                ),
+            )
+            for log in audit
+        )
+    )
+    rows = bind.execute(candidates.limit(2)).all()
+    if len(rows) != 1:
+        mismatch("ECS result reset audit missing or not unique", code)
+
+    resource, reset_at, detail = rows[0]
+    before, after = detail.get("before"), detail.get("after")
+    if (
+        resource != "ecs-command"
+        or detail.get("command_code") != code
+        or detail.get("exchange_id") != exchange_id
+        or detail.get("retained_result_record_id") != result_id
+        or not isinstance(before, dict)
+        or before.get("applied_result_id") != semantic
+        or not isinstance(after, dict)
+        or "applied_result_id" not in after
+        or after["applied_result_id"] is not None
+        or reset_at <= fact["occurred_at"]
+    ):
+        mismatch("ECS result reset audit conflicts with original evidence", code)
+
+    receipt = (
+        bind.execute(
+            sa.select(receipts).where(
+                receipts.c.operation == "ecs.result",
+                receipts.c.operation_id == semantic,
+                receipts.c.active.is_(True),
+            )
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if (
+        receipt is None
+        or receipt["protocol"] != "ecs-result"
+        or receipt["device_code"] != root["device_code"]
+        or receipt["status_code"] != 200
+        or fact["http_status"] != 200
+        or not fact["attempt_id"]
+        or receipt["reply_attempt_id"] != fact["attempt_id"]
+        or receipt["reply_wire"] != body(record(fact["response_record_id"]), "ECS result", code)
+    ):
+        mismatch("ECS result reset original receipt missing or conflicting", code)
+
+
+def _ecs_ack(bind, records, refs, root, request, ack, record, body):
+    code = root["command_code"]
+    exchange_id = root["id"]
+    if ack is None or ack["exchange_id"] != exchange_id:
+        mismatch("ECS ACK identity", code)
+
+    if ack["capture_origin"] == "BACKFILL":
+        version = ack["source_version"]
+        original = bind.scalar(
+            sa.select(
+                sa.exists().where(
+                    refs.c.exchange_id == exchange_id,
+                    refs.c.reference_kind == "LEGACY_SOURCE",
+                    refs.c.namespace == "ecs_command",
+                    refs.c.relation_role == "ORIGINAL_SOURCE",
+                    refs.c.reference_value == code,
+                    refs.c.value_digest == digest(code.encode()),
+                    refs.c.source_record_id.is_(None),
+                )
+            )
+        )
+        marker = bind.scalar(
+            sa.select(
+                sa.exists().where(
+                    records.c.exchange_id == exchange_id,
+                    records.c.capture_origin == "BACKFILL",
+                    records.c.record_kind == "LEGACY_SNAPSHOT",
+                    records.c.source_kind == "ecs_command",
+                    records.c.source_key == code,
+                    records.c.source_version == version,
+                )
+            )
+        )
+        if (
+            root["capture_origin"] != "BACKFILL"
+            or ack["record_kind"] != "HTTP_RESPONSE_OBSERVED"
+            or ack["direction"] != "INBOUND"
+            or ack["attempt_id"] is not None
+            or ack["body_record_id"] is not None
+            or ack["http_status"] is not None
+            or ack["source_kind"] != "ecs_command:ack"
+            or ack["source_key"] != code
+            or not valid_sha(version)
+            or request["capture_origin"] != "BACKFILL"
+            or request["source_kind"] != "ecs_command:request"
+            or request["source_key"] != code
+            or not original
+            or not marker
+        ):
+            mismatch("ECS ACK backfill provenance", code)
+        observation = ack
+    else:
+        lease = ack["attempt_id"]
+        observation = ack
+        if ack["record_kind"] == "SEND_ATTEMPT_FINISHED":
+            if (
+                ack["direction"] != "INTERNAL"
+                or not ack["body_record_id"]
+                or ack["parent_record_id"] != ack["body_record_id"]
+                or ack["http_status"] not in (None, 200)
+            ):
+                mismatch("ECS ACK finish pointer", code)
+            observation = record(ack["body_record_id"])
+        if (
+            not lease
+            or ack["capture_origin"] != "LIVE"
+            or observation is None
+            or observation["exchange_id"] != exchange_id
+            or observation["attempt_id"] != lease
+            or observation["capture_origin"] != "LIVE"
+            or observation["record_kind"] != "HTTP_RESPONSE_OBSERVED"
+            or observation["direction"] != "INBOUND"
+            or observation["http_status"] != 200
+            or observation["network_state"] != "HTTP_RESPONSE_COMPLETE"
+            or observation["protocol_verdict"] != "DELIVERED"
+            or observation["body_record_id"] is not None
+        ):
+            mismatch("ECS ACK original HTTP observation", code)
+        conclusions = bind.execute(
+            sa.select(records.c.ecs_attempt_outcome, records.c.http_status).where(
+                records.c.exchange_id == exchange_id,
+                records.c.record_kind == "ECS_ATTEMPT_CONCLUSION",
+                records.c.attempt_id == lease,
+                records.c.parent_record_id == ack["id"],
+            )
+        ).all()
+        if conclusions != [("ACK", 200)]:
+            mismatch("ECS ACK conclusion missing or conflicting", code)
+
+    wire = body(observation, "ECS ACK", code, full_only=True)
+    decoded = json_object(wire)
+    if (
+        decoded is None
+        or type(decoded.get("code")) is not int
+        or (decoded["code"], decoded.get("message")) != (200, "ACK")
+        or ("trace_id" in decoded and not isinstance(decoded["trace_id"], str))
+    ):
+        mismatch("ECS ACK body does not acknowledge the command", code)
+    try:
+        canonical_digest(decoded)
+    except (ValueError, RecursionError):
+        mismatch("ECS ACK body is not canonicalizable", code)
+    return wire
 
 
 def restore_active_ecs_attempts(bind, schema, metadata, messages, records):

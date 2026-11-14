@@ -1065,6 +1065,7 @@ async def test_original_gate_finish_and_result_cost_with_retained_history(ecs):
 
 @pytest.mark.parametrize("late", [False, True])
 async def test_result_settles_open_http_exchange_and_restart_restores_it(ecs, late):
+    import asyncio
     from dataclasses import replace
 
     from app.integrations.ecs_command.protocol import PROTOCOL
@@ -1074,6 +1075,11 @@ async def test_result_settles_open_http_exchange_and_restart_restores_it(ecs, la
     from app.reliable import Verdict, VerdictKind
     from app.reliable.store import AttemptOutcome
     from app.reliable.types import MessageStatus
+
+    # The PostgreSQL fixture shares older projection work with other cases in this lane.
+    async with asyncio.timeout(30):
+        while await reconcile_outbound(ecs.factory):
+            pass
 
     command = await prepare(ecs)
     store = await make_store(ecs)

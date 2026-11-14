@@ -1,6 +1,7 @@
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
 import pytest
 from sqlalchemy import select, text
@@ -626,3 +627,264 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
         assert not (await session.get(CallbackReceipt, wms.receipt_id)).active
         assert (await session.get(CallbackReceipt, protected.receipt_id)).active
         assert (await session.get(CallbackReceipt, pending.receipt_id)).active
+
+
+@pytest.mark.parametrize(
+    "state_migration",
+    [("TEST_HISTORY_MIGRATION_DATABASE_URL", "postgresql", "http_exchange_runtime_expand")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "shape,invalid",
+    [
+        ("live", None),
+        ("backfill", None),
+        ("live", "lease"),
+        ("live", "status"),
+        ("live", "conclusion"),
+        ("live", "conflicting_conclusion"),
+        ("live", "body"),
+        ("live", "envelope"),
+        ("backfill", "source"),
+        ("backfill", "reference"),
+        ("backfill", "status"),
+    ],
+)
+async def test_ecs_ack_cutover_checks_original_provenance(state_migration, shape, invalid):
+    from app.models import EcsCommand, EcsSendEvidence
+
+    factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
+    service, store, adapter, targets = ecs(factory)
+    command, claim = await command_at_gate(factory, service, store, adapter, targets, "ack")
+    wire = b'{"code":200,"message":"ACK"}'
+    response = HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), wire)
+    assert await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.DONE,
+            result=response,
+            verdict=Verdict(VerdictKind.DELIVERED, response=wire),
+        ),
+    )
+    async with factory.begin() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code
+            )
+        )
+        ack = await session.get(IntegrationRecord, root.ack_record_id)
+        if shape == "live":
+            assert ack.record_kind == "SEND_ATTEMPT_FINISHED"
+            observation = await session.get(IntegrationRecord, ack.body_record_id)
+            if invalid == "lease":
+                observation.attempt_id = "different-lease"
+            elif invalid == "status":
+                observation.http_status = 201
+            elif invalid == "body":
+                observation.body_sha256 = "0" * 64
+            elif invalid == "envelope":
+                wrong_body = b'{"code":200,"message":"ERROR","message":"ACK"}'
+                observation.raw_body = wrong_body
+                observation.stored_bytes = len(wrong_body)
+                observation.body_sha256 = sha256(wrong_body).hexdigest()
+            elif invalid in {"conclusion", "conflicting_conclusion"}:
+                conclusion = await session.scalar(
+                    select(IntegrationRecord).where(IntegrationRecord.parent_record_id == ack.id)
+                )
+                if invalid == "conclusion":
+                    await session.delete(conclusion)
+                else:
+                    conclusion.ecs_attempt_outcome = "REJECTED"
+        else:
+            root.capture_origin = "BACKFILL"
+            root.coverage = "LEGACY"
+            version = sha256(b"archived command source").hexdigest()
+            request = await session.get(IntegrationRecord, root.request_record_id)
+            request.capture_origin = "BACKFILL"
+            request.source_kind = "ecs_command:request"
+            request.source_key = root.command_code
+            request.source_version = version
+            root.ack_record_id = await history.write_record(
+                session,
+                draft=history.RecordDraft(
+                    exchange_id=root.id,
+                    record_kind="HTTP_RESPONSE_OBSERVED",
+                    event_key="BACKFILL:ACK",
+                    direction="INBOUND",
+                    capture_origin="BACKFILL",
+                    http_status=200 if invalid == "status" else None,
+                    raw_body=wire,
+                    source_kind="ecs_command:ack",
+                    source_key=root.command_code,
+                    source_version=version,
+                ),
+            )
+            if invalid != "source":
+                await history.write_record(
+                    session,
+                    draft=history.RecordDraft(
+                        exchange_id=root.id,
+                        record_kind="LEGACY_SNAPSHOT",
+                        event_key="SOURCE:COMMAND",
+                        direction="INTERNAL",
+                        capture_origin="BACKFILL",
+                        source_kind="ecs_command",
+                        source_key=root.command_code,
+                        source_version=version,
+                    ),
+                )
+            if invalid != "reference":
+                await history.write_reference(
+                    session,
+                    exchange_id=root.id,
+                    reference_kind="LEGACY_SOURCE",
+                    namespace="ecs_command",
+                    value=root.command_code,
+                    relation_role="ORIGINAL_SOURCE",
+                    created_at=datetime.now(UTC),
+                )
+        original_ack = root.ack_record_id
+
+    url = state_migration.engine.url.render_as_string(hide_password=False)
+    result = await run_alembic(url, "-x", "fence_legacy_writes=true", "upgrade", "head")
+    if invalid:
+        assert result.returncode != 0
+        assert "ECS ACK" in result.stdout + result.stderr
+        async with factory() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "http_exchange_runtime_expand"
+            )
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    async with factory() as session:
+        stored = await session.get(EcsCommand, command.command_code)
+        assert (stored.ack_record_id, stored.ack_wire) == (original_ack, wire)
+        if shape == "live":
+            evidence = await session.get(EcsSendEvidence, (command.command_code, claim.lease_id, 1))
+            assert (evidence.outcome, evidence.http_status, evidence.response_wire) == (
+                "ACK",
+                200,
+                wire,
+            )
+        else:
+            assert not await session.scalar(
+                select(EcsSendEvidence).where(EcsSendEvidence.observation_id == original_ack)
+            )
+
+
+@pytest.mark.parametrize(
+    "state_migration",
+    [("TEST_HISTORY_MIGRATION_DATABASE_URL", "postgresql", "http_exchange_runtime_expand")],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "proof",
+    [
+        "live",
+        "archived",
+        "missing",
+        "wrong_command",
+        "wrong_exchange",
+        "wrong_digest",
+        "wrong_record",
+        "missing_after",
+        "duplicate",
+        "conflicting",
+        "missing_receipt",
+        "wrong_receipt_attempt",
+    ],
+)
+async def test_ecs_result_reset_cutover_requires_unique_audited_evidence(
+    state_migration, proof, monkeypatch
+):
+    from app.models import AuditLog, AuditLogArchive, EcsCommand, EcsResultEvidence
+
+    factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
+    service, store, adapter, targets = ecs(factory)
+    command, _ = await command_at_gate(factory, service, store, adapter, targets, "reset")
+    raw = result_wire(command)
+    async with factory.begin() as session:
+        original = await receive_ecs_result(session, raw, service)
+        assert (original.status_code, original.pure_replay) == (200, False)
+        root = await session.get(IntegrationExchange, original.exchange_id)
+        fact = await session.scalar(
+            select(IntegrationRecord).where(
+                IntegrationRecord.exchange_id == root.id, IntegrationRecord.applied.is_(True)
+            )
+        )
+        root.applied_result_id = None
+        root.status = "HELD"
+        root.hold_reason = "OPERATOR_SUPERSEDED"
+        root.blocked = True
+        details = {
+            "command_code": "different" if proof == "wrong_command" else command.command_code,
+            "exchange_id": str(uuid7() if proof == "wrong_exchange" else root.id),
+            "retained_result_record_id": str(uuid7() if proof == "wrong_record" else fact.id),
+            "before": {
+                "applied_result_id": "f" * 64 if proof == "wrong_digest" else original.digest
+            },
+            "after": {} if proof == "missing_after" else {"applied_result_id": None},
+        }
+        audit = dict(
+            id=121,
+            action="ops:ecs-result:reset",
+            resource="ecs-command",
+            detail=details,
+            trace_id="result-reset-test",
+            created_at=datetime.now(UTC),
+        )
+        if proof == "archived":
+            session.add(AuditLogArchive(**audit))
+        elif proof != "missing":
+            session.add(AuditLog(**audit))
+        if proof in {"duplicate", "conflicting"}:
+            if proof == "conflicting":
+                audit = {**audit, "id": 122, "detail": {**details, "before": {}}}
+            session.add(AuditLogArchive(**audit))
+        if proof in {"missing_receipt", "wrong_receipt_attempt"}:
+            receipt = await session.scalar(
+                select(IntegrationExchange).where(
+                    IntegrationExchange.receipt_id == original.receipt_id
+                )
+            )
+            if proof == "missing_receipt":
+                receipt.receipt_active = False
+            else:
+                response = await session.get(IntegrationRecord, receipt.current_response_record_id)
+                response.attempt_id = str(uuid7())
+
+    url = state_migration.engine.url.render_as_string(hide_password=False)
+    result = await run_alembic(url, "-x", "fence_legacy_writes=true", "upgrade", "head")
+    if proof not in {"live", "archived"}:
+        assert result.returncode != 0
+        assert "ECS result reset" in result.stdout + result.stderr
+        async with factory() as session:
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "http_exchange_runtime_expand"
+            )
+        return
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
+    await require_reconciled(factory)
+    async with factory.begin() as session:
+        stored = await session.get(EcsCommand, command.command_code)
+        evidence = await session.get(EcsResultEvidence, (command.command_code, original.digest))
+        receipt = await session.get(CallbackReceipt, original.receipt_id)
+        assert (stored.applied_result_id, stored.status, stored.blocked) == (None, "HELD", True)
+        assert (evidence.applied, evidence.receipt_id, evidence.response_wire) == (
+            True,
+            original.receipt_id,
+            original.prepared_body,
+        )
+        assert (receipt.active, receipt.status_code, receipt.reply_wire) == (
+            True,
+            200,
+            original.prepared_body,
+        )
+        replay = await receive_ecs_result(session, raw, service)
+        assert (replay.pure_replay, replay.receipt_id, replay.prepared_body) == (
+            True,
+            original.receipt_id,
+            original.prepared_body,
+        )

@@ -60,6 +60,7 @@ def upgrade():
             "reliable_message, reliable_delivery_attempt, transport_task "
             "IN ACCESS EXCLUSIVE MODE NOWAIT"
         )
+        bind.exec_driver_sql("LOCK TABLE audit_logs, audit_logs_archive IN SHARE MODE NOWAIT")
     fence = context.get_x_argument(as_dictionary=True).get("fence_legacy_writes") == "true"
     if (
         not fence
