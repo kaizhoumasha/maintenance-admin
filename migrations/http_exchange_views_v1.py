@@ -3,10 +3,19 @@
 from sqlalchemy import text
 
 
-def create_http_views(bind):
+def create_http_views(bind, *, initiator=False, replace=False):
     pg = bind.dialect.name == "postgresql"
     p = "enterprise_backend." if pg else ""
     uid = "uuid" if pg else "text"
+    column = "initiator" if initiator else "direction"
+    peer_initiated = "h.initiator='PEER'" if initiator else "h.direction='INBOUND'"
+    response_direction = (
+        "h.initiator"
+        if initiator
+        else "CASE WHEN h.direction='INBOUND' THEN 'OUTBOUND' ELSE 'INBOUND' END"
+    )
+    schema_version = 3 if initiator else 2
+    create = "CREATE OR REPLACE VIEW" if replace else "CREATE VIEW"
     # SQLite stores ORM UUIDs as 32 hex digits.
     operation_id = (
         "CAST(h.operation_id AS text)"
@@ -17,7 +26,7 @@ def create_http_views(bind):
     )
     common = (
         "id",
-        "direction",
+        column,
         "interaction_kind",
         "started_at",
         "finished_at",
@@ -73,8 +82,8 @@ def create_http_views(bind):
 
     bind.execute(
         text(f"""
-        CREATE VIEW {p}integration_exchange_summary AS
-        SELECT h.id, 2 AS schema_version,
+        {create} {p}integration_exchange_summary AS
+        SELECT h.id, {schema_version} AS schema_version,
             CASE WHEN h.receipt_id IS NOT NULL THEN 'RECEIPT'
                  WHEN h.interaction_kind='COMMAND' THEN 'ECS_COMMAND'
                  WHEN h.message_id IS NOT NULL THEN 'OUTGOING' ELSE 'DIAGNOSTIC' END AS role,
@@ -84,7 +93,7 @@ def create_http_views(bind):
                 WHEN 'CALLBACK' THEN 'wms-callback' WHEN 'COMMAND' THEN 'ecs-command'
                 WHEN 'EVENT' THEN 'ecs-event' WHEN 'RESULT' THEN 'ecs-result'
                 WHEN 'STATUS' THEN 'ecs-status' ELSE 'wms-transport' END AS protocol,
-            h.direction, h.interaction_kind, h.operation_name AS operation,
+            h.{column}, h.interaction_kind, h.operation_name AS operation,
             COALESCE(h.wms_id,r.operation_id) AS operation_id, h.message_type,
             CASE WHEN h.peer='TRANSPORT' AND h.transport_task_id IS NOT NULL
                     THEN 'TRANSPORT_TASK_ID'
@@ -105,7 +114,7 @@ def create_http_views(bind):
             COALESCE(m.status,c.delivery_status,'UNKNOWN') AS delivery_state,
             m.delivery_uncertain, h.protocol_verdict, h.http_status AS protocol_http_status,
             CASE WHEN h.http_status IS NULL THEN NULL
-                 WHEN h.direction='INBOUND' THEN 'PROTOCOL_PREPARED' ELSE 'PEER_OBSERVATION' END
+                 WHEN {peer_initiated} THEN 'PROTOCOL_PREPARED' ELSE 'PEER_OBSERVATION' END
                 AS response_scope,
             CASE WHEN h.http_status IS NOT NULL THEN {side_id("5")} END
                 AS protocol_source_record_id,
@@ -138,11 +147,11 @@ def create_http_views(bind):
     )
     bind.execute(
         text(f"""
-        CREATE VIEW {p}integration_record_summary AS
+        {create} {p}integration_record_summary AS
         SELECT {side_id("4")} AS id,h.id AS exchange_id,
-            CASE WHEN h.direction='INBOUND' THEN 'CALLBACK_RECEIVED' ELSE 'REQUEST_REGISTERED' END
+            CASE WHEN {peer_initiated} THEN 'CALLBACK_RECEIVED' ELSE 'REQUEST_REGISTERED' END
                 AS record_kind,'DIAGNOSTIC' AS evidence_class,h.lease_id AS attempt_id,
-            CAST(NULL AS {uid}) AS parent_record_id,h.direction,h.started_at AS occurred_at,
+            CAST(NULL AS {uid}) AS parent_record_id,h.{column},h.started_at AS occurred_at,
             h.started_at AS recorded_at,'LIVE' AS capture_origin,
             CAST(NULL AS integer) AS http_status,
             CAST(NULL AS text) AS network_state,CAST(NULL AS text) AS protocol_verdict,
@@ -156,10 +165,10 @@ def create_http_views(bind):
             h.response_record_id, 'request' AS side,h.peer_system,h.trace_id,h.reason_code
         FROM {p}integration_exchange_summary h
         UNION ALL SELECT h.response_record_id,h.id,
-            CASE WHEN h.direction='INBOUND' THEN 'RESPONSE_PREPARED'
+            CASE WHEN {peer_initiated} THEN 'RESPONSE_PREPARED'
                  ELSE 'HTTP_RESPONSE_OBSERVED' END,
             'DIAGNOSTIC',h.lease_id,h.request_record_id,
-            CASE WHEN h.direction='INBOUND' THEN 'OUTBOUND' ELSE 'INBOUND' END,
+            {response_direction},
             COALESCE(h.late_response_at,h.response_observed_at,h.finished_at,h.started_at),
             COALESCE(h.late_response_at,h.response_observed_at,h.finished_at,h.started_at),
             'LIVE',h.protocol_http_status,h.attempt_state,h.protocol_verdict,h.protocol_code,

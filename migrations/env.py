@@ -142,12 +142,23 @@ def _run(connection) -> None:
                 options.get("fence_legacy_writes") == "true"
                 or get_settings().INTEGRATION_RUNTIME_AUTHORITY
             )
-            from app.integrations.runtime_authority import QUERY_REVISION, check_reconciled
+            from app.integrations.runtime_authority import (
+                PREVIOUS_QUERY_REVISION,
+                QUERY_REVISION,
+                check_reconciled,
+            )
 
-            if not use_runtime and context.get_context().get_current_revision() != QUERY_REVISION:
+            revision = context.get_context().get_current_revision()
+            if not use_runtime and revision not in (PREVIOUS_QUERY_REVISION, QUERY_REVISION):
                 return
             try:
-                check_reconciled(connection, use_runtime=use_runtime)
+                check_reconciled(
+                    connection,
+                    use_runtime=use_runtime,
+                    query_revision=revision
+                    if revision == PREVIOUS_QUERY_REVISION
+                    else QUERY_REVISION,
+                )
             except RuntimeError as error:
                 raise CommandError(str(error)) from None
 

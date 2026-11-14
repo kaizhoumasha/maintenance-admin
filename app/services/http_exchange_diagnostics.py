@@ -26,7 +26,7 @@ EXCHANGES = {
 }
 SUMMARY = (
     "id",
-    "direction",
+    "initiator",
     "interaction_kind",
     "traffic_source",
     "started_at",
@@ -112,7 +112,7 @@ async def diagnostics(session, *, peer, reference, limit, before):
             )
             runtime.append(
                 dict(
-                    direction="OUTBOUND",
+                    initiator="WES",
                     message_id=item.id,
                     operation=item.operation,
                     target=item.target,
@@ -152,7 +152,7 @@ async def diagnostics(session, *, peer, reference, limit, before):
             .mappings()
             .all()
         )
-        runtime.extend(dict(direction="INBOUND", **row) for row in receipts[:100])
+        runtime.extend(dict(initiator="PEER", **row) for row in receipts[:100])
         runtime_truncated = len(rows) > 100 or len(receipts) > 100
     elif peer == "ECS":
         command = EcsCommand if enabled() else IntegrationExchange

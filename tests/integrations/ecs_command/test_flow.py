@@ -1099,6 +1099,7 @@ async def test_result_settles_open_http_exchange_and_restart_restores_it(ecs, la
     await reconcile_outbound(ecs.factory)
     async with ecs.factory() as session:
         row = (await session.scalars(query)).one()
+        assert row.initiator == "WES"
         assert (row.close_reason, row.attempt_state) == ("SETTLED_BY_CALLBACK", "DELIVERY_UNKNOWN")
         assert row.response_wire is None
         identity, finished_at = row.id, row.finished_at

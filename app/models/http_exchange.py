@@ -59,7 +59,7 @@ class ReliableDeliveryAttempt(Base):
 
 class HttpExchange:
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
-    direction: Mapped[str] = mapped_column(Text)
+    initiator: Mapped[str] = mapped_column(Text)
     interaction_kind: Mapped[str] = mapped_column(Text)
     traffic_source: Mapped[str] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -101,7 +101,7 @@ class HttpExchange:
 
 def _constraints(name, kinds, *keys):
     return (
-        CheckConstraint("direction IN ('INBOUND', 'OUTBOUND')", name="direction"),
+        CheckConstraint("initiator IN ('WES', 'PEER')", name="initiator"),
         CheckConstraint("traffic_source IN ('PEER', 'MOCK')", name="traffic_source"),
         CheckConstraint(f"interaction_kind IN {kinds}", name="interaction_kind"),
         CheckConstraint("(message_id IS NULL) = (lease_id IS NULL)", name="lease_pair"),

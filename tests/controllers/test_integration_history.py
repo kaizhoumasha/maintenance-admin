@@ -210,6 +210,7 @@ async def test_diagnostics_finds_unmatched_ecs_callback_and_keeps_wire_out_of_su
     assert result["runtime"] == []
     [row] = result["items"]
     assert row["http_status"] == 404 and row["reason_code"] == "COMMAND_NOT_FOUND"
+    assert row["initiator"] == "PEER" and "direction" not in row
     wire = await client.get(
         f"/api/v1/integrations/http-exchanges/ECS/{row['id']}/response", headers=admin
     )

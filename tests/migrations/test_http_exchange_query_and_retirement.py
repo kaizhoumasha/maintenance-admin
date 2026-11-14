@@ -101,7 +101,7 @@ async def test_query_and_body_permission_with_old_tables_hidden(
     payload = {"private": "fixture-body"}
     now = datetime.now(UTC)
     details = dict(
-        direction="INBOUND",
+        initiator="PEER",
         traffic_source="PEER",
         started_at=now,
         finished_at=now,
@@ -230,22 +230,23 @@ async def test_query_and_body_permission_with_old_tables_hidden(
             root + "/diagnostics", headers=admin, params={"peer": peer, "reference": reference}
         )
         assert result.status_code == 200, result.text
-        assert str(attempts[peer].id) in {row["id"] for row in result.json()["items"]}
+        [record] = [row for row in result.json()["items"] if row["id"] == str(attempts[peer].id)]
+        assert record["initiator"] == "PEER" and "direction" not in record
         assert "fixture-body" not in result.text
         if peer == "WMS":
             outbound, inbound = result.json()["runtime"]
-            assert (outbound["message_id"], outbound["operation"], outbound["direction"]) == (
+            assert (outbound["message_id"], outbound["operation"], outbound["initiator"]) == (
                 message.id,
                 operation,
-                "OUTBOUND",
+                "WES",
             )
             assert (
                 outbound["delivery_status"],
                 outbound["response_state"],
                 outbound["protocol_code"],
             ) == ("DONE", "VALID", "PREPARE_ACCEPTED")
-            assert (inbound["receipt_id"], inbound["direction"]) == (1201, "INBOUND")
-        params = {"peer_system": peer, "identity_value": reference, "limit": 1}
+            assert (inbound["receipt_id"], inbound["initiator"]) == (1201, "PEER")
+        params = {"peer_system": peer, "identity_value": reference, "limit": 1, "initiator": "PEER"}
         listed = await client.get(root + "/exchanges", headers=admin, params=params)
         assert listed.status_code == 200, listed.text
         item = listed.json()["items"][0]
@@ -258,6 +259,11 @@ async def test_query_and_body_permission_with_old_tables_hidden(
             assert next_page.status_code == 200 and len(next_page.json()["items"]) == 1
             assert next_page.json()["items"][0]["id"] != item["id"]
         assert item["reason_code"] == "INVALID_ENVELOPE"
+        assert item["initiator"] == "PEER" and "direction" not in item
+        unmatched = await client.get(
+            root + "/exchanges", headers=admin, params={**params, "initiator": "WES"}
+        )
+        assert unmatched.status_code == 200 and unmatched.json()["items"] == []
     receipt_only = await client.get(
         root + "/diagnostics",
         headers=admin,
@@ -270,6 +276,7 @@ async def test_query_and_body_permission_with_old_tables_hidden(
     detail = await client.get(f"{root}/exchanges/{exchange_id}", headers=admin)
     assert detail.status_code == 200, detail.text
     assert detail.json()["receipt_id"] == 1201
+    assert detail.json()["initiator"] == "PEER" and "direction" not in detail.json()
     assert any(
         ref["exchange_id"] == str(replay_id) and ref["related_exchange_id"] == exchange_id
         for ref in detail.json()["references"]
@@ -280,6 +287,22 @@ async def test_query_and_body_permission_with_old_tables_hidden(
     rows = {row["side"]: row for row in timeline.json()["items"]}
     assert rows["request"]["id"] == detail.json()["request_record_id"]
     assert rows["response"]["id"] == detail.json()["current_response_record_id"]
+    assert all(row["initiator"] == "PEER" and "direction" not in row for row in rows.values())
+    filtered = await client.get(
+        f"{root}/exchanges/{exchange_id}/records",
+        headers=admin,
+        params={
+            "filter": json.dumps(
+                {
+                    "conditions": [
+                        {"field": "initiator", "op": "eq", "value": "PEER"},
+                        {"field": "record_kind", "op": "eq", "value": "RESPONSE_PREPARED"},
+                    ]
+                }
+            )
+        },
+    )
+    assert filtered.status_code == 200 and filtered.json()["items"] == [rows["response"]]
     paths = {side: f"{root}/records/{row['id']}/body" for side, row in rows.items()}
     auth_factory = app.state.audit_session_factory
     async with auth_factory.begin() as session:
@@ -413,7 +436,7 @@ async def test_retirement_refuses_dependencies_then_drops_only_old_tables(
         session.add(
             WmsHttpExchange(
                 id=exchange_id,
-                direction="OUTBOUND",
+                initiator="WES",
                 interaction_kind="DECISION",
                 traffic_source="PEER",
                 started_at=datetime.now(UTC),

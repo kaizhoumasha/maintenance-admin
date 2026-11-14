@@ -204,7 +204,7 @@ def _values(attempt, request, response, reply):
     )
     values = dict(
         id=attempt.id,
-        direction="OUTBOUND",
+        initiator="WES",
         interaction_kind=kind,
         traffic_source=attempt.traffic_source,
         message_id=attempt.message_id,
@@ -453,7 +453,7 @@ async def capture_callback(
     reply_data = reply.get("data")
     values = dict(
         id=identity,
-        direction="INBOUND",
+        initiator="PEER",
         traffic_source=traffic_source,
         started_at=started_at,
         finished_at=finished_at,
@@ -504,7 +504,7 @@ async def capture_status(factory, *, origin, request, started_at, result, reason
     completed = result.completed_at if result else None
     values = dict(
         id=uuid7(started_at),
-        direction="OUTBOUND",
+        initiator="WES",
         interaction_kind="STATUS",
         traffic_source="PEER",
         started_at=started_at,

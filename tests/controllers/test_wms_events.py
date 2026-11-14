@@ -72,6 +72,7 @@ async def test_unknown_operation_replays_its_original_rejection(
             .order_by(WmsHttpExchange.started_at, WmsHttpExchange.id)
         )
         original, repeated = rows.all()
+    assert original.initiator == repeated.initiator == "PEER"
     assert original.handling_outcome == "REJECTED"
     assert repeated.handling_outcome == "REPLAYED"
     assert repeated.replayed_from_id == original.id

@@ -35,9 +35,13 @@ class HistoryParams(BaseModel):
         return value
 
 
+HttpInitiator = Literal["WES", "PEER"]
+
+
 class ExchangeListParams(HistoryParams):
     peer_system: Literal["ECS", "WMS", "TRANSPORT"] | None = None
     direction: Literal["INBOUND", "OUTBOUND", "INTERNAL"] | None = None
+    initiator: HttpInitiator | None = None
     operation: str | None = None
     device_code: str | None = None
     owner_domain: str | None = None
@@ -71,14 +75,13 @@ class RecordListParams(HistoryParams):
     evidence_class: Literal["CORE", "DIAGNOSTIC"] | None = None
 
 
-class ExchangeSummary(BaseModel):
+class _ExchangeSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID
     schema_version: int
     role: str
     peer_system: str | None
     protocol: str
-    direction: str
     interaction_kind: str
     operation: str | None
     operation_id: str | None
@@ -101,7 +104,15 @@ class ExchangeSummary(BaseModel):
     late_response_at: UtcTime | None = None
 
 
-class ExchangeDetail(ExchangeSummary):
+class ExchangeSummary(_ExchangeSummary):
+    direction: str
+
+
+class HttpExchangeSummary(_ExchangeSummary):
+    initiator: HttpInitiator
+
+
+class _ExchangeDetail(_ExchangeSummary):
     command_code: str | None
     receipt_id: int | None
     receipt_active: bool | None
@@ -112,7 +123,15 @@ class ExchangeDetail(ExchangeSummary):
     references_truncated: bool
 
 
-class RecordSummary(BaseModel):
+class ExchangeDetail(_ExchangeDetail):
+    direction: str
+
+
+class HttpExchangeDetail(_ExchangeDetail):
+    initiator: HttpInitiator
+
+
+class _RecordSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: UUID
     exchange_id: UUID
@@ -120,7 +139,6 @@ class RecordSummary(BaseModel):
     evidence_class: str
     attempt_id: str | None
     parent_record_id: UUID | None
-    direction: str
     occurred_at: UtcTime | None
     recorded_at: UtcTime
     capture_origin: str
@@ -142,3 +160,11 @@ class RecordSummary(BaseModel):
     response_record_id: UUID | None
     metadata: dict | None
     side: Literal["request", "response"] | None = None
+
+
+class RecordSummary(_RecordSummary):
+    direction: str
+
+
+class HttpRecordSummary(_RecordSummary):
+    initiator: HttpInitiator
