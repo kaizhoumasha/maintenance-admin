@@ -4,10 +4,12 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import pytest
+from pydantic import ConfigDict
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.businesses._components.sorting_task.contracts import Cancel
 from app.core.config import get_settings
 from app.core.identifiers import uuid7
 from app.http_client import DeliveryState, HttpResult
@@ -20,7 +22,7 @@ from app.integrations.ecs_command.result import receive_ecs_result
 from app.integrations.ecs_command.routing import RouteAuthorization, RouteSnapshot
 from app.integrations.ecs_command.service import CommandOwner, EcsCommands
 from app.integrations.runtime_authority import require_reconciled
-from app.integrations.wms_callback import receive
+from app.integrations.wms_callback import CallbackErrors, callback_operation, receive, registry
 from app.integrations.wms_transport import (
     BinMove,
     HandoffPosition,
@@ -452,15 +454,39 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
     task_id, original, trigger = await seed_transport(factory)
     applied_task_id, applied_original, applied_trigger = await seed_transport(factory)
     unknown_task_id, unknown_original, _ = await seed_transport(factory)
-    wms_wire = wire("unknown.test@v1", str(uuid7()), {})
+    operation = "sorting.task.cancel@v1"
+    wms_body = dict(task_id="TASK", cancel_scope="TASK", diagnostic_note="old")
+    wms_operation_id = str(uuid7())
+    wms_wire = wire(operation, wms_operation_id, wms_body)
+    monkeypatch.setattr(registry, "_registry", dict(registry._registry))
+    registry._registry.pop(operation, None)
+
+    class LegacyCancel(Cancel):
+        model_config = ConfigDict(extra="forbid")
+
+    @callback_operation(
+        operation,
+        data=LegacyCancel,
+        errors=CallbackErrors("INVALID_DATA", "INVALID_ENVELOPE", "IDEMPOTENCY_CONFLICT"),
+    )
+    async def unexpected_handler(ctx, data):
+        pytest.fail("an original payload rejection must not run the handler")
+
+    closed_result = json.loads(result_wire(closed_command)) | {
+        "result": "FAILED",
+        "error_detail": {"code": "E", "msg": "original error"},
+    }
     protected_wire = wire("unknown.test@v1", str(uuid7()), {})
     event_wire = b'{"device_code":"D1","event_type":"UNREGISTERED","timestamp":1,"data":{}}'
     async with factory.begin() as session:
-        saved_result = await receive_ecs_result(session, result_wire(closed_command), service)
+        saved_result = await receive_ecs_result(
+            session, json.dumps(closed_result).encode(), service
+        )
         assert saved_result.status_code == 200
         event = await receive_ecs_event(session, event_wire)
         assert event.status_code == 200
         wms = await receive(session, wms_wire)
+        assert wms.status_code == 422 and wms.body["data"] == {"reason_code": "INVALID_DATA"}
         protected = await receive(session, protected_wire)
         await history.link_receipt(
             session,
@@ -515,6 +541,8 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
     assert migration.returncode == 0, migration.stdout + migration.stderr
     monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
     await require_reconciled(factory)
+    registration = registry.lookup(operation)
+    monkeypatch.setitem(registry._registry, operation, replace(registration, data_model=Cancel))
     with pytest.raises(DBAPIError, match="writes retired"):
         async with factory.begin() as session:
             await session.execute(text("UPDATE integration_exchange SET coverage=coverage"))
@@ -539,6 +567,8 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
             wms.status_code,
             wms.prepared_body,
         )
+        changed = wire(operation, wms_operation_id, wms_body | {"diagnostic_note": "changed"})
+        assert (await receive(session, changed)).status_code == 409
         event_replay = await receive_ecs_event(session, event_wire)
         assert event_replay.receipt_id == event.receipt_id
         assert event_replay.prepared_body == event.prepared_body
@@ -546,7 +576,11 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
         assert position.status_code == 202 and position.receipt_id > pending.receipt_id
         result = await receive_ecs_result(session, result_wire(command), service)
         assert result.status_code == 200
-        old_result = await receive_ecs_result(session, result_wire(closed_command), service)
+        extended = closed_result | {
+            "error_detail": closed_result["error_detail"] | {"diagnostic_note": "changed"}
+        }
+        old_result = await receive_ecs_result(session, json.dumps(extended).encode(), service)
+        assert old_result.digest == saved_result.digest
         assert old_result.prepared_body == saved_result.prepared_body
     async with factory.begin() as session:
         replay = await receive_ecs_result(session, result_wire(command), service)

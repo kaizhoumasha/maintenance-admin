@@ -2,7 +2,7 @@
 
 from typing import Annotated, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from app.businesses._components.sorting_task.contracts import (
     Cancel,
@@ -25,8 +25,28 @@ class ManualCompleted(CallbackPayload):
     completed_at: Positive
 
 
-class DirectPickCompleted(CallbackPayload):
-    model_config = ConfigDict(strict=True, extra="forbid")
+class _RackCompletion(CallbackPayload):
+    @model_validator(mode="before")
+    @classmethod
+    def reject_other_completion_fields(cls, value):
+        completion_fields = {
+            "plan_revision",
+            "through_plan_revision",
+            "rack_face",
+            "bin_code",
+            "result",
+            "slot_id",
+            "slot_ids",
+            "slot_results",
+            "results",
+            "cell_id",
+        }
+        if isinstance(value, dict) and (value.keys() & completion_fields) - cls.model_fields.keys():
+            raise ValueError("field does not apply to this rack completion")
+        return value
+
+
+class DirectPickCompleted(_RackCompletion):
     task_id: Identifier
     plan_revision: Positive
     rack_id: Identifier
@@ -34,7 +54,7 @@ class DirectPickCompleted(CallbackPayload):
     completed_at: Positive
 
 
-class ReturnRackCompleted(CallbackPayload):
+class ReturnRackCompleted(_RackCompletion):
     task_id: Identifier
     through_plan_revision: Positive
     rack_id: Identifier

@@ -6,6 +6,7 @@ from pydantic import ConfigDict, Field, model_validator
 
 from app.businesses._components.sorting_task.contracts import Identifier, NonNegative
 from app.businesses.bin_types import BinType
+from app.integrations.wms_callback import CallbackPayload
 
 from .work_plan_contracts import Data, Number
 
@@ -79,7 +80,28 @@ class SourceAbsent(Data):
         return value
 
 
-class RackExhausted(Data):
+class RackExhausted(CallbackPayload):
     task_id: Identifier
     rack_id: Identifier
     transport_task_id: Identifier
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_other_source_evidence(cls, value):
+        if isinstance(value, dict) and value.keys() & {
+            "plan_revision",
+            "workline_code",
+            "location_code",
+            "zone_code",
+            "rack_face",
+            "arrival_event_id",
+            "source_rack_exhausted",
+            "barcode",
+            "observed_at",
+            "scanned_at",
+            "source",
+            "source_racks",
+            "target_bin_code",
+        }:
+            raise ValueError("rack exhaustion references the original inbound transport only")
+        return value

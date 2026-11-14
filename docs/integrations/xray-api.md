@@ -224,7 +224,7 @@ WES 将五种 Command 模型列入 `COMMANDS`。三个判定模型各自包含�
 | barcode / new_barcode | Barcode。复核前使用入口原码，复核 OK 后的正常路径使用实读新码。各报文的必填条件见对应小节。 |
 | template_id / label.variables.ID | 固定模板标识 XX123456789。入口、点料和标签变量保持一致，未结盘期间不切换模板或变量定义。部署变更须明确配置，不按单盘临时选模板。 |
 | reason_code / reason_message | 原设备原因码和说明，均为非空字符串。按各事件的条件携带；NG_DISCHARGED 使用 reason 作为说明。 |
-| Result result / error_detail | result 为 SUCCESS／FAILED。FAILED 必含 error_detail，且仅含 code、msg 两个非空字符串，SUCCESS 省略 error_detail 或为 null。 |
+| Result result / error_detail | result 为 SUCCESS／FAILED。FAILED 必含 error_detail 及非空字符串 code、msg，WES 忽略其中真正未知字段。SUCCESS 省略 error_detail 或为 null。 |
 | 原命令与事件重报 | 同身份同原载荷恢复原接纳或收件。同号异载荷按公共冲突处理。正文 UTF-8 JSON，上限 256 KiB。 |
 
 Command `params` 和 Result `data` 按冻结的严格分支校验。模型包含可选字段 `failure_stage`、实际位置和事实数量。Event 的业务字段以各事件字段表为准，缺少实际读数时按表中条件省略。Command 顶层为闭集，Event 和 Result 的顶层诊断扩展沿公共信封处理。正式 Event 的 is_debug 省略或为 false，不以 true 驱动正式业务。
@@ -267,7 +267,7 @@ Result／Event 可以乱序；各节成功样例、下列失败样例及 NG 分�
 | data.failure_stage | 可选非空字符串，如 COUNT、PRINT、LABEL、PICK、PUT，不限定为封闭枚举。 |
 | data.actual_qty | 仅搬运失败且可证实目标放料未完成时填整数 0，未知时省略。 |
 | data.actual_target | 实际位置已知时可附，按实际 location_type 使用 2.12 的完整位置模型，允许与命令目标不同；位置未知时省略，不抄期望目标冒充。 |
-| error_detail | 必填且仅含非空字符串 code、msg。失败不携带成功分支的 decision、qty、mode、label_status 或 discharged。 |
+| error_detail | 必填非空字符串 code、msg，WES 忽略真正未知的诊断字段。失败的 data 不携带成功分支的 decision、qty、mode、label_status 或 discharged。 |
 
 动作未知保持待恢复，不按超时编造 FAILED。失败后的业务处置见对应阶段。
 

@@ -61,8 +61,26 @@ async def test_rack_completion_identity_includes_original_operation(manual_racks
 async def test_rack_callback_contracts_remain_operation_specific(manual_racks):
     flow = manual_racks
     await flow.issue()
-    assert (await flow.deliver(flow.notification(face="A", extra="ignored?"))).status_code == 422
+    notice = json.loads(flow.notification(face="A", diagnostic_note="first"))
+    first = await flow.deliver(json.dumps(notice).encode())
+    assert first.status_code == 202
+    notice["data"]["diagnostic_note"] = "retry"
+    replay = await flow.deliver(json.dumps(notice).encode())
+    assert replay.status_code == 200
+    assert replay.body == first.body | {"code": "DUPLICATE"}
+    notice["data"]["rack_face"] = "B"
+    assert (await flow.deliver(json.dumps(notice).encode())).status_code == 409
+    for field, value in (("through_plan_revision", 2), ("slot_ids", ["S1"])):
+        response = await flow.deliver(flow.notification(face="A", **{field: value}))
+        assert response.status_code == 422
+        assert response.body["data"] == {"reason_code": "INVALID_DATA"}
     assert (await flow.deliver(flow.notification(extra="ignored"))).status_code == 202
+    for field, value in (("plan_revision", 2), ("rack_face", "A"), ("slot_ids", ["S1"])):
+        notice = json.loads(flow.notification())
+        notice["data"][field] = value
+        response = await flow.deliver(json.dumps(notice).encode())
+        assert response.status_code == 422
+        assert response.body["data"] == {"reason_code": "INVALID_DATA"}
     for face in (None, "A"):
         for completed_at in (0, 101):
             raw = json.loads(flow.notification(face=face))

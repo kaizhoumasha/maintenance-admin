@@ -297,6 +297,28 @@ async def test_replay_returns_same_ack_and_handler_runs_once(callback_store):
     assert len(calls) == 1 and await receipt_count(callback_store) == 1
 
 
+async def test_ignored_event_data_extensions_still_participate_in_identity(callback_store):
+    class Scan(CallbackPayload):
+        barcode: str
+
+    calls = []
+
+    async def handler(ctx, payload):
+        calls.append(payload.model_dump())
+
+    ecs_event("SCAN_COMPLETED", device_role="SCAN1", data=Scan)(handler)
+    body = BASE | {"data": {"barcode": "B1", "diagnostic_note": "first"}}
+    first = await receive(callback_store, json.dumps(body).encode())
+    replay = await receive(callback_store, json.dumps(body | {"diagnostic_note": "outer"}).encode())
+    assert (replay.digest, replay.receipt_id) == (first.digest, first.receipt_id)
+    changed = body | {"data": body["data"] | {"diagnostic_note": "second"}}
+    second = await receive(callback_store, json.dumps(changed).encode())
+    assert first.digest == canonical_digest(body)
+    assert second.digest == canonical_digest(changed) != first.digest
+    assert second.receipt_id != first.receipt_id
+    assert calls == [{"barcode": "B1"}, {"barcode": "B1"}]
+
+
 async def test_replay_after_handler_validation_tightened_still_acks(callback_store):
     raw = json.dumps(BASE).encode()
     assert (await receive(callback_store, raw)).outcome == "unregistered"

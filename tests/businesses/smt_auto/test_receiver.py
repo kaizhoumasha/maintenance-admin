@@ -1,10 +1,13 @@
 """AUTO host evidence through the real shared WMS callback receiver and public outbox ports."""
 
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
+from pydantic import ConfigDict
 from sqlalchemy import func, select
 
+from app.businesses._components.sorting_task.contracts import Cancel
 from app.businesses.smt_auto.models import (
     AutoInboundSourceMember,
     AutoOutboundSourceMember,
@@ -13,6 +16,9 @@ from app.businesses.smt_auto.models import (
     AutoTaskInput,
     AutoTaskRequest,
 )
+from app.core.strict_json import canonical_digest
+from app.integrations.callback_receipts import find_receipt
+from app.integrations.wms_callback import registry
 from app.models import IntegrationExchange, ReliableMessage, WorkLine
 
 
@@ -174,6 +180,79 @@ async def test_rolled_back_issued_and_prepare_leave_no_new_intent(auto_receiver)
         assert (await session.get(AutoTask, "task")).status == "QUEUED"
         for model in (AutoTaskRequest, ReliableMessage):
             assert await session.scalar(select(func.count()).select_from(model)) == 0
+
+
+async def test_cancel_ignores_notes_without_changing_the_receipt_identity(auto_receiver):
+    flow = auto_receiver
+    await start(flow)
+    body = flow.message("cancel", {"task_id": "task", "cancel_scope": "TASK"})
+    for data in (
+        {"plan_revision": 1},
+        {"source_racks": [{"rack_id": "SOURCE-1", "plan_revision": 1}]},
+        {
+            "cancel_scope": "PLAN_MEMBERS",
+            "source_racks": [{"rack_id": "SOURCE-1", "plan_revision": 1, "slot_ids": ["S1"]}],
+        },
+        {
+            "cancel_scope": "PLAN_MEMBERS",
+            "source_racks": [
+                {"rack_id": "SOURCE-1", "plan_revision": 1, "location_code": "STATION_A"}
+            ],
+        },
+    ):
+        invalid = flow.message("cancel", body["data"] | data)
+        response = await flow.deliver(invalid)
+        assert response.status_code == 422
+        assert response.body["data"] == {"reason_code": "INVALID_DATA"}
+
+    first = await flow.deliver(body | {"data": body["data"] | {"diagnostic_note": "first"}})
+    assert first.status_code == 202
+    replay = await flow.deliver(body | {"data": body["data"] | {"diagnostic_note": "retry"}})
+    assert replay.status_code == 200
+    assert replay.body == first.body | {"code": "DUPLICATE"}
+    assert (await flow.deliver(body | {"timestamp": body["timestamp"] + 1})).status_code == 409
+    async with flow.factory() as session:
+        receipt = await find_receipt(session, body["operation"], body["operation_id"])
+        assert receipt.effective_digest == canonical_digest(body)
+        assert (await session.get(AutoTask, "task")).status == "CANCELLED"
+
+
+async def test_cancel_replays_old_extra_field_rejection_before_archive_guard(
+    auto_receiver, monkeypatch
+):
+    flow = auto_receiver
+    await start(flow)
+    body = flow.message(
+        "cancel", {"task_id": "task", "cancel_scope": "TASK", "diagnostic_note": "old"}
+    )
+    operation = registry.lookup(body["operation"])
+
+    class LegacyCancel(Cancel):
+        model_config = ConfigDict(extra="forbid")
+
+    with monkeypatch.context() as old:
+        old.setitem(
+            registry._registry, body["operation"], replace(operation, data_model=LegacyCancel)
+        )
+        first = await flow.deliver(body)
+
+    async def unexpected_guard(*args):
+        pytest.fail("a previous payload rejection must bypass archive and business rules")
+
+    monkeypatch.setitem(
+        registry._registry, body["operation"], replace(operation, archive_guard=unexpected_guard)
+    )
+    assert first.status_code == 422 and first.body["data"] == {"reason_code": "INVALID_DATA"}
+    replay = await flow.deliver(body)
+    assert replay.status_code == 422 and replay.prepared_body == first.prepared_body
+    assert replay.receipt_id == first.receipt_id
+    changed = body | {"data": body["data"] | {"diagnostic_note": "changed"}}
+    assert (await flow.deliver(changed)).status_code == 409
+    async with flow.factory() as session:
+        receipt = await find_receipt(session, body["operation"], body["operation_id"])
+        assert receipt.raw_digest == canonical_digest(body)
+        assert receipt.compare_mode == "RAW" and receipt.effective_digest is None
+        assert (await session.get(AutoTask, "task")).status == "PREPARING"
 
 
 @pytest.mark.parametrize("recovery", ["disabled", "cancelled"])

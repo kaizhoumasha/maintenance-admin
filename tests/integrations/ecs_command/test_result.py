@@ -3,6 +3,7 @@ import json
 import pytest
 from sqlalchemy import func, select
 
+from app.core.strict_json import canonical_digest
 from app.integrations import history as history_records
 from app.integrations.ecs_command.result import receive_ecs_result
 from app.models import IntegrationExchange, IntegrationRecord
@@ -28,7 +29,7 @@ from tests.helpers import EcsMove, read_history_body
             "device_code": "D",
             "result": "FAILED",
             "finish_time": 1,
-            "error_detail": {"code": "X", "msg": "x", "secret": "s"},
+            "error_detail": {"code": "X", "msg": 1, "secret": "s"},
         },
     ],
 )
@@ -110,6 +111,64 @@ async def test_result_receipts_keep_device_for_applied_and_conflicting_results(e
         assert len(rows) == 2
         assert {row.status_code for row in rows} == {200, 409}
         assert {row.operation for row in rows} == {"ecs.result"}
+
+
+@pytest.mark.parametrize("extension_on_first_delivery", [False, True])
+async def test_failed_result_ignores_error_notes_and_replays_original_digest(
+    ecs, extension_on_first_delivery
+):
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.reliable.store import MessageStore
+
+    async with ecs.factory.begin() as session:
+        command = await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key="failure-details",
+            device_code="D1",
+            timeout_ms=1000,
+            command=EcsMove(qty=1),
+        )
+    store = MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    original = dict(
+        command_code=command.command_code,
+        device_code="D1",
+        result="FAILED",
+        finish_time=1,
+        data={"qty": 1},
+        error_detail={"code": "E", "msg": "original failure"},
+    )
+
+    async def receive(body):
+        async with ecs.factory.begin() as session:
+            return await receive_ecs_result(session, json.dumps(body).encode(), ecs.service)
+
+    def extended(note):
+        return original | {"error_detail": original["error_detail"] | {"diagnostic_note": note}}
+
+    first = await receive(extended("initial") if extension_on_first_delivery else original)
+    original_digest = canonical_digest(original)
+    assert (first.status_code, first.digest) == (200, original_digest)
+    for replay_body in (extended("first"), extended("changed"), original):
+        replay = await receive(replay_body)
+        assert (replay.pure_replay, replay.digest, replay.prepared_body) == (
+            True,
+            original_digest,
+            first.prepared_body,
+        )
+    assert (await receive(extended("note") | {"result": "SUCCESS"})).status_code == 400
+    different = original | {"error_detail": {"code": "E", "msg": "different failure"}}
+    assert (await receive(different)).status_code == 409
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.result == original
 
 
 async def test_result_transaction_rollback_removes_evidence_and_projection(ecs):
@@ -204,7 +263,7 @@ async def test_annex_error_validation_points_to_error_detail(ecs):
             result="FAILED",
             finish_time=1,
             data={"qty": 1},
-            error_detail={"code": "UNKNOWN", "msg": "x"},
+            error_detail={"code": "UNKNOWN", "msg": "x", "diagnostic_note": "extension"},
         )
     ).encode()
     async with ecs.factory.begin() as session:
@@ -304,6 +363,14 @@ async def test_shared_permissive_models_keep_original_result_contract(ecs):
         assert (
             await receive_ecs_result(session, json.dumps(result).encode(), retained)
         ).status_code == 200
+    async with ecs.factory.begin() as session:
+        changed = result | {"data": result["data"] | {"vendor_extension": "other"}}
+        conflict = await receive_ecs_result(session, json.dumps(changed).encode(), retained)
+        assert conflict.status_code == 409
+        assert conflict.digest == canonical_digest(
+            {key: value for key, value in changed.items() if key != "extension"}
+            | {"error_detail": None}
+        )
     async with ecs.factory() as session:
         view = await retained.get_command(
             session, owner=ecs.owner, command_code=command.command_code
