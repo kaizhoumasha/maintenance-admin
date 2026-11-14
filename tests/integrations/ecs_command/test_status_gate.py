@@ -7,6 +7,7 @@ import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy import select
 
+from app.core.identifiers import uuid7
 from app.integrations.ecs_command.service import CommandOwner
 from app.models import ReliableDeliveryAttempt, ReliableMessage
 from tests.helpers import EcsMove, loopback_app, simulator_sender
@@ -61,7 +62,7 @@ async def test_coarse_command_waits_for_fresh_idle_and_sends_original(ecs, owner
             original = await ecs.service.create(
                 session,
                 owner=CommandOwner(owner),
-                call_key="status-gate",
+                call_key=str(uuid7()),
                 device_code="D1",
                 timeout_ms=30000,
                 command=EcsMove(qty=1),
@@ -109,7 +110,7 @@ async def test_unstarted_coarse_command_recovers_without_false_delivery(ecs, int
         original = await ecs.service.create(
             session,
             owner=CommandOwner("coarse_sorting"),
-            call_key="recover-status-check",
+            call_key=str(uuid7()),
             device_code="D1",
             timeout_ms=30000,
             command=EcsMove(qty=1),
