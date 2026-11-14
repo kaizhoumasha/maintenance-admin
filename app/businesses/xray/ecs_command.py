@@ -33,6 +33,24 @@ class ReelResult(Incoming):
 
     reel_id: UUIDText
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_other_result_fields(cls, value):
+        branch_fields = {
+            "decision",
+            "qty",
+            "mode",
+            "label_status",
+            "discharged",
+            "actual_qty",
+            "position",
+            "actual_target",
+            "failure_stage",
+        }
+        if isinstance(value, dict) and (value.keys() & branch_fields) - cls.model_fields.keys():
+            raise ValueError("field belongs to another result branch")
+        return value
+
     @model_validator(mode="after")
     def matches_outcome(self, info: ValidationInfo) -> Self:
         result = (info.context or {}).get("result")

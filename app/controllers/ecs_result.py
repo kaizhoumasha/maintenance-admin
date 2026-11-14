@@ -45,7 +45,6 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
                                     {
                                         "type": "object",
                                         "required": ["code", "msg"],
-                                        "additionalProperties": False,
                                         "properties": {
                                             "code": {"type": "string"},
                                             "msg": {"type": "string"},

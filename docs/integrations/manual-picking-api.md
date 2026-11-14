@@ -448,7 +448,7 @@ WES 保存消息后，在任务所属工作线中唯一匹配已取得 WORK_REQU
 }
 ```
 
-全部 data 字段必填：task_id/rack_id 为 Identifier，rack_face 为原计划面，plan_revision 为对应来源成员正版本，completed_at 为正毫秒且不晚于通知 timestamp；本 operation 的信封 timestamp 也为正。data 严格拒绝未知字段。
+全部 data 字段必填：task_id/rack_id 为 Identifier，rack_face 为原计划面，plan_revision 为对应来源成员正版本，completed_at 为正毫秒且不晚于通知 timestamp；本 operation 的信封 timestamp 也为正。WES 忽略 data 中真正未知的扩展字段。整架截止版本、箱级完工和逐格结果字段仍拒绝。
 
 只闭合同任务、该版本、该架面对应直接取料成员，不以当前最高版本替代，不携带逐 slot 结果。PDA 缺料、损耗等内部处理不由 WES 编造。业务完成不表示货架已换面或离场；流转仍核对本架本轮直接物理义务。
 
@@ -470,7 +470,7 @@ WES 保存消息后，在任务所属工作线中唯一匹配已取得 WORK_REQU
 }
 ```
 
-task_id、rack_id 必填 Identifier；through_plan_revision 必填正整数；completed_at 必填正毫秒且不晚于 timestamp。只覆盖同任务同架 `plan_revision <= through_plan_revision` 的直接取料成员。须等计划连续应用到截止版本；不等待逐面通知，不补造逐面完成。完成范围只增不退，新 revision 成员不被旧通知覆盖。
+task_id、rack_id 必填 Identifier；through_plan_revision 必填正整数；completed_at 必填正毫秒且不晚于 timestamp。只覆盖同任务同架 `plan_revision <= through_plan_revision` 的直接取料成员。须等计划连续应用到截止版本；不等待逐面通知，不补造逐面完成。完成范围只增不退，新 revision 成员不被旧通知覆盖。 WES 忽略真正未知的扩展字段，拒绝逐面、逐格或箱级完工字段。
 
 参考合同要求任务尚未可靠保存时返回 `503 / UNAVAILABLE`，保留发送方原身份重试，不成功 ACK 后遗留无归属记录。整架完成、整单完成与物理离场分别判断；不得用本通知授权转运架离场。
 
@@ -655,9 +655,9 @@ Result 必须匹配原 command_code、device_code 并通过原冻结合同验证
 
 field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信封仍回显原 operation_id；不自行引入 BUSY/429。可选字段无值省略，**除字段表明确允许外禁止 null**，包括显式允许的共用离场 current_face=null 例外。
 
-额外字段策略按方向及模型区分：所有 WES → WMS 请求 data 及其嵌套 RequestPayload 都严格拒绝额外字段，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 通知中，direct_pick_completed.data 和 sorting.task.cancel.data 严格拒绝额外字段；manual_bin.work_completed、outbound.return_rack.task_completed 忽略未知字段，其他任务通知另按下段规则。响应 data 按各自模型校验，不沿用通知的宽松策略。幂等有效字段与原始收据的保存规则分别遵守原协议，不重算历史身份。
+额外字段策略按方向及模型区分：所有 WES → WMS 请求 data 及其嵌套 RequestPayload 都严格拒绝额外字段，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 主动通知忽略真正未知的扩展字段，明确禁用或属于其他分支的业务字段仍拒绝。同步响应沿各自模型校验。通知的幂等有效字段和历史收据沿原协议，旧字段校验拒绝按原报文重放。
 
-统一 sorting.task.* 目标的[任务族冗余字段](smt-auto-api.md#task-field-policy)已本方确认：cancel.data 严格，其他层级按各接口忽略真正未知字段；明确禁用或跨模式/分支/选择器的业务字段拒绝，不扩大范围，不重算历史有效内容。此处不改变上段非任务族接口的严格层级，也不表示旧 operation 已切换。
+统一 sorting.task.* 目标的[任务族冗余字段](smt-auto-api.md#task-field-policy)同样适用于 cancel.data 及其选择器。明确禁用或跨模式、分支、选择器的业务字段继续拒绝，取消范围和历史有效内容沿原合同。
 
 统一任务目标的[工作线准入](smt-auto-api.md#workline-admission)已本方确认：首次不存在/停用/业务不匹配分别按引用或状态冲突拒绝；在制停用限制新增计划和执行，取消/合法原结果及历史确认继续，不重绑任务或自动解除 HELD/UNKNOWN。此处沿原任务范围收口，不表示历史 wire 或旧实现已迁移。
 

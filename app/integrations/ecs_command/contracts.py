@@ -53,6 +53,10 @@ class ErrorDetail(BaseModel):
     msg: str
 
 
+class _ResultErrorDetail(ErrorDetail):
+    model_config = ConfigDict(extra="ignore")
+
+
 class ResultEnvelope(BaseModel):
     model_config = ConfigDict(strict=True, extra="ignore")
     command_code: Text
@@ -60,7 +64,7 @@ class ResultEnvelope(BaseModel):
     result: Literal["SUCCESS", "FAILED"]
     finish_time: Millis
     data: dict = {}
-    error_detail: ErrorDetail | None = None
+    error_detail: _ResultErrorDetail | None = None
 
     @model_validator(mode="after")
     def check_error(self):

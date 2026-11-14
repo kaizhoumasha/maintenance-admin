@@ -889,7 +889,8 @@ async def test_technical_count_discharge_does_not_wait_for_failed_result(xray):
     await x.event("NG_DISCHARGED", stage="COUNT", barcode=x.barcode, reason="count failed")
     await x.drain()
     assert len(x.facts) == 1
-    await x.result(cmd, failure=True, failure_stage="COUNT")
+    await x.result(cmd, failure=True, status=400, decision="COUNT_REQUIRED", qty=10)
+    await x.result(cmd, failure=True, failure_stage="COUNT", diagnostic_note="extension")
     await x.drain()
     assert len(x.facts) == len(x.commands) == len(x.requests) == 1
 

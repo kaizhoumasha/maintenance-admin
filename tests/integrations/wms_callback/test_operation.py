@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ConfigDict
 
+from app.businesses.smt_auto.inbound_contracts import RackExhausted
 from app.integrations.wms_callback import (
     Accepted,
     CallbackPayload,
@@ -62,3 +63,23 @@ async def test_handle_turns_the_handler_result_into_an_outcome(result, expected)
     assert isinstance(outcome, expected)
     if isinstance(result, dict):
         assert outcome.data == result
+
+
+def test_rack_exhaustion_ignores_notes_but_rejects_other_business_evidence():
+    operation = make(lambda payload: None, payload=RackExhausted)
+    data = {"task_id": "TASK", "rack_id": "RACK", "transport_task_id": "ORIGINAL-ENTER"}
+    assert operation.parse(data | {"diagnostic_note": "unused"}) == data
+    for field, value in {
+        "plan_revision": 1,
+        "workline_code": "LINE",
+        "location_code": "STATION_A",
+        "zone_code": "ZONE",
+        "arrival_event_id": "EVENT",
+        "source_rack_exhausted": True,
+        "barcode": "REEL",
+        "observed_at": 1,
+        "source": {"rack_id": "RACK"},
+        "scanned_at": 1,
+    }.items():
+        with pytest.raises(InvalidPayload):
+            operation.parse(data | {field: value})

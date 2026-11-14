@@ -2,7 +2,7 @@
 
 from typing import Annotated, ClassVar, Literal, Self
 
-from pydantic import ConfigDict, Field, model_serializer, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from app.integrations.wms_callback import CallbackPayload, Rejected
 
@@ -202,6 +202,7 @@ class BinSelector(BinSourceRack):
 
 
 class SourceSelector(Rack):
+    known_fields = Rack.known_fields | {"location_code", "station_id"}
     plan_revision: Positive
 
 
@@ -216,7 +217,6 @@ class DirectSelector(RackFace):
 
 
 class Cancel(_Task):
-    model_config = ConfigDict(strict=True, extra="forbid")
     cancel_scope: Literal["TASK", "PLAN_MEMBERS"]
     bin_source_racks: Annotated[list[BinSelector], Field(min_length=1)] | None = None
     source_racks: Annotated[list[SourceSelector], Field(min_length=1)] | None = None

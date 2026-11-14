@@ -695,7 +695,7 @@ WMS → WES events。取消不推进plan_revision、不改原计划正文或issu
 | source_racks[] | 原plan_revision/rack_id，只选该版整单层架；不带左右位置、箱码、cell_id、slot_ids或rack_face | 禁止 |
 | direct_pick_sources[] | 禁止 | 原plan_revision/rack_id/单值rack_face，选原added_return_racks面；不传slot_ids，不预列或撤销逐SLOT，不扩为目标架撤销 |
 
-选择器可按本方向混合。版本必须是原成员版本，不能用当前最高版本替代；同架跨版精确区分，不预先取消未来版本。版本为正int64，面为原文、1～10个Unicode code point且不含NUL；省略无变化选择器，禁止null/空数组/重复选择器/重复面及跨方向业务字段。cancel.data严格拒绝额外字段，其他层级见[任务字段策略](#task-field-policy)。
+选择器可按本方向混合。版本必须是原成员版本，不能用当前最高版本替代；同架跨版精确区分，不预先取消未来版本。版本为正int64，面为原文、1～10个Unicode code point且不含NUL；省略无变化选择器，禁止null/空数组/重复选择器/重复面及跨方向业务字段。cancel.data 及其选择器忽略真正未知字段，明确禁用字段按[任务字段策略](#task-field-policy)拒绝。
 
 原收据、成员变化及供箱变更在receiver同一事务保存，提交后202/RECEIVED/data={}；同身份同有效内容重放200/DUPLICATE，保留原时间，不重复apply_supply_change。合法选择器中不存在、已取消、当前不可取消者跳过，全部跳过仍成功，不增逐成员响应列表。WMS先获得计划成功再撤销成员；不存在任务REFERENCE_CONFLICT，TASK阶段非法STATE_CONFLICT，身份漂移IDEMPOTENCY_CONFLICT，结构/类型/null/重复/禁用字段422/INVALID_DATA。
 
@@ -2221,7 +2221,7 @@ RackSlot 案例沿原第 1 版来源成员，不向正常 material.decide 或 mo
 }
 ```
 
-三个 data 字段均必填，沿原 Identifier/字符串类型约定；transport_task_id 必须是该架在原任务下本次进场的原 RACK_MOVE，不是离场、换面或后来再次进场任务。原记录关联原计划/实际工作位及 STATION_A/STATION_B，不增加 plan_revision、工作线/区域重复字段或外部到位编号。operation 本身表达整架取尽，不再发送 source_rack_exhausted、条码、observed_at 或空取证据。
+三个 data 字段均必填，沿原 Identifier/字符串类型约定；transport_task_id 必须是该架在原任务下本次进场的原 RACK_MOVE，不是离场、换面或后来再次进场任务。原记录关联原计划/实际工作位及 STATION_A/STATION_B，不增加 plan_revision、工作线/区域重复字段或外部到位编号。operation 本身表达整架取尽，不再发送 source_rack_exhausted、条码、observed_at 或空取证据。WES 忽略真正未知的扩展字段，另带计划版本、工作线、位置、外部到位或扫码／空取证据等已禁用字段时返回 INVALID_DATA。
 
 WES 保存通知及原进场关联后返回 HTTP 202：
 
@@ -3711,7 +3711,7 @@ WMS 保证本盘参数精度、单位、业务范围和设备适用性；WES 保
 
 明确空取另按 §7.12 使用 FAILED/0/PICK_EMPTY，不属于下述普通 PICK_FAILED 的推断。上述组合 actual_qty 必填 JSON 整数。0 只表示本次完整取放未完成，不证明未取出、仍在原位、来源为空或整架取尽。第三种保留料盘已到扫码台的事实，不回退为未取盘；允许 FAILED + PUT_FINISHED，不新增 pick_and_put_result 扫码失败枚举。
 
-三种失败均省略 barcode/scanned_at，不填空字符串、0 或 null，不复制前一次命令扫码。FAILED 必填 error_detail 对象且仅 code/msg，SUCCESS 沿原省略或 null。下列 code 是错误分类示例，正式上报按 §7.9 保留 ECS 实际稳定原厂码，不据分类示例建立额外码表；发生在哪段由原 command_code 的冻结命令确定，设备码沿其原绑定。
+三种失败均省略 barcode/scanned_at，不填空字符串、0 或 null，不复制前一次命令扫码。FAILED 必填 error_detail 对象及 code/msg，WES 忽略其中真正未知的扩展字段；SUCCESS 沿原省略或 null。下列 code 是错误分类示例，正式上报按 §7.9 保留 ECS 实际稳定原厂码，不据分类示例建立额外码表；发生在哪段由原 command_code 的冻结命令确定，设备码沿其原绑定。
 
 以下为三次独立命令的完整示例，均 ECS → WES，POST /api/v1/callback/result。
 
@@ -4247,14 +4247,14 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 | queue_changed | 已定义字段严格校验，真正未知字段忽略；额外字段不能修改模式、方向、工作线或原下发时间 |
 | prepare | 接收方忽略真正未知字段，含响应额外字段；规范请求仍仅 task_id/workline_code，PREPARE_ACCEPTED 的有效 data={} |
 | plan_delta | 真正未知字段忽略；按原任务冻结模式/方向选择计划联合，混入其他模式已定义资源字段拒绝，不通过忽略字段改变计划含义 |
-| cancel | data 层严格拒绝额外字段；信封和选择器项忽略真正未知字段，但跨分支/跨选择器的已定义资源字段拒绝，不能扩大取消范围 |
+| cancel | 信封、data 和选择器项忽略真正未知字段，拒绝禁用或跨分支、跨选择器的已定义资源字段 |
 | completion_confirm | 接收方忽略真正未知字段；两字段规范请求及三分支有效响应不变，已定义的冲突分支字段不能忽略 |
 
 例如 AUTO/inbound 的 plan_delta 不能把其他模式的 target_rack、added_direct_picks 或 added_return_racks 当未知字段忽略；单层整架取消选择器不能带 cell_id、slot_ids 或 rack_face 后被静默扩大成整架取消。真正未知备注字段与这些业务字段分别处理，不新增通用宽松 DTO。
 
 请求的已定义字段缺失、类型/枚举错误、显式非法空值、禁用字段或不合法分支混发，按原公共校验返回 422 / REJECTED、INVALID_DATA；响应的已定义字段冲突则作为无效业务响应保留原阶段，不删除冲突字段后执行。原 HTTP/code 匹配、Body 上限及消息身份校验不因忽略未知字段放宽。
 
-被忽略的真正未知字段不参与幂等有效内容比较；已冻结消息仍沿原合同、原有效内容和原接收结果恢复，不因本规则或后续字段定义变化重算历史摘要，也不把新字段反向加入历史身份。
+被忽略的真正未知字段不参与幂等有效内容比较；已冻结消息沿原有效内容和原接收结果恢复。已保存的字段校验拒绝仍按原报文比较和重放；当时报文的内容变化仍按原冲突规则处理。历史摘要沿原值。
 
 六类sorting.task.*@v1按[共享计划1.4](../superpowers/plans/2026-10-31-sorting-task-implementation.md#sorting-task-v1-freeze)在首次正式发布前完整定义MANUAL/AUTO四分支；发布后冻结有效字段、规范化、在场性及未知字段策略。仅允许层级的未知备注变化仍按原版本比较，省略字段不补null/空数组，旧待定计划不随新模型改变含义。后到宿主不原地收紧@v1；后续新语义须另行设计显式新合同版本，本轮不增加新版本operation或通用版本框架。
 

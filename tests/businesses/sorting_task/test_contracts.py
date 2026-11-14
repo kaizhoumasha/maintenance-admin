@@ -132,10 +132,7 @@ def test_plan_shape_uses_original_direction(mode, direction, revision, resources
 )
 def test_task_normalization_preserves_absence_and_known_fields(model, data):
     assert model.model_validate(data).model_dump(mode="json") == data
-    if model is not Cancel:
-        assert (
-            model.model_validate(data | {"unknown_note": "ignored"}).model_dump(mode="json") == data
-        )
+    assert model.model_validate(data | {"unknown_note": "ignored"}).model_dump(mode="json") == data
 
 
 @pytest.mark.parametrize(
@@ -220,7 +217,7 @@ def test_plan_checks_resource_shapes(resources):
     [
         {"cancel_scope": "TASK", "source_racks": [{"plan_revision": 1, "rack_id": "S"}]},
         {"cancel_scope": "PLAN_MEMBERS"},
-        {"cancel_scope": "TASK", "note": "no"},
+        {"cancel_scope": "TASK", "plan_revision": 1},
         {"cancel_scope": "PLAN_MEMBERS", "source_racks": []},
         {
             "cancel_scope": "PLAN_MEMBERS",

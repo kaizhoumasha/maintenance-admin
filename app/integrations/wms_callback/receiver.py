@@ -459,7 +459,8 @@ async def _receive(
             attempt_id=attempt_id,
             receipt_id=existing.id,
         )
-    if handler is not None and parsed is not None:
+    # A stored payload rejection remains final if a later parser accepts its body.
+    if existing.compare_mode == "EFFECTIVE" and handler is not None and parsed is not None:
         context = _context(
             session,
             handler,
