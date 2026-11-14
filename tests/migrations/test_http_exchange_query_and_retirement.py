@@ -141,6 +141,7 @@ async def test_query_and_body_permission_with_old_tables_hidden(
         ),
     }
     replay_id = uuid7()
+    operation = "sorting.task.prepare@v1"
     async with cutover.begin() as session:
         session.add_all(attempts.values())
         session.add_all(
@@ -189,6 +190,28 @@ async def test_query_and_body_permission_with_old_tables_hidden(
                 next_attempt_at=now,
             )
         )
+        message = ReliableMessage(
+            target="wms-decisions",
+            operation=operation,
+            operation_id=wms_id,
+            protocol="wms-decisions",
+            status="DONE",
+            exchange_id=uuid7(),
+            request_record_id=uuid7(),
+            frozen_request_wire=json.dumps(
+                dict(operation=operation, operation_id=wms_id, timestamp=10, data={})
+            ).encode(),
+            terminal_response_wire=json.dumps(
+                dict(operation_id=wms_id, code="PREPARE_ACCEPTED", timestamp=11, data={})
+            ).encode(),
+            terminal_response_at=now,
+            last_http_status=202,
+            last_verdict="DELIVERED",
+            created_at=now,
+            updated_at=now,
+            next_attempt_at=now,
+        )
+        session.add(message)
     from app.services import dev_submit_service, dev_wms_request_service
 
     async with cutover() as session:
@@ -210,7 +233,18 @@ async def test_query_and_body_permission_with_old_tables_hidden(
         assert str(attempts[peer].id) in {row["id"] for row in result.json()["items"]}
         assert "fixture-body" not in result.text
         if peer == "WMS":
-            assert result.json()["runtime"][0]["receipt_id"] == 1201
+            outbound, inbound = result.json()["runtime"]
+            assert (outbound["message_id"], outbound["operation"], outbound["direction"]) == (
+                message.id,
+                operation,
+                "OUTBOUND",
+            )
+            assert (
+                outbound["delivery_status"],
+                outbound["response_state"],
+                outbound["protocol_code"],
+            ) == ("DONE", "VALID", "PREPARE_ACCEPTED")
+            assert (inbound["receipt_id"], inbound["direction"]) == (1201, "INBOUND")
         params = {"peer_system": peer, "identity_value": reference, "limit": 1}
         listed = await client.get(root + "/exchanges", headers=admin, params=params)
         assert listed.status_code == 200, listed.text

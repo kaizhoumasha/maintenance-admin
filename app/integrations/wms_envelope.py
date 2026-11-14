@@ -69,9 +69,9 @@ def response_projection(message):
     columns = {name: message.c[name] for name in RESPONSE_COLUMNS}
     if enabled():
         columns.update(
-            request_raw=message.c.frozen_request_wire,
-            response_raw=message.c.terminal_response_wire,
-            terminal_occurred_at=message.c.terminal_response_at,
+            request_raw=message.c.frozen_request_wire.label("request_raw"),
+            response_raw=message.c.terminal_response_wire.label("response_raw"),
+            terminal_occurred_at=message.c.terminal_response_at.label("terminal_occurred_at"),
         )
         return clause, columns
     for name, ref in (
