@@ -544,10 +544,11 @@ class XrayService:
                 )
                 await self._send(session, reel, "REPORT", operation, payload, ng_event)
             else:
+                outlet = facts["OUTLET"].payload
                 operation, model = self.requests["PUT_REPORT"]
                 payload = model(
                     **base,
-                    target_operation_id=actions["OUTLET"]["operation_id"],
+                    barcode=outlet.get("new_barcode") or outlet["barcode"],
                     to_locator=destination,
                     occurred_at=put_result["finish_time"],
                 )

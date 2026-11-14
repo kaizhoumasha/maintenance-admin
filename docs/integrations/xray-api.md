@@ -1152,7 +1152,7 @@ SUCCESS 必含 `barcode`、`reel_id`、整数 `actual_qty=1`、`position=TARGET`
   "timestamp": 1793413841000,
   "data": {
     "workline_code": "XRAY-LINE-01",
-    "target_operation_id": "01a1887a-d46a-7da3-8e2c-81762c6ee604",
+    "barcode": "SXCN0031482261000009NVD",
     "to_locator": {
       "type": "RACK_SLOT",
       "location_code": "XRAY-RACK-01",
@@ -1181,7 +1181,7 @@ SUCCESS 必含 `barcode`、`reel_id`、整数 `actual_qty=1`、`position=TARGET`
 | 请求 `data` 字段 | 类型 / 必填 | 约束 |
 | --- | --- | --- |
 | workline_code | Identifier / 是 | 实际放料或排出事实所属的工作线。 |
-| target_operation_id | UUIDv7 / 是 | 原已授权的 `put_target_decide` 请求身份。 |
+| barcode | Barcode / 是 | 与原选位请求的 `data.barcode` 一致。COUNTED 使用 CCD 复核通过的实读新码，BYPASS 使用进料实读原码。 |
 | to_locator | object / 是 | 五层架用 2.9 的完整 RACK_SLOT 位置字段，均来自实际核对。通箱用 `{"type":"TRANSIT_BIN"}`，表示实际放入中转通箱。 |
 | occurred_at | 毫秒整数 / 是 | 实际放料完成时间。 |
 
@@ -1190,7 +1190,7 @@ SUCCESS 必含 `barcode`、`reel_id`、整数 `actual_qty=1`、`position=TARGET`
 | 200 / RECORDED | `{}` | 保存本次收妥。 |
 | 200 / DUPLICATE | `{}` | 恢复同一事实报告的收妥。 |
 
-WMS 用 `target_operation_id` 关联原选位授权并核对实际去向，同一授权的实际放料只处理一次。WES 按 [2.14.3](#xray-ng-event) 核对实际位置与授权，以及本次进机的落位与排出证据。证据冲突时留证待核对。通箱报告保持 TRANSIT_BIN 业务分支，WES 另存原随机箱位及完整实际目标。通箱放料与后续手工上架分别记录。
+WMS 按 `data.barcode` 识别物料，同一份报告补报时沿用外层 `operation_id` 去重。WES 内部保留本次取放与原选位授权的关联，并按 [2.14.3](#xray-ng-event) 核对实际位置与授权，以及本次进机的落位与排出证据。证据冲突时留证待核对。通箱报告保持 TRANSIT_BIN 业务分支，WES 另存原随机箱位及完整实际目标。通箱放料与后续手工上架分别记录。
 
 <a id="xray-bypass"></a>
 ### 2.13 免清点分支
@@ -1293,7 +1293,7 @@ WMS 清点前返回免清点后，WES 登记 APPLY_PKG_DECISION，decision=BYPAS
 }
 ```
 
-WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":"TRANSIT_BIN"}}`。WES 按 [2.11.2](#xray-ecs-put-bin) 随机选箱并冻结完整目标，PUT_TO_BIN 引用本次到料 event_id。实际 Result 按 [2.12.2](#xray-ecs-put-bin-result) 核对，随后按 [2.12.3](#xray-put-report) 报告，target_operation_id 引用上述选位请求。重报沿原身份，不重复选位、取放或报告。
+WMS 按 [2.9](#xray-target) 返回 `{"result":"ACCEPT","target_locator":{"type":"TRANSIT_BIN"}}`。WES 按 [2.11.2](#xray-ecs-put-bin) 随机选箱并冻结完整目标，PUT_TO_BIN 引用本次到料 event_id。实际 Result 按 [2.12.2](#xray-ecs-put-bin-result) 核对，随后按 [2.12.3](#xray-put-report) 报告，`data.barcode` 使用进料实读原码。报告重发沿用原 `operation_id`，不重复选位或取放。
 
 <a id="xray-ng"></a>
 ### 2.14 排 NG 分支
@@ -1759,7 +1759,7 @@ ECS 与 WES 需同步采用第 2 章的报文。五种新登记的 ECS 命令均
 <a id="xray-ecs-cutover"></a>
 ### 6.1 全量切换与在途恢复
 
-现场切换前，确认相关工作线无待推进料盘、未结命令、待投递 WMS 请求或报告，ECS 的旧版待报队列已清空。WMS 须在进料清点许可提供正数 `reel_thickness`，并在清点盘选位时接受以实读新码作为 `barcode`。确认这两项后，与更新后的 WES、ECS 一起恢复进料。新增 Event 按本版校验，Result 按原命令冻结版本校验。
+现场切换前，确认相关工作线无待推进料盘、未结命令、待投递 WMS 请求或报告，ECS 的旧版待报队列已清空。WMS 须在进料清点许可提供正数 `reel_thickness`；出口选位和实际放料报告均须接收 `data.barcode`，COUNTED 使用复核通过的实读新码，BYPASS 使用进料实读原码。确认 WMS 已按 [2.12.3](#xray-put-report) 的报文接收放料报告后，与更新后的 WES、ECS 一起恢复进料。新增 Event 按本版校验，Result 按原命令冻结版本校验。
 
 切换后，Event 补报沿用原 `event_id`、时间和正文，WES 按原设备及事件身份去重。命令保留原 `command_code`、`call_key`、设备地址、附录版本、请求字节和截止时间。同版原命令按原 300 秒窗口恢复投递。切换后，旧版路由须经原授权核对。迟到 Result 按原命令冻结的 `(annex_id, annex_version)` 校验，跨重启继续结算同一动作。
 
