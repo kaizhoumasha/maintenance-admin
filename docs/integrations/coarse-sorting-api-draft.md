@@ -841,7 +841,7 @@ WES 收据受理响应（HTTP 202）：
 
 ## 4. ECS 设备、位置和扫码事件
 
-以下是说明书中的设备及 ECS 固定位置参考，用于理解设备交互和结果。固定位置由 ECS 管理，不作为 WES 工作线位置配置或命令参数。候选业务 code 为 `coarse_sorting`；逻辑角色分别对应入料机械臂、输送线和出料机械臂，由运行时绑定取得设备。
+下表列出 ECS 设备、固定位置和入箱成功回报的位置值。ECS 管理固定取放位置。WES 按第 5.2 节配置校验入箱结果。候选业务 code 为 `coarse_sorting`；逻辑角色分别对应入料机械臂、输送线和出料机械臂，由运行时绑定取得设备。
 
 | 交互 / 位置                                       | A 区                          | B 区                          |
 | ------------------------------------------------- | ----------------------------- | ----------------------------- |
@@ -851,6 +851,7 @@ WES 收据受理响应（HTTP 202）：
 | 输送线入口                                        | `STATION_PIPELINE1_INPUT1`  | `STATION_PIPELINE2_INPUT1`  |
 | 输送线出口                                        | `STATION_PIPELINE1_OUTPUT1` | `STATION_PIPELINE2_OUTPUT1` |
 | 出料位置                                          | `STATION_OUTPUT1`           | `STATION_OUTPUT2`           |
+| `PUT_TO_BIN` 成功回报 `data.location`              | `STATION_PIPELINE1_OUTPUT1` | `STATION_OUTPUT2`           |
 | NG 平台                                           | `STATION_NG_PLATFORM1`      | `STATION_NG_PLATFORM2`      |
 
 <a id="ecs-scan-completed"></a>
@@ -1020,12 +1021,12 @@ ECS 接纳响应见第 5.1 节。明确放料完成后，ECS → WES：
   "finish_time": 1793206814000,
   "data": {
     "actual_qty": 1,
-    "location": "STATION_OUTPUT1"
+    "location": "STATION_PIPELINE1_OUTPUT1"
   }
 }
 ```
 
-入箱完成要求：**料盘已放入原命令指定的箱位和格位，整个放料动作完成**。`location=STATION_OUTPUT1` 本身不证明具体箱格，必须结合原命令和已确认的动作结果语义；仅机械臂到达出料区域不满足完成门槛。WES 据此登记第 3.3 节反馈，不以 ACK、设备空闲或时间流逝代替。设备结果的合同确认事项见第 7 节 P08。
+入箱完成要求：**料盘已放入原命令指定的箱位和格位，整个放料动作完成**。RS01 在 `COARSE_SORTING_OUTPUT_LOCATIONS` 中的入箱回报预期值为 `STATION_PIPELINE1_OUTPUT1`。WES 在登记箱格分配时记录预期位置，入箱指令沿用该值校验结果。已保存的预期位置随原作业保留。回报位置本身不证明具体箱格，必须结合原命令和已确认的动作结果语义；仅机械臂到达出料区域不满足完成门槛。WES 据此登记第 3.3 节反馈，不以 ACK、设备空闲或时间流逝代替。设备结果的合同确认事项见第 7 节 P08。
 
 <a id="ecs-move-to-ng"></a>
 
