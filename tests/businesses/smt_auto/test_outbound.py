@@ -1,4 +1,4 @@
-"""Normal inbound consumes actual ECS results and actual WMS outbox responses."""
+"""Outbound consumes original ECS results and WMS outbox responses."""
 
 import asyncio
 import importlib
@@ -220,10 +220,12 @@ async def outbound_host(s5_roller, request, monkeypatch):
         ),
     )
     host.ecs = ecs
+    host.work_plans.outbound = host.outbound
+    host.work_plans.roller = host.roller
 
     pending_claims = []
 
-    async def settle(operation, data, code="DECIDED", *, on_delivered=None):
+    async def settle(operation, data, code="DECIDED", *, on_delivered=None, operation_id=None):
         store = MessageStore(
             host.factory,
             records=history_records,
@@ -232,7 +234,12 @@ async def outbound_host(s5_roller, request, monkeypatch):
         )
         pending_claims.extend(await store.claim(100, host.requests.outbox.targets))
         claims = pending_claims
-        matching = [c for c in claims if c.message.operation == operation]
+        matching = [
+            c
+            for c in claims
+            if c.message.operation == operation
+            and (operation_id is None or c.message.operation_id == operation_id)
+        ]
         assert len(matching) == 1
         claim = matching[0]
         pending_claims.remove(claim)
@@ -511,8 +518,13 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         if disabled:
             (await session.get(WorkLine, 1)).is_enabled = False
     monkeypatch.setattr(PickAndPut, "from_millimeters", builder)
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
     assert (await host.arm_result(put_code, location=None)).status_code == 200
     async with host.factory.begin() as session:
+        work = await session.get(AutoBinWork, host.work_id)
+        await host.work_plans.consume_bin(
+            session, work_line_id=1, arrival_id=work.arrival_id, now_ms=179
+        )
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=180)
         assert plate.report_message_id
         assert plate.report_data["occurred_at"] == 99
@@ -589,23 +601,24 @@ async def return_face(host, *, ready=True, consume=True):
         )
         await racks.advance(session, task_id="t", now_ms=30)
         assert member.arrived_at_ms == 30
-    await host.settle(
-        "outbound.return_rack.work_plan@v1",
-        dict(
-            result="READY",
-            rack_id="return",
-            rack_face="A",
-            slot_id="S1",
-            rack_layer=2,
-            rack_column=3,
-            reel_thickness=15.3,
-            reel_diameter=330.2,
+    if ready is not None:
+        await host.settle(
+            "outbound.return_rack.work_plan@v1",
+            dict(
+                result="READY",
+                rack_id="return",
+                rack_face="A",
+                slot_id="S1",
+                rack_layer=2,
+                rack_column=3,
+                reel_thickness=15.3,
+                reel_diameter=330.2,
+            )
+            if ready is True
+            else ready
+            if ready
+            else {"result": "WAIT", "retry_after_ms": 100},
         )
-        if ready is True
-        else ready
-        if ready
-        else {"result": "WAIT", "retry_after_ms": 100},
-    )
     async with host.factory.begin() as session:
         if consume:
             await racks.advance(session, task_id="t", now_ms=40)
@@ -814,7 +827,7 @@ async def test_return_rack_scan_conflict_waits_for_linked_correction(outbound_ho
         assert decision.request_data["scanned_at"] == 101
 
 
-@pytest.mark.parametrize("next_mode", [None, "valid", "invalid", "ng"])
+@pytest.mark.parametrize("next_mode", ["NO_WORK", "valid", "wrong_face", "repeat_slot", "ng"])
 async def test_return_face_original_pick_and_final_target(outbound_host, next_mode):
     host = outbound_host
     racks, member_id, plate_id = await return_face(host)
@@ -899,16 +912,6 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
             rack_column=5,
         ),
     )
-    if next_mode:
-        decision["next_source_action"] = dict(
-            rack_id="return",
-            rack_face="A" if next_mode == "valid" else "B",
-            slot_id="S2",
-            rack_layer=1,
-            rack_column=6,
-            reel_thickness=22,
-            reel_diameter=13,
-        )
     await host.settle("outbound.rackslot.material.decide@v1", decision)
     async with host.factory.begin() as session:
         plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=70)
@@ -927,21 +930,41 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         assert target["reel_diameter"] == 13
         assert target["rack_layer"] == "4"
         member = await session.get(AutoOutboundSourceMember, member_id)
-        assert await host.outbound.face_source_terminal(session, member) is (next_mode is None)
-        assert not await host.outbound.face_closed(session, member)
+        assert not await host.outbound.face_source_terminal(session, member)
         demand, handoff = await racks.ports.facts(session, job_id=member.rack_job_id)
-        assert demand.state == ("NONE" if next_mode is None else "CONTINUE")
-        assert handoff.state == ("BLOCKED" if next_mode == "valid" else "CLEAR")
-        assert await session.scalar(select(func.count()).select_from(AutoOutboundPlate)) == (
-            2 if next_mode == "valid" else 1
+        assert demand.state == "CONTINUE"
+        assert handoff.state == "CLEAR"
+    if next_mode == "NO_WORK":
+        next_result = {"result": "NO_WORK"}
+    else:
+        next_result = dict(
+            result="READY",
+            rack_id="return",
+            rack_face="B" if next_mode == "wrong_face" else "A",
+            slot_id="S1" if next_mode == "repeat_slot" else "S2",
+            rack_layer=1,
+            rack_column=6,
+            reel_thickness=22,
+            reel_diameter=13,
         )
+    await host.settle("outbound.return_rack.work_plan@v1", next_result)
     if next_mode == "valid":
         await host.arm_ack(put_code)
-        async with host.factory.begin() as session:
-            successor = await session.scalar(
-                select(AutoOutboundPlate).where(AutoOutboundPlate.grant_parent_plate_id == plate_id)
+    async with host.factory.begin() as session:
+        await host.outbound.work_plans.consume_return_face(
+            session, work_line_id=1, member_id=member_id, now_ms=71
+        )
+        member = await session.get(AutoOutboundSourceMember, member_id)
+        assert await host.outbound.face_source_terminal(session, member) is (next_mode == "NO_WORK")
+        assert not await host.outbound.face_closed(session, member)
+        successor = await session.scalar(
+            select(AutoOutboundPlate).where(
+                AutoOutboundPlate.source_member_id == member_id, AutoOutboundPlate.id != plate_id
             )
-            await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=71)
+        )
+        assert (successor is not None) is (next_mode == "valid")
+        if successor is not None:
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=72)
             assert successor.pick_command_code is None
     assert (await host.arm_result(put_code)).status_code == 200
     async with host.factory.begin() as session:
@@ -951,7 +974,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
         plate = await host.outbound.advance_report(session, plate_id=plate_id, now_ms=90)
         member = await session.get(AutoOutboundSourceMember, member_id)
         assert await host.outbound.closed(session, plate)
-        assert await host.outbound.face_closed(session, member) is (next_mode is None)
+        assert await host.outbound.face_closed(session, member) is (next_mode == "NO_WORK")
 
 
 @pytest.fixture
@@ -1160,6 +1183,9 @@ async def test_scan_revision_replaces_only_unaccepted_material_once(decided_outb
             assert plate.put_command_code and plate.final_decision_round_id == rounds[1].id
             put_code = plate.put_command_code
             rack_job_id = plate.target_rack_job_id
+        await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
+        async with host.factory.begin() as session:
+            await consume_bin_plan(host, session, now_ms=63)
             work = await session.get(AutoBinWork, host.work_id)
             assert (
                 await flow.release_bin(
@@ -1346,6 +1372,18 @@ async def test_targeted_material_and_sweep_create_one_put(decided_outbound, monk
             )
             == original_count + 1
         )
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(AutoOutboundDecisionRound)
+                .where(
+                    AutoOutboundDecisionRound.bin_work_id == host.work_id,
+                    AutoOutboundDecisionRound.operation == "outbound.bin.work_plan@v1",
+                    AutoOutboundDecisionRound.normal_continuation.is_(True),
+                )
+            )
+            == 1
+        )
     for field in (
         "preceding_ms",
         "workline_lock_ms",
@@ -1363,104 +1401,118 @@ async def test_targeted_material_and_sweep_create_one_put(decided_outbound, monk
         assert command.ack_received and command.status == "WAITING_RESULT"
 
 
-@pytest.mark.parametrize("successor_state", ["absent", "valid", "conflicting"])
-async def test_ready_return_rack_yields_only_to_bin_successor(
-    decided_outbound, successor_state, monkeypatch
-):
+@pytest.mark.parametrize(
+    "tail", ["unknown", "WAIT", "ready_first", "ack_first", "put_first", "put_failed"]
+)
+async def test_ready_return_rack_yields_only_to_bin_successor(decided_outbound, tail, monkeypatch):
     host = decided_outbound
     notices = []
     monkeypatch.setattr(business_wakeups, "enqueue_business", notices.append)
     _, _, rack_plate_id = await return_face(host)
-    decision = dict(
-        result="ACCEPT",
-        detailMessage="OK",
-        target_locator=dict(
-            type="RACK_SLOT",
-            rack_id="target",
-            rack_face="A",
-            slot_id="A1",
-            rack_layer=1,
-            rack_column=1,
-        ),
-    )
-    if successor_state != "absent":
-        decision["next_source_action"] = dict(
-            cell_id="C2",
-            cell_index=2,
-            bin_type=3,
-            reel_layer=1,
-            reel_thickness=15.3,
-            reel_diameter=7,
-            label="next reel",
-        )
-    if successor_state == "conflicting":
-        decision["next_source_action"]["result"] = "WAIT"
-    await host.settle("outbound.bin.material.decide@v1", decision)
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
     async with host.factory.begin() as session:
         first = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
         put_code = first.put_command_code
+        assert put_code
         rack = await host.outbound.advance(
             session, work_line_id=1, plate_id=rack_plate_id, now_ms=61
         )
         assert rack.pick_command_code is None
-        if successor_state == "valid":
-            successor = await session.scalar(
-                select(AutoOutboundPlate).where(
-                    AutoOutboundPlate.grant_parent_plate_id == host.plate_id
-                )
+    if tail in ("ack_first", "put_failed"):
+        await host.arm_ack(put_code, on_ack=business_wakeups.ecs_ack_committed)
+    if tail == "put_first":
+        assert (await host.arm_result(put_code)).status_code == 200
+
+    if tail != "unknown":
+        result = {"result": "WAIT", "retry_after_ms": 1000} if tail == "WAIT" else ready_bin()
+        await host.settle("outbound.bin.work_plan@v1", result)
+    successor_id = None
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=62)
+        successor = await session.scalar(
+            select(AutoOutboundPlate).where(
+                AutoOutboundPlate.bin_work_id == host.work_id,
+                AutoOutboundPlate.id != host.plate_id,
             )
+        )
+        if tail in ("unknown", "WAIT"):
+            assert successor is None
+        else:
+            assert successor is not None
             successor_id = successor.id
-            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=62)
-            assert successor.pick_command_code is None
-    await host.arm_ack(put_code, on_ack=business_wakeups.ecs_ack_committed)
-    assert notices == ["smt_auto"]
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=63)
+            assert bool(successor.pick_command_code) is (tail != "ready_first")
+
+    if tail in ("unknown", "WAIT", "ready_first"):
+        await host.arm_ack(put_code, on_ack=business_wakeups.ecs_ack_committed)
+    assert notices == ([] if tail == "put_first" else ["smt_auto"])
     async with host.factory.begin() as session:
         rack = await host.outbound.advance(
-            session, work_line_id=1, plate_id=rack_plate_id, now_ms=63
+            session, work_line_id=1, plate_id=rack_plate_id, now_ms=64
         )
         assert rack.pick_command_code is None
-        if successor_state == "valid":
+        if successor_id is not None:
             successor = await host.outbound.advance(
-                session, work_line_id=1, plate_id=successor_id, now_ms=64
+                session, work_line_id=1, plate_id=successor_id, now_ms=65
             )
             pick_code = successor.pick_command_code
             assert pick_code
-            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=65)
+            await host.outbound.advance(session, work_line_id=1, plate_id=successor_id, now_ms=66)
             assert successor.pick_command_code == pick_code
             put = await host.ecs.get_command(
                 session, owner=CommandOwner("smt_auto"), command_code=put_code
             )
-            assert put.status == "WAITING_RESULT" and put.result is None
-    if successor_state == "valid":
+            assert put.status == ("SUCCEEDED" if tail == "put_first" else "WAITING_RESULT")
+    if tail == "put_failed":
+        assert (
+            await host.arm_result(put_code, status="FAILED", empty="PUT_FAILED")
+        ).status_code == 200
+        async with host.factory.begin() as session:
+            rack = await host.outbound.advance(
+                session, work_line_id=1, plate_id=rack_plate_id, now_ms=67
+            )
+            successor = await host.outbound.advance(
+                session, work_line_id=1, plate_id=successor_id, now_ms=68
+            )
+            assert rack.pick_command_code is None
+            assert successor.pick_command_code == pick_code
+            assert not await session.scalar(
+                select(AutoOutboundDecisionRound.id).where(
+                    AutoOutboundDecisionRound.plate_id == successor_id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
+                )
+            )
+        return
+    if successor_id is not None:
         assert (await host.arm_result(pick_code)).status_code == 200
         assert (
             await host.platform_scan(pick_code, barcode="next reel", timestamp=105)
         ).status_code == 200
         async with host.factory.begin() as session:
             successor = await host.outbound.advance(
-                session, work_line_id=1, plate_id=successor_id, now_ms=66
+                session, work_line_id=1, plate_id=successor_id, now_ms=67
             )
             assert successor.barcode == "next reel"
-            assert not await session.scalar(
+            round_id = await session.scalar(
                 select(AutoOutboundDecisionRound.id).where(
-                    AutoOutboundDecisionRound.plate_id == successor_id
+                    AutoOutboundDecisionRound.plate_id == successor_id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
                 )
             )
-    assert (await host.arm_result(put_code)).status_code == 200
+            assert bool(round_id) is (tail == "put_first")
+    if tail != "put_first":
+        assert (await host.arm_result(put_code)).status_code == 200
     async with host.factory.begin() as session:
         rack = await host.outbound.advance(
             session, work_line_id=1, plate_id=rack_plate_id, now_ms=70
         )
-        if successor_state == "valid":
-            assert rack.pick_command_code is None
-            successor = await session.scalar(
-                select(AutoOutboundPlate).where(
-                    AutoOutboundPlate.grant_parent_plate_id == host.plate_id
-                )
+        assert bool(rack.pick_command_code) is (successor_id is None)
+        if successor_id is not None:
+            successor = await host.outbound.advance(
+                session, work_line_id=1, plate_id=successor_id, now_ms=71
             )
-            await host.outbound.advance(session, work_line_id=1, plate_id=successor.id, now_ms=71)
             assert successor.pick_command_code == pick_code
             assert await session.scalar(
                 select(AutoOutboundDecisionRound.id).where(
@@ -1469,13 +1521,58 @@ async def test_ready_return_rack_yields_only_to_bin_successor(
                 )
             )
         else:
-            if successor_state == "absent":
-                assert rack.pick_command_code
-            assert not await session.scalar(
-                select(AutoOutboundPlate.id).where(
-                    AutoOutboundPlate.grant_parent_plate_id == host.plate_id
-                )
-            )
+            work = await session.get(AutoBinWork, host.work_id)
+            assert not work.release_command_code
+            assert not await host.outbound.bin_closed(session, work, for_release=True)
+
+
+@pytest.mark.parametrize("tail", ["unknown", "WAIT"])
+async def test_ready_bin_takes_platform_after_rack_put_with_tail_pending(outbound_host, tail):
+    host = outbound_host
+    _, member_id, rack_plate_id = await return_face(host)
+    async with host.factory.begin() as session:
+        rack = await host.outbound.advance(
+            session, work_line_id=1, plate_id=rack_plate_id, now_ms=50
+        )
+        rack_pick = rack.pick_command_code
+        assert rack_pick
+    assert (await host.arm_result(rack_pick, scan=True)).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=rack_plate_id, now_ms=60)
+    await host.settle("outbound.rackslot.material.decide@v1", accepted_target())
+    async with host.factory.begin() as session:
+        rack = await host.outbound.advance(
+            session, work_line_id=1, plate_id=rack_plate_id, now_ms=70
+        )
+        rack_put = rack.put_command_code
+        assert rack_put
+    if tail == "WAIT":
+        await host.settle(
+            "outbound.return_rack.work_plan@v1", {"result": "WAIT", "retry_after_ms": 1000}
+        )
+    await host.settle("outbound.bin.work_plan@v1", ready_bin())
+    await host.arm_ack(rack_put)
+    async with host.factory.begin() as session:
+        await host.outbound.work_plans.consume_return_face(
+            session, work_line_id=1, member_id=member_id, now_ms=72
+        )
+        await consume_bin_plan(host, session, now_ms=72)
+        bin_plate = await session.scalar(
+            select(AutoOutboundPlate).where(AutoOutboundPlate.bin_work_id == host.work_id)
+        )
+        bin_plate_id = bin_plate.id
+        await host.outbound.advance(session, work_line_id=1, plate_id=bin_plate_id, now_ms=73)
+        assert bin_plate.pick_command_code is None
+    assert (await host.arm_result(rack_put)).status_code == 200
+    async with host.factory.begin() as session:
+        bin_plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=bin_plate_id, now_ms=74
+        )
+        assert bin_plate.pick_command_code
+        member = await session.get(AutoOutboundSourceMember, member_id)
+        assert not await host.outbound.face_source_terminal(session, member)
+        rack_plate = await session.get(AutoOutboundPlate, rack_plate_id)
+        assert rack_plate.report_consumed_at_ms is None
 
 
 @pytest.mark.parametrize("rack_ready", [False, True])
@@ -1514,37 +1611,104 @@ async def test_new_bin_yields_to_ready_rack_only(outbound_host, rack_ready):
             assert rack.pick_command_code
 
 
-@pytest.mark.parametrize("has_successor", [False, True])
-async def test_scan2_release_follows_source_terminal_before_put_result(
-    decided_outbound, has_successor
-):
+def accepted_target(*, rack_id="target", rack_face="A", preparation=None):
+    decision = dict(
+        result="ACCEPT",
+        target_locator=dict(
+            type="RACK_SLOT",
+            rack_id=rack_id,
+            rack_face=rack_face,
+            slot_id="A1",
+            rack_layer=1,
+            rack_column=1,
+        ),
+    )
+    if preparation is not None:
+        decision["target_preparation"] = preparation
+    return decision
+
+
+def ready_bin(cell="C2", index=2):
+    return dict(
+        result="READY",
+        cell_id=cell,
+        cell_index=index,
+        bin_type=3,
+        reel_layer=1,
+        reel_thickness=15.3,
+        reel_diameter=7,
+    )
+
+
+async def consume_bin_plan(host, session, *, now_ms, work_id=None):
+    work = await session.get(AutoBinWork, work_id or host.work_id)
+    return await host.work_plans.consume_bin(
+        session, work_line_id=1, arrival_id=work.arrival_id, now_ms=now_ms
+    )
+
+
+async def test_bin_tail_wait_retries_once_with_original_arrival(decided_outbound):
+    host = decided_outbound
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=60)
+    await host.settle("outbound.bin.work_plan@v1", {"result": "WAIT", "retry_after_ms": 20})
+    async with host.factory.begin() as session:
+        tail = await consume_bin_plan(host, session, now_ms=61)
+        original_id = tail.operation_id
+        request = tail.request_data
+        work = await session.get(AutoBinWork, host.work_id)
+        args = dict(work_line_id=1, arrival_id=work.arrival_id)
+        plan = await host.work_plans.start_bin(session, **args, now_ms=80)
+        assert plan.operation_id == original_id
+        plan = await host.work_plans.start_bin(session, **args, now_ms=81)
+        next_id = plan.operation_id
+        assert next_id != original_id and plan.request_data == request
+        again = await host.work_plans.start_bin(session, **args, now_ms=82)
+        assert again.operation_id == next_id
+    await host.settle("outbound.bin.work_plan@v1", ready_bin(), operation_id=next_id)
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=83)
+        await consume_bin_plan(host, session, now_ms=84)
+        assert await session.scalar(select(func.count()).select_from(AutoOutboundPlate)) == 2
+
+
+async def test_accepted_bin_resumes_work_plan_after_source_is_reenabled(decided_outbound):
+    host = decided_outbound
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
+    async with host.factory.begin() as session:
+        line = await session.get(WorkLine, 1)
+        line.is_enabled = False
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        assert plate.final_decision_round_id and plate.put_command_code is None
+    async with host.factory.begin() as session:
+        line = await session.get(WorkLine, 1)
+        line.is_enabled = True
+        work = await session.get(AutoBinWork, host.work_id)
+        args = dict(work_line_id=1, arrival_id=work.arrival_id)
+        round_ = await host.work_plans.start_bin(session, **args, now_ms=61)
+        assert round_.unresolved
+        assert (await host.work_plans.start_bin(session, **args, now_ms=62)).id == round_.id
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=63)
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=64
+        )
+        assert plate.put_command_code
+
+
+@pytest.mark.parametrize("tail", ["unknown", "WAIT", "READY", "NO_WORK"])
+async def test_scan2_release_follows_source_terminal_before_put_result(decided_outbound, tail):
     from app.businesses.smt_auto.task_flow import TaskFlow
 
     host = decided_outbound
     flow = TaskFlow(
         host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
     )
-    decision = dict(
-        result="ACCEPT",
-        target_locator=dict(
-            type="RACK_SLOT",
-            rack_id="target",
-            rack_face="A",
-            slot_id="A1",
-            rack_layer=1,
-            rack_column=1,
-        ),
-    )
-    if has_successor:
-        decision["next_source_action"] = dict(
-            cell_id="C2",
-            cell_index=2,
-            bin_type=3,
-            reel_layer=1,
-            reel_thickness=15.3,
-            reel_diameter=7,
-        )
-    await host.settle("outbound.bin.material.decide@v1", decision)
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
     async with host.factory.begin() as session:
         work = await session.get(AutoBinWork, host.work_id)
         release = dict(work_line_id=1, arrival_id=work.arrival_id)
@@ -1552,26 +1716,89 @@ async def test_scan2_release_follows_source_terminal_before_put_result(
         plate = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
-        assert plate.put_command_code and plate.report_message_id is None
-        state = "WAITING" if has_successor else "RELEASING"
-        assert await flow.release_bin(session, **release, now_ms=61) == state
-        command = work.release_command_code
-        assert bool(command) == (not has_successor)
-        assert await flow.release_bin(session, **release, now_ms=62) == state
-        assert work.release_command_code == command
-        assert await flow.advance(session, task_id="t", now_ms=63) == "WAITING"
         put_code = plate.put_command_code
+        assert put_code and plate.report_message_id is None
+        assert await flow.release_bin(session, **release, now_ms=61) == "WAITING"
+    if tail != "unknown":
+        data = ready_bin() if tail == "READY" else {"result": tail}
+        if tail == "WAIT":
+            data["retry_after_ms"] = 1000
+        await host.settle("outbound.bin.work_plan@v1", data)
+    async with host.factory.begin() as session:
+        work = await session.get(AutoBinWork, host.work_id)
+        await host.work_plans.consume_bin(session, **release, now_ms=62)
+        state = "RELEASING" if tail == "NO_WORK" else "WAITING"
+        assert await flow.release_bin(session, **release, now_ms=63) == state
+        command = work.release_command_code
+        assert bool(command) == (tail == "NO_WORK")
+        assert await flow.release_bin(session, **release, now_ms=64) == state
+        assert work.release_command_code == command
+        assert await flow.advance(session, task_id="t", now_ms=65) == "WAITING"
     if command:
         assert (await host.result(command)).status_code == 200
         async with host.factory.begin() as session:
-            assert await flow.release_bin(session, **release, now_ms=64) == "RELEASED"
-            assert await flow.advance(session, task_id="t", now_ms=65) == "WAITING"
+            assert await flow.release_bin(session, **release, now_ms=66) == "RELEASED"
+            assert await flow.advance(session, task_id="t", now_ms=67) == "WAITING"
         assert (await host.arm_result(put_code)).status_code == 200
         async with host.factory.begin() as session:
             plate = await host.outbound.advance(
                 session, work_line_id=1, plate_id=host.plate_id, now_ms=110
             )
             assert plate.report_message_id
+
+
+async def test_second_bin_gets_own_work_plan_after_actual_arrival(decided_outbound):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = decided_outbound
+    flow = TaskFlow(
+        host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
+    )
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        put_code = plate.put_command_code
+        assert put_code
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=61)
+        first = await session.get(AutoBinWork, host.work_id)
+        assert (
+            await flow.release_bin(session, work_line_id=1, arrival_id=first.arrival_id, now_ms=62)
+            == "RELEASING"
+        )
+        release_code = first.release_command_code
+    assert (await host.result(release_code)).status_code == 200
+    async with host.factory.begin() as session:
+        assert not await session.scalar(
+            select(AutoBinWork.id).where(AutoBinWork.id != host.work_id)
+        )
+    new_bin = await host.scan(timestamp=111, bin_code="A000000002-C")
+    assert new_bin is not None
+    await host.settle("outbound.bin.work_plan@v1", ready_bin())
+    async with host.factory.begin() as session:
+        round_ = await consume_bin_plan(host, session, now_ms=112, work_id=new_bin.id)
+        assert round_.request_data == {
+            "task_id": "t",
+            "bin_code": "A000000002",
+            "scanned_at": 111,
+        }
+        next_plate = await session.scalar(
+            select(AutoOutboundPlate).where(AutoOutboundPlate.bin_work_id == new_bin.id)
+        )
+        next_id = next_plate.id
+        await host.outbound.advance(session, work_line_id=1, plate_id=next_id, now_ms=113)
+        assert next_plate.pick_command_code is None
+    assert (await host.arm_result(put_code)).status_code == 200
+    async with host.factory.begin() as session:
+        next_plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=next_id, now_ms=114
+        )
+        assert next_plate.pick_command_code
+        first_plate = await session.get(AutoOutboundPlate, host.plate_id)
+        assert first_plate.report_consumed_at_ms is None
 
 
 @pytest.mark.parametrize("changed", ["scanner", "rack_arm", "transfer_point", "rack", "face"])
@@ -1619,11 +1846,23 @@ async def test_put_reuses_current_arrival_after_unrelated_line_change(decided_ou
             )
 
 
-@pytest.mark.parametrize("invalid_next", [False, True])
+async def test_material_accept_with_legacy_successor_cannot_move_current_plate(decided_outbound):
+    host = decided_outbound
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        {**accepted_target(), "next_source_action": ready_bin()},
+    )
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        assert plate.put_command_code is None
+        assert plate.final_decision_round_id is None
+        assert await session.scalar(select(func.count()).select_from(AutoOutboundPlate)) == 1
+
+
 @pytest.mark.parametrize("rescan", [False, True])
-async def test_target_rotation_requires_original_applied_action(
-    decided_outbound, invalid_next, rescan
-):
+async def test_target_rotation_requires_original_applied_action(decided_outbound, rescan):
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
 
     host = decided_outbound
@@ -1633,7 +1872,6 @@ async def test_target_rotation_requires_original_applied_action(
         dict(
             result="ACCEPT",
             target_preparation="ROTATE",
-            **({"next_source_action": {"cell_id": "broken"}} if invalid_next else {}),
             target_locator=dict(
                 type="RACK_SLOT",
                 rack_id="target",
@@ -1690,7 +1928,6 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
             source_disposition=disposition,
             detailMessage="OK",
             target_locator=None,
-            next_source_action={"label": "irrelevant to REJECT"},
             ng_locator=dict(type="NG_ZONE", zone_code="MATERIAL_NG_01", label="NG"),
         ),
     )
@@ -1700,7 +1937,6 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
                 session, work_line_id=1, plate_id=host.plate_id, now_ms=now
             )
         assert plate.final_decision_round_id
-        assert plate.next_source_action is None
         assert plate.put_command_code
         code = plate.put_command_code
         line = await session.get(WorkLine, 1)
@@ -1847,37 +2083,23 @@ async def test_target_replacement_waits_for_applied_movement_report(decided_outb
 
     host = decided_outbound
     racks = OutboundRacks(host.outbound, station_id="station")
-    next_source = dict(
-        cell_id="C2", cell_index=2, bin_type=3, reel_layer=1, reel_thickness=20, reel_diameter=7
-    )
-    await host.settle(
-        "outbound.bin.material.decide@v1",
-        dict(
-            result="ACCEPT",
-            target_locator=dict(
-                type="RACK_SLOT",
-                rack_id="target",
-                rack_face="A",
-                slot_id="A1",
-                rack_layer=1,
-                rack_column=1,
-            ),
-            next_source_action=next_source,
-        ),
-    )
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
     async with host.factory.begin() as session:
         first = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
         put_code = first.put_command_code
+        job_id = first.target_rack_job_id
         assert put_code
+    await host.settle("outbound.bin.work_plan@v1", ready_bin() | {"reel_thickness": 20})
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=65)
         second = await session.scalar(
-            select(AutoOutboundPlate).where(AutoOutboundPlate.grant_parent_plate_id == first.id)
+            select(AutoOutboundPlate).where(AutoOutboundPlate.id != host.plate_id)
         )
         second_id = second.id
-        await host.outbound.advance(session, work_line_id=1, plate_id=second.id, now_ms=70)
+        await host.outbound.advance(session, work_line_id=1, plate_id=second_id, now_ms=70)
         assert second.pick_command_code is None
-        job_id = first.target_rack_job_id
         assert not any(
             action.kind == "DEPART"
             for action in (await host.dispatch.progress(session, job_id=job_id)).actions
@@ -1914,6 +2136,20 @@ async def test_target_replacement_waits_for_applied_movement_report(decided_outb
         demand, handoff = await racks.ports.facts(session, job_id=job_id)
         assert demand.state == "NONE"
         assert handoff.state == "CLEAR"
+        command = await session.scalar(
+            select(IntegrationExchange).where(IntegrationExchange.command_code == put_code)
+        )
+        # Simulate an outstanding original PUT at the point of the replacement check.
+        command.status = "WAITING_RESULT"
+        await session.flush()
+        demand, handoff = await racks.ports.facts(session, job_id=job_id)
+        assert (demand.state, handoff.state) == ("CONTINUE", "BLOCKED")
+        await racks.advance(session, task_id="t", now_ms=111)
+        assert [
+            action.kind for action in (await host.dispatch.progress(session, job_id=job_id)).actions
+        ] == ["ENTER"]
+        command.status = "SUCCEEDED"
+        await session.flush()
         final = await session.get(AutoOutboundDecisionRound, first.final_decision_round_id)
         final.unresolved = True
         await session.flush()
@@ -1976,6 +2212,9 @@ async def test_same_transfer_rack_reenters_after_departure_without_replace(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
         old_job_id, put_code = first.target_rack_job_id, first.put_command_code
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=61)
         old_bin = await session.get(AutoBinWork, host.work_id)
         assert (
             await flow.release_bin(
@@ -2094,7 +2333,7 @@ async def test_same_transfer_rack_reenters_after_departure_without_replace(
         assert command.device_code == "ARM04"
 
 
-async def test_final_decision_and_put_intent_roll_back_together(decided_outbound):
+async def test_final_decision_put_and_work_plan_roll_back_together(decided_outbound):
     host = decided_outbound
     await host.settle(
         "outbound.bin.material.decide@v1",
@@ -2110,17 +2349,24 @@ async def test_final_decision_and_put_intent_roll_back_together(decided_outbound
             ),
         ),
     )
+    rounds = (
+        select(func.count())
+        .select_from(AutoOutboundDecisionRound)
+        .where(AutoOutboundDecisionRound.operation == "outbound.bin.work_plan@v1")
+    )
     async with host.factory() as session:
         await session.begin()
         plate = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
         assert plate.put_command_code
+        assert await session.scalar(rounds) == 2
         await session.rollback()
     async with host.factory.begin() as session:
         plate = await session.get(AutoOutboundPlate, host.plate_id)
         assert plate.put_command_code is None
         assert plate.final_decision_round_id is None
+        assert await session.scalar(rounds) == 1
         assert (
             await session.scalar(
                 select(func.count())
@@ -2131,6 +2377,8 @@ async def test_final_decision_and_put_intent_roll_back_together(decided_outbound
         )
         await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=70)
         assert plate.put_command_code
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=71)
+        assert await session.scalar(rounds) == 2
         assert (
             await session.scalar(
                 select(func.count())
@@ -2155,42 +2403,105 @@ async def test_transfer_demand_requires_complete_original_plan_coverage(decided_
         assert (await ports.facts(session, job_id=plan.target_job_id))[0].state == "UNKNOWN"
 
 
-async def test_replacement_with_next_does_not_wait_for_its_own_successor_decision(decided_outbound):
+@pytest.mark.parametrize("tail", ["unknown", "WAIT", "READY"])
+async def test_replacement_does_not_wait_for_its_own_successor(decided_outbound, tail):
     host = decided_outbound
     await host.settle(
         "outbound.bin.material.decide@v1",
-        dict(
-            result="ACCEPT",
-            target_preparation="REPLACE",
-            target_locator=dict(
-                type="RACK_SLOT",
-                rack_id="replacement",
-                rack_face="A",
-                slot_id="A1",
-                rack_layer=1,
-                rack_column=1,
-            ),
-            next_source_action=dict(
-                cell_id="C2",
-                cell_index=2,
-                bin_type=3,
-                reel_layer=1,
-                reel_thickness=15.3,
-                reel_diameter=7,
-            ),
-        ),
+        accepted_target(rack_id="replacement", preparation="REPLACE"),
     )
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=60)
+    if tail != "unknown":
+        result = ready_bin() if tail == "READY" else {"result": "WAIT", "retry_after_ms": 10}
+        await host.settle("outbound.bin.work_plan@v1", result)
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=61)
         successor = await session.scalar(
-            select(AutoOutboundPlate).where(
-                AutoOutboundPlate.grant_parent_plate_id == host.plate_id
-            )
+            select(AutoOutboundPlate).where(AutoOutboundPlate.id != host.plate_id)
         )
-        assert successor and successor.final_decision_round_id is None
+        assert (successor is not None) is (tail == "READY")
+        if successor is not None:
+            assert successor.pick_command_code is None
         plan = await session.scalar(select(AutoTaskInput))
         ports = AutoRackPorts(host.dispatch, outbound=host.outbound)
         demand, handoff = await ports.facts(session, job_id=plan.target_job_id)
+        assert (demand.state, handoff.state) == ("NONE", "CLEAR")
+
+
+async def test_closed_empty_pick_does_not_hold_later_target_replacement(outbound_host):
+    host = outbound_host
+    await host.settle("outbound.bin.work_plan@v1", ready_bin("C1", 1))
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=30)
+        first = await session.scalar(select(AutoOutboundPlate))
+        first_id = first.id
+        await host.outbound.advance(session, work_line_id=1, plate_id=first_id, now_ms=40)
+        first_pick = first.pick_command_code
+
+    async def advance(plate_id, now_ms):
+        async with host.factory.begin() as session:
+            return await host.outbound.advance(
+                session, work_line_id=1, plate_id=plate_id, now_ms=now_ms
+            )
+
+    assert (
+        await host.arm_result(first_pick, status="FAILED", empty="PICK_FAILED")
+    ).status_code == 200
+    await advance(first_id, 50)
+    await host.settle("outbound.source.empty_decide@v1", {"result": "SOURCE_DONE"})
+    await advance(first_id, 60)
+    await host.settle("outbound.bin.work_plan@v1", ready_bin())
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=70)
+        first = await session.get(AutoOutboundPlate, first_id)
+        assert not first.pending and await host.outbound.closed(session, first)
+        current = await session.scalar(
+            select(AutoOutboundPlate).where(AutoOutboundPlate.id != first_id)
+        )
+        current_id = current.id
+    current = await advance(current_id, 80)
+    assert (await host.arm_result(current.pick_command_code, scan=True)).status_code == 200
+    await advance(current_id, 90)
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        accepted_target(rack_id="replacement", preparation="REPLACE"),
+    )
+    await advance(current_id, 100)
+    async with host.factory.begin() as session:
+        plan = await session.scalar(select(AutoTaskInput))
+        demand, handoff = await AutoRackPorts(host.dispatch, outbound=host.outbound).facts(
+            session, job_id=plan.target_job_id
+        )
+        assert (demand.state, handoff.state) == ("NONE", "CLEAR")
+
+
+@pytest.mark.parametrize("ready", [None, False, True])
+async def test_other_source_prefetch_cannot_hold_target_replacement(decided_outbound, ready):
+    host = decided_outbound
+    async with host.factory.begin() as session:
+        plan = await session.scalar(select(AutoTaskInput))
+        job_id = plan.target_job_id
+        plan.effective_request = {
+            **plan.effective_request,
+            "added_return_racks": [{"rack_id": "return", "rack_faces": ["A"]}],
+        }
+    racks, _, rack_plate_id = await return_face(host, ready=ready)
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        accepted_target(rack_id="replacement", preparation="REPLACE"),
+    )
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=201
+        )
+        assert plate.put_command_code is None
+        if rack_plate_id is not None:
+            rack_plate = await host.outbound.advance(
+                session, work_line_id=1, plate_id=rack_plate_id, now_ms=202
+            )
+            assert rack_plate.pick_command_code is None
+        demand, handoff = await racks.ports.facts(session, job_id=job_id)
         assert (demand.state, handoff.state) == ("NONE", "CLEAR")
 
 
@@ -2319,8 +2630,10 @@ async def test_mixed_withdrawn_sources_release_target_before_report(decided_outb
         )
         code = plate.put_command_code
         assert code
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
     await host.arm_result(code)
     async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=69)
         plate = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=70
         )

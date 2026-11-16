@@ -26,6 +26,7 @@ from app.integrations.history import (
     write_record,
     write_reference,
 )
+from app.integrations.runtime_authority import PREVIOUS_QUERY_REVISION, QUERY_REVISIONS
 from app.models import IntegrationExchange as Exchange
 from app.models import IntegrationRecord as Record
 from app.models import IntegrationReference as Reference
@@ -1182,8 +1183,8 @@ async def _run(args):
             revision = await coordinator.scalar(text("SELECT version_num FROM alembic_version"))
             if revision in {
                 "http_exchange_runtime_authority",
-                "http_exchange_query_views",
-                "http_exchange_initiator",
+                PREVIOUS_QUERY_REVISION,
+                *QUERY_REVISIONS,
             }:
                 raise ValueError("legacy integration history backfill has retired")
             if pg and not await coordinator.scalar(

@@ -41,7 +41,7 @@ uv run pytest --collect-only -q --test-lane=1/10
 
 可靠投递的到期与清理操作扫描整个库。`tests/reliable` 每个 PostgreSQL 测试模块使用迁移到 head 的专属临时库，模块内的会话、运行时及子进程统一使用该库。
 
-历史迁移用例同时验证停写后的成功路径与有活跃事务时的拒绝路径。CI 仅在该任务专属的一次性 PostgreSQL 服务中关闭 autovacuum，避免系统目录维护与停写测试竞争。复现 CI 条件的本机测试也需使用独立 PostgreSQL 实例。生产活跃事务检测和锁门禁保持原样。
+历史迁移用例同时验证停写后的成功路径与有活跃事务时的拒绝路径。CI 仅在该任务专属的一次性 PostgreSQL 服务中关闭 autovacuum 和 TimescaleDB 遥测，避免后台事务与停写测试竞争。复现 CI 条件的本机测试也需使用独立 PostgreSQL 实例。生产活跃事务检测和锁门禁保持原样。
 
 此前完整复跑有两个 PostgreSQL 用例被原停写门禁拒绝；随后采到符合原门禁谓词的活跃 autovacuum 快照，但未捕获原失败的精确瞬间，不能宣告根因已完全证实。独立临时库修复后完整六道通过，原失败日志仍保留。
 
@@ -50,10 +50,11 @@ uv run pytest --collect-only -q --test-lane=1/10
 后续 `dc24a16` 的远端 CI 五道通过，第4道两个 audit_archive 用例在公共管理源的初始化阶段失败，尚未进入用例正文断言。迁移目录的模块级 `pg_url` 现在只创建并回收自有空管理库，供各例创建独立历史库；不再对该管理源预先执行无关的未来 head。真正需要现代运行结构的 `pg_sessions` 仍按需执行真实 `upgrade head`，当前仅 expiry-index 用例消费它。历史用例自行选择 revision，原断言、生产门禁及重试策略不变。专项9项通过；最终远端结果仍须按最终提交实测，不能从本机通过推断。
 
 CI 的每个矩阵任务有自己的 PostgreSQL 和 Redis 服务，因此任务之间可以使用相同库名和 Redis DB 号。
-在该任务服务内额外创建两个空库，分别配置：
+在该任务服务内为这些迁移回归分别创建空库：
 
 - `TEST_HISTORY_MIGRATION_DATABASE_URL`：执行本次历史改造的 PostgreSQL 补录与迁移证明。
 - `TRANSPORT_OWNER_MIGRATION_DATABASE_URL`：执行相关 Transport 原归属与位置证据迁移回归。
+- `SMT_AUTO_MIGRATION_DATABASE_URL`：执行 SMT AUTO 出库切换与迁移回归。
 
 这两组验证此前未被 CI 显式配置；本次保留其独立临时库约束并启用它们，避免仅通过 SQLite 就交付历史权威切换。
 CI 使用现有 `migration_database_ddl` 创建任务自有数据库，服务随任务销毁；不连接业务数据库。
