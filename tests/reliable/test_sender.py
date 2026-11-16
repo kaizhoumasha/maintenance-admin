@@ -63,12 +63,12 @@ async def test_completed_sends_refill_slots_without_polling_delay(
     )
     runner = asyncio.create_task(sender.run())
     try:
-        async with asyncio.timeout(3):
+        # The frozen poll clock tests wakeup; the wall-clock timeout only guards against hangs.
+        async with asyncio.timeout(15):
             await full.wait()
             await parked.wait()
-        assert len(requests) == 4 and maximum == 4
-        release.set()
-        async with asyncio.timeout(3):
+            assert len(requests) == 4 and maximum == 4
+            release.set()
             await refilled.wait()
     finally:
         release.set()
