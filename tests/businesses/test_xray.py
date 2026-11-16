@@ -124,12 +124,11 @@ async def xray(callback_store, monkeypatch):
         facts.append(body)
         if req.app is mock_peer:
             mock_facts.append(body)
-        return {
-            "operation_id": body["operation_id"],
-            "code": "RECORDED",
-            "timestamp": 2,
-            "data": {},
-        }
+        status, code = replies.get("put_report", (200, "RECORDED"))
+        return JSONResponse(
+            {"operation_id": body["operation_id"], "code": code, "timestamp": 2, "data": {}},
+            status_code=status,
+        )
 
     @peer.post("/api/v1/wes/transport-requests")
     async def transport(req: Request):
@@ -308,6 +307,7 @@ async def xray(callback_store, monkeypatch):
                 body["error_detail"] = {"code": "FAILED", "msg": "device failure"}
             response = await client.post("/api/v1/callback/result", json=body)
             assert response.status_code == status, response.text
+            return body["finish_time"]
 
         async def dispatch():
             sent = await sender.tick()
@@ -613,8 +613,9 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
         await x.result(
             put, status=400, actual_qty=1, position="TARGET", actual_target=target | invalid
         )
+    x.replies["put_report"] = (503, "UNAVAILABLE")
     for _ in range(2):
-        await x.result(
+        finished_at = await x.result(
             put,
             barcode=effective_barcode,
             actual_qty=1,
@@ -622,14 +623,26 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
             actual_target=target | {"rack_id": "RACK-1", "bin_id": "BIN-D", "reel_thickness": 20},
         )
         await x.drain()
-    assert len(x.facts) == 1
-    assert x.facts[0]["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
+    (report,) = x.facts
+    assert report["data"] == {
+        "workline_code": x.requests[-1]["data"]["workline_code"],
+        "barcode": effective_barcode,
+        "to_locator": {"type": "TRANSIT_BIN"},
+        "occurred_at": finished_at,
+    }
+    assert report["operation_id"] != x.requests[-1]["operation_id"]
+    x.replies["put_report"] = (200, "DUPLICATE")
+    x.clock.advance(60)
+    x.restart()
+    await x.drain()
+    assert x.facts == [report, report]
+    assert len(x.requests) == (4 if counted else 2)
+    assert len(x.commands) == (4 if counted else 2)
     assert not x.mock_facts
     assert all(
         not {"reel_id", "source_event_id"} & request["data"].keys()
         for request in (*x.requests, *x.facts)
     )
-    assert x.facts[0]["data"]["target_operation_id"] == x.requests[-1]["operation_id"]
 
 
 async def test_xray_trace_logs_committed_command_with_its_wms_operation(xray, caplog):
@@ -1072,7 +1085,7 @@ async def test_late_original_bin_result_uses_v2_target_after_upgrade(xray):
         await x.drain()
 
     (report,) = x.facts
-    assert report["data"]["target_operation_id"] == x.requests[-1]["operation_id"]
+    assert report["data"]["barcode"] == x.barcode
     assert report["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
     assert len(x.commands) == 2
 
@@ -1204,7 +1217,7 @@ async def test_rack_enter_preserves_original_slot_authorization(xray):
     await x.result(put, actual_qty=1, position="TARGET", actual_target=actual)
     await x.drain()
     assert x.facts[0]["data"]["to_locator"] == rack_slot(x)["target_locator"]
-    assert x.facts[0]["data"]["target_operation_id"] == first["operation_id"]
+    assert x.facts[0]["data"]["barcode"] == first["data"]["barcode"]
 
 
 def target_requests(x):
