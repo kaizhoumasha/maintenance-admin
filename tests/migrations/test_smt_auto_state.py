@@ -186,11 +186,7 @@ async def test_deadline_downgrade_preserves_original_configuration_evidence(stat
 async def test_barcode_migration_preserves_unicode_and_refuses_lossy_downgrade(state_migration):
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from app.businesses.smt_auto.models import (
-        AutoBinWork,
-        AutoInboundDecisionRound,
-        AutoInboundPlate,
-    )
+    from app.businesses.smt_auto.models import AutoInboundDecisionRound, AutoInboundPlate
     from tests.migration_helpers import source_table
 
     store = state_migration
@@ -211,23 +207,26 @@ async def test_barcode_migration_preserves_unicode_and_refuses_lossy_downgrade(s
                 dispatch_sequence=1,
             )
         )
-        work = AutoBinWork(
-            work_line_id=12,
-            arrival_id="arrival",
-            device_code="SCAN2",
-            raw_bin_code="BIN-C",
-            bin_code="BIN",
-            scanned_at=1,
-            task_id="original",
-            business_type="inbound",
-            association="TASK",
+        work = await source_table(await session.connection(), "smt_auto_bin_work")
+        work_id = await session.scalar(
+            work.insert()
+            .values(
+                work_line_id=12,
+                arrival_id="arrival",
+                device_code="SCAN2",
+                raw_bin_code="BIN-C",
+                bin_code="BIN",
+                scanned_at=1,
+                task_id="original",
+                business_type="inbound",
+                association="TASK",
+            )
+            .returning(work.c.id)
         )
-        session.add(work)
-        await session.flush()
         round_ = AutoInboundDecisionRound(
             task_id="original",
             purpose="WORK_PLAN",
-            bin_work_id=work.id,
+            bin_work_id=work_id,
             stage_key="first",
             round_no=1,
             operation="putaway.work_plan@v1",
@@ -240,7 +239,7 @@ async def test_barcode_migration_preserves_unicode_and_refuses_lossy_downgrade(s
         session.add(
             AutoInboundPlate(
                 task_id="original",
-                bin_work_id=work.id,
+                bin_work_id=work_id,
                 grant_kind="READY",
                 grant_round_id=round_.id,
                 grant_snapshot={},

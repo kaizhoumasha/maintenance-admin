@@ -4,6 +4,7 @@ from app.core.config import get_settings
 
 PREVIOUS_QUERY_REVISION = "http_exchange_query_views"
 QUERY_REVISION = "http_exchange_initiator"
+QUERY_REVISIONS = frozenset({QUERY_REVISION, "smt_auto_outbound_v1"})
 LEGACY_TABLES = ("integration_exchange", "integration_record", "integration_reference")
 
 
@@ -67,9 +68,10 @@ def check_reconciled(connection, *, use_runtime, query_revision=QUERY_REVISION):
                 text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'")
             )
         )
+    supported_revisions = QUERY_REVISIONS if query_revision == QUERY_REVISION else {query_revision}
     if (
         not has_runtime_tables
-        or connection.scalar(text(f"SELECT version_num FROM {ledger}")) != query_revision
+        or connection.scalar(text(f"SELECT version_num FROM {ledger}")) not in supported_revisions
     ):
         raise RuntimeError("integration runtime authority requires successful reconciliation")
     if retired:

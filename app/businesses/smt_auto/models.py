@@ -165,6 +165,9 @@ class AutoOutboundSourceMember(Base):
     )
     terminal_basis: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     terminal_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    normal_plan_due: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     rack_array_index: Mapped[int]
     withdrawn_by_input_id: Mapped[int | None] = mapped_column(ForeignKey("smt_auto_task_input.id"))
     withdrawn_at_ms: Mapped[int | None] = mapped_column(BigInteger)
@@ -193,6 +196,9 @@ class AutoBinWork(Base):
     exception_basis: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     terminal_basis: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     terminal_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    normal_plan_due: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     release_decided_at_ms: Mapped[int | None] = mapped_column(BigInteger)
     release_command_code: Mapped[str | None] = mapped_column(String(100))
     release_result_ref: Mapped[str | None] = mapped_column(String(200))
@@ -331,22 +337,15 @@ class AutoOutboundPlate(Base):
     __tablename__ = "smt_auto_outbound_plate"
     __table_args__ = (
         UniqueConstraint("id", "task_id", name="outbound_plate_task"),
-        CheckConstraint("grant_kind IN ('READY','NEXT','RETRY')", name="outbound_plate_grant"),
+        CheckConstraint("grant_kind IN ('READY','RETRY')", name="outbound_plate_grant"),
         CheckConstraint(
-            "(grant_kind = 'NEXT' AND grant_parent_plate_id IS NOT NULL AND "
-            "grant_round_id IS NULL) OR (grant_kind IN ('READY','RETRY') AND "
-            "grant_round_id IS NOT NULL AND grant_parent_plate_id IS NULL)",
+            "grant_round_id IS NOT NULL",
             name="outbound_plate_grant_origin",
         ),
         ForeignKeyConstraint(
             ["grant_round_id", "task_id"],
             ["smt_auto_outbound_decision_round.id", "smt_auto_outbound_decision_round.task_id"],
             name="outbound_plate_round_fk",
-        ),
-        ForeignKeyConstraint(
-            ["grant_parent_plate_id", "task_id"],
-            ["smt_auto_outbound_plate.id", "smt_auto_outbound_plate.task_id"],
-            name="outbound_plate_parent_fk",
         ),
         CheckConstraint(
             "(bin_work_id IS NOT NULL AND source_member_id IS NULL) OR (bin_work_id IS "
@@ -367,7 +366,6 @@ class AutoOutboundPlate(Base):
     )
     grant_kind: Mapped[str] = mapped_column(String(20))
     grant_round_id: Mapped[int | None] = mapped_column(unique=True)
-    grant_parent_plate_id: Mapped[int | None] = mapped_column(unique=True)
     grant_snapshot: Mapped[dict] = mapped_column(JSON)
     source_locator: Mapped[dict] = mapped_column(JSON)
     source_params: Mapped[dict] = mapped_column(JSON)
@@ -383,7 +381,6 @@ class AutoOutboundPlate(Base):
     pick_result_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     empty_observation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     target_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
-    next_source_action: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     put_result_snapshot: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     report_data: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
     report_response: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
@@ -444,6 +441,9 @@ class AutoOutboundDecisionRound(Base):
     trigger_plate_id: Mapped[int | None] = mapped_column(ForeignKey("smt_auto_outbound_plate.id"))
     stage_key: Mapped[str] = mapped_column(String(200))
     round_no: Mapped[int]
+    normal_continuation: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     previous_round_id: Mapped[int | None] = mapped_column(unique=True)
     operation: Mapped[str] = mapped_column(String(200))
     operation_id: Mapped[str] = mapped_column(String(200))

@@ -44,6 +44,11 @@ def test_accept_and_reject_are_closed_branch_shapes():
     with pytest.raises(ValidationError):
         BinAccept(result="ACCEPT", target_locator=target, next_source_action=None)
     with pytest.raises(ValidationError):
+        BinAccept.model_validate(
+            dict(result="ACCEPT", target_locator=target, next_source_action={"cell_id": "C2"}),
+            extra="ignore",
+        )
+    with pytest.raises(ValidationError):
         RackReject(
             result="REJECT",
             business_exception_code="MATERIAL_REJECTED",

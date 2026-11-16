@@ -51,20 +51,31 @@ class Outbound:
         self.requests, self.ecs, self.dispatch, self.roller = requests, ecs, dispatch, roller
         self.work_plans = WorkPlans(requests, dispatch)
         self.work_plans.outbound = self
+        self.work_plans.roller = roller
 
     async def _result(self, session, plate, phase, *, empty=False):
         code = getattr(plate, f"{phase}_command_code")
         key = getattr(plate, f"{phase}_call_key")
         snapshot = plate.source_arrival_snapshot or {}
         command = snapshot.get(f"{phase}_command", {})
-        if not code or not key or not command:
+        return await self._arm_result(
+            session,
+            key=key,
+            code=code,
+            device_code=command.get("device_code"),
+            phase=phase,
+            empty=empty,
+        )
+
+    async def _arm_result(self, session, *, key, code, device_code, phase, empty=False):
+        if not code or not key or not device_code:
             return None
         view = await self.ecs.get_by_call(session, owner=OWNER, call_key=key)
         if (
             view is None
             or view.command_code != code
             or view.status != ("FAILED" if empty else "SUCCEEDED")
-            or view.device_code != command.get("device_code")
+            or view.device_code != device_code
             or view.task_type != "PICK_AND_PUT"
             or view.hold_reason
             or view.needs_reconciliation
@@ -344,92 +355,60 @@ class Outbound:
                 and await self._grant(session, parent, new_pick=new_pick)
                 and await self._empty_closed(session, parent) == "RETRY"
             )
-        if plate.grant_kind == "READY":
-            grant = await session.get(AutoOutboundDecisionRound, plate.grant_round_id)
-            expected = plate.grant_snapshot
-        elif plate.grant_kind == "NEXT":
-            parent = await session.get(AutoOutboundPlate, plate.grant_parent_plate_id)
-            if (
-                parent is None
-                or parent.task_id != plate.task_id
-                or parent.bin_work_id != plate.bin_work_id
-                or parent.source_member_id != plate.source_member_id
-            ):
-                return False
-            grant = await session.get(AutoOutboundDecisionRound, parent.final_decision_round_id)
-            if grant is None or grant.plate_id != parent.id:
-                return False
-            expected = (grant.response_snapshot or {}).get("data", {})
-            if (
-                expected.get("result") != "ACCEPT"
-                or expected.get("next_source_action") != plate.grant_snapshot
-                or "result" in plate.grant_snapshot
-            ):
-                return False
-        else:
+        if plate.grant_kind != "READY":
             return False
+        grant = await session.get(AutoOutboundDecisionRound, plate.grant_round_id)
         if (
             grant is None
             or grant.task_id != plate.task_id
+            or grant.purpose != "WORK_PLAN"
             or grant.unresolved
             or grant.consumed_at_ms is None
         ):
             return False
-        if plate.grant_kind == "READY":
-            if grant.purpose != "WORK_PLAN":
+        if plate.bin_work_id is not None:
+            work = await session.get(AutoBinWork, plate.bin_work_id)
+            if (
+                work is None
+                or work.task_id != plate.task_id
+                or grant.bin_work_id != work.id
+                or grant.operation != "outbound.bin.work_plan@v1"
+                or grant.request_data
+                != dict(task_id=plate.task_id, bin_code=work.bin_code, scanned_at=work.scanned_at)
+                or plate.source_locator.get("bin_code") != work.bin_code
+            ):
                 return False
-            if plate.bin_work_id is not None:
-                work = await session.get(AutoBinWork, plate.bin_work_id)
-                if (
-                    work is None
-                    or work.task_id != plate.task_id
-                    or grant.bin_work_id != work.id
-                    or grant.operation != "outbound.bin.work_plan@v1"
-                    or grant.request_data
-                    != dict(
-                        task_id=plate.task_id, bin_code=work.bin_code, scanned_at=work.scanned_at
-                    )
-                    or plate.source_locator.get("bin_code") != work.bin_code
-                ):
-                    return False
-            else:
-                member = await session.get(AutoOutboundSourceMember, plate.source_member_id)
-                if (
-                    member is None
-                    or member.task_id != plate.task_id
-                    or grant.operation != "outbound.return_rack.work_plan@v1"
-                    or grant.source_preparation_action_id != member.preparation_action_id
-                    or plate.source_rack_job_id != member.rack_job_id
-                    or plate.source_preparation_action_id != member.preparation_action_id
-                    or grant.request_data
-                    != dict(
-                        task_id=plate.task_id,
-                        rack_id=member.rack_id,
-                        rack_face=member.rack_face,
-                        arrived_at=member.arrived_at_ms,
-                    )
-                ):
-                    return False
-            if new_pick and not await self._work_plan_pick_ready(session, plate, grant):
+        else:
+            member = await session.get(AutoOutboundSourceMember, plate.source_member_id)
+            if (
+                member is None
+                or member.task_id != plate.task_id
+                or grant.operation != "outbound.return_rack.work_plan@v1"
+                or grant.source_preparation_action_id != member.preparation_action_id
+                or plate.source_rack_job_id != member.rack_job_id
+                or plate.source_preparation_action_id != member.preparation_action_id
+                or grant.request_data
+                != dict(
+                    task_id=plate.task_id,
+                    rack_id=member.rack_id,
+                    rack_face=member.rack_face,
+                    arrived_at=member.arrived_at_ms,
+                )
+            ):
                 return False
-        elif not await self._grant(session, parent, new_pick=new_pick):
+        if new_pick and not await self._work_plan_pick_ready(session, plate, grant):
             return False
         result = await read_decision(self.requests, session, grant)
+        ready = plate.grant_snapshot
         if (
             result is None
-            or result.response_data != expected
-            or expected != (grant.response_snapshot or {}).get("data")
+            or result.response_data != ready
+            or ready != (grant.response_snapshot or {}).get("data")
+            or ready.get("result") != "READY"
         ):
             return False
-        ready = (
-            plate.grant_snapshot
-            if plate.grant_kind == "READY"
-            else {"result": "READY", **plate.grant_snapshot}
-        )
         try:
-            plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(
-                ready, extra="ignore" if plate.grant_kind == "NEXT" else None
-            )
+            plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(ready)
         except (ValueError, TypeError):
             return False
         fields = {k: ready[k] for k in type(plan).model_fields if k != "result"}
@@ -452,14 +431,20 @@ class Outbound:
                 or previous.request_data != round_.request_data
             ):
                 return False
-            if not (
-                await self._recorded_wait(session, previous)
-                or await self.work_plans.corrected_rack_ready(session, previous, round_)
-            ):
+            if await self._recorded_wait(session, previous):
+                if previous.normal_continuation != round_.normal_continuation:
+                    return False
+            elif round_.normal_continuation:
+                return bool(
+                    not previous.unresolved
+                    and previous.consumed_at_ms is not None
+                    and (previous.response_snapshot or {}).get("data", {}).get("result") == "READY"
+                )
+            elif not await self.work_plans.corrected_rack_ready(session, previous, round_):
                 return False
             round_ = previous
         if round_.trigger_plate_id is None:
-            return round_.round_no == 1
+            return not round_.normal_continuation and round_.round_no == 1
         return await self.work_plans._outbound_trigger(
             session,
             plate.task_id,
@@ -586,11 +571,17 @@ class Outbound:
             return role
         return None
 
+    async def _bin_normal_ready(self, session, plate):
+        if plate.bin_work_id is None or plate.grant_kind != "READY":
+            return False
+        round_ = await session.get(AutoOutboundDecisionRound, plate.grant_round_id)
+        return bool(round_ and round_.normal_continuation)
+
     @staticmethod
-    def _pick_priority(plate):
+    def _pick_priority(plate, normal):
         if plate.bin_work_id is None:
             return (1, plate.id)
-        return (0 if plate.grant_kind in ("NEXT", "RETRY") else 2, plate.id)
+        return (0 if normal or plate.grant_kind == "RETRY" else 2, plate.id)
 
     async def _rack_put_accepted(self, session, plate, rack_arm_code):
         put = (plate.source_arrival_snapshot or {}).get("put_command", {})
@@ -617,7 +608,7 @@ class Outbound:
             and not view.needs_reconciliation
         )
 
-    async def _platform_allows_pick(self, session, work_line_id, plate, rack_arm_code):
+    async def _platform_handoff(self, session, work_line_id, plate, rack_arm_code, normal):
         outstanding = await session.scalars(
             select(AutoOutboundPlate)
             .join(AutoTask, AutoTask.task_id == AutoOutboundPlate.task_id)
@@ -628,6 +619,7 @@ class Outbound:
                 AutoOutboundPlate.empty_observation.is_(None),
             )
         )
+        handoff = None
         for original in outstanding:
             put = (original.source_arrival_snapshot or {}).get("put_command", {})
             if put.get("params", {}).get("source") == SCAN and await self._result(
@@ -637,14 +629,19 @@ class Outbound:
             if await self._result(session, original, "pick", empty=True):
                 continue
             if (
-                plate.bin_work_id is not None
-                and plate.grant_kind == "NEXT"
-                and plate.grant_parent_plate_id == original.id
-                and await self._rack_put_accepted(session, original, rack_arm_code)
+                handoff is not None
+                or not normal
+                or plate.bin_work_id != original.bin_work_id
+                or plate.task_id != original.task_id
+                or not await self._rack_put_accepted(session, original, rack_arm_code)
             ):
-                continue
-            return False
-        return True
+                return False, None
+            handoff = dict(
+                key=original.put_call_key,
+                code=original.put_command_code,
+                device_code=rack_arm_code,
+            )
+        return True, handoff
 
     async def advance(self, session, *, work_line_id, plate_id, now_ms, timing=None):
         bindings = await lock_line(session, self.dispatch, work_line_id, timing=timing)
@@ -667,9 +664,13 @@ class Outbound:
                 return plate
             scanner = bindings.get(line.device_bindings.get("PLATFORM_SCANNER"))
             role = await self._pick_role(session, task, plate, bindings, scanner)
-            if role is None or not await self._platform_allows_pick(
-                session, work_line_id, plate, line.device_bindings.get("RACK_ARM")
-            ):
+            if role is None:
+                return plate
+            normal = await self._bin_normal_ready(session, plate)
+            allowed, handoff = await self._platform_handoff(
+                session, work_line_id, plate, line.device_bindings.get("RACK_ARM"), normal
+            )
+            if not allowed:
                 return plate
             candidates = await session.scalars(
                 select(AutoOutboundPlate).where(
@@ -678,11 +679,16 @@ class Outbound:
                     AutoOutboundPlate.pick_command_code.is_(None),
                 )
             )
-            priority = self._pick_priority(plate)
+            priority = self._pick_priority(plate, normal)
             for candidate in candidates:
-                if self._pick_priority(candidate) < priority and await self._pick_role(
-                    session, task, candidate, bindings, scanner
+                candidate_normal = await self._bin_normal_ready(session, candidate)
+                if self._pick_priority(candidate, candidate_normal) >= priority:
+                    continue
+                if handoff is not None and (
+                    not candidate_normal or candidate.bin_work_id != plate.bin_work_id
                 ):
+                    continue
+                if await self._pick_role(session, task, candidate, bindings, scanner):
                     return plate
             params = plate.source_params
             if plate.bin_work_id:
@@ -726,19 +732,17 @@ class Outbound:
             )
             if scanner is not None and scanner.device_role == "PLATFORM_SCANNER":
                 original["platform_scanner_id"] = scanner.device_id
+            if handoff is not None:
+                original["platform_handoff"] = handoff
             plate.source_arrival_snapshot = {
                 **plate.source_arrival_snapshot,
                 "pick_command": original,
             }
         await observe_arm_result(self.ecs, session, plate, "pick", owner=OWNER)
-        if plate.bin_work_id is not None and plate.grant_kind == "NEXT":
-            # Only the next BIN pick overlaps. Target decisions can request rack movement.
-            parent = await session.get(AutoOutboundPlate, plate.grant_parent_plate_id)
-            if parent is None or (
-                parent.put_consumed_at_ms is None
-                and await self._result(session, parent, "put") is None
-            ):
-                return plate
+        handoff = plate.source_arrival_snapshot["pick_command"].get("platform_handoff")
+        # A new target decision may move a rack while the original PUT is still executing.
+        if handoff is not None and await self._arm_result(session, phase="put", **handoff) is None:
+            return plate
         pending_scan = plate.source_arrival_snapshot.get("pending_platform_scan")
         correcting = (
             pending_scan is not None
@@ -859,11 +863,10 @@ class Outbound:
             current.unresolved = False
             plate.final_decision_round_id = current.id
             plate.target_snapshot = target
-            plate.next_source_action = None if is_ng else data.get("next_source_action")
+            if not is_ng:
+                await self._continue_normal(session, task, plate, now_ms, enabled=enabled)
         if plate.target_snapshot != target:
             return plate
-        if not is_ng:
-            await self._next(session, plate, data)
         if plate.put_command_code is None:
             role_name = "BIN_ARM" if is_ng else "RACK_ARM"
             role = next((b for b in bindings.values() if b and b.device_role == role_name), None)
@@ -1181,12 +1184,8 @@ class Outbound:
             if p.id != plate.id
         ]
         for other in others:
-            if await self.closed(session, other):
-                continue
-            decision = await self._decision(session, other)
-            if decision is None or (
-                "next_source_action" in decision[0]
-                and not any(p.grant_parent_plate_id == other.id for p in (*others, plate))
+            if await self._decision(session, other) is None and not await self.closed(
+                session, other
             ):
                 return None
         common = dict(work_line_id=task.work_line_id, now_ms=now_ms, trigger_plate_id=plate.id)
@@ -1199,67 +1198,22 @@ class Outbound:
             )
         return round_ if round_ is not None and round_.trigger_plate_id == plate.id else None
 
-    async def _next(self, session, plate, data):
-        successor = data.get("next_source_action")
-        if successor is None or "result" in successor:
-            return
-        try:
-            plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(
-                {"result": "READY", **successor}, extra="ignore"
-            )
-        except (ValueError, TypeError):
-            return
-        if not plate.bin_work_id and any(
-            successor[k] != plate.source_locator[k] for k in ("rack_id", "rack_face")
-        ):
-            return
-        existing = await session.scalar(
-            select(AutoOutboundPlate).where(AutoOutboundPlate.grant_parent_plate_id == plate.id)
-        )
-        if existing:
-            return
-        locator = (
-            {
-                "type": "BIN_CELL",
-                "bin_code": plate.source_locator["bin_code"],
-                "cell_id": successor["cell_id"],
-            }
-            if plate.bin_work_id
-            else {
-                "type": "RACK_SLOT",
-                **{k: successor[k] for k in ("rack_id", "rack_face", "slot_id")},
-            }
-        )
-        if await outbound_locator_closed(
-            session,
-            task_id=plate.task_id,
-            bin_work_id=plate.bin_work_id,
-            source_member_id=plate.source_member_id,
-            locator=locator,
-        ):
-            return
-        session.add(
-            AutoOutboundPlate(
-                task_id=plate.task_id,
-                bin_work_id=plate.bin_work_id,
-                source_member_id=plate.source_member_id,
-                source_rack_job_id=plate.source_rack_job_id,
-                source_preparation_action_id=plate.source_preparation_action_id,
-                grant_kind="NEXT",
-                grant_parent_plate_id=plate.id,
-                grant_snapshot=successor,
-                source_locator=locator,
-                source_params={
-                    k: successor[k]
-                    for k in type(plan).model_fields
-                    if k != "result" and k not in locator
-                },
-                source_arrival_snapshot=self._arrival_context(plate),
-                pick_call_key=f"auto:{plate.task_id}:outbound:{plate.id}:next",
-                pending=True,
-            )
-        )
-        await session.flush()
+    async def _continue_normal(self, session, task, plate, now_ms, *, enabled):
+        bindings = dict(work_line_id=task.work_line_id, now_ms=now_ms)
+        if plate.bin_work_id is not None:
+            work = await session.get(AutoBinWork, plate.bin_work_id)
+            if work is not None and task.status in ("EXECUTING", "CANCELLED"):
+                work.normal_plan_due = True
+                if enabled:
+                    await self.work_plans.start_bin(session, arrival_id=work.arrival_id, **bindings)
+        else:
+            member = await session.get(AutoOutboundSourceMember, plate.source_member_id)
+            if member is not None and task.status == "EXECUTING":
+                member.normal_plan_due = True
+                if enabled:
+                    await self.work_plans.start_return_face(
+                        session, member_id=member.id, **bindings
+                    )
 
     async def _final_material(self, session, plate):
         if plate.put_command_code is None and plate.source_arrival_snapshot.get(
@@ -1497,9 +1451,11 @@ class Outbound:
             if bin_work_id is not None
             else await session.get(AutoOutboundSourceMember, member_id)
         )
-        if subject is None:
+        if subject is None or subject.normal_plan_due:
             return False
-        terminals = 0
+        terminal = await self._subject_no_work(session, subject)
+        if terminal is None:
+            return False
         accepted = []
         for plate in plates:
             if plate.task_id != subject.task_id:
@@ -1507,10 +1463,6 @@ class Outbound:
             decision = await self._decision(session, plate)
             if decision is not None:
                 accepted.append(plate)
-                if "next_source_action" not in decision[0]:
-                    terminals += 1
-                elif not any(p.grant_parent_plate_id == plate.id for p in plates):
-                    return False
                 continue
             if not await self.closed(session, plate):
                 return False
@@ -1519,10 +1471,8 @@ class Outbound:
                     return False
             elif await self._exception_round(session, plate) is None:
                 return False
-        if terminals + int(await self._subject_no_work(session, subject)) != 1:
-            return False
-        # A terminal ACCEPT ends the source BIN's work. Delivery still owns its reports.
-        if reports and not (for_release and terminals == 1):
+        # Only a normal tail round allows SCAN2 release ahead of the original reports.
+        if reports and not (for_release and terminal.normal_continuation):
             for plate in accepted:
                 if not await self.closed(session, plate):
                     return False
@@ -1542,7 +1492,7 @@ class Outbound:
     async def _subject_no_work(self, session, subject):
         basis = subject.terminal_basis or {}
         if basis.get("kind") != "NO_WORK":
-            return False
+            return None
         round_ = await session.get(AutoOutboundDecisionRound, basis.get("round_id"))
         is_bin = isinstance(subject, AutoBinWork)
         operation = "outbound.bin.work_plan@v1" if is_bin else "outbound.return_rack.work_plan@v1"
@@ -1569,9 +1519,9 @@ class Outbound:
             or round_.operation_id != basis.get("operation_id")
             or round_.request_data != request
         ):
-            return False
+            return None
         response = await read_decision(self.requests, session, round_)
-        return bool(
+        if (
             response
             and response.response_data == {"result": "NO_WORK"}
             and round_.response_snapshot
@@ -1581,7 +1531,9 @@ class Outbound:
                 timestamp=response.response_timestamp,
                 data=response.response_data,
             )
-        )
+        ):
+            return round_
+        return None
 
     async def source_clear(self, session, *, job_id):
         plates = list(
@@ -1721,7 +1673,19 @@ class Outbound:
             )
         }
         bin_ids = {b.id for b in bins}
-        face_actions = {m.preparation_action_id for m in members}
+        face_actions = {m.preparation_action_id for m in members if m.preparation_action_id}
+        source_plan_ids = {
+            r.id
+            for r in rounds
+            if r.purpose == "WORK_PLAN"
+            and (
+                (r.operation == "outbound.bin.work_plan@v1" and r.bin_work_id in bin_ids)
+                or (
+                    r.operation == "outbound.return_rack.work_plan@v1"
+                    and r.source_preparation_action_id in face_actions
+                )
+            )
+        }
         decisions = {}
         for plate in plates:
             decision = await self._decision(session, plate)
@@ -1735,21 +1699,21 @@ class Outbound:
             and decisions[p.id]["target_locator"]["rack_id"] != job.origin.rack_id
             and p.put_call_key is None
         ]
-        descendants = set()
-        frontier = {p.id for p in replacements}
-        while frontier:
-            children = {
-                p.id
-                for p in plates
-                if p.grant_parent_plate_id in frontier
-                and p.id not in descendants
-                and await self._grant(session, p)
-            }
-            descendants.update(children)
-            frontier = children
+        # Source plans can prepare either input while the scanner holds the replacing plate.
+        # Only an authorized replacement may disregard source-only work.
+        replacement_rounds = source_plan_ids if replacements else set()
+        waiting_picks = {
+            p.id
+            for p in plates
+            if p.pick_command_code is None
+            and (
+                p.grant_round_id in replacement_rounds or (replacements and p.grant_kind == "RETRY")
+            )
+            and await self._grant(session, p)
+        }
         if any(
             (
-                r.plate_id not in descendants
+                r.id not in replacement_rounds
                 and (
                     r.unresolved
                     or (
@@ -1763,16 +1727,15 @@ class Outbound:
                 )
             )
             or (r.plate_id is not None and r.plate_id not in plate_ids)
-            or (
-                r.purpose == "WORK_PLAN"
-                and r.bin_work_id not in bin_ids
-                and r.source_preparation_action_id not in face_actions
-            )
+            or (r.purpose == "WORK_PLAN" and r.id not in source_plan_ids)
             for r in rounds
         ):
             return "CONTINUE"
-        if any(p.id not in decisions and p.id not in descendants for p in plates):
-            return "CONTINUE"
+        for plate in plates:
+            if plate.id in decisions or plate.id in waiting_picks:
+                continue
+            if not replacements or not await self.closed(session, plate):
+                return "CONTINUE"
         if replacements:
             for plate in plates:
                 decision = decisions.get(plate.id)

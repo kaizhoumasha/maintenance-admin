@@ -145,11 +145,16 @@ def _run(connection) -> None:
             from app.integrations.runtime_authority import (
                 PREVIOUS_QUERY_REVISION,
                 QUERY_REVISION,
+                QUERY_REVISIONS,
                 check_reconciled,
             )
 
             revision = context.get_context().get_current_revision()
-            if not use_runtime and revision not in (PREVIOUS_QUERY_REVISION, QUERY_REVISION):
+            if (
+                not use_runtime
+                and revision != PREVIOUS_QUERY_REVISION
+                and revision not in QUERY_REVISIONS
+            ):
                 return
             try:
                 check_reconciled(

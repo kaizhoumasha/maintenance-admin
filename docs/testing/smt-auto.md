@@ -16,6 +16,12 @@ SMT AUTO 的入库与出库共用宿主、待办入口和原身份恢复。API�
 
 开发阶段已收尾。后续对端报文和实机证据按 [KT11 / KT14 联调留档清单](../superpowers/plans/2026-11-05-smt-auto-ecs-delivery-closeout.md#kt11-kt14-integration-checklist) 收集。设备与现场验收沿[总计划 D1–D8](../superpowers/plans/2026-10-31-smt-auto-implementation.md#delivery-dependencies)核对。包括 WMS 去重和库存事务、两组机械臂原命令阶段恢复、出库空取与 NG 设备合同，以及工作线角色、点位、容量、端点和真机联调。原 ACK、测试模拟结果、离线 worker 及迁移通过只作为各自软件层证据。
 
+## 出库 v1 来源续问验收范围
+
+本次出库调整按[接口与时序设计](../integrations/smt-auto-outbound-v1-design.md)和[实施计划验收矩阵](../superpowers/plans/2026-11-16-smt-auto-outbound-v1-implementation.md#4-联调验收矩阵)验证。三种来源切换分别覆盖料箱到退料架面、退料架面到料箱和料箱 A 到料箱 B。重点核对正常 `ACCEPT` 与来源续问独立推进、`NO_WORK` 提前放行、同箱双臂重叠和已排队时的平台占用保护。隔离回归的模拟命令与决定用于核对 WES 调度。WMS 实际授权并发、PLC 已排队动作互锁和实机节拍仍需现场验收。此节历史软件回归数字均见对应日期记录。
+
+软件回归覆盖 SMT AUTO、WMS 提交后唤醒、worker 恢复和迁移，单次运行 616 项通过。另补齐了需要专用 PostgreSQL 连接的 3 个迁移项，SQLite 与 PostgreSQL 迁移专项共 12 项通过。最终关键时序另跑 42 项通过。 代码复审修正后，全仓库按 10 道回归，7195 项通过、73 项按条件跳过。7268 个收集项与报告逐项一致。
+
 ## KT11 / KT14 配置复验
 
 以[已确认配置基线](../integrations/smt-auto-api.md#auto-config)填充隔离库。该轮隔离复验早于本地四线配置写入。试验环境使用临时超时，点位容量留空，WMS 决定及 ECS Result 使用模拟响应。
