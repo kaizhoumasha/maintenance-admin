@@ -13,6 +13,7 @@ from app.businesses._components.rack_dispatch.service import XRAY_SOURCES
 from app.businesses.runtime import Capabilities
 from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
+from app.diagnostics import log_exception
 from app.integrations.ecs_callback import EventApplicationRef
 from app.integrations.ecs_command.service import CommandOwner
 from app.integrations.wms_request.adapter import MOCK_DECISIONS_TARGET
@@ -159,7 +160,7 @@ class XrayService:
             if not ids:
                 break
             for identity in ids:
-                await self._transaction(self._monitor_rack_job, identity)
+                await self._advance_pending_item(self._monitor_rack_job, identity)
             cursor = ids[-1]
             scanned += len(ids)
         return scanned
@@ -200,9 +201,22 @@ class XrayService:
             if not page:
                 return scanned
             for _, identity in page:
-                await self._transaction(advance, identity)
+                await self._advance_pending_item(advance, identity)
             cursor = tuple(page[-1])
             scanned += len(page)
+
+    async def _advance_pending_item(self, advance, identity):
+        try:
+            await self._transaction(advance, identity)
+        except Exception as error:
+            log_exception(
+                logger,
+                "X-Ray advance failed",
+                error,
+                component="xray",
+                phase="advance",
+                context={"request_id": identity, "source": advance.__name__},
+            )
 
     async def advance(self, identity):
         return await self._transaction(self._advance, identity)
