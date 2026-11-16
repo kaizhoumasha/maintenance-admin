@@ -23,7 +23,7 @@ from app.integrations.ecs_command import EcsCommands
 from app.integrations.ecs_command.clients import DynamicClients
 from app.integrations.ecs_command.lifecycle import EcsLifecycle
 from app.integrations.ecs_command.protocol import EcsCommandAdapter
-from app.integrations.wms_request import ADAPTERS
+from app.integrations.wms_request import ADAPTERS, WmsRequests
 from app.integrations.wms_transport import ADAPTERS as TRANSPORT_ADAPTERS
 from app.main import app
 from app.models import Device, DeviceRoute, WorkLine, WorkLinePosition
@@ -1042,6 +1042,33 @@ async def test_event_cannot_override_terminal_nonacceptance(xray):
     )
     await x.drain()
     assert len(x.requests) == len(x.commands) == 1
+
+
+async def test_failed_reel_does_not_block_later_pending_reel(xray, monkeypatch):
+    x = xray
+    x.decisions["pkg_decide"] = {"result": "BYPASS_COUNT"}
+    first = await x.entry(reel_id=str(uuid4()), barcode="PENDING-FIRST")
+    second = await x.entry(reel_id=str(uuid4()), barcode="PENDING-SECOND")
+    send = WmsRequests.send
+
+    async def fail_first(self, session, payload, **kwargs):
+        reference = await send(self, session, payload, **kwargs)
+        if payload.barcode == "PENDING-FIRST":
+            raise history.EvidenceIntegrityError("original evidence unavailable")
+        return reference
+
+    with monkeypatch.context() as fault:
+        fault.setattr(WmsRequests, "send", fail_first)
+        await x.advance()
+        await x.dispatch()
+        assert [request["data"]["barcode"] for request in x.requests] == ["PENDING-SECOND"]
+
+    await x.drain()
+    assert [request["data"]["barcode"] for request in x.requests] == [
+        "PENDING-SECOND",
+        "PENDING-FIRST",
+    ]
+    assert [command["params"]["source_event_id"] for command in x.commands] == [second, first]
 
 
 async def test_two_reels_share_one_unsettled_arm_command(xray):
