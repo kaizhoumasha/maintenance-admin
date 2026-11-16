@@ -46,12 +46,7 @@ def validate_configuration(settings) -> None:
             COARSE_MOCK_FACTS_TARGET,
         )
 
-        line = mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK).workline_code
-        if (
-            line not in settings.COARSE_SORTING_OUTPUT_LOCATIONS
-            or line not in settings.COARSE_SORTING_NG_LOCATIONS
-        ):
-            raise ValueError("Coarse sorting WMS mock requires both completion locations")
+        mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
         for protocol, name in (
             ("wms-decisions", COARSE_MOCK_DECISIONS_TARGET),
             ("wms-facts", COARSE_MOCK_FACTS_TARGET),

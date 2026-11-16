@@ -137,6 +137,10 @@ async def ng_result(flow, wire, **changes):
 @pytest.mark.parametrize("prior", [None, "action", "snapshot"])
 async def test_original_ng_closes_only_after_matching_applied_success(ng, prior):
     if prior is None:
+        async with ng.factory.begin() as session:
+            line = await session.get(WorkLine, ng.line_ids[0])
+            line.position_bindings = {**line.position_bindings, "NG_COMPLETION": NG_PLATFORM}
+        ng.ng_locations = {line.line_code: "LEGACY_NG"}
         ng.assemble(enabled=True)
     row = await accept_and_validate(ng)
     if prior:
@@ -179,6 +183,7 @@ async def test_original_ng_closes_only_after_matching_applied_success(ng, prior)
         line = await session.get(WorkLine, ng.line_ids[0])
         line.version += 1
         line.is_enabled = False
+        line.position_bindings = {**line.position_bindings, "NG_COMPLETION": "NEW_PLATFORM"}
     ng.ng_locations = {row["workline_code"]: "NEW_PLATFORM"}
     ng.assemble(enabled=True)
     assert (await ng_result(ng, wire)).status_code == 200

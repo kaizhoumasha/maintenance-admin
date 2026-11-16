@@ -16,6 +16,7 @@ ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
 DEPART = "rack.departure_decide@v1"
 MOCK_OUTPUT_LOCATION = "STATION_PIPELINE1_OUTPUT1"
+MOCK_NG_LOCATION = "STATION_NG_PLATFORM1"
 
 
 async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp_path):
@@ -184,8 +185,6 @@ async def exercise_integration(integration_database, *, mock=None):
                         }
                     )
                 ),
-                COARSE_SORTING_OUTPUT_LOCATIONS=json.dumps({"COARSE": MOCK_OUTPUT_LOCATION}),
-                COARSE_SORTING_NG_LOCATIONS='{"COARSE":"NG-POINT"}',
             )
             assert not requests and not reports and not transports
             assert sorted(command["task_type"] for command in commands) == [
@@ -297,6 +296,12 @@ async def exercise(phase, origin):
                 "OUTPUT_ARM": "OUTPUT",
             }
             line.position_bindings = {"OUTPUT_RACK": "RACK-POINT"}
+            if phase == "mock":
+                line.position_bindings = {
+                    **line.position_bindings,
+                    "PUT_COMPLETION": MOCK_OUTPUT_LOCATION,
+                    "NG_COMPLETION": MOCK_NG_LOCATION,
+                }
             session.add(
                 WorkLinePosition(work_line_id=line.id, position_code="RACK-POINT", capacity=1)
             )
@@ -469,7 +474,7 @@ async def exercise(phase, origin):
                 await complete_commands(
                     {
                         "PUT_TO_BIN": {"actual_qty": 1, "location": MOCK_OUTPUT_LOCATION},
-                        "MOVE_TO_NG": {"actual_qty": 1, "location": "NG-POINT"},
+                        "MOVE_TO_NG": {"actual_qty": 1, "location": MOCK_NG_LOCATION},
                     }
                 )
                 expected = {normal: "COMPLETED", ng: "NG_COMPLETED"}
