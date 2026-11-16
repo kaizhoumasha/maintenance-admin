@@ -96,10 +96,11 @@ def _prepare_schema(connection) -> str:
 def _include_name(name, kind, parent):
     if kind == "schema":
         return name == SCHEMA
-    # This ledger is managed by the integration operator, outside Alembic.
+    # Operator-managed tables are outside Alembic.
     return kind != "table" or name not in {
         "coarse_sorting_mock_round",
         "integration_history_retirement",
+        "xray_mock_decisions",
     }
 
 
