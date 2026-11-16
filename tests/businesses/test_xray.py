@@ -1,6 +1,7 @@
 """Run the formal X-Ray entry points and Sender against disposable peers."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -466,6 +467,29 @@ async def xray(callback_store, monkeypatch):
             mock_peer.state.xray_wms_mock = XrayWmsMock(mock_targets, settings.XRAY_RETURN_RACKS)
             service = rebuild()
 
+        @asynccontextmanager
+        async def use_random_mock(thickness):
+            nonlocal service
+            settings = get_settings()
+            mock_targets = {line.line_code: {"random": {"reel_thickness": thickness}}}
+
+            def restart_peer():
+                mock_peer.state.xray_wms_mock = XrayWmsMock(mock_targets, {})
+
+            restart_peer()
+            from app.businesses.xray.mock_storage import MockBase
+
+            engine = factory.kw["bind"]
+            async with engine.begin() as connection:
+                await connection.run_sync(MockBase.metadata.create_all)
+            try:
+                monkeypatch.setattr(settings, "XRAY_WMS_MOCK_TARGETS", mock_targets)
+                service = rebuild()
+                yield restart_peer
+            finally:
+                async with engine.begin() as connection:
+                    await connection.run_sync(MockBase.metadata.drop_all)
+
         try:
             yield SimpleNamespace(
                 decisions=decisions,
@@ -489,6 +513,7 @@ async def xray(callback_store, monkeypatch):
                 restart=restart,
                 dispatch_original_bin=dispatch_original_bin,
                 use_mock=use_mock,
+                use_random_mock=use_random_mock,
                 clock=clock,
                 barcode=original,
                 dialect=factory.kw["bind"].dialect.name,
@@ -1188,6 +1213,78 @@ async def test_mock_wms_drives_counted_reels_to_rack_and_other_reels_to_transit(
     assert x.facts[-1]["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
     assert len(x.facts) == 3 and x.mock_facts == x.facts
     if fixed:
+        assert not x.transports
+
+
+@pytest.mark.parametrize(
+    ("draw", "original", "part", "qty"),
+    [
+        (0, "001-original", None, None),
+        (1, "001-original", "TEST-PART", 0),
+        (9, MOCK_BARCODES[0], "TEST-PART-01", 612),
+    ],
+    ids=["bypass", "count-short-code", "count-full-code"],
+)
+async def test_random_mock_drives_both_modes_to_transit(
+    xray, monkeypatch, draw, original, part, qty
+):
+    x = xray
+    monkeypatch.setattr("app.businesses.xray.mock_wms.randbelow", lambda upper: draw, raising=False)
+    async with x.use_random_mock(12.5) as restart_mock:
+        await x.entry(barcode=original)
+        await x.drain()
+        (entry,) = x.commands
+        barcode = original
+        mode = "BYPASS"
+        if qty is None:
+            assert entry["params"]["decision"] == "BYPASS_COUNT"
+            await x.result(entry, decision="BYPASS_COUNT", mode=mode)
+        else:
+            mode = "COUNTED"
+            assert entry["params"]["decision"] == "COUNT_REQUIRED"
+            assert entry["params"]["reel_thickness"] == 12.5
+            await x.event(
+                "XRAY_COUNT_COMPLETED",
+                barcode=original,
+                template_id=TEMPLATE,
+                count_status="OK",
+                qty=qty,
+            )
+            await x.result(entry, decision="COUNT_REQUIRED", qty=qty)
+            await x.drain()
+            label_cmd = x.commands[-1]
+            label = label_cmd["params"]["label"]["variables"]
+            assert label["PHHPN"] == part
+            assert label["QQTYPC"] == str(qty)
+            barcode = label["SPKG"]
+            restart_mock()
+            await x.result(label_cmd, decision="OK", label_status="APPLIED")
+            await x.event(
+                "SCAN_COMPLETED",
+                scan_stage="VERIFY",
+                scan_status="OK",
+                barcode=original,
+                old_barcode=original,
+                new_barcode=barcode,
+            )
+            await x.drain()
+            verify = x.commands[-1]
+            assert verify["params"]["decision"] == "OK"
+            await x.result(verify, decision="OK", mode=mode)
+        arrival = {"new_barcode": barcode} if mode == "COUNTED" else {}
+        await x.event(
+            "MATERIAL_ARRIVED", barcode=barcode, mode=mode, ready_for_pick=True, **arrival
+        )
+        await x.drain()
+        put = x.commands[-1]
+        assert put["task_type"] == "PUT_TO_BIN"
+        assert put["params"]["barcode"] == barcode
+        await placed(x, put)
+        await x.drain()
+        (report,) = x.mock_facts
+        assert report["data"]["barcode"] == barcode
+        assert report["data"]["to_locator"] == {"type": "TRANSIT_BIN"}
+        assert len(x.commands) == (2 if qty is None else 4)
         assert not x.transports
 
 

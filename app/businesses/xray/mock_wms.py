@@ -5,9 +5,12 @@ import re
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from hmac import compare_digest
+from secrets import randbelow
 
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.businesses._components.rack_dispatch.service import XRAY_SOURCES
 from app.core.clock import unix_ms
@@ -15,8 +18,9 @@ from app.core.identifiers import validate_uuid7
 from app.integrations.wms_request.adapter import mock_signature
 from app.models import WorkLine
 
-from .contracts import CountOk, LabelVariables, RackAccept
+from .contracts import CountOk, LabelVariables, PositiveNumber, RackAccept, Strict
 from .definition import DEFINITION
+from .mock_storage import MockDecision
 from .racks import RackPoint
 from .request import inbound_xray_count_decide_v1 as count
 from .request import inbound_xray_pkg_decide_v1 as pkg
@@ -31,16 +35,27 @@ OPERATIONS = {
     outlet.OPERATION: outlet.PutTargetDecide,
 }
 WAIT = {"result": "WAIT", "retry_after_ms": 5000}
+TRANSIT = {"result": "ACCEPT", "target_locator": {"type": "TRANSIT_BIN"}}
 INVALID = (422, "REJECTED", {"reason_code": "INVALID_DATA"})
 CONFLICT = (409, "CONFLICT", {"reason_code": "IDEMPOTENCY_CONFLICT"})
 EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
+class RandomMockSettings(Strict):
+    reel_thickness: PositiveNumber
+
+
 class XrayWmsMock:
     def __init__(self, targets, rack_settings):
         self.targets = {}
+        self.random_settings = {}
         self.fixed_lines = set()
         for line, raw_targets in targets.items():
+            if set(raw_targets) == {"random"}:
+                self.random_settings[line] = RandomMockSettings.model_validate(
+                    raw_targets["random"]
+                )
+                continue
             if (
                 line not in rack_settings
                 or len(raw_targets) != 2
@@ -81,7 +96,9 @@ class XrayWmsMock:
         line = sent["data"].get("workline_code")
         if not isinstance(operation, str) or operation not in OPERATIONS:
             return None
-        if not isinstance(line, str) or line not in self.targets:
+        if not isinstance(line, str) or (
+            line not in self.targets and line not in self.random_settings
+        ):
             return None
         timestamp = unix_ms(datetime.now(UTC))
         if not compare_digest(signature.encode(), mock_signature(raw)):
@@ -91,6 +108,11 @@ class XrayWmsMock:
             payload = OPERATIONS[operation].model_validate(sent["data"])
         except (TypeError, ValueError):
             return (*INVALID, timestamp)
+        if line in self.random_settings:
+            try:
+                return await self._answer_random(session, payload, operation_id, raw, timestamp)
+            except (ValidationError, OverflowError, ValueError):
+                return (*INVALID, timestamp)
         async with self._lock:
             if original := self._replies.get(operation_id):
                 old_request, response = original
@@ -103,6 +125,66 @@ class XrayWmsMock:
             self._replies[operation_id] = (sent, response)
             return response
 
+    async def _answer_random(self, session, payload, operation_id, raw, timestamp):
+        digest = sha256(raw).hexdigest()
+        async with session.begin():
+            original = await session.get(MockDecision, operation_id)
+            if original is None:
+                data = await self._decide_random(session, payload, operation_id)
+                label = data.get("label_variables")
+                insert = (
+                    pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+                )
+                created = await session.scalar(
+                    insert(MockDecision)
+                    .values(
+                        operation_id=operation_id,
+                        request_digest=digest,
+                        timestamp=timestamp,
+                        data=data,
+                        workline_code=payload.workline_code,
+                        original_barcode=payload.barcode if label else None,
+                        issued_spkg=label["SPKG"] if label else None,
+                    )
+                    .on_conflict_do_nothing(index_elements=[MockDecision.operation_id])
+                    .returning(MockDecision.operation_id)
+                )
+                if created is not None:
+                    return 200, "DECIDED", data, timestamp
+                original = await session.get(MockDecision, operation_id)
+            if original.request_digest != digest:
+                return (*CONFLICT, timestamp)
+            return 200, "DECIDED", original.data, original.timestamp
+
+    async def _decide_random(self, session, payload, operation_id):
+        if isinstance(payload, pkg.PkgDecide):
+            if randbelow(10) == 0:
+                return {"result": "BYPASS_COUNT"}
+            return {
+                "result": "COUNT_REQUIRED",
+                "reel_thickness": self.random_settings[payload.workline_code].reel_thickness,
+            }
+        if isinstance(payload, count.CountDecide):
+            return self._count_reply(payload, operation_id)
+        if isinstance(payload, outlet.PutTargetDecide) and payload.mode == "BYPASS":
+            return TRANSIT
+        spkg = (
+            payload.barcode
+            if isinstance(payload, outlet.PutTargetDecide)
+            else payload.expected_spkg
+        )
+        original_barcode = await session.scalar(
+            select(MockDecision.original_barcode).where(
+                MockDecision.workline_code == payload.workline_code,
+                MockDecision.issued_spkg == spkg,
+            )
+        )
+        if isinstance(payload, outlet.PutTargetDecide):
+            if original_barcode is None:
+                raise ValueError("outlet barcode was not issued for this workline")
+            return TRANSIT
+        return self._verify_reply(payload, original_barcode == payload.barcode)
+
     async def _decide(self, app, session, payload, operation_id):
         counted = payload.barcode in self.targets[payload.workline_code]
         if isinstance(payload, pkg.PkgDecide):
@@ -114,7 +196,7 @@ class XrayWmsMock:
             if payload.mode == "BYPASS":
                 if counted:
                     raise ValueError("invalid bypass barcode")
-                return {"result": "ACCEPT", "target_locator": {"type": "TRANSIT_BIN"}}
+                return TRANSIT
             original = self._issued_labels.get(payload.barcode)
             if original is None or original[0] != payload.workline_code:
                 raise ValueError("outlet barcode was not issued for this workline")
@@ -124,37 +206,50 @@ class XrayWmsMock:
 
         material = (payload.workline_code, payload.barcode)
         if isinstance(payload, count.CountDecide):
-            spkg = "XRAYMOCK" + sha256(operation_id.encode()).hexdigest()[:16].upper()
-            part, _, manufacturer, date, lot, _ = payload.barcode.split(",")
-            variables = LabelVariables(
-                ID=payload.template_id,
-                PHHPN=part[1:],
-                SPKG=spkg,
-                MMfrPN=manufacturer[1:],
-                VVendor="M000000000",
-                QQTYPC=str(payload.actual_qty),
-                Location="",
-                DDC=date[1:],
-                DateTime=(EPOCH + timedelta(milliseconds=payload.observed_at)).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                LLC=lot[1:],
-            )
-            response = CountOk(result="OK", label_variables=variables).model_dump(mode="json")
-            self._issued_labels[spkg] = material
+            response = self._count_reply(payload, operation_id)
+            self._issued_labels[response["label_variables"]["SPKG"]] = material
             return response
         if isinstance(payload, verify.VerifyDecide):
-            if (
-                payload.scan_status == "OK"
-                and payload.new_barcode == payload.expected_spkg
-                and self._issued_labels.get(payload.expected_spkg) == material
-            ):
-                return {"result": "OK"}
-            return {
-                "result": "NG",
-                "reason_code": "VERIFY_MISMATCH",
-                "reason_message": "CCD did not read the SPKG generated for this reel",
-            }
+            return self._verify_reply(
+                payload, self._issued_labels.get(payload.expected_spkg) == material
+            )
+
+    @staticmethod
+    def _count_reply(payload, operation_id):
+        if SAMPLE_BARCODE.fullmatch(payload.barcode):
+            part, _, manufacturer, date, lot, _ = payload.barcode.split(",")
+            part, manufacturer, date, lot = part[1:], manufacturer[1:], date[1:], lot[1:]
+        else:
+            part, manufacturer, date, lot = "TEST-PART", "TEST-MPN", "260101", "TEST-LOT"
+        variables = LabelVariables(
+            ID=payload.template_id,
+            PHHPN=part,
+            SPKG="XRAYMOCK" + sha256(operation_id.encode()).hexdigest()[:16].upper(),
+            MMfrPN=manufacturer,
+            VVendor="M000000000",
+            QQTYPC=str(payload.actual_qty),
+            Location="",
+            DDC=date,
+            DateTime=(EPOCH + timedelta(milliseconds=payload.observed_at)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
+            LLC=lot,
+        )
+        return CountOk(result="OK", label_variables=variables).model_dump(mode="json")
+
+    @staticmethod
+    def _verify_reply(payload, label_matches):
+        if (
+            label_matches
+            and payload.scan_status == "OK"
+            and payload.new_barcode == payload.expected_spkg
+        ):
+            return {"result": "OK"}
+        return {
+            "result": "NG",
+            "reason_code": "VERIFY_MISMATCH",
+            "reason_message": "CCD did not read the SPKG generated for this reel",
+        }
 
     async def _rack_target(self, app, session, payload, original_barcode):
         target = self.targets[payload.workline_code][original_barcode]

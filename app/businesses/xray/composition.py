@@ -84,6 +84,11 @@ def build_service(capabilities):
     }
     settings = get_settings()
     mock_targets = settings.XRAY_WMS_MOCK_TARGETS if settings.ENVIRONMENT == "local" else {}
+    if any(
+        set(targets) == {"random"} and line not in mappings
+        for line, targets in mock_targets.items()
+    ):
+        raise ValueError("Random X-Ray WMS mock requires XRAY_TRANSIT_TARGETS")
     if mock_targets:
         capabilities.wms.target(DECISIONS_PROTOCOL, explicit=MOCK_DECISIONS_TARGET)
         capabilities.wms.target(FACTS_PROTOCOL, explicit=MOCK_FACTS_TARGET)

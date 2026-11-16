@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -5,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.businesses.xray.mock_storage import MockBase
 from app.businesses.xray.mock_wms import XrayWmsMock
 from app.controllers.dev_mock_wms import router
 from app.core.database import get_session
@@ -265,6 +267,120 @@ def test_xray_mock_is_rejected_outside_local():
             REDIS_URL="redis://localhost:6379/0",
             JWT_SECRET_KEY="isolated-test-key-with-at-least-32-characters",
         )
+
+
+@pytest.fixture
+async def random_mock_peers(callback_db):
+    async def session_override():
+        async with callback_db() as session:
+            yield session
+
+    def make_peer(thickness=8.1):
+        app = FastAPI()
+        targets = {
+            line: {"random": {"reel_thickness": thickness}} for line in ("XRAY", "XRAY-OTHER")
+        }
+        app.state.xray_wms_mock = XrayWmsMock(targets, {})
+        app.dependency_overrides[get_session] = session_override
+        app.include_router(router, prefix="/api/v1")
+        return app
+
+    async def decide(app, stage, barcode, *, operation_id=None, signed=True, **data):
+        raw = json.dumps(
+            {
+                "operation_id": operation_id or str(uuid7()),
+                "operation": f"inbound.xray.{stage}_decide@v1",
+                "timestamp": 1000,
+                "data": {"workline_code": "XRAY", "barcode": barcode, **data},
+            }
+        ).encode()
+        headers = {MOCK_SIGNATURE_HEADER: mock_signature(raw).decode()} if signed else {}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post("/api/v1/wes/decisions", content=raw, headers=headers)
+
+    engine = callback_db.kw["bind"]
+    async with engine.begin() as connection:
+        await connection.run_sync(MockBase.metadata.create_all)
+    try:
+        yield make_peer, decide
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(MockBase.metadata.drop_all)
+
+
+async def test_random_same_intake_replays_across_workers_and_restart(
+    random_mock_peers, monkeypatch
+):
+    make_peer, decide = random_mock_peers
+    apps = [make_peer(), make_peer()]
+    barcode = "MOCK-REEL-001"
+    original_id = str(uuid7())
+    draw = 9
+
+    def choose(upper):
+        assert upper == 10
+        return draw
+
+    monkeypatch.setattr("app.businesses.xray.mock_wms.randbelow", choose)
+    rejected = await decide(
+        apps[0], "pkg", "UNSIGNED", operation_id=original_id, scanned_at=1, signed=False
+    )
+    assert rejected.status_code == 401
+    first, duplicate = await asyncio.gather(
+        *(decide(app, "pkg", barcode, scanned_at=1, operation_id=original_id) for app in apps)
+    )
+    assert first.status_code == duplicate.status_code == 200, (first.text, duplicate.text)
+    assert first.json() == duplicate.json()
+    assert first.json()["data"] == {"result": "COUNT_REQUIRED", "reel_thickness": 8.1}
+
+    draw = 0
+    replacement = make_peer(thickness=9.2)
+    restarted = await decide(replacement, "pkg", barcode, scanned_at=1, operation_id=original_id)
+    assert restarted.json() == first.json()
+    assert (
+        await decide(replacement, "pkg", barcode, scanned_at=2, operation_id=original_id)
+    ).status_code == 409
+    second = await decide(replacement, "pkg", barcode, scanned_at=2)
+    assert second.json()["data"] == {"result": "BYPASS_COUNT"}
+    assert (await decide(replacement, "pkg", "", scanned_at=1)).status_code == 422
+
+
+async def test_random_only_accepts_labels_for_the_original_reel_and_line(random_mock_peers):
+    make_peer, decide = random_mock_peers
+    original = "ORIGINAL-REEL"
+    counted = await decide(
+        make_peer(), "count", original, actual_qty=1, template_id="XX123456789", observed_at=1
+    )
+    label = counted.json()["data"]["label_variables"]["SPKG"]
+    peer = make_peer()
+    for barcode, spkg, workline in (
+        ("OTHER-REEL", label, "XRAY"),
+        (original, "UNISSUED-LABEL", "XRAY"),
+        (original, label, "XRAY-OTHER"),
+    ):
+        verified = await decide(
+            peer,
+            "verify",
+            barcode,
+            workline_code=workline,
+            scan_status="OK",
+            scanned_at=1,
+            expected_spkg=spkg,
+            new_barcode=spkg,
+        )
+        assert verified.status_code == 200
+        assert verified.json()["data"]["reason_code"] == "VERIFY_MISMATCH"
+    for spkg, workline in (("UNISSUED-LABEL", "XRAY"), (label, "XRAY-OTHER")):
+        outlet = await decide(
+            peer,
+            "put_target",
+            spkg,
+            workline_code=workline,
+            mode="COUNTED",
+            observed_at=1,
+            new_barcode=spkg,
+        )
+        assert outlet.status_code == 422
 
 
 def test_xray_mock_rejects_the_example_signing_key():
