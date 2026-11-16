@@ -33,7 +33,7 @@ WCS说明：当前项目没有独立WCS接口合同和实现，出料到位MATER
 
 - Content-Type: application/json，正文UTF-8，最大256KiB。时间字段使用整数纪元毫秒，耗时整数毫秒。
 - 命令顶层严格为device_code、command_code、task_type、priority、timeout、timestamp、params。业务输入必须在params，不新增顶层template_id/barcode等字段。
-- 结果和事件的业务数据放data；本项目业务键按下文约定：barcode/source_event_id等沿用camelCase；本版target位置字段及本盘厚度reel_thickness使用明确列出的snake_case，公共包络原snake_case保持不变。不同时混发历史草稿中的同义键。
+- 命令业务参数放在 `params`，事件与结果的业务数据放在 `data`。按 2026-11-13 修订，HTTP JSON 的公共包络和业务字段统一使用 `snake_case`。`label.variables` 内的模板绑定键保留原名，设备 TCP 字段沿用原协议。新版 HTTP 报文不混用旧字段名。
 - 同步ACK只确认接纳/持久接收，不代表业务判定或物理完成；事件ACK中不得附带下一步指令或标签变量。WMS另行调用command接口发送判定/变量。
 - 本项目不增加取消接口、私有认证字段或私有路径；网络与访问配置按双方部署合同确认。
 - 生产事件is_debug省略或false，禁止true；ESTOP_PRESSED不发到WMS事件接口，设备安全及原命令恢复独立处理。
@@ -303,7 +303,7 @@ SPKG不存在等明确业务拒收使用decision=NG、reason非空；临时无�
 | MMfrPN | 制造商料号 | string | 必填非空，示例PZ2012S601AT000 |
 | VVendor | 供应商编号 | string | 必填非空，示例M000002870，保留原内容 |
 | QQTYPC | 标签元件数量 | string | 必填非空数字字符串，示例"4000"，单位PCS |
-| Location | 标签显示库位 | string | 键必填，允许""，不等于物理locationId |
+| Location | 标签显示库位 | string | 键必填，允许""，独立于物理位置字段 `location_id` |
 | DDC | 日期码 | string | 必填非空，示例2623，按业务编码原样填写 |
 | DateTime | 标签显示日期时间 | string | 必填非空，格式yyyy-MM-dd HH:mm:ss，示例2026-10-29 14:43:50 |
 | LLC | 批次码 | string | 必填非空，示例1T3330022677，保留字母/前导零 |
@@ -379,7 +379,7 @@ actual_target只回传实际位置身份字段：
 
 actual_target仅包含对应分支的实际位置字段。单层箱位回传实际放入的A、B、C或D。五层架回传实际rack_id和储位。实际位置不同于原目标时保留真实位置和诊断，按原任务失败或对账规则处理。失败且实际位置未知时省略actual_target。
 
-目标源位仍固定，一条任务固定一盘，不增加source或qty。target.location_id是本次目标站点；不得沿用旧“无需locationId”的结论省略该字段。新增命令、站点、料箱/储位映射、格号及尺寸必须按双方同一配置校验。
+目标源位仍固定，一条任务固定一盘，不增加source或qty。target.location_id是本次目标站点；不得按旧版规则省略该字段。新增命令、站点、料箱/储位映射、格号及尺寸必须按双方同一配置校验。
 
 WMS指令接纳后HTTP200 ACK只表示接纳；实际取放结束后才Result。实际源位未就绪、抓手持盘、忙碌及安全许可不满足仍按原503/429规则处理，结构/类型/映射不合法按HTTP422 ANNEX_VALIDATION_FAILED明确未接纳。
 
@@ -392,7 +392,7 @@ WMS指令接纳后HTTP200 ACK只表示接纳；实际取放结束后才Result。
 | APPLY_PKG_DECISION COUNT_REQUIRED成功 | barcode、decision=COUNT_REQUIRED、qty | qty为实际PCS整数≥0 | 原COUNT设备任务成功终态 |
 | APPLY_PKG_DECISION BYPASS_COUNT成功 | barcode、decision=BYPASS_COUNT、mode=BYPASS | 不含虚构qty/CCD复核值 | XRAY OUTLET_ARRIVED |
 | APPLY_PKG_DECISION NG成功 | barcode、decision=NG、discharged=true | 进料业务拒收已实际排出，非业务合格 | 已确认实际排NG |
-| APPLY_COUNT_DECISION OK成功 | barcode、decision=OK、labelStatus=APPLIED | 只证明贴标已完成 | XRAY LABEL_RESULT SUCCESS |
+| APPLY_COUNT_DECISION OK成功 | barcode、decision=OK、label_status=APPLIED | 只证明贴标已完成 | XRAY LABEL_RESULT SUCCESS |
 | APPLY_COUNT_DECISION NG成功 | barcode、decision=NG、discharged=true | 排NG动作成功，业务仍NG | 已确认实际排出 |
 | APPLY_VERIFY_DECISION OK成功 | barcode、decision=OK、mode=COUNTED | 到位后等待WMS搬运 | XRAY OUTLET_ARRIVED |
 | APPLY_VERIFY_DECISION NG成功 | barcode、decision=NG、discharged=true | 不是合格入库 | 已确认实际排NG |
@@ -433,7 +433,7 @@ WMS指令接纳后HTTP200 ACK只表示接纳；实际取放结束后才Result。
 | reel_id | string | 是 | 原设备料盘UUID，同一次处理周期保持不变 |
 | barcode | string | 是 | 原周期非空进料条码 |
 | decision | string | 是 | OK |
-| labelStatus | string | 是 | APPLIED，实际已贴标，不代表复核通过 |
+| label_status | string | 是 | APPLIED，实际已贴标，不代表复核通过 |
 
 ### 7.4 APPLY_PKG_DECISION / APPLY_COUNT_DECISION / APPLY_VERIFY_DECISION：业务NG且排出成功
 
@@ -1804,7 +1804,7 @@ command_code指此前已接纳并下发COUNT的APPLY_PKG_DECISION命令，不能
 
 #### 13.10.16 ECS接纳命令后重启恢复时序
 
-前提：ECS已持久接纳一条APPLY_PKG_DECISION COUNT_REQUIRED，其command_code、reelId、sourceEventId及设备COUNT.id关联未丢失；下发可能已经发生。重启恢复先QUERY_TASK，不新建COUNT任务id。下面13.10.17～13.10.20为同一恢复案例。
+前提：ECS已持久接纳一条APPLY_PKG_DECISION COUNT_REQUIRED，其 HTTP 命令的 `command_code`、`params.source_event_id` 与原料盘 `reel_id`（设备 TCP 中为 `reelId`）、设备 `COUNT.id` 的关联未丢失；下发可能已经发生。重启恢复先QUERY_TASK，不新建COUNT任务id。下面13.10.17～13.10.20为同一恢复案例。
 
 #### 13.10.17 查询原COUNT任务
 
@@ -2091,7 +2091,7 @@ command_code为重启前原命令号，与设备QUERY_TASK.id不是同一个字�
 
 1. XRAY自主进料扫码，SCAN_RESULT仅按原规则提供原pkg和reelId，不要求设备在此时已知道WMS厚度。
 2. ECS转发ENTRY事件，WMS在对应APPLY_PKG_DECISION的params中提供number类型reel_thickness，单位毫米；仅COUNT_REQUIRED必填，BYPASS_COUNT及NG省略。
-3. ECS持久保存该厚度及reelId、sourceEventId、command_code关联，再随COUNT原设备命令转发；不新建“厚度设置”独立指令，不把ACK当成业务回复。
+3. ECS 持久保存该厚度及其与原料盘 `reel_id`、HTTP 命令 `params.source_event_id` 和 `command_code` 的关联，再随原设备 `COUNT` 命令转发；不新建“厚度设置”独立指令，不把ACK当成业务回复。
 4. 点料成功、WMS返回原十个标签变量后，ECS在PRINT_LABEL顶层再次携带同一reel_thickness，使贴标命令参数完整。XRAY保存并核对同盘厚度，据实际标定控制贴标高度/行程；不是ECS猜测机械坐标。
 5. BYPASS不传厚度、不点料、不贴标、不CCD，直接正常出料。NG分支不因缺少厚度阻塞已授权异常处置。
 
