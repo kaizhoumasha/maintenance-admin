@@ -651,10 +651,10 @@ async def test_changed_admission_job_set_aborts_before_original_fact_consumption
     read = direction_host.dispatch.admission_jobs
     calls = 0
 
-    async def growing_set(session, *, work_line_id):
+    async def growing_set(session, **kwargs):
         nonlocal calls
         calls += 1
-        actual = await read(session, work_line_id=work_line_id)
+        actual = await read(session, **kwargs)
         # Model a first enumeration that preceded this already real original job.
         return () if calls == 1 else actual
 

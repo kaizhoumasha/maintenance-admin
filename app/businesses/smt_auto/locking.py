@@ -49,11 +49,15 @@ async def lock_line(
     bindings = {
         device.device_code: await resolve_binding(session, device.device_code) for device in devices
     }
-    jobs = await dispatch.admission_jobs(session, work_line_id=work_line_id)
+    jobs = await dispatch.admission_jobs(
+        session, work_line_id=work_line_id, include_late_arrivals=roller is not None
+    )
     original = tuple(sorted(job.id for job in jobs))
     job_ids = tuple(sorted(set(original) | set(include_job_ids)))
     await dispatch.lock_admission_jobs(session, job_ids=job_ids)
-    current = await dispatch.admission_jobs(session, work_line_id=work_line_id)
+    current = await dispatch.admission_jobs(
+        session, work_line_id=work_line_id, include_late_arrivals=roller is not None
+    )
     if tuple(sorted(job.id for job in current)) != original:
         raise RackLockSetChanged("original AUTO dispatch jobs changed during lock acquisition")
     tasks = tuple(
@@ -85,7 +89,9 @@ async def lock_line(
     if roller is not None:
         await roller.lock_production_subjects(session, work_line_id, jobs)
     await dispatch.lock_admission_actions(session, job_ids=job_ids)
-    current = await dispatch.admission_jobs(session, work_line_id=work_line_id)
+    current = await dispatch.admission_jobs(
+        session, work_line_id=work_line_id, include_late_arrivals=roller is not None
+    )
     if tuple(sorted(job.id for job in current)) != original:
         raise RackLockSetChanged("original AUTO dispatch jobs changed during lock acquisition")
     if timing is not None:

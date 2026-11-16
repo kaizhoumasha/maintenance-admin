@@ -535,6 +535,259 @@ async def test_submit_ack_alone_never_supplies_another_face(roller_lifecycle, ro
     assert len(await flow.all_rows("feed")) == len(existing) + 1
 
 
+@pytest.mark.parametrize("code,http", [("RECEIVED", 202), ("DUPLICATE", 200)])
+async def test_original_ctu02_acceptance_unblocks_next_racks_return_batch(
+    roller_lifecycle, code, http
+):
+    flow = roller_lifecycle
+    first, cycle = await flow.ready_supply(count=1)
+    rotated = await flow.demand(face="B", revision=2)
+    following = await flow.demand(rack="R2", revision=3)
+    await flow.advance("FACE", following)
+    next_entry = (await flow.all_rows("rack_action"))[-1]
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", first)
+    rotation = next(a for a in await flow.all_rows("rack_action") if a["kind"] == "CTU02")
+    await flow.rack_result(next_entry)
+    await flow.advance("FACE", following)
+    assert len(await flow.all_rows("feed")) == 1
+
+    await flow.accepted(rotation, response_task=next_entry["transport_task_id"])
+    await flow.advance("RACK_CYCLE", cycle)
+    await flow.advance("FACE", following)
+    assert len(await flow.all_rows("feed")) == 1
+
+    await flow.accepted(rotation, code=code, http=http)
+    await flow.advance("RACK_CYCLE", cycle)
+    await flow.advance("FACE", following)
+    assert {f["id"] for f in await flow.all_rows("feed")} == {first, following}
+    await flow.bins(1)
+    await flow.decision("feed", following, dict(result="RACK_FACE_DONE"))
+    await flow.advance("FACE", following)
+    assert [batch["id"] for batch in await flow.all_rows("return_batch")] == [following]
+
+    await flow.rack_result(rotation)
+    await flow.advance("RACK_CYCLE", cycle)
+    await flow.advance("RACK_CYCLE", next_entry["cycle_id"])
+    async with flow.factory() as session:
+        dispatch = flow.roller.rack_dispatch
+        ready = await dispatch.get_point_preparations(session, work_line_id=1, point="RACK-WORK")
+        assert [rack.id for rack in ready] == [cycle]
+    assert {f["id"] for f in await flow.all_rows("feed")} == {first, following, rotated}
+
+
+@pytest.mark.parametrize("late", [False, True])
+@pytest.mark.parametrize("task_cancelled", [False, True])
+async def test_cancelled_entry_at_the_work_point_leaves_once(
+    roller_lifecycle, late, task_cancelled
+):
+    from app.reliable import ScopeRef
+
+    flow = roller_lifecycle
+    face = await flow.demand()
+    await flow.advance("FACE", face)
+    entry = (await flow.all_rows("rack_action"))[0]
+    cycle = entry["cycle_id"]
+    if task_cancelled:
+        await flow.accepted(entry)
+        async with flow.factory.begin() as session:
+            await flow.roller.close_scope(
+                session,
+                ScopeRef(flow.roller.context.domain, "TASK", flow.current_task),
+                reason="TASK_CANCELLED",
+            )
+    await flow.rack_callback(
+        dict(
+            transport_task_id=entry["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            outcome_revision=1,
+            status="CANCELLED",
+            final_position=dict(
+                kind="RACK_POSITION", location_code="STORAGE" if late else "RACK-WORK"
+            ),
+        )
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    if late:
+        assert not await flow.all_rows("departure")
+        await flow.rack_result(entry, revision=2)
+        async with flow.factory() as session:
+            upper = await flow.roller.get_pending_upper_id(session, kind="RACK_CYCLE")
+            assert RollerWorkRef("RACK_CYCLE", cycle) in await flow.roller.list_pending(
+                session, kind="RACK_CYCLE", after_id=None, upper_id=upper, limit=10
+            )
+        await flow.advance("RACK_CYCLE", cycle)
+
+    assert not await flow.all_rows("feed")
+    assert [item["request"]["rack_id"] for item in await flow.all_rows("departure")] == ["R1"]
+    assert [action["kind"] for action in await flow.all_rows("rack_action")] == ["CTU01"]
+    await flow.finish_departure(cycle)
+    await flow.advance("RACK_CYCLE", cycle)
+    assert [action["kind"] for action in await flow.all_rows("rack_action")] == ["CTU01", "CTU03"]
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        assert not job.pending
+        assert job.actions[0].outcome["status"] == "CANCELLED"
+        if task_cancelled:
+            assert job.state == "CLOSED_BY_SCOPE"
+            assert job.closure_basis["reason"] == "TASK_CANCELLED"
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_cancelled_rotation_reclaims_the_point_for_departure_only(roller_lifecycle, late):
+    flow = roller_lifecycle
+    old, cycle = await flow.ready_supply(count=1)
+    new_face = await flow.demand(face="B", revision=2)
+    other = await flow.demand(rack="R2", revision=3)
+    await flow.advance("FACE", other)
+    entry = (await flow.all_rows("rack_action"))[-1]
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", old)
+    rotation = (await flow.all_rows("rack_action"))[-1]
+    await flow.accepted(rotation)
+    await flow.advance("RACK_CYCLE", cycle)
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    await flow.rack_callback(
+        dict(
+            transport_task_id=rotation["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            outcome_revision=1,
+            status="CANCELLED",
+            final_position=(
+                dict(kind="RACK_POSITION", location_code="STORAGE") if late else rotation["target"]
+            ),
+        )
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    if late:
+        assert not await flow.all_rows("departure")
+        await flow.rack_result(rotation, revision=2)
+        await flow.advance("RACK_CYCLE", cycle)
+    assert [d["request"]["rack_id"] for d in await flow.all_rows("departure")] == ["R1"]
+    assert new_face not in {f["id"] for f in await flow.all_rows("feed")}
+    await flow.finish_departure(cycle)
+
+
+async def test_task_cancel_clears_the_rack_after_its_frozen_box_move_finishes(roller_lifecycle):
+    from sqlalchemy import select
+
+    from app.models import TransportTask
+    from app.reliable import ScopeRef
+
+    flow = roller_lifecycle
+    _, cycle = await flow.ready_supply(count=1)
+    segment = (await flow.all_rows("feed_segment"))[0]
+    async with flow.factory() as session:
+        operation = await session.scalar(
+            select(TransportTask.operation_id).where(
+                TransportTask.transport_task_id == segment["transport_task_id"]
+            )
+        )
+    await flow.accepted({**segment, "operation_id": operation})
+    async with flow.factory.begin() as session:
+        await flow.roller.close_scope(
+            session,
+            ScopeRef(flow.roller.context.domain, "TASK", flow.current_task),
+            reason="TASK_CANCELLED",
+        )
+    await flow.advance("RACK_CYCLE", cycle)
+    assert not await flow.all_rows("departure")
+    await flow.feed_success(segment)
+    await flow.advance("RACK_CYCLE", cycle)
+    await flow.finish_departure(cycle)
+    assert [a["kind"] for a in await flow.all_rows("rack_action")] == ["CTU01", "CTU03"]
+
+
+@pytest.mark.parametrize(
+    "original,condition",
+    [
+        ("CTU02", "OVERLAP"),
+        ("DECISION", "UNSENT"),
+        ("CTU03", "OVERLAP"),
+        ("CTU03", "DISPATCHED"),
+        ("CTU03", "EXPIRED"),
+    ],
+)
+async def test_task_cancel_cleans_up_without_replacing_an_unsent_departure(
+    roller_lifecycle, original, condition
+):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from app.models import ReliableMessage
+    from app.reliable import ScopeRef
+
+    flow = roller_lifecycle
+    rack = "R2" if condition == "OVERLAP" else "R1"
+    if condition == "OVERLAP":
+        await awaiting_allocation(flow, "R1")
+    face, cycle = await flow.ready_supply(count=1, rack=rack)
+    if original == "CTU02":
+        await flow.demand(rack=rack, face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", face)
+    ready = dict(result="READY", rack_destination=dict(type="ZONE", location_code="STORAGE"))
+    if original == "CTU03":
+        departure = (await flow.all_rows("departure"))[0]
+        await flow.decision("departure", departure["id"], ready)
+        await flow.advance("RACK_CYCLE", cycle)
+    last = (await flow.all_rows("rack_action"))[-1]
+    if original != "DECISION":
+        assert last["kind"] == original
+    scope = ScopeRef(flow.roller.context.domain, "TASK", flow.current_task)
+    async with flow.factory.begin() as session:
+        if condition in ("DISPATCHED", "EXPIRED"):
+            message = await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.operation_id == last["operation_id"])
+            )
+            if condition == "DISPATCHED":
+                message.dispatch_started_at = datetime.now(UTC)
+            else:
+                message.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.flush()
+        await flow.roller.close_scope(session, scope, reason="TASK_CANCELLED")
+
+    progress = await flow.advance("RACK_CYCLE", cycle)
+    departures = await flow.all_rows("departure")
+    assert len(departures) == 1
+    async with flow.factory() as session:
+        if original in ("CTU02", "CTU03"):
+            status = await session.scalar(
+                select(ReliableMessage.status).where(
+                    ReliableMessage.operation_id == last["operation_id"]
+                )
+            )
+            assert status == (
+                "ABANDONED"
+                if original == "CTU02" or condition in ("DISPATCHED", "EXPIRED")
+                else "PENDING"
+            )
+        else:
+            request = await session.get(ReliableMessage, departures[0]["message_id"])
+            assert request.status == "PENDING"
+    if original == "CTU03":
+        if condition == "EXPIRED":
+            assert progress == "CLEANUP_SUBMISSION_NEEDS_REVIEW"
+            return
+        if condition == "DISPATCHED":
+            assert len([a for a in await flow.all_rows("rack_action") if a["kind"] == "CTU03"]) == 1
+            async with flow.factory() as session:
+                assert (await flow.roller.rack_dispatch.progress(session, job_id=cycle)).pending
+            return
+        await flow.accepted(last)
+        await flow.advance("RACK_CYCLE", cycle)
+    else:
+        await flow.finish_departure(cycle)
+    assert len([a for a in await flow.all_rows("rack_action") if a["kind"] == "CTU03"]) == 1
+    async with flow.factory() as session:
+        stopped = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        assert stopped.closure_basis["responsibility_release"]["kind"] == "DEPARTURE_ACK"
+
+
 @pytest.mark.parametrize("at_work_point", [False, True])
 async def test_withdrawn_failed_entry_uses_observed_location_without_starting_feed(
     roller_lifecycle, at_work_point
@@ -570,6 +823,43 @@ async def test_withdrawn_failed_entry_uses_observed_location_without_starting_fe
         assert job.actions[0].outcome["status"] == "FAILED"
         assert job.state == ("RELEASING" if at_work_point else "NOT_ARRIVED")
         assert len([a for a in job.actions if a.kind == "DEPARTURE_DECIDE"]) == int(at_work_point)
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_cancelled_rack_at_work_point_leaves_ready_bins_for_the_next_rack(
+    roller_lifecycle, rotate
+):
+    flow = roller_lifecycle
+    if rotate:
+        first, cycle = await flow.ready_supply(count=1)
+        await flow.demand(face="B", revision=2)
+        await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+        await flow.advance("FACE", first)
+    else:
+        first = await flow.demand()
+        await flow.advance("FACE", first)
+        cycle = (await flow.all_rows("rack_action"))[0]["cycle_id"]
+    action = (await flow.all_rows("rack_action"))[-1]
+    assert action["kind"] == ("CTU02" if rotate else "CTU01")
+    await flow.bins(1)
+    await flow.rack_callback(
+        dict(
+            transport_task_id=action["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            outcome_revision=1,
+            status="CANCELLED",
+            final_position=action["target"],
+        )
+    )
+    await flow.advance("RACK_CYCLE", cycle)
+    assert not await flow.all_rows("return_batch")
+    assert [row["return_state"] for row in await flow.all_rows("bin_return")] == ["READY"]
+    assert len(await flow.all_rows("feed")) == int(rotate)
+    departure = (await flow.all_rows("departure"))[0]
+    assert departure["request"].get("current_face") is None
+    await flow.finish_departure(cycle)
+    assert (await flow.all_rows("rack_cycle"))[0]["status"] == "RELEASED"
 
 
 async def test_missing_original_face_cannot_authorize_departure(roller_lifecycle):
@@ -700,14 +990,15 @@ async def test_new_box_transport_requires_current_original_face(
     assert not await flow.all_rows("feed_segment")
 
 
-async def test_two_active_original_position_claims_do_not_choose_latest(roller_lifecycle):
+async def test_latest_arrival_supersedes_the_old_preparation_before_its_worker_runs(
+    roller_lifecycle,
+):
     flow = roller_lifecycle
     first, entry, feed = await awaiting_allocation(flow, "R1")
     second = await flow.demand(rack="R2")
     await flow.advance("FACE", second)
     replacement = (await flow.all_rows("rack_action"))[-1]
-    await flow.rack_result(replacement)
-    await flow.advance("RACK_CYCLE", replacement["cycle_id"])
+    await flow.rack_result(replacement, timestamp=2)
     async with flow.factory() as session:
         assert (
             await flow.roller.rack_dispatch.get_point_preparations(
@@ -733,6 +1024,71 @@ async def test_two_active_original_position_claims_do_not_choose_latest(roller_l
     await flow.advance("FACE", first)
     row = next(r for r in await flow.all_rows("face_work") if r["id"] == first)
     assert row["current_transport_task_id"] is None
+    await flow.advance("RACK_CYCLE", replacement["cycle_id"])
+    await flow.rack_result(entry)
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        ready = await flow.roller.rack_dispatch.get_point_preparations(
+            session, work_line_id=1, point="RACK-WORK"
+        )
+        assert [rack.id for rack in ready] == [replacement["cycle_id"]]
+    assert {f["id"] for f in await flow.all_rows("feed")} == {first, second}
+    await flow.decision("feed", second, dict(result="RACK_FACE_DONE"))
+    await flow.advance("FACE", second)
+    await flow.finish_departure(replacement["cycle_id"])
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    async with flow.factory() as session:
+        assert not await flow.roller.rack_dispatch.get_point_preparations(
+            session, work_line_id=1, point="RACK-WORK"
+        )
+    await flow.bins(1)
+    row = (await flow.all_rows("bin_return"))[0]
+    await flow.advance("RETURN", row["id"])
+    state = (await flow.all_rows("workline_state"))[0]
+    await flow.decide_current(
+        state["drain_message_id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
+    )
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert any(r["rack_id"] == "D1" for r in await flow.all_rows("rack_cycle"))
+    assert [r["kind"] for r in await flow.all_rows("rack_action")] == [
+        "CTU01",
+        "CTU01",
+        "CTU03",
+        "CTU01",
+    ]
+
+
+async def test_superseded_departure_decision_does_not_block_drain_entry(roller_lifecycle):
+    flow = roller_lifecycle
+    first, entry, _ = await awaiting_allocation(flow, "R1")
+    second = await flow.demand(rack="R2")
+    await flow.advance("FACE", second)
+    replacement = (await flow.all_rows("rack_action"))[-1]
+    await flow.decision("feed", first, dict(result="RACK_FACE_DONE"))
+    await flow.advance("FACE", first)
+    assert [d["cycle_id"] for d in await flow.all_rows("departure")] == [entry["cycle_id"]]
+
+    await flow.rack_result(replacement)
+    await flow.advance("RACK_CYCLE", replacement["cycle_id"])
+    await flow.decision("feed", second, dict(result="RACK_FACE_DONE"))
+    await flow.advance("FACE", second)
+    await flow.finish_departure(replacement["cycle_id"])
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+
+    await flow.bins(1)
+    row = (await flow.all_rows("bin_return"))[0]
+    await flow.advance("RETURN", row["id"])
+    state = (await flow.all_rows("workline_state"))[0]
+    await flow.decide_current(
+        state["drain_message_id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
+    )
+    await flow.advance("DRAIN", state["line_run_id"])
+    assert [r["kind"] for r in await flow.all_rows("rack_action")] == [
+        "CTU01",
+        "CTU01",
+        "CTU03",
+        "CTU01",
+    ]
 
 
 @pytest.mark.parametrize("association", ["missing", "older_same_face"])
@@ -813,3 +1169,150 @@ async def test_inflight_box_result_is_consumed_after_rack_replacement(roller_lif
                 )
             )
         ) == [original["transport_task_id"]]
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_cancelled_rack_outside_the_point_closes_withdrawn_face(roller_lifecycle, rotate):
+    flow = roller_lifecycle
+    if rotate:
+        first, _ = await flow.ready_supply(count=1)
+        face = await flow.demand(face="B", revision=2)
+        await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+        await flow.advance("FACE", first)
+    else:
+        face = await flow.demand()
+        await flow.advance("FACE", face)
+    action = (await flow.all_rows("rack_action"))[-1]
+    if rotate:
+        await flow.accepted(action)
+    revision, side = (2, "B") if rotate else (1, "A")
+    async with flow.factory.begin() as session:
+        await flow.roller.apply_supply_change(
+            session,
+            SupplyChange(
+                1, flow.current_task, "withdraw", (), (SourceFaceRef(revision, "R1", side),)
+            ),
+        )
+    await flow.rack_callback(
+        dict(
+            transport_task_id=action["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            outcome_revision=1,
+            status="CANCELLED",
+            final_position=dict(kind="RACK_POSITION", location_code="STORAGE"),
+        )
+    )
+    await flow.advance("RACK_CYCLE", action["cycle_id"])
+    row = next(row for row in await flow.all_rows("face_work") if row["id"] == face)
+    assert row["close_reason"] == "WITHDRAWN"
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=action["cycle_id"])
+        assert job.state == "NOT_ARRIVED" and not job.pending
+    assert not await flow.all_rows("departure")
+
+    if rotate:
+        await flow.rack_result(action, revision=2)
+        await flow.advance("RACK_CYCLE", action["cycle_id"])
+        assert len(await flow.all_rows("departure")) == 1
+        assert len(await flow.all_rows("feed")) == 1
+
+
+@pytest.mark.parametrize("old_first", [True, False])
+async def test_other_rack_anomaly_is_ordered_against_valid_arrival(roller_lifecycle, old_first):
+    flow = roller_lifecycle
+    first = await flow.demand(rack="R1")
+    await flow.advance("FACE", first)
+    entry = (await flow.all_rows("rack_action"))[-1]
+    second = await flow.demand(rack="R2", revision=2)
+    await flow.advance("FACE", second)
+    replacement = (await flow.all_rows("rack_action"))[-1]
+    assert replacement["cycle_id"] != entry["cycle_id"]
+    if not old_first:
+        await flow.rack_result(replacement)
+    await flow.rack_callback(
+        dict(
+            transport_task_id=entry["transport_task_id"],
+            kind="RACK_MOVE",
+            rack_id="R1",
+            outcome_revision=1,
+            status="SUCCEEDED",
+            final_position=entry["target"],
+            arrival_face="OTHER",
+        )
+    )
+    await flow.advance("RACK_CYCLE", entry["cycle_id"])
+    if old_first:
+        await flow.rack_result(replacement)
+    await flow.advance("RACK_CYCLE", replacement["cycle_id"])
+    async with flow.factory() as session:
+        ready = await flow.roller.rack_dispatch.get_point_preparations(
+            session, work_line_id=1, point="RACK-WORK"
+        )
+        assert [rack.origin.rack_id for rack in ready] == (["R2"] if old_first else [])
+    assert [feed["id"] for feed in await flow.all_rows("feed")] == ([second] if old_first else [])
+
+
+@pytest.mark.parametrize("template", ["CTU02", "CTU03"])
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_rack_submit_rejection_preserves_position_and_surfaces_reason(
+    roller_lifecycle, template, uncertain
+):
+    import json
+
+    from sqlalchemy import select
+
+    from app.models import ReliableMessage
+    from tests.helpers import set_message_bodies
+
+    flow = roller_lifecycle
+    face, cycle = await flow.ready_supply(count=1)
+    if template == "CTU02":
+        await flow.demand(face="B", revision=2)
+    await flow.feed_success((await flow.all_rows("feed_segment"))[0])
+    await flow.advance("FACE", face)
+    if template == "CTU03":
+        decision = (await flow.all_rows("departure"))[0]
+        await flow.decision(
+            "departure",
+            decision["id"],
+            dict(
+                result="READY",
+                rack_destination=dict(type="ZONE", location_code="STORAGE"),
+            ),
+        )
+        await flow.advance("RACK_CYCLE", cycle)
+    action = next(a for a in await flow.all_rows("rack_action") if a["kind"] == template)
+    async with flow.factory.begin() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == action["operation_id"])
+        )
+        message.status, message.last_http_status, message.last_verdict = (
+            "FAILED",
+            422,
+            "PEER_TERMINAL",
+        )
+        message.fail_reason = "REJECTED"
+        message.delivery_uncertain = uncertain
+        await set_message_bodies(
+            session,
+            message,
+            response_raw=json.dumps(
+                dict(
+                    operation_id=message.operation_id,
+                    code="REJECTED",
+                    timestamp=2,
+                    data=dict(
+                        transport_task_id=action["transport_task_id"], reason_code="INVALID_DATA"
+                    ),
+                )
+            ).encode(),
+        )
+    for _ in range(3):
+        await flow.advance("RACK_CYCLE", cycle)
+    async with flow.factory() as session:
+        job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
+        assert job.pending
+        assert job.review_reason == ("SUBMISSION_UNCERTAIN" if uncertain else "SUBMIT_REJECTION")
+        assert job.actual_position == dict(kind="RACK_POSITION", location_code="RACK-WORK")
+    assert len(await flow.all_rows("rack_action")) == 2

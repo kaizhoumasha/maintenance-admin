@@ -21,7 +21,12 @@ from .acceptance import SubmissionAcceptance, get_submission_acceptance
 from .adapter import ADAPTERS
 from .predecessors import PredecessorQueryResult, list_unclosed_predecessors
 from .protocol import DEFAULT_MOVE_TEMPLATE, OPERATION, PROTOCOL, SUBMIT_TTL
-from .results import TransportTaskResult, get_result
+from .results import (
+    TransportTaskResult,
+    get_result,
+    late_rack_arrival_cycles,
+    latest_rack_arrival_cycle,
+)
 from .types import (
     BinExchangePair,
     BinMove,
@@ -111,6 +116,31 @@ class TransportService:
             caller=caller,
             owner=self.owner_domain,
         )
+
+    async def latest_rack_arrival_cycle(
+        self,
+        session: AsyncSession,
+        *,
+        workline_id: str,
+        point: str,
+        templates: tuple[str, ...],
+        after_receipt_id: int | None = None,
+    ) -> str | None:
+        if self.owner_domain is None:
+            return None
+        return await latest_rack_arrival_cycle(
+            session,
+            owner_domain=self.owner_domain,
+            workline_id=workline_id,
+            point=point,
+            templates=templates,
+            after_receipt_id=after_receipt_id,
+        )
+
+    async def late_rack_arrival_cycles(self, session: AsyncSession) -> tuple[str, ...]:
+        if self.owner_domain is None:
+            return ()
+        return await late_rack_arrival_cycles(session, owner_domain=self.owner_domain)
 
     async def list_unclosed_predecessors(
         self,

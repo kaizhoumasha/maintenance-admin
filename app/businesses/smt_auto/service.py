@@ -359,7 +359,14 @@ class SmtAutoService(AutoTaskService):
                 )
                 await self.roller.advance(session, RollerWorkRef(kind, record_id))
                 return state
-            await lock_line(session, self.dispatch, line_id, roller=self.roller)
+            job_id = original.get("rack_job_id") if kind == "FACE" else None
+            await lock_line(
+                session,
+                self.dispatch,
+                line_id,
+                roller=self.roller,
+                include_job_ids=(job_id,) if job_id else (),
+            )
             return await self.roller.advance(session, RollerWorkRef(kind, record_id))
 
         model = {

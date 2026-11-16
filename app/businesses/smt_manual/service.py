@@ -211,8 +211,15 @@ class SmtManualService(SmtManualTaskFlow):
                 task_id = located["scope_id"]
             elif kind == "PASSAGE" and located["scope_kind"] == "TASK":
                 task_id = located["scope_id"]
+            job_id = located.get("rack_job_id") if kind == "FACE" else None
+            if kind == "RACK_CYCLE":
+                job_id = record_id
             await self.repository.lock_dispatch_line(
-                session, self.roller, located["work_line_id"], task_id=task_id
+                session,
+                self.roller,
+                located["work_line_id"],
+                task_id=task_id,
+                include_job_ids=(job_id,) if job_id else (),
             )
         if kind not in {"SCAN2_RELEASE", "RACK_REPORT"} and task_id:
             await self._register_task_rack_candidates(session, task_id=task_id)

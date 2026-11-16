@@ -27,10 +27,15 @@ async def overlap(flow, works):
     )
 
 
-async def test_two_scan4_wakeups_register_one_first_drain(roller_lifecycle):
+async def test_two_scan4_wakeups_register_one_first_drain(roller_lifecycle, monkeypatch):
     flow = roller_lifecycle
-    await flow.bins(2)
-    flow.successor = "NONE"
+
+    async def unconfigured(*args):
+        return None
+
+    with monkeypatch.context() as setup:
+        setup.setattr(flow.roller, "read_resources", unconfigured)
+        await flow.bins(2)
     rows = await flow.all_rows("bin_return")
     await overlap(flow, [("RETURN", r["id"]) for r in rows])
     state = (await flow.all_rows("workline_state"))[0]

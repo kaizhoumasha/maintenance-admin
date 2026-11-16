@@ -374,6 +374,24 @@ async def read_drain_manifest(roller, session, state):
         return None
 
 
+async def _has_receiving_rack(roller, session, repo, resources):
+    if await roller.rack_dispatch.has_receiving_rack(
+        session, work_line_id=repo.work_line_id, point=resources["positions"]["FIVE_RACK"]
+    ):
+        return True
+    return await _has_direct_box_move(session, repo)
+
+
+async def _has_direct_box_move(session, repo):
+    faces = repo.tables["face_work"]
+    query = select(faces.c.id).where(
+        *repo.scoped(faces),
+        faces.c.closed_at.is_(None),
+        faces.c.phase.in_(("FEED_MOVE", "RETURN_MOVE")),
+    )
+    return await session.scalar(query.limit(1)) is not None
+
+
 async def advance_drain(roller, session, work_line_id):
     from .rack_flow import advance_cycle, register_job
 
@@ -385,22 +403,11 @@ async def advance_drain(roller, session, work_line_id):
     if state["drain_phase"] == "IDLE":
         await repo.finish_line_if_idle(session)
         state = await repo.line_state(session)
-        successor = await roller.production.read_successor(session, work_line_id=work_line_id)
         candidates = await roller.return_candidates(session, work_line_id=work_line_id)
-        faces = repo.tables["face_work"]
-        successor_blocked = successor.state not in {"NONE", "UNKNOWN"} or bool(
-            successor.evidence.get("queued_task_ids")
-        )
-        if (
-            successor_blocked
-            or not candidates
-            or await session.scalar(
-                select(faces.c.id).where(*repo.scoped(faces), faces.c.closed_at.is_(None)).limit(1)
-            )
-        ):
+        if not candidates:
             return None
         resources = await roller.read_resources(session, work_line_id)
-        if not resources:
+        if not resources or await _has_receiving_rack(roller, session, repo, resources):
             return None
         state = await repo.line_state(session, start=True)
         operation_id = str(uuid7())
@@ -515,7 +522,7 @@ async def advance_drain(roller, session, work_line_id):
                 break
             return None
         resources = await roller.read_resources(session, work_line_id)
-        if not resources:
+        if not resources or await _has_receiving_rack(roller, session, repo, resources):
             return None
         job_id = await register_job(
             roller,
@@ -570,8 +577,23 @@ async def close_scope(roller, session, scope: ScopeRef, *, reason):
         .all()
     )
     returns = roller.tables["bin_return"]
+    ctu_box_moves = {} if scope.kind == "TASK" and reason == "TASK_CANCELLED" else None
     for face in selected_faces:
         repo = roller.repository(face["work_line_id"])
+        if ctu_box_moves is not None and face["rack_job_id"] and face["current_transport_task_id"]:
+            job = await roller.rack_dispatch.progress(session, job_id=face["rack_job_id"])
+            caller = job.origin.caller if job else None
+            if caller is not None:
+                transport_id = face["current_transport_task_id"]
+                result = await roller.capabilities.transport.get_result(
+                    session,
+                    transport_task_id=transport_id,
+                    client_request_id=face["current_client_request_id"],
+                    caller=caller,
+                )
+                stop = stops.get(result.submission_message_id)
+                if result.closure != "CLOSED" and (not stop or stop.dispatch != "NEVER_DISPATCHED"):
+                    ctu_box_moves.setdefault(job.id, set()).add(transport_id)
         members = (
             (
                 await session.execute(
@@ -665,7 +687,9 @@ async def close_scope(roller, session, scope: ScopeRef, *, reason):
         await roller.repository(row["work_line_id"]).close(
             session, "bin_passage", row["id"], reason
         )
-    await roller.rack_dispatch.close_scope(session, scope, reason=reason)
+    await roller.rack_dispatch.close_scope(
+        session, scope, reason=reason, ctu_box_moves=ctu_box_moves
+    )
     if scope.kind == "LINE":
         rows = (
             (

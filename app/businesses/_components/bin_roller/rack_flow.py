@@ -209,6 +209,7 @@ async def evaluate_roller_point(roller, session, job):
         job.origin.point,
     )
     ordinary = job.origin.source_kind == "ROLLER_ORDINARY"
+    expired_drain = False
     if ordinary:
         task = await roller.production.read_task_coverage(
             session, point=point, task_id=job.origin.task_id
@@ -220,7 +221,11 @@ async def evaluate_roller_point(roller, session, job):
     else:
         state = await repo.line_state(session)
         if state["drain_operation_id"] != job.origin.source_ref or state["drain_phase"] != "USING":
-            return PointDemand(point, "UNKNOWN", ()), DirectHandoff(point, "UNKNOWN", ())
+            expired_drain = job.state == "NOT_ARRIVED" or any(
+                (a.basis or {}).get("previous_not_arrived") for a in job.actions
+            )
+            if not expired_drain:
+                return PointDemand(point, "UNKNOWN", ()), DirectHandoff(point, "UNKNOWN", ())
         anchor = row_fact("workline_state", repo.tables["workline_state"], state)
         coverage = []
     table = repo.tables["face_work"]
@@ -249,16 +254,18 @@ async def evaluate_roller_point(roller, session, job):
             point, "UNKNOWN", tuple(coverage)
         )
     active = [f for f in faces if f["closed_at"] is None]
+    if expired_drain:
+        handoff = "BLOCKED" if any(f["phase"] != "WAIT_RACK" for f in active) else "CLEAR"
+        return PointDemand(point, "NONE", tuple(coverage)), DirectHandoff(
+            point, handoff, tuple(coverage)
+        )
     if (
         ordinary
         and job.actions
         and job.actions[-1].outcome
         and job.actions[-1].outcome["status"] in ("FAILED", "CANCELLED")
     ):
-        for face in active:
-            if face["demand_state"] == "WITHDRAWN" and not face["feed_operation_id"]:
-                await repo.close(session, "face_work", face["id"], "WITHDRAWN")
-        active = [f for f in active if f["demand_state"] != "WITHDRAWN" or f["feed_operation_id"]]
+        active = [f for f in active if not _withdrawn_before_use(f)]
     if ordinary:
         current = await roller.production.read_current_task(session, work_line_id=repo.work_line_id)
         if (
@@ -306,6 +313,12 @@ async def evaluate_roller_point(roller, session, job):
 
 
 def cycle_progress(job):
+    if job.review_reason in (
+        "SUBMIT_REJECTION",
+        "SUBMISSION_UNCERTAIN",
+        "CLEANUP_SUBMISSION_NEEDS_REVIEW",
+    ):
+        return job.review_reason
     if job.closure_reason == "DEPARTURE_ACK":
         return "RELEASED"
     if job.state == "RELEASING":
@@ -323,14 +336,24 @@ def cycle_progress(job):
     return job.state
 
 
+def _withdrawn_before_use(face):
+    return (
+        face["demand_state"] == "WITHDRAWN"
+        and face["phase"] == "WAIT_RACK"
+        and face["feed_operation_id"] is None
+        and face["current_transport_task_id"] is None
+        and face["step_id"] is None
+    )
+
+
 async def advance_cycle(roller, session, cycle_id):
     from .feed_flow import advance_face, start_feed
-    from .return_flow import read_drain_manifest
+    from .return_flow import _has_direct_box_move, read_drain_manifest
 
     job = await roller.rack_dispatch.progress(session, job_id=cycle_id)
     if not job or job.origin.source_kind not in ("ROLLER_ORDINARY", "ROLLER_DRAIN"):
         raise ValueError("original roller rack job missing")
-    if not job.pending:
+    if not job.pending and job.state not in {"NOT_ARRIVED", "CLOSED_BY_SCOPE"}:
         return cycle_progress(job)
     if job.state == "CLOSED_BY_SCOPE":
         point = PointRef(
@@ -368,6 +391,20 @@ async def advance_cycle(roller, session, cycle_id):
     job = await roller.rack_dispatch.advance(
         session, job_id=job.id, demand=demand, handoff=handoff, now_ms=int(time() * 1000)
     )
+    if ordinary:
+        move = next((a for a in reversed(job.actions) if a.kind in ("ENTER", "ROTATE")), None)
+        if move and (move.outcome or {}).get("status") in ("FAILED", "CANCELLED"):
+            withdrawn = await session.execute(
+                select(table).where(
+                    *repo.scoped(table),
+                    table.c.rack_job_id == job.id,
+                    table.c.closed_at.is_(None),
+                    table.c.demand_state == "WITHDRAWN",
+                )
+            )
+            for face in withdrawn.mappings():
+                if _withdrawn_before_use(face):
+                    await repo.close(session, "face_work", face["id"], "WITHDRAWN")
     if not job.pending or job.state != "ACTIVE" or job.release_requested:
         if not job.pending and not ordinary:
             state = await repo.line_state(session)
@@ -518,6 +555,8 @@ async def advance_cycle(roller, session, cycle_id):
         kind = "ROTATE"
     else:
         return "WAITING_FOR_ORIGINAL_RESULT"
+    if not ordinary and kind == "ENTER" and await _has_direct_box_move(session, repo):
+        return cycle_progress(job)
     action_id = await roller.rack_dispatch.prepare(
         session, job_id=job.id, kind=kind, source_ref=face["id"], face=face["rack_face"]
     )

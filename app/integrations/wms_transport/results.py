@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.strict_json import canonical_digest, json_object
@@ -16,7 +16,13 @@ from app.integrations.wms_envelope import (
     response_row,
     stored_response,
 )
-from app.models import ReliableMessage, TransportTask
+from app.models import (
+    IntegrationExchange,
+    IntegrationRecord,
+    IntegrationReference,
+    ReliableMessage,
+    TransportTask,
+)
 
 from .adapter import TransportSubmitAdapter
 from .callback.payloads import RackPositionRef, Resulted
@@ -279,10 +285,32 @@ def validate_outcome(task: dict, raw: dict, revision: int, *, applied: bool) -> 
 
 
 def validate_position_observation(task: dict, raw: dict) -> dict:
-    data = Resulted.model_validate(raw).model_dump(mode="json")
+    if "arrival_receipt_id" in raw:
+        payload = dict(raw)
+        receipt_id = payload.pop("arrival_receipt_id")
+        revision = payload["outcome_revision"]
+        data, status = validate_outcome(task, payload, revision, applied=False)
+        if (
+            type(receipt_id) is not int
+            or receipt_id < 1
+            or task["outcome_status"] != "CANCELLED"
+            or task["frozen"].get("rcs_template_id") not in ("CTU01", "CTU02")
+            or revision <= task["applied_outcome_revision"]
+            or status != "SUCCEEDED"
+            or data != payload
+            or data["final_position"] != task["frozen"]["target"]
+        ):
+            raise ValueError("invalid late rack arrival")
+        return raw
+    payload = dict(raw)
+    if "observation_receipt_id" in payload:
+        receipt_id = payload.pop("observation_receipt_id")
+        if type(receipt_id) is not int or receipt_id < 1:
+            raise ValueError("invalid position observation receipt")
+    data = Resulted.model_validate(payload).model_dump(mode="json")
     frozen = task["frozen"]
     if (
-        raw != data
+        payload != data
         or task["kind"] not in {"RACK_MOVE", "RACK_ROTATE"}
         or data["transport_task_id"] != task["transport_task_id"]
         or data["kind"] != task["kind"]
@@ -303,7 +331,7 @@ def validate_position_observation(task: dict, raw: dict) -> dict:
         )
     ):
         raise ValueError("invalid rack position observation")
-    return data
+    return raw
 
 
 def has_position_milestones(task: dict) -> bool:
@@ -441,6 +469,8 @@ def project(
             "AMBIGUOUS": "AMBIGUOUS_SUBMISSION",
             "INVALID": "INVALID_EVIDENCE",
         }[result.submission_state]
+    elif result.submission_delivery_uncertain:
+        reason = "DELIVERY_OR_RESULT_UNCERTAIN"
     elif result.submission_response_state == "VALID" and result.submission_http_status in {
         409,
         422,
@@ -462,7 +492,7 @@ def project(
                     response_data=deepcopy(result.submission_response_data),
                 ),
             )
-    elif result.submission_delivery_uncertain or result.submission_delivery_status in {
+    elif result.submission_delivery_status in {
         "HELD",
         "FAILED",
         "EXPIRED",
@@ -502,3 +532,122 @@ async def get_result(
         client_request_id=client_request_id,
         caller=caller,
     )
+
+
+async def latest_rack_arrival_cycle(
+    session: AsyncSession,
+    *,
+    owner_domain: str,
+    workline_id: str,
+    point: str,
+    templates: tuple[str, ...],
+    after_receipt_id: int | None = None,
+) -> str | None:
+    """Read the original receipt order of an applied rack arrival, including closed cycles."""
+    task = TransportTask.__table__
+    receipt_id = task.c.applied_result_receipt_id
+    if not enabled():
+        receipt_id = (
+            select(func.min(IntegrationExchange.receipt_id))
+            .select_from(IntegrationRecord)
+            .join(
+                IntegrationReference, IntegrationReference.source_record_id == IntegrationRecord.id
+            )
+            .join(
+                IntegrationExchange,
+                IntegrationExchange.id == IntegrationReference.related_exchange_id,
+            )
+            .where(
+                IntegrationRecord.exchange_id == task.c.submission_exchange_id,
+                IntegrationRecord.record_kind == "RESULT_APPLIED",
+                IntegrationRecord.outcome_revision == task.c.applied_outcome_revision,
+                IntegrationReference.relation_role == "RESULT_SOURCE",
+                IntegrationExchange.role == "RECEIPT",
+                IntegrationExchange.operation == "transport.task.resulted@v1",
+            )
+            .having(func.count(IntegrationExchange.receipt_id) == 1)
+            .correlate(task)
+            .scalar_subquery()
+        )
+    late_receipt = task.c.position_observation["arrival_receipt_id"].as_integer()
+    position_order = func.coalesce(late_receipt, receipt_id)
+    newer = (
+        position_order > after_receipt_id
+        if after_receipt_id is not None
+        else position_order.is_not(None)
+    )
+    query = (
+        select(
+            task.c.kind,
+            task.c.cycle_id,
+            task.c.transport_task_id,
+            task.c.frozen,
+            task.c.applied_outcome,
+            task.c.applied_outcome_revision,
+            task.c.outcome_status,
+            task.c.position_observation,
+        )
+        .where(
+            task.c.owner_domain == owner_domain,
+            task.c.workline_id == workline_id,
+            task.c.kind.in_(("RACK_MOVE", "RACK_ROTATE")),
+            task.c.cycle_id.is_not(None),
+            task.c.frozen["rcs_template_id"].as_string().in_(templates),
+            task.c.frozen["target"]["kind"].as_string() == "RACK_POSITION",
+            task.c.frozen["target"]["location_code"].as_string() == point,
+            or_(
+                task.c.outcome_status == "SUCCEEDED",
+                and_(
+                    task.c.outcome_status == "CANCELLED",
+                    or_(
+                        late_receipt.is_not(None),
+                        and_(
+                            task.c.applied_outcome["final_position"]["kind"].as_string()
+                            == "RACK_POSITION",
+                            task.c.applied_outcome["final_position"]["location_code"].as_string()
+                            == point,
+                        ),
+                    ),
+                ),
+            ),
+            newer,
+        )
+        .order_by(position_order.desc())
+        .limit(1)
+    )
+    with session.no_autoflush:
+        row = (await session.execute(query)).mappings().one_or_none()
+    if row is None:
+        return None
+    try:
+        validate_frozen(row)
+        outcome, status = validate_outcome(
+            row, row.applied_outcome, row.applied_outcome_revision, applied=True
+        )
+        if row.position_observation and "arrival_receipt_id" in row.position_observation:
+            outcome = validate_position_observation(row, row.position_observation)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    actual = {"kind": "RACK_POSITION", "location_code": point}
+    return (
+        row.cycle_id
+        if status == row.outcome_status and outcome["final_position"] == actual
+        else None
+    )
+
+
+async def late_rack_arrival_cycles(session: AsyncSession, *, owner_domain: str) -> tuple[str, ...]:
+    task = TransportTask.__table__
+    with session.no_autoflush:
+        return tuple(
+            await session.scalars(
+                select(task.c.cycle_id)
+                .where(
+                    task.c.owner_domain == owner_domain,
+                    task.c.cycle_id.is_not(None),
+                    task.c.outcome_status == "CANCELLED",
+                    task.c.position_observation["arrival_receipt_id"].as_integer().is_not(None),
+                )
+                .distinct()
+            )
+        )

@@ -70,7 +70,10 @@ async def test_transport_closure_matrix(transport_rig, status, uncertain, reason
 
 
 @pytest.mark.parametrize("http,code", [(409, "CONFLICT"), (422, "REJECTED")])
-async def test_confirmed_refusal_closes_only_without_execution_evidence(transport_rig, http, code):
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_confirmed_refusal_closes_only_without_execution_evidence(
+    transport_rig, http, code, uncertain
+):
     factory = transport_rig.factory
     task = await result_task(factory, bins=True)
     async with factory.begin() as session:
@@ -78,6 +81,7 @@ async def test_confirmed_refusal_closes_only_without_execution_evidence(transpor
             select(ReliableMessage).where(ReliableMessage.target == task.target)
         )
         row.status, row.fail_reason = "FAILED", code
+        row.delivery_uncertain = uncertain
         row.last_http_status, row.last_verdict = http, "PEER_TERMINAL"
         await set_message_bodies(
             session,
@@ -94,7 +98,13 @@ async def test_confirmed_refusal_closes_only_without_execution_evidence(transpor
             ).encode(),
         )
     result = await read(factory, task)
-    assert result.closure == "CLOSED" and result.closure_reason == "SUBMIT_REJECTION"
+    if uncertain:
+        assert (result.closure, result.closure_reason) == (
+            "UNDETERMINED",
+            "DELIVERY_OR_RESULT_UNCERTAIN",
+        )
+    else:
+        assert (result.closure, result.closure_reason) == ("CLOSED", "SUBMIT_REJECTION")
     await transport_callback(factory, task, bins=True, known=False)
     assert (await read(factory, task)).closure == "UNDETERMINED"
 

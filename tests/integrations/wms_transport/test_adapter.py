@@ -357,3 +357,18 @@ def test_valid_submit_paths(path):
 def test_invalid_submit_paths(path):
     with pytest.raises((ValueError, TypeError)):
         TransportSubmitAdapter(path)
+
+
+@pytest.mark.parametrize(
+    "template,rack,kind",
+    [
+        ("CTU03", "510004", "PEER_TERMINAL"),
+        ("CTU03", "510099", "UNKNOWN"),
+        ("CTU01", "510004", "UNKNOWN"),
+    ],
+)
+def test_already_in_storage_rejection_is_bound_to_the_departing_rack(template, rack, kind):
+    request = {**REQUEST, "data": {**REQUEST["data"], "rcs_template_id": template}}
+    detail = f"货架({rack})当前已在库区，不能执行搬运任务(CTU03)"
+    result = ack(422, "REJECTED", data={"reason_code": f"{detail}任务下发失败：{detail}"})
+    assert TransportSubmitAdapter().classify_response(message(request), result).kind == kind

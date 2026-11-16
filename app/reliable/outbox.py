@@ -292,6 +292,45 @@ class Outbox:
     def _time(session, value):
         return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
+    async def resume_never_dispatched(
+        self,
+        session: AsyncSession,
+        *,
+        scope: ScopeRef,
+        message_id: int,
+        operation_id: str,
+        reason: str,
+    ) -> bool:
+        """Resume an explicitly authorized static intent without changing its original identity."""
+        now = utc_datetime(self.clock())
+        return (
+            await session.scalar(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.id == message_id,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.scope_owner == scope.owner_domain,
+                    ReliableMessage.scope_kind == scope.kind,
+                    ReliableMessage.scope_id == scope.scope_id,
+                    ReliableMessage.status == MessageStatus.ABANDONED,
+                    ReliableMessage.pause_reason == reason,
+                    ReliableMessage.delivery_snapshot.is_(None),
+                    ReliableMessage.dispatch_started_at.is_(None),
+                    ReliableMessage.delivery_uncertain.is_(False),
+                    ReliableMessage.terminal_response_record_id.is_(None),
+                    (ReliableMessage.expires_at.is_(None)) | (ReliableMessage.expires_at > now),
+                )
+                .values(
+                    status=MessageStatus.PENDING,
+                    pause_reason=None,
+                    next_attempt_at=now,
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.id)
+            )
+            is not None
+        )
+
     async def resume(
         self, session: AsyncSession, target: str, operation: str, operation_id: str
     ) -> bool:
