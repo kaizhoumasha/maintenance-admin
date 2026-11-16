@@ -15,6 +15,7 @@ VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
 DEPART = "rack.departure_decide@v1"
+MOCK_OUTPUT_LOCATION = "STATION_PIPELINE1_OUTPUT1"
 
 
 async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp_path):
@@ -183,7 +184,7 @@ async def exercise_integration(integration_database, *, mock=None):
                         }
                     )
                 ),
-                COARSE_SORTING_OUTPUT_LOCATIONS='{"COARSE":"OUTPUT-POINT"}',
+                COARSE_SORTING_OUTPUT_LOCATIONS=json.dumps({"COARSE": MOCK_OUTPUT_LOCATION}),
                 COARSE_SORTING_NG_LOCATIONS='{"COARSE":"NG-POINT"}',
             )
             assert not requests and not reports and not transports
@@ -467,7 +468,7 @@ async def exercise(phase, origin):
                 await advance_until({normal: "AWAITING_PUT_RESULT", ng: "AWAITING_NG_RESULT"})
                 await complete_commands(
                     {
-                        "PUT_TO_BIN": {"actual_qty": 1, "location": "OUTPUT-POINT"},
+                        "PUT_TO_BIN": {"actual_qty": 1, "location": MOCK_OUTPUT_LOCATION},
                         "MOVE_TO_NG": {"actual_qty": 1, "location": "NG-POINT"},
                     }
                 )

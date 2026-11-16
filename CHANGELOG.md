@@ -12,9 +12,10 @@
 - WMS 用 `operation_id`、ECS 用 `command_code`、Transport 用 `transport_task_id`，单编号查询 HTTP 尝试及运行状态。每次尝试保存成对的请求与响应原文和结构化数据，迟到响应补回原尝试。正文读取沿用权限和审计。
 - 原收据、设备裁决和运输结果由各自运行模型保存。存量最终对账失败会阻止切换，worker 在接收任务前核对运行配置，旧表按独立维护窗口退出。旧联调过程历史无需回填。
 
-### 粗分机 ECS 入箱字段
+### 粗分机 ECS 入箱字段和结果
 
 - 按现场 ECS 更新后的合同，粗分机 `PUT_TO_BIN` 发送整数 `bin_cell_location` 和数值 `reel_totalthickness`。
+- RS01 的入箱成功回报位置统一为 `STATION_PIPELINE1_OUTPUT1`。WES 按原作业保存的预期位置核对 ECS 结果。
 
 ### ECS 回调兼容
 
