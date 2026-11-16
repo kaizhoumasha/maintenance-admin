@@ -636,7 +636,7 @@ Result 必须匹配原 command_code、device_code 并通过原冻结合同验证
 | 公共 OUTLET 回架 | BIN_MOVE，每笔 1～4 箱 | [公共回流](workline-bin-return-api.md#return-transport)按原 WMS 分配和结果推进 |
 | 五层架离场 | RACK_MOVE / CTU03 | departure READY 冻结去向；原 submit 明确接纳即 WES 释放，不需最终位置 |
 
-统一使用 transport.task.submit@v1；整架结果使用 transport.task.resulted@v1，member_position_changed 只用于箱成员位置里程碑。WMS locator 使用 type/bin_code，Transport wire 使用 kind/container_id，WES 保存映射及原关联。CTU01/02 及料箱回架的接纳、CLOSED 或旧 TARGET_PLACED 不代替其当前实际结果；CTU03 的 WES 释放另按明确接纳，不等待最终位置/Result。与本架无关的旧离场 UNKNOWN 不成为全线永久门禁，当前直接依赖仍保留。
+统一使用 transport.task.submit@v1；整架结果使用 transport.task.resulted@v1，member_position_changed 只用于箱成员位置里程碑。WMS locator 使用 type/bin_code，Transport wire 使用 kind/container_id，WES 保存映射及原关联。CTU01 进场、CTU02 新面就绪及料箱回架依赖各自实际结果。原 CTU02 明确接纳即释放换面前的点位占用，原 CTU03 明确接纳即释放货架周期。与本架无关的旧离场 UNKNOWN 不成为全线永久门禁，当前直接依赖仍保留。
 
 <a id="manual-rules"></a>
 ## 4. 公共规则与工作线配置

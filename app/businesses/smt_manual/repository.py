@@ -54,7 +54,7 @@ class TaskRepository:
         return line
 
     async def lock_dispatch_line(
-        self, session, roller, work_line_id, *, task_id=None, lock_actions=True
+        self, session, roller, work_line_id, *, task_id=None, lock_actions=True, include_job_ids=()
     ):
         line = await self.lock_line(session, work_line_id)
         from app.businesses._components.bin_roller.service import ROLLER_SOURCES, RackLockSetChanged
@@ -62,10 +62,11 @@ class TaskRepository:
         from .manual_rack_flow import MANUAL_SOURCES
 
         kinds = (*ROLLER_SOURCES, *MANUAL_SOURCES)
-        admission = await roller.rack_dispatch.admission_jobs(session, work_line_id=work_line_id)
-        await roller.rack_dispatch.lock_admission_jobs(
-            session, job_ids=tuple(j.id for j in admission)
+        admission = await roller.rack_dispatch.admission_jobs(
+            session, work_line_id=work_line_id, include_late_arrivals=True
         )
+        job_ids = tuple(sorted({j.id for j in admission} | set(include_job_ids)))
+        await roller.rack_dispatch.lock_admission_jobs(session, job_ids=job_ids)
         jobs = await roller.rack_dispatch.jobs(
             session, work_line_id=work_line_id, source_kinds=kinds, pending=True
         )
@@ -78,16 +79,14 @@ class TaskRepository:
             session, work_line_id=work_line_id, source_kinds=kinds, pending=True
         )
         confirmed_admission = await roller.rack_dispatch.admission_jobs(
-            session, work_line_id=work_line_id
+            session, work_line_id=work_line_id, include_late_arrivals=True
         )
         if tuple(j.id for j in admission) != tuple(j.id for j in confirmed_admission) or tuple(
             j.id for j in jobs
         ) != tuple(j.id for j in confirmed):
             raise RackLockSetChanged("original dispatch jobs changed during lock acquisition")
         if lock_actions:
-            await roller.rack_dispatch.lock_admission_actions(
-                session, job_ids=tuple(job.id for job in admission)
-            )
+            await roller.rack_dispatch.lock_admission_actions(session, job_ids=job_ids)
         return line, jobs
 
     async def lock_dispatch_subjects(self, session, work_line_id, task_ids):

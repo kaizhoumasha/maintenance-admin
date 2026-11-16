@@ -48,7 +48,12 @@ class BinRoller:
         jobs = await self.rack_dispatch.jobs(
             session, work_line_id=work_line_id, source_kinds=ROLLER_SOURCES, pending=True
         )
-        await self.rack_dispatch.lock_jobs(session, job_ids=tuple(j.id for j in jobs))
+        admission = await self.rack_dispatch.admission_jobs(
+            session, work_line_id=work_line_id, include_late_arrivals=True
+        )
+        await self.rack_dispatch.lock_jobs(
+            session, job_ids=tuple(j.id for j in admission if j.owner_domain == self.context.domain)
+        )
         return jobs
 
     async def lock_production_subjects(self, session, work_line_id, jobs):

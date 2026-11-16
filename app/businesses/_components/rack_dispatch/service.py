@@ -45,6 +45,7 @@ from .models import RackAction, RackJob
 AUTO_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
 COARSE_SOURCES = ("COARSE_INCOMING", "COARSE_WMS_PRESENT")
 XRAY_SOURCES = ("XRAY_RETURN",)
+ROLLER_SOURCES = ("ROLLER_ORDINARY", "ROLLER_DRAIN")
 STRICT_SOURCES = (*AUTO_SOURCES, *COARSE_SOURCES, *XRAY_SOURCES)
 TEMPLATES = {
     "COARSE_INCOMING": {"ENTER": "F01", "DEPART": "F01"},
@@ -145,6 +146,41 @@ def _close(job, state, reason, basis, now_ms):
     job.state, job.pending = state, False
     job.closure_reason, job.closure_basis = reason, _json(basis)
     job.completed_at_ms, job.review_reason = now_ms, None
+
+
+def _late_ctu_arrival(action):
+    return bool(
+        action.position_observation and action.position_observation.get("arrival_receipt_id")
+    )
+
+
+def _submission_blocker(action, result):
+    if (
+        action.template not in ("CTU02", "CTU03")
+        or result is None
+        or result.outcome is not None
+        or result.has_submission_acceptance
+        or result.submission_message_id != action.submit_message_id
+        or result.submission_target != action.submit_target
+    ):
+        return None
+    if (
+        result.submission_delivery_uncertain
+        or result.closure_reason == "DELIVERY_OR_RESULT_UNCERTAIN"
+    ):
+        return "SUBMISSION_UNCERTAIN"
+    if result.closure_reason == "SUBMIT_REJECTION":
+        return "SUBMIT_REJECTION"
+    return None
+
+
+def _ctu_task_stopped(job):
+    return (
+        job.source_kind in ROLLER_SOURCES
+        and job.state == "CLOSED_BY_SCOPE"
+        and job.scope_kind == "TASK"
+        and (job.closure_basis or {}).get("reason") == "TASK_CANCELLED"
+    )
 
 
 class RackDispatch:
@@ -337,7 +373,7 @@ class RackDispatch:
             await session.flush()
         return job.id
 
-    async def close_scope(self, session, scope: ScopeRef, *, reason: str):
+    async def close_scope(self, session, scope: ScopeRef, *, reason: str, ctu_box_moves=None):
         if scope.owner_domain != self.owner_domain:
             raise ValueError("rack scope owner mismatch")
         jobs = list(
@@ -359,6 +395,11 @@ class RackDispatch:
                 job.closure_basis = dict(
                     reason=reason, scope_kind=scope.kind, scope_id=scope.scope_id
                 )
+            if _ctu_task_stopped(job) and ctu_box_moves is not None:
+                job.closure_basis = {
+                    "ctu_box_moves": sorted(ctu_box_moves.get(job.id, ())),
+                    **job.closure_basis,
+                }
             actions = await self._actions(session, job, lock=True)
             await self._release_unused_scope(session, job, actions, unix_ms(datetime.now(UTC)))
         await session.flush()
@@ -369,7 +410,7 @@ class RackDispatch:
         *,
         work_line_id: int,
         point: str,
-        source_kinds: tuple[str, ...] = ("ROLLER_ORDINARY", "ROLLER_DRAIN"),
+        source_kinds: tuple[str, ...] = ROLLER_SOURCES,
     ):
         jobs = await self.jobs(
             session,
@@ -381,12 +422,22 @@ class RackDispatch:
         eligible = []
         if await self.has_position_conflict(session, point=point):
             return ()
+        latest_cycle = (
+            await self._latest_ctu_arrival(session, work_line_id, point)
+            if any(job.origin.source_kind in ROLLER_SOURCES for job in jobs)
+            else None
+        )
         for job in jobs:
             if (
                 job.state != "ACTIVE"
                 or job.review_reason
                 or job.origin.point != point
                 or not job.actions
+                or (
+                    job.origin.source_kind in ROLLER_SOURCES
+                    and latest_cycle is not None
+                    and latest_cycle != job.origin.cycle_id
+                )
             ):
                 continue
             action = job.actions[-1]
@@ -462,19 +513,78 @@ class RackDispatch:
                 actions.append(action)
         return tuple(_snapshot(job, actions) for job, actions in grouped.values())
 
-    def _pending_ids(self, kinds):
+    async def has_receiving_rack(
+        self, session: AsyncSession, *, work_line_id: int, point: str
+    ) -> bool:
+        jobs = await self.jobs(
+            session,
+            work_line_id=work_line_id,
+            point=point,
+            source_kinds=ROLLER_SOURCES,
+            pending=True,
+        )
+        if not jobs:
+            return False
+        if await self.get_point_preparations(session, work_line_id=work_line_id, point=point):
+            return True
+        for job in jobs:
+            if not job.actions:
+                continue
+            action = job.actions[-1]
+            if action.template not in ("CTU01", "CTU02") or not action.transport_task_id:
+                continue
+            result = await self.final_result(session, job_id=job.id, action_id=action.id)
+            if result is None or result.closure != "CLOSED":
+                return True
+            if action.phase != "APPLIED" and (
+                (result.outcome or {}).get("status") == "SUCCEEDED"
+                or (result.position_observation or {}).get("arrival_receipt_id")
+            ):
+                return True
+        return False
+
+    async def _work_pending(self, session):
+        transport = self.capabilities.transport
+        if transport is None:
+            return RackJob.pending
+        cycles = await transport.late_rack_arrival_cycles(session)
+        if not cycles:
+            return RackJob.pending
+        return or_(
+            RackJob.pending,
+            select(RackAction.id)
+            .where(
+                RackJob.source_kind.in_(ROLLER_SOURCES),
+                RackJob.owner_domain == self.owner_domain,
+                RackJob.original_cycle_id.in_(cycles),
+                or_(
+                    RackJob.state == "NOT_ARRIVED",
+                    (RackJob.state == "CLOSED_BY_SCOPE")
+                    & (RackJob.scope_kind == "TASK")
+                    & (RackJob.closure_basis["reason"].as_string() == "TASK_CANCELLED"),
+                ),
+                RackAction.job_id == RackJob.id,
+                RackAction.id == RackJob.current_action_id,
+                RackAction.template.in_(("CTU01", "CTU02")),
+                RackAction.position_observation["arrival_receipt_id"].as_integer().is_(None),
+            )
+            .exists(),
+        )
+
+    async def _pending_ids(self, session, kinds):
         return select(RackJob.id).where(
             RackJob.owner_domain == self.owner_domain,
-            RackJob.pending,
+            await self._work_pending(session)
+            if set(kinds).intersection(ROLLER_SOURCES)
+            else RackJob.pending,
             RackJob.source_kind.in_(kinds),
         )
 
     async def pending_upper_id(
         self, session: AsyncSession, *, source_kinds: tuple[str, ...]
     ) -> str | None:
-        return await session.scalar(
-            self._pending_ids(source_kinds).order_by(RackJob.id.desc()).limit(1)
-        )
+        query = await self._pending_ids(session, source_kinds)
+        return await session.scalar(query.order_by(RackJob.id.desc()).limit(1))
 
     async def pending_ids(
         self,
@@ -487,7 +597,7 @@ class RackDispatch:
     ) -> tuple[str, ...]:
         if limit < 1 or upper_id is None:
             return ()
-        query = self._pending_ids(source_kinds).where(RackJob.id <= upper_id)
+        query = (await self._pending_ids(session, source_kinds)).where(RackJob.id <= upper_id)
         if after_id is not None:
             query = query.where(RackJob.id > after_id)
         return tuple(await session.scalars(query.order_by(RackJob.id).limit(limit)))
@@ -556,16 +666,16 @@ class RackDispatch:
         return frozenset(handed_off)
 
     async def has_position_conflict(self, session: AsyncSession, *, point: str) -> bool:
-        holders = await session.scalar(
-            select(func.count())
-            .select_from(RackJob)
-            .where(
-                RackJob.pending,
-                RackJob.position_action_id.is_not(None),
-                RackJob.actual_position["location_code"].as_string() == point,
-            )
+        return await self._position_conflict(session, point)
+
+    async def _latest_ctu_arrival(self, session, work_line_id, point, *, after_receipt_id=None):
+        return await self.capabilities.transport.latest_rack_arrival_cycle(
+            session,
+            workline_id=str(work_line_id),
+            point=point,
+            templates=("CTU01", "CTU02"),
+            after_receipt_id=after_receipt_id,
         )
-        return holders > 1 or await self._position_conflict(session, point)
 
     async def point_vacant_for_entry(
         self, session: AsyncSession, *, point: str, rack_id: str, exclude_job_id=None
@@ -623,44 +733,90 @@ class RackDispatch:
             and location.get("location_code") != point
         )
 
-    async def _position_conflict(self, session, point, *, exclude_job_id=None):
-        conflict = (
-            select(RackAction.id)
-            .where(
-                RackAction.job_id == RackJob.id,
-                (
-                    (RackAction.phase == "REVIEW")
-                    & (RackAction.actual_position["location_code"].as_string() == point)
-                )
-                | (
-                    RackAction.basis["unconsumed_locations"][point].as_integer()
-                    > func.coalesce(RackAction.outcome_revision, 0)
+    async def _position_conflict(
+        self, session, point, *, exclude_job_id=None, unsent_action_id=None
+    ):
+        unconsumed = RackAction.basis["unconsumed_locations"][point].as_integer() > func.coalesce(
+            RackAction.outcome_revision, 0
+        )
+        query = (
+            select(RackJob, RackAction, unconsumed)
+            .outerjoin(
+                RackAction,
+                (RackAction.job_id == RackJob.id)
+                & (
+                    unconsumed
+                    | (
+                        (RackAction.phase == "REVIEW")
+                        & (RackAction.actual_position["location_code"].as_string() == point)
+                    )
                 ),
             )
-            .exists()
-        )
-        query = select(RackJob.id).where(
-            RackJob.pending,
-            conflict
-            | (
-                ((RackJob.point != point) | (RackJob.review_reason == "POSITION_CONFLICT"))
-                & (RackJob.actual_position["location_code"].as_string() == point)
-            ),
+            .where(
+                RackJob.pending,
+                RackAction.id.is_not(None)
+                | (
+                    ((RackJob.point != point) | (RackJob.review_reason == "POSITION_CONFLICT"))
+                    & (RackJob.actual_position["location_code"].as_string() == point)
+                ),
+            )
         )
         if exclude_job_id is not None:
             query = query.where(RackJob.id != exclude_job_id)
-        if await session.scalar(query.limit(1)):
-            return True
-        claims = await session.scalar(
-            select(func.count())
-            .select_from(RackJob)
-            .where(
-                RackJob.pending,
-                RackJob.position_action_id.is_not(None),
-                RackJob.actual_position["location_code"].as_string() == point,
+        for job, action, unresolved in await session.execute(query):
+            observation = action.position_observation or {} if action is not None else {}
+            receipt = observation.get("observation_receipt_id")
+            if (
+                action is None
+                or unresolved
+                or job.owner_domain != self.owner_domain
+                or job.source_kind not in ROLLER_SOURCES
+                or job.point != point
+                or job.position_action_id != action.id
+                or action.template not in ("CTU01", "CTU02")
+                or observation.get("final_position") != action.target
+                or type(receipt) is not int
+            ):
+                return True
+            latest = await self._latest_ctu_arrival(
+                session, job.work_line_id, point, after_receipt_id=receipt
             )
-        )
-        return claims > 1
+            if latest is None or latest == job.original_cycle_id:
+                return True
+        claims = (
+            await session.execute(
+                select(
+                    RackJob.owner_domain,
+                    RackJob.work_line_id,
+                    RackJob.source_kind,
+                    RackAction.id,
+                    RackAction.template,
+                    RackAction.phase,
+                )
+                .outerjoin(RackAction, RackAction.id == RackJob.current_action_id)
+                .where(
+                    RackJob.pending,
+                    RackJob.position_action_id.is_not(None),
+                    RackJob.actual_position["location_code"].as_string() == point,
+                )
+            )
+        ).all()
+        if len(claims) < 2:
+            return False
+        line = claims[0].work_line_id
+        if any(
+            claim.owner_domain != self.owner_domain
+            or claim.work_line_id != line
+            or claim.source_kind not in ROLLER_SOURCES
+            or (
+                claim.id != unsent_action_id
+                and claim.template in ("CTU02", "CTU03")
+                and claim.phase == "REGISTERED"
+            )
+            for claim in claims
+        ):
+            return True
+        return await self._latest_ctu_arrival(session, line, point) is None
 
     async def withdraw_unused(
         self, session: AsyncSession, *, job_id: str, source: Coverage
@@ -731,12 +887,13 @@ class RackDispatch:
             for job, action in await session.execute(query)
         )
 
-    async def admission_jobs(self, session, *, work_line_id):
+    async def admission_jobs(self, session, *, work_line_id, include_late_arrivals=False):
         """All owners' original jobs; callers acquire this set before host/action locks."""
+        pending = await self._work_pending(session) if include_late_arrivals else RackJob.pending
         return tuple(
             await session.scalars(
                 select(RackJob)
-                .where(RackJob.work_line_id == work_line_id, RackJob.pending)
+                .where(RackJob.work_line_id == work_line_id, pending)
                 .order_by(RackJob.id)
                 .execution_options(populate_existing=True)
             )
@@ -823,6 +980,20 @@ class RackDispatch:
             if external and other.rack_id == job.rack_id:
                 return False
             if other.point != job.point:
+                continue
+            if (
+                job.source_kind in ROLLER_SOURCES
+                and other.source_kind in ROLLER_SOURCES
+                and other.owner_domain == job.owner_domain
+                and other.work_line_id == job.work_line_id
+                and other.review_reason == "POSITION_SUPERSEDED"
+                and actions
+                and (
+                    actions[-1].kind == "DEPARTURE_DECIDE"
+                    or (actions[-1].kind in ("ENTER", "ROTATE") and actions[-1].phase == "APPLIED")
+                )
+                and not await self._unclosed_ctu_box_moves(session, other)
+            ):
                 continue
             same = (
                 other.work_line_id == job.work_line_id
@@ -985,7 +1156,7 @@ class RackDispatch:
             rcs_template_id=action.template,
             target_face=action.target_face,
             scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
-            if job.scope_owner
+            if job.scope_owner and not (_ctu_task_stopped(job) and action.kind == "DEPART")
             else None,
         )
         transport = self.capabilities.transport
@@ -1173,14 +1344,20 @@ class RackDispatch:
         if (
             len(actions) != 1
             or actions[0].kind != "ENTER"
-            or actions[0].phase != "REGISTERED"
             or job.actual_position
             or job.position_action_id
         ):
             return False
         action = actions[0]
+        if not await self._never_dispatched_move(session, job, action):
+            return False
+        self._release_scope(job, dict(kind="NEVER_DISPATCHED", action_id=action.id), now_ms)
+        return True
+
+    async def _never_dispatched_move(self, session, job, action):
         if (
-            action.outcome
+            action.phase != "REGISTERED"
+            or action.outcome
             or action.outcome_revision
             or action.position_observation
             or action.observation_revision
@@ -1190,11 +1367,28 @@ class RackDispatch:
             or action.acceptance_basis
             or (action.basis or {}).get("unconsumed_locations")
         ):
-            return False
+            return None
         result = await self._result(session, job, action)
         if not (
             result
-            and self._matches_entry(job, action, result)
+            and (
+                self._matches_entry(job, action, result)
+                if action.kind == "ENTER"
+                else self._auto_move_matches(job, action)
+                and result.frozen
+                == {
+                    "kind": "RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE",
+                    "rack_id": job.rack_id,
+                    "rcs_template_id": action.template,
+                    "source": action.source,
+                    "target": action.target,
+                    **(
+                        {"target_face": action.target_face}
+                        if action.target_face is not None
+                        else {}
+                    ),
+                }
+            )
             and result.submission_state == "AVAILABLE"
             and result.submission_message_id == action.submit_message_id
             and result.submission_target == action.submit_target
@@ -1207,17 +1401,27 @@ class RackDispatch:
             and not result.member_facts
             and not result.has_pending_outcome
         ):
-            return False
+            return None
         acceptance = await self.capabilities.transport.get_submission_acceptance(
             session,
             transport_task_id=action.transport_task_id,
             client_request_id=action.client_request_id,
             caller=_caller(action),
         )
-        if acceptance.state != "MISSING":
+        return result if acceptance.state == "MISSING" else None
+
+    async def _unclosed_ctu_box_moves(self, session, job):
+        ids = tuple((job.closure_basis or {}).get("ctu_box_moves", ()))
+        if not ids:
             return False
-        self._release_scope(job, dict(kind="NEVER_DISPATCHED", action_id=action.id), now_ms)
-        return True
+        predecessor = await self.capabilities.transport.list_unclosed_predecessors(
+            session,
+            caller=_caller(job),
+            cycle_id=job.original_cycle_id,
+            predecessor_ids=ids,
+            rack_id=job.rack_id,
+        )
+        return not predecessor.complete or bool(predecessor.unresolved)
 
     async def _advance_stopped(self, session, job, actions, demand, handoff, now_ms):
         if await self._release_unused_scope(session, job, actions, now_ms):
@@ -1226,22 +1430,93 @@ class RackDispatch:
         if rejection:
             self._release_scope(job, dict(kind="SUBMIT_REJECTION", **rejection), now_ms)
             return
-        if actions and actions[-1].kind == "DEPART" and actions[-1].transport_task_id:
+        last = actions[-1] if actions else None
+        task_cancelled = _ctu_task_stopped(job)
+        unsent_action_id = None
+        unsent_departure = None
+        if last and last.kind == "DEPART" and last.transport_task_id:
             basis = await self._departure_acceptance(session, job, actions, now_ms)
             if basis is not None:
-                action = actions[-1]
-                action.phase, action.acceptance_basis, action.accepted_at_ms = (
+                last.phase, last.acceptance_basis, last.accepted_at_ms = (
                     "ACCEPTED",
                     asdict(basis),
                     basis.accepted_at,
                 )
                 self._release_scope(
                     job,
-                    dict(kind="DEPARTURE_ACK", action_id=action.id, acceptance_basis=asdict(basis)),
+                    dict(kind="DEPARTURE_ACK", action_id=last.id, acceptance_basis=asdict(basis)),
                     now_ms,
                 )
-            return
-        await self._applied(session, job, actions)
+            if basis is not None or not task_cancelled:
+                return
+            unsent_departure = await self._never_dispatched_move(session, job, last)
+            if unsent_departure is None:
+                return
+            unsent_action_id = last.id
+        last_move = next((a for a in reversed(actions) if a.template in ("CTU01", "CTU02")), None)
+        applied_actions = actions
+        if (
+            task_cancelled
+            and last_move is not None
+            and last_move.template == "CTU02"
+            and last_move.previous_action_id == job.position_action_id
+            and job.actual_position == _point(job.point)
+            and await self._never_dispatched_move(session, job, last_move)
+        ):
+            unsent_action_id = unsent_action_id or last_move.id
+            applied_actions = [a for a in actions if a is not last_move]
+            last_move = next(a for a in applied_actions if a.id == job.position_action_id)
+        cleanup = (
+            task_cancelled
+            and last_move is not None
+            and (
+                job.closure_basis.get("ctu_return")
+                or "ctu_box_moves" in job.closure_basis
+                or last_move.phase == "REGISTERED"
+                or (last_move.outcome or {}).get("status") == "CANCELLED"
+            )
+        )
+        applied = await self._applied(session, job, applied_actions)
+        if (
+            cleanup
+            and applied
+            and job.position_action_id == last_move.id
+            and job.actual_position == _point(job.point)
+            and not await self._position_conflict(
+                session, job.point, unsent_action_id=unsent_action_id
+            )
+            and not await self._unclosed_ctu_box_moves(session, job)
+        ):
+            job.closure_basis = {**job.closure_basis, "ctu_return": True}
+            if last.kind in ("DEPARTURE_DECIDE", "DEPART"):
+                message_id = (
+                    last.message_id if last.kind == "DEPARTURE_DECIDE" else last.submit_message_id
+                )
+                operation_id = (
+                    last.decision_operation_id
+                    if last.kind == "DEPARTURE_DECIDE"
+                    else last.submit_operation_id
+                )
+                if message_id is not None and operation_id is not None:
+                    resumed = await self.capabilities.wms.outbox.resume_never_dispatched(
+                        session,
+                        scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id),
+                        message_id=message_id,
+                        operation_id=operation_id,
+                        reason="TASK_CANCELLED",
+                    )
+                    if (
+                        unsent_departure is not None
+                        and unsent_departure.submission_delivery_status == "ABANDONED"
+                        and not resumed
+                    ):
+                        job.review_reason = "CLEANUP_SUBMISSION_NEEDS_REVIEW"
+                if last.kind == "DEPART":
+                    return
+            if last.kind != "DEPARTURE_DECIDE" or await self._consume_decision(
+                session, job, last, now_ms
+            ):
+                await self._departure(session, job, actions, demand, handoff, now_ms)
 
     async def _applied(self, session, job, actions):
         """Refresh only original moves. Older unresolved observations still protect the line."""
@@ -1297,10 +1572,10 @@ class RackDispatch:
                     actual["arrival_face"],
                 )
                 job.position_action_id = action.id
-            if newer_observation:
+            if newer_observation and not _late_ctu_arrival(action):
                 action.phase, reason = "REVIEW", "POSITION_CONFLICT"
             elif outcome is None:
-                reason = reason or "AWAITING_ORIGINAL_RESULT"
+                reason = reason or _submission_blocker(action, result) or "AWAITING_ORIGINAL_RESULT"
             elif (
                 outcome["position_unknown"]
                 or not outcome["final_position"]
@@ -1325,6 +1600,21 @@ class RackDispatch:
                 action.phase, reason = "REVIEW", "ARRIVAL_FACE_UNPROVED"
             else:
                 action.phase = "APPLIED"
+        last = moves[-1]
+        if (
+            reason == "AWAITING_ORIGINAL_RESULT"
+            and (last.kind, last.template, last.phase) == ("ROTATE", "CTU02", "REGISTERED")
+            and last.pending_revision is None
+            and last.previous_action_id is not None
+            and job.position_action_id == last.previous_action_id
+            and job.actual_position == last.source == last.target == _point(job.point)
+        ):
+            acceptance = await self._submission_acceptance(session, job, last)
+            if acceptance is not None:
+                last.acceptance_basis = asdict(acceptance)
+                last.accepted_at_ms = acceptance.accepted_at
+                # The previous face no longer occupies the point while the rotation is in flight.
+                job.position_action_id = job.actual_position = job.actual_face = None
         if reason is None:
             ids = tuple(a.transport_task_id for a in moves)
             for start in range(0, len(ids), 100):
@@ -1357,6 +1647,10 @@ class RackDispatch:
                     break
         # Consuming an applied non-success elsewhere does not release that point's protection.
         external = job.actual_position is not None and job.actual_position != _point(job.point)
+        if reason is None and job.source_kind in ROLLER_SOURCES and not external:
+            latest_cycle = await self._latest_ctu_arrival(session, job.work_line_id, job.point)
+            if latest_cycle is not None and latest_cycle != job.original_cycle_id:
+                reason = "POSITION_SUPERSEDED"
         job.review_reason = reason or ("POSITION_CONFLICT" if external else None)
         return reason is None
 
@@ -1410,7 +1704,25 @@ class RackDispatch:
             raise LookupError("unknown owner job")
         actions = await self._actions(session, job, lock=True)
         if not job.pending:
-            return _snapshot(job, actions)
+            last = actions[-1] if actions else None
+            recoverable = (
+                job.source_kind in ROLLER_SOURCES
+                and (job.state == "NOT_ARRIVED" or _ctu_task_stopped(job))
+                and last is not None
+                and last.template in ("CTU01", "CTU02")
+                and not _late_ctu_arrival(last)
+            )
+            if not recoverable:
+                return _snapshot(job, actions)
+            result = await self._result(session, job, last)
+            if not result or not (result.position_observation or {}).get("arrival_receipt_id"):
+                return _snapshot(job, actions)
+            if not await self._applied(session, job, actions):
+                return _snapshot(job, actions)
+            if job.state == "NOT_ARRIVED":
+                last.basis = {**(last.basis or {}), "previous_not_arrived": job.closure_basis}
+                job.state, job.closure_reason, job.closure_basis = "ACTIVE", None, None
+            job.pending, job.completed_at_ms = True, None
         if job.state == "CLOSED_BY_SCOPE":
             await self._advance_stopped(session, job, actions, demand, handoff, now_ms)
             await session.flush()
@@ -1468,12 +1780,21 @@ class RackDispatch:
             if not await self._consume_decision(session, job, previous, now_ms):
                 return _snapshot(job, actions)
         known_demand = isinstance(demand, PointDemand) and _at_point(demand, job)
-        none = known_demand and demand.state == "NONE"
         clear = (
             isinstance(handoff, DirectHandoff)
             and _at_point(handoff, job)
             and handoff.state == "CLEAR"
         )
+        current_position = next((a for a in predecessors if a.id == job.position_action_id), None)
+        cleanup = (
+            job.source_kind in ROLLER_SOURCES
+            and applied
+            and current_position is not None
+            and current_position.template in ("CTU01", "CTU02")
+            and (current_position.outcome or {}).get("status") == "CANCELLED"
+            and job.actual_position == _point(job.point)
+        )
+        none = known_demand and (demand.state == "NONE" or (cleanup and clear))
         if none and job.state == "ACTIVE":
             job.release_requested = True
             job.release_basis = _json(asdict(demand))
@@ -1577,7 +1898,10 @@ class RackDispatch:
             if (
                 location
                 and not managed
-                and move.kind == "ENTER"
+                and (
+                    move.kind == "ENTER"
+                    or (move.template == "CTU02" and move.outcome["status"] == "CANCELLED")
+                )
                 and move.outcome["status"] in ("FAILED", "CANCELLED")
                 # Coarse ENTER still owns the original failed move while awaiting resolution.
                 and not (
@@ -1760,7 +2084,7 @@ class RackDispatch:
             payload,
             operation_id=op_id,
             scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id)
-            if job.scope_owner
+            if job.scope_owner and not _ctu_task_stopped(job)
             else None,
         )
         row = RackAction(
@@ -1785,7 +2109,8 @@ class RackDispatch:
         job.current_action_id = row.id
         session.add(row)
         actions.append(row)
-        job.state = "RELEASING"
+        if not _ctu_task_stopped(job):
+            job.state = "RELEASING"
         if not previous:
             job.release_basis = basis
 
@@ -1816,6 +2141,13 @@ class RackDispatch:
         }:
             job.review_reason = "INVALID_DEPARTURE_INTENT"
             return
+        acceptance = await self._submission_acceptance(session, job, action)
+        if acceptance is None and action.template == "CTU03":
+            result = await self._result(session, job, action)
+            job.review_reason = _submission_blocker(action, result)
+        return acceptance
+
+    async def _submission_acceptance(self, session, job, action):
         acceptance = await self.capabilities.transport.get_submission_acceptance(
             session,
             transport_task_id=action.transport_task_id,
@@ -1833,11 +2165,12 @@ class RackDispatch:
 
     @staticmethod
     def _matches_acceptance(job, action, basis):
+        kind = "RACK_ROTATE" if action.kind == "ROTATE" else "RACK_MOVE"
         return not (
             basis.owner_domain != job.owner_domain
             or basis.cycle_id != job.original_cycle_id
             or basis.caller != _caller(action)
-            or (basis.kind, basis.operation) != ("RACK_MOVE", TRANSPORT_OPERATION)
+            or (basis.kind, basis.operation) != (kind, TRANSPORT_OPERATION)
             or basis.transport_task_id != action.transport_task_id
             or basis.business_key != action.transport_task_id
             or basis.client_request_id != action.client_request_id
@@ -1848,11 +2181,12 @@ class RackDispatch:
             not in ((202, "RECEIVED"), (200, "DUPLICATE"))
             or basis.frozen
             != {
-                "kind": "RACK_MOVE",
+                "kind": kind,
                 "rack_id": job.rack_id,
                 "rcs_template_id": action.template,
                 "source": action.source,
                 "target": action.target,
+                **({"target_face": action.target_face} if action.kind == "ROTATE" else {}),
             }
         )
 

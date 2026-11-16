@@ -194,17 +194,22 @@ async def roller_lifecycle(roller_return):
                 ).encode(),
             )
 
-    async def callback(data, operation="transport.task.resulted@v1"):
+    async def callback(data, operation="transport.task.resulted@v1", *, timestamp=3):
         async with factory.begin() as session:
             response = await receive(
                 session,
                 json.dumps(
-                    dict(operation=operation, operation_id=str(uuid7()), timestamp=3, data=data)
+                    dict(
+                        operation=operation,
+                        operation_id=str(uuid7()),
+                        timestamp=timestamp,
+                        data=data,
+                    )
                 ).encode(),
             )
             assert response.status_code in (200, 202), response
 
-    async def rack_result(action, *, status="SUCCEEDED", revision=1):
+    async def rack_result(action, *, status="SUCCEEDED", revision=1, timestamp=3):
         cycle = next(r for r in await all_rows("rack_cycle") if r["id"] == action["cycle_id"])
         data = dict(
             transport_task_id=action["transport_task_id"],
@@ -217,7 +222,7 @@ async def roller_lifecycle(roller_return):
         )
         if status == "FAILED":
             data["failure_code"] = "RCS_EXECUTION_FAILED"
-        await callback(data)
+        await callback(data, timestamp=timestamp)
 
     async def accepted(action, *, code="RECEIVED", http=202, response_task=None):
         async with factory.begin() as session:
