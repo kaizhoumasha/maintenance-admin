@@ -96,6 +96,8 @@ async def _get_role(session: AsyncSession, role_id: int) -> Role:
 
 async def update_role(session: AsyncSession, role_id: int, name: str) -> Role:
     role = await _get_role(session, role_id)
+    if name != role.name and "admin" in (role.name, name):
+        raise AppError(ErrorCode.CONFLICT, "admin 是系统保留角色，不能通过改名更改")
     if name != role.name and await session.scalar(select(Role.id).where(Role.name == name)):
         raise AppError(ErrorCode.CONFLICT, "角色名已存在")
     role.name = name

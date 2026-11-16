@@ -1,5 +1,8 @@
 import pytest
+from sqlalchemy import select, update
 
+from app.main import app
+from app.models import Role
 from tests.helpers import PAYLOAD
 from tests.helpers import bearer as _bearer
 from tests.helpers import make_user_with_perms as _make_user_with_perms
@@ -144,6 +147,30 @@ async def test_rename_role(client, admin):
     assert (
         await client.put(f"/api/v1/roles/{rid}", json={"name": "ops2"}, headers=admin)
     ).status_code == 200
+
+
+@pytest.mark.parametrize("rename_into_admin", [False, True])
+async def test_role_update_preserves_reserved_admin_identity(client, admin, rename_into_admin):
+    uid = await _make_user_with_perms(client, admin, ["admin:role:update", "asset:device:read"])
+    operator = _bearer(uid)
+    if rename_into_admin:
+        # A store affected by an earlier rename can have no role named admin.
+        async with app.state.audit_session_factory.begin() as session:
+            await session.execute(update(Role).where(Role.name == "admin").values(name="old-admin"))
+    async with app.state.audit_session_factory() as session:
+        role_id = await session.scalar(
+            select(Role.id).where(Role.name == ("r" if rename_into_admin else "admin"))
+        )
+
+    response = await client.put(
+        f"/api/v1/roles/{role_id}",
+        json={"name": "admin" if rename_into_admin else "old-admin"},
+        headers=operator,
+    )
+    assert response.status_code == 409 and response.json()["code"] == "CONFLICT"
+    assert (await client.get("/api/v1/devices", headers=operator)).status_code == 403
+    if not rename_into_admin:
+        assert (await client.get("/api/v1/devices", headers=admin)).status_code == 200
 
 
 async def test_rename_role_errors(client, admin):
