@@ -74,7 +74,12 @@ class TransportSubmitAdapter:
             return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.CONFLICT)
         if pair == (422, "REJECTED"):
             reason = data.get("reason_code")
-            if isinstance(reason, str) and reason in REJECTION_REASONS:
+            request = _json_object(message.request_raw)["data"]
+            storage_rejection = False
+            if request.get("rcs_template_id") == "CTU03" and request.get("rack_id"):
+                detail = f"货架({request['rack_id']})当前已在库区，不能执行搬运任务(CTU03)"
+                storage_rejection = reason == f"{detail}任务下发失败：{detail}"
+            if isinstance(reason, str) and (reason in REJECTION_REASONS or storage_rejection):
                 return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
             return UNKNOWN
         if pair == (503, "UNAVAILABLE"):

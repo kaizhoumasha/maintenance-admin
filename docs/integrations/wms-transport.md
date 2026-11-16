@@ -86,6 +86,7 @@ Transport 是 WES→WMS→RCS 的静态目标协议；ECS 按[独立参考](ecs-
 
 - `transport.task.member_position_changed@v1` 与 `transport.task.resulted@v1` 分别承载位置事实和最终结果；每条回调有 WMS 自己生成的 `operation_id`，不沿用 submit ID，技术重试保持该消息原身份和完整信封。
 - `transport_task_id` 关联原任务；最终结果另以 `transport_task_id + outcome_revision` 登记版本（`transport_task.applied_outcome_revision`、`outcome_digests`）。同版本相同 `data` 判重复，不同 `data` 判冲突；不需要另造设备 `event_id`。
+- 整架搬运和换面的取消回报统一使用 `kind=RACK_MOVE`、`status=CANCELLED`。WES 按原任务编号和冻结的 `rack_id` 校验，原任务为 `RACK_ROTATE` 时应用为该换面任务的取消，保留原始回报中的 `RACK_MOVE` 和实际终位。料箱结果继续按各自的成员合同校验。
 - 与合同的内部顺序不同、对端可见行为不变：不设证据表和后台应用，回调在请求事务内锁任务行并直接应用后再 ACK。未知任务、事实矛盾也只记收据诊断和告警日志，仍返回 `202`，不能套用 ECS 讨论样例的未知命令拒绝规则；应用逻辑对通过 DTO 校验的消息不抛异常。
 - 低版本不回退事实；更高版本只在未确定结果上收敛，不改写已确定成功/失败。料箱成功结果先于位置事件到达时暂存在 `pending_outcome`，位置补齐后在同一事务内完成。BIN 回架等前置位置条件按业务合同验收，不能仅凭聚合结果推断完成。
 - 任务收到任何回调即结束其提交消息的发送（`settle_submitted`）；对端长期不可用或回调缺失，靠 `transport.scan_stuck` 的卡住任务告警暴露，不做定时盲目重发。

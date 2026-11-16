@@ -15,7 +15,7 @@ from app.integrations.wms_transport import (
     RackPosition,
 )
 from app.integrations.wms_transport.protocol import OPERATION as SUBMIT
-from app.integrations.wms_transport.wire import bin_move_data, move_rack_data
+from app.integrations.wms_transport.wire import bin_move_data, move_rack_data, rotate_rack_data
 from app.models import ReliableMessage, TransportTask
 from tests.helpers import read_receipts, seed_reliable_message, seed_transport_task
 
@@ -41,7 +41,7 @@ def bin_data():
     )
 
 
-async def add_task(factory, data, *, frozen=True):
+async def add_task(factory, data, *, frozen=True, owner_domain=None, cycle_id=None):
     task_id = "transport-" + str(uuid7())
     async with factory.begin() as session:
         await seed_transport_task(
@@ -53,6 +53,8 @@ async def add_task(factory, data, *, frozen=True):
                 kind=data["kind"],
                 input_digest="a" * 64,
                 workline_id="line",
+                owner_domain=owner_domain,
+                cycle_id=cycle_id,
                 created_at=datetime.now(UTC),
                 frozen=data if frozen else None,
             ),
@@ -360,6 +362,78 @@ async def test_failed_and_cancelled_results_may_end_away_from_the_target(
         assert (await send(callback_client, RESULTED, data)).status_code == 202
     assert (await task_row(callback_store, failed_id)).outcome_status == "FAILED"
     assert (await task_row(callback_store, cancelled_id)).outcome_status == "CANCELLED"
+
+
+async def test_rack_move_cancellation_applies_to_the_original_rotation(
+    callback_client, callback_store
+):
+    task_id = await add_task(
+        callback_store, rotate_rack_data("R1", RackPosition("TEST-WORK"), "90", "CTU02")
+    )
+    position = {"kind": "RACK_POSITION", "location_code": "TEST-WORK"}
+    misplaced = rack_result(task_id, 1, status="CANCELLED", rack_id="OTHER")
+    success = rack_result(task_id, 2, final_position=position, arrival_face="90")
+    for data in (misplaced, success):
+        assert (await send(callback_client, RESULTED, data)).status_code == 202
+    assert (await task_row(callback_store, task_id)).applied_outcome is None
+
+    cancelled = rack_result(task_id, 3, status="CANCELLED", final_position=position)
+    operation_id = str(uuid7())
+    assert (
+        await send(callback_client, RESULTED, cancelled, operation_id=operation_id)
+    ).status_code == 202
+    assert (
+        await send(callback_client, RESULTED, cancelled, operation_id=operation_id)
+    ).status_code == 200
+    row = await task_row(callback_store, task_id)
+    assert row.outcome_status == "CANCELLED" and row.applied_outcome_revision == 3
+    assert row.applied_outcome["kind"] == "RACK_ROTATE"
+    assert row.applied_outcome["final_position"] == position
+    assert row.applied_outcome["arrival_face"] is None
+
+
+@pytest.mark.parametrize("template", ["CTU01", "CTU02"])
+@pytest.mark.parametrize("runtime_authority", [False, True])
+async def test_late_arrival_preserves_the_original_ctu_cancellation(
+    callback_client, callback_store, monkeypatch, template, runtime_authority
+):
+    from app.core.config import get_settings
+    from app.integrations.wms_transport.results import latest_rack_arrival_cycle
+
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime_authority)
+    point = RackPosition("TEST-WORK")
+    frozen = (
+        move_rack_data("R1", RackPosition("STORAGE"), point, "90", template)
+        if template == "CTU01"
+        else rotate_rack_data("R1", point, "90", template)
+    )
+    cycle_id = str(uuid7())
+    task_id = await add_task(callback_store, frozen, owner_domain="roller", cycle_id=cycle_id)
+    cancelled = rack_result(task_id, status="CANCELLED")
+    assert (await send(callback_client, RESULTED, cancelled)).status_code == 202
+    arrival = rack_result(
+        task_id, 2, kind=frozen["kind"], arrival_face="90", final_position=frozen["target"]
+    )
+    assert (await send(callback_client, RESULTED, arrival)).status_code == 202
+    row = await task_row(callback_store, task_id)
+    assert (row.outcome_status, row.applied_outcome_revision) == ("CANCELLED", 1)
+    assert row.position_observation["final_position"] == frozen["target"]
+    assert row.position_observation["outcome_revision"] == 2
+    assert (await send(callback_client, RESULTED, arrival)).status_code == 200
+    assert (
+        await task_row(callback_store, task_id)
+    ).position_observation == row.position_observation
+    async with callback_store() as session:
+        assert (
+            await latest_rack_arrival_cycle(
+                session,
+                owner_domain="roller",
+                workline_id="line",
+                point="TEST-WORK",
+                templates=(template,),
+            )
+            == cycle_id
+        )
 
 
 # ---- 最终结果:料箱族与前置位置 ----

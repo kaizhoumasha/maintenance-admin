@@ -62,6 +62,21 @@ class TaskCallbacks:
             return
         if self.task.outcome_status in TERMINAL:
             self.task.pending_outcome = None  # 终态不会被改写,暂存的更高版本再也用不上
+            if (
+                self.task.outcome_status == "CANCELLED"
+                and self.frozen.get("rcs_template_id") in ("CTU01", "CTU02")
+                and data.get("status") == "SUCCEEDED"
+                and data["final_position"] == self.frozen.get("target")
+                and self._mismatch(data) is None
+            ):
+                previous = self.task.position_observation
+                if previous is None or (
+                    "arrival_receipt_id" not in previous and revision > previous["outcome_revision"]
+                ):
+                    self.task.position_observation = dict(
+                        self._normalized(data), arrival_receipt_id=self.ctx.receipt_id
+                    )
+                return
             return self._skip("TERMINAL_CONFLICT", data=data)
         reason = self._mismatch(data)
         if reason:
@@ -73,7 +88,9 @@ class TaskCallbacks:
             ):
                 previous = self.task.position_observation
                 if previous is None or revision > previous["outcome_revision"]:
-                    self.task.position_observation = dict(data)
+                    self.task.position_observation = dict(
+                        data, observation_receipt_id=self.ctx.receipt_id
+                    )
             return self._skip(reason, data=data)
         if not self._prerequisites_met(data):
             pending = self.task.pending_outcome
@@ -102,7 +119,12 @@ class TaskCallbacks:
 
     # ---- 判定表(设计 §6.2) ----
     def _mismatch(self, data: dict) -> str | None:
-        if data["kind"] != self.task.kind:
+        rotation_cancelled = (
+            self.task.kind == "RACK_ROTATE"
+            and data["kind"] == "RACK_MOVE"
+            and data.get("status") == "CANCELLED"
+        )
+        if data["kind"] != self.task.kind and not rotation_cancelled:
             return "KIND_MISMATCH"
         if self.task.kind in BIN_KINDS:
             members = self.members
@@ -144,7 +166,7 @@ class TaskCallbacks:
         return True
 
     def _normalized(self, data: dict) -> dict:
-        outcome = dict(data)
+        outcome = dict(data, kind=self.task.kind)
         face = self.frozen.get("target_face")
         if self.task.kind not in BIN_KINDS and data["status"] == "SUCCEEDED" and face:
             outcome["arrival_face"] = data["arrival_face"] or face  # 成功缺省时用冻结目标面补齐
