@@ -1,11 +1,6 @@
 # 开箱机上下盖配对调度算法设计
 
-版本：WES 开发评审稿 0.21
-
-日期：2026-11-05  
-适用范围：同一产品、同一任务，上下盖等量需求，每层 2 片，单取料位与单余箱缓存
-
-本文描述 WES 内部的开工确认、选箱、额度、结果结算、补取和整单完成通知。WMS 决策和 ECS 回报由外部系统提供，在 WES 开发环境用模拟报文验证。设备职责、WES 交付范围及 C01-C12 对接依赖见概要设计。 [概要设计](opening-machine-overview-design.md)
+本文描述单一产品 MVP 的选源、额度、结算及工单交接。开箱机工作线只受理约定产品的工单，支持该产品连续下单。每层 2 片，取料位与余箱缓存各容一箱。 [API 草案](opening-machine-api.md) · [概要设计](opening-machine-overview-design.md)
 
 ## 1. 算法目标与输入
 
@@ -13,15 +8,15 @@ WES 继续处理当前箱，直至取空或本侧达标。需要新箱时，优�
 
 选源输入包括工单、WMS 确认的箱资料、当前来源占位、已结算数量和原指令状态。Buffer 的备板及 Magazine 周转在设备内处理。
 
-当前容量示例为上盖箱最多 22 片、下盖箱最多 16 片，每箱实际数量可以更少。纸箱外码经 ECS、WES 转交 WMS，由 WMS 解析有效外码并返回数量。开箱回库的纸箱按核实的实物余量重新出具外码，再次上线时使用更新后的数量。设备内余箱从缓存恢复时，沿用原箱号和已结算的余量。
+当前正常容量示例为上盖箱 22 片、下盖箱 16 片，每箱实际数量可以更少。纸箱外码经 ECS、WES 转交 WMS，由 WMS 解析有效外码并返回标示数量。设备内余箱从缓存恢复时，沿用原箱号和已结算的余量。核实后的多料同样留箱，箱量差异按原报告由 WMS 独立调整库存。
 
 配对按已成功放到载板的实物片数计算。实际到线顺序由 Buffer、搬运和下游共同协调。
 
-| 评审状态 | 内容 |
-|---|---|
-| 已确认 | 到箱确认时下发当前箱额度并预判下一箱，原额度结清后按两侧实际成功量复核。整层取料额度、同层 GET/PUT 配对、Buffer 处理整层 NG、整单完成通知、同产品余箱复用及换产品人工清线 |
-| 本稿采用的调度约束 | 一次只执行一条来源流程，一个未结清取料额度。设备按同一层结清后推进，层内取料与备板并行 |
-| WES 对接依赖 | 额度 Result 统一入账方案及字段、工位释放回报、整单通知报文和原指令恢复约定。ARM01 提前备箱条件待 ECS 联调 |
+| 项目 | MVP 约定 |
+| --- | --- |
+| 选源 | 串行供箱，一份未结清额度。到箱只登记本箱额度，结算后按实际成功量和占位选源。业务侧的盖型 `cover_type` 为 `UPPER` 或 `LOWER` |
+| 逐层执行 | 设备维持单层在途，同层取料和备板可并行。当前层物理结清后继续，GET/PUT 由 ECS 上报 WES 供追溯 |
+| 结算与交接 | 每条额度一份最终 Result，按原指令号入账一次。同箱补取使用新额度。逐箱耗用留在 WES，供料结果只向 WMS 报工单汇总和箱量差异。ECS 确认可接下一单后交接 |
 
 ## 2. 状态和数量单位
 
@@ -29,21 +24,20 @@ WES 继续处理当前箱，直至取空或本侧达标。需要新箱时，优�
 
 | 状态 | 内容 |
 |---|---|
-| task | 任务身份、产品、原需求、向上取偶的执行目标 |
+| task | 原工单、产品、领取时生效的版本、原需求套数及向上取偶的执行目标 |
 | target[side] | 各侧目标层数，例如 2501 套对应 1251 层 |
 | good[side] | 已结算成功层数 |
 | drawn[side] | 已结算实际取出层数 |
 | ng[side] | 已结算、已确认投料 NG 层数 |
 | active | 取料位纸箱，包含箱号、产品、盖型和剩余层数；无箱为 None |
 | cache | 唯一缓存箱，结构与 active 相同；无箱为 None |
-| carton records | 用入线记录 ID 保存原箱、实物余量、可取余量及待恢复或待处置原因。箱离位后仍可按原额度找到该记录 |
+| carton records | 用入线记录 ID 保存原箱、实物余量、可取余量及待恢复原因。箱离位后仍可按原额度找到该记录 |
 | start_operation_id / start_binding_confirmed | 原开工通知身份，以及 WMS 对当前工单保存执行绑定的确认 |
 | pending | 原供箱、校验、取料、离位或缓存流程尚未结清。供箱流程包含缺箱等待补给，阻止新来源动作 |
-| next_carton_plan | 随额度动作保存的下一箱候选盖型和来源。到箱时按预计成功量生成，结算时按实际成功量更新。双侧达标时为 None |
-| carton_consumption | 按工单与来源箱归集已结清的取出、成功和 NG 层数，以及启用逐箱上报时的原报告身份 |
+| carton_consumption | 按工单与原入线箱归集已结清的取出、成功和 NG 层数 |
 | supply_complete_reported / completion_notice | 两侧供料汇总是否已登记，以及 WMS 整单完成通知与原转发身份 |
 
-WES 保留当前额度直到结清。按本稿拟定的入账方式，GET/PUT 用于逐层核对，最终额度 Result 统一更新业务数量。
+WES 保留当前额度直到结清。最终 Result 统一更新业务数量，GET/PUT 用于原额度和层序追溯。
 
 已结清状态满足：
 
@@ -58,21 +52,23 @@ remaining_draw_allowance[side] = target[side] + ng[side] - drawn[side]
 
 ## 3. 来源选择顺序
 
-WES 取得本线执行资格并核对留箱或清线后，在同一事务登记开工及原通知。收到 WMS 对当前工单、工作线和原通知的绑定保存确认后，才允许供箱、恢复缓存箱或取料。未确认时沿原通知恢复，历史确认归原任务。 [开工通知](opening-machine-api.md#task-started)
+WES 在领取前核对续单余量下限和原箱状态，取得本线执行资格后，在同一事务登记开工及原通知。WMS 核对工单版本和取偶后的执行目标并确认原绑定已保存后，才允许供箱、恢复缓存箱或取料。交付未知沿原通知恢复，明确冲突保留待核对，历史确认归原任务。 [开工通知](opening-machine-api.md#task-started)
 
-1. 原指令、当前层或扫码决策未结清，等待原处理，保持来源不变。
-2. 当前箱已空，等待 ARM03 移走空纸箱及设备确认取料位释放。清箱后的送箱放行由设备联动完成。
-3. 两侧成功量均达标，且额度、在途层和相关来源动作均已结清后，WES 向 WMS 汇总供料结果。已确认的余箱可人工清线，或留在原位供同产品下一单复用。
+1. 原指令或扫码决策未结清，等待原处理，保持来源不变。
+2. 当前箱已空时，设备自主清箱，并随原额度最终 Result 确认实际离位。若 ARM02 已有按原授权开好的箱，ECS/PLC 在取料位释放后自动送箱。
+3. 两侧成功量均达标，且额度、在途层和相关来源动作均已结清后，WES 向 WMS 汇总供料结果。已确认可用的余箱可留在原位，供该产品下一单复用。末箱取空时，消费确认实际离位的原额度最终 Result 后再汇总。核实后的多料记为可用余料，差异独立上报。
 4. 当前箱仍有料且本侧未完成，继续当前箱。投料 NG 引起的不足也优先从当前箱补取。
 5. 当前箱仍有料但本侧完成，另一侧未完成且缓存为空时，将本箱移入缓存。
 6. 取料位空、缓存箱属于本任务且其侧尚未完成时，先恢复缓存箱。
 7. 无需恢复缓存时，在未完成两侧中选 `good` 较小者；相同则先上盖。ARM01 只按该选择取一箱，不提前批量开箱。
 
-缓存中已有本侧已完成的余箱时，可以继续处理另一侧。另一侧中途取空箱就移走空箱、继续新箱；另一侧最终完成时允许将其余箱留在取料位。此时两侧都不再需要取料，属于待清场，不属于供料死锁。
+缓存中已有本侧已完成的余箱时，可以继续处理另一侧。另一侧中途取空箱就移走空箱、继续新箱；另一侧最终完成时允许将其余箱留在取料位。此时两侧都无需取料，可在完成交接后将余箱留给该产品的下一单。
+
+续单时两个位置均有箱，仍按上面的顺序处理。只有本侧达标后取料位仍有余料、缓存已占用且另一侧还需供料，取料和缓存移动都无法继续时，才进入通用实物异常流程。
 
 ### 3.1 单缓存位尾数保护
 
-默认算法不会中途缓存未完成侧的箱子。恢复、人工干预或后续优化策略可能带来这类状态，仍必须保护：
+默认算法不会中途缓存未完成侧的箱子。设备恢复或后续优化策略可能带来这类状态，仍必须保护：
 
 > 缓存中有本任务尚需取料的箱子时，取料位一旦可用，就先恢复该箱。不要为了追平配对差值先取另一侧新箱。
 
@@ -82,13 +78,13 @@ WES 取得本线执行资格并核对留箱或清线后，在同一事务登记�
 
 ### 3.2 跨任务复用
 
-同产品续单时，核对原位留箱的原箱号、盖型、位置和已结算余量，将这些箱绑定到新任务。新任务从零累计成功量和 NG。换产品时，操作员扫描外箱码并在 WMS 的 PC 或 PDA 页面确认移箱。WMS 停用旧码后向 WES 回报。登记开工通知前，WES 核对工作线和前后任务，按原工位及入线时保存的 SCAN1 外码唯一匹配全部待清占位。确认后关闭原来源记录，历史耗用继续引用原箱。WMS 在独立退料时实点并签发新码，余箱重新上线时走 SCAN1 校验并使用有效新码数量。 [人工清线确认](opening-machine-api.md#line-clearance-confirmed)
+MVP 只受理工作线约定产品的工单。该产品续单时，核对原箱号、盖型、位置和已结算可用余量，新任务从零累计成功量和 NG。核实后的多料计入该位置的可用余量。
 
-两侧仍需供料且取料位和缓存位均占用时，在登记开工通知前检查 `dual_carton_blocks(s)`。例如满箱开始的 6 套工单结束后，ARM03 留下 10 片下盖，缓存留下 16 片上盖。下一单仍为同产品 6 套时，取完 6 片下盖仍有 4 片占位，须先腾位。WMS 组织人工移出其中一箱，WES 按当前交接、工作线、原工位及扫描外箱码核对实际移出事实，只释放匹配的占位一次，然后重新判断开工条件。确认后仍须等待本单 WMS 开工绑定。此处是同产品单箱腾位，回报承载待 WMS 联调；换产品仍按完整清线处理。取料过程中发现同类双占位也按相同方式等待腾位并重新选源。
+领取前按盖型分别合计取料位和缓存位的已确认可用余量。有效需求套数至少达到两侧余量片数中的较大值。例如下盖余 10 片、上盖余 16 片时，下一单至少 16 套。较小的队首工单继续保持未选中，等待 WMS 改量或撤销。 [续单余量下限](opening-machine-api.md#continuation-quantity)
 
 ## 4. Python 伪代码：WES 选源与额度
 
-下列 `State`、`Carton` 由上节的状态组成。跨任务场景先按 3.2 完成交接，再调用选源。`pending` 包括已持久化但尚未发送的命令，避免两个并发调度同时选源。ARM03 到箱后，在同一推进事务登记当前箱额度和下一箱预判，提交后发送额度。预计量只参与预判，实际取箱仍受结果结算和占位约束。 [API 对接规则](opening-machine-api.md#next-carton-planning)
+下列 `State`、`Carton` 由上节的状态组成。跨任务场景先按 3.2 完成交接，再调用选源。`pending` 包括已持久化但尚未发送的命令，避免两个并发调度同时选源。ARM03 到箱后，在同一推进事务只登记本箱额度，提交后发送。最终 Result 入账且占位条件满足后再选源。 [API 对接规则](opening-machine-api.md#next-carton-planning)
 
 ```python
 UPPER, LOWER = "UPPER", "LOWER"
@@ -96,8 +92,8 @@ SIDES = (UPPER, LOWER)
 
 
 def target_layers(requested_sets):
-    if type(requested_sets) is not int or requested_sets < 0:
-        raise ValueError("需求必须是非负整数")
+    if type(requested_sets) is not int or requested_sets <= 0:
+        raise ValueError("需求必须是正整数")
     return (requested_sets + 1) // 2
 
 
@@ -113,43 +109,10 @@ def quota_layers(s, box):
     return min(box.remaining, box.usable_remaining, allowance)
 
 
-def dual_carton_blocks(s):
-    box = s.active
-    return (
-        box is not None
-        and s.cache is not None
-        and box.remaining > min(box.usable_remaining, need(s, box.side))
-        and any(need(s, side) > 0 for side in SIDES if side != box.side)
-    )
-
-
-def next_carton_candidate(s, good):
-    unfinished = [side for side in SIDES if good[side] < s.target[side]]
-    if not unfinished:
-        return None
-    if s.cache is not None and s.cache.side in unfinished and not s.cache.hold_reason:
-        return ("RESTORE_AND_CONFIRM", s.cache.id)
-    side = min(unfinished, key=lambda side: good[side])  # 平局先上盖。
-    return ("FETCH_ONE_CARTON", side)
-
-
-def register_current_quota(s, box, layers):
-    quota = register_quota_intent(s, box, layers)
-    projected_good = dict(s.good)
-    projected_good[box.side] += layers
-    quota.next_carton_plan = next_carton_candidate(s, projected_good)
-
-
 def on_carton_arrived(s, arrival):
     with locked_task_transaction(s.task_id):
         save_original_carton_arrival(s, arrival)
         advance_source(s)
-
-
-def on_carton_departed(s, departure):
-    with locked_task_transaction(s.task_id):
-        if apply_matched_departure(s, departure):
-            advance_source(s)
 
 
 def on_source_resolution(s, evidence):
@@ -170,58 +133,53 @@ def choose_source(s):
     if s.pending:
         return ("WAIT_ORIGINAL",)
 
-    if s.active is not None and s.active.remaining == 0:
-        return ("WAIT_EMPTY_CARTON_REMOVAL", s.active.id)
-
     if all(need(s, side) == 0 for side in SIDES):
-        if supply_is_complete(s):
-            return ("SUPPLY_DONE",)
-        return ("WAIT_ORIGINAL",)
+        return ("SUPPLY_DONE",) if supply_is_complete(s) else ("WAIT_ORIGINAL",)
 
     if s.active is not None:
         box = s.active
         if box.hold_reason:
             return (box.hold_reason, box.id)
-        if dual_carton_blocks(s):
-            return ("WAIT_DUAL_CARTON_CLEARANCE",)
         if need(s, box.side) > 0:
             return ("RUN_QUOTA", box.id, quota_layers(s, box))
         if s.cache is None:
             return ("PARK_AND_CONFIRM", box.id)
-        # 正常策略不会制造此状态；已有状态需保持并核对，不能强行挤入缓存。
-        return ("WAIT_DUAL_CARTON_CLEARANCE",)
+        # 已结算事实确认当前箱无法取料或移入缓存，另一侧仍需供料。
+        return ("HOLD_PHYSICAL_EXCEPTION",)
 
     if s.cache is not None and need(s, s.cache.side) > 0 and s.cache.hold_reason:
         return (s.cache.hold_reason, s.cache.id)
-    candidate = next_carton_candidate(s, s.good)
-    if candidate[0] == "FETCH_ONE_CARTON" and not source_path_is_available(s):
+    if s.cache is not None and need(s, s.cache.side) > 0:
+        return ("RESTORE_AND_CONFIRM", s.cache.id)
+    if not source_path_is_available(s):
         return ("WAIT_SOURCE_PATH",)
-    return candidate
+    unfinished = [side for side in SIDES if need(s, side) > 0]
+    side = min(unfinished, key=lambda side: s.good[side])  # 平局先上盖。
+    return ("FETCH_ONE_CARTON", side)
 ```
 
-到箱事实按原供箱关联保存。`apply_saved_eligible_arrival` 核对当前工单、箱号、盖型和原供箱动作，只在前一额度已结清、原箱已离位且占位匹配时应用一次，绑定 `active` 并关闭本次供箱等待。无已匹配的在途供箱时，过早或旧到箱事实仍归原动作。`apply_matched_departure` 按工作线、原工位及入线箱身份核对实际离位，只释放当时匹配的占位一次，保留原箱记录及未结清额度。重复旧箱离位回报不会释放新箱。
+ARM03 `BIN_ARRIVED.data.source_command_code` 等于原 ARM01 取箱指令的顶层 `command_code`，由 ARM02 的 `OPEN_CARTON.params.source_command_code` 随箱传递。`apply_saved_eligible_arrival` 核对该引用、取料位 `STATION_CCD`、当前工单及开箱授权上的箱号和盖型。前一额度已结清、原占位已释放且新箱到位匹配后，只绑定一次 `active` 并关闭本次供箱等待。到箱先送达时按原动作保存。取空时按原额度最终 Result 结算，并同事务释放对应的空箱占位。 [到位报文](opening-machine-api.md#ecs-carton-ready-example)
 
-`apply_matching_source_resolution` 按原异常及箱身份应用一次有效证据。ECS 确认 ARM03 已恢复且原箱仍在位时解除取料恢复等待。WMS 明确批准多料可用量时更新 `usable_remaining`，以上限和已核实实物余量中的较小值为准；确认退料时保持待离位，实际移出后释放占位。多料差异报告的收妥回执只更新消息交付状态。同产品双余箱按 §3.2 应用 WMS 腾位回报，开工前重新检查交接条件。`apply_source_decision` 在同一事务登记可执行动作，`RUN_QUOTA` 调用 `register_current_quota`，等待分支保留待推进依据。
+`apply_matching_source_resolution` 按原异常及箱身份应用一次有效证据。ECS 确认 ARM03 已恢复且原箱仍在位时解除取料恢复等待。多料在应用原额度最终 Result 时计入 `usable_remaining`，差异报告的收妥回执只更新消息交付状态。`apply_source_decision` 在同一事务登记可执行动作，`RUN_QUOTA` 只登记本箱额度。`HOLD_PHYSICAL_EXCEPTION` 调用 [通用实物异常流程](opening-machine-api.md#quota-result)，保留原占位，核清且取料路径恢复后重新选源。
 
 动作的状态变化由物理结果驱动：
 
 | 动作 | 发出前 | 成功结果到达后 |
 |---|---|---|
-| FETCH_ONE_CARTON | 从 WMS 工单取得产品，上盖选 A、下盖选 B，固定相应箱型及原命令身份，设置 pending | ARM01 到位后扫码，WES 校验通过后下发本箱开箱指令。ARM03 新箱到位回报的盖型及关联身份核对通过后绑定 active。工位无可用箱则等待补给 |
-| RUN_QUOTA | 固定箱号、最大取层数及箱余量快照，设置 pending，并按本轮预计成功量保存下一箱候选 | 核对额度结算，更新成功/NG/实际取出与箱余量，清除原 pending，按实际数量与占位重新选源 |
-| WAIT_EMPTY_CARTON_REMOVAL | 已知箱空，ARM03 自行移走纸箱 | 确认原箱实际离位后释放匹配占位。额度 Result 可先到或后到，按原额度关联的箱记录入账 |
+| FETCH_ONE_CARTON | 从 WMS 工单取得产品。`UPPER` 选 A，`LOWER` 选 B。冻结原命令及盖型，按 [ARM01 协议](opening-machine-api.md#fetch-carton) 组装下发，设置 pending | ARM01 到位后扫码，WES 校验通过后下发本箱开箱指令。ARM03 新箱到位回报的盖型及关联身份核对通过后绑定 active。工位无可用箱则等待补给 |
+| RUN_QUOTA | 固定箱号、最大取层数及箱余量快照，设置 pending | 核对额度结算，更新成功/NG/实际取出与箱余量，取空时按原结果释放原箱占位，清除原 pending，按实际数量与占位重新选源 |
 | PARK_AND_CONFIRM | 缓存为空且当前层已结清，保留两个位置的预留 | 原 MOVE_BACKWARD 完成并核对箱号后，cache=active，active=None |
 | RESTORE_AND_CONFIRM | 取料位可用、缓存箱身份明确 | 原 MOVE_FORWARD 完成后，active=cache，cache=None |
 
-原动作结果未知时，WES 保留原箱体位置和待结清状态。ECS 在断线恢复或重启后按原 `command_code` 重发已保存的最终 Result，WES 对原指令结算一次，再更新箱体位置或取料额度。若设备尚未确认执行结果，先核对实际动作和占位，再按原指令结清。
+设备命令 ACK 后，WES 保留原占位和待结清状态，持续等待原 Result。ECS 在断线恢复或重启后按原 `command_code` 重发已保存的最终 Result，WES 对原指令结算一次，再更新箱体位置或取料额度。若设备尚未确认执行结果，先核对实际动作和占位，再按原指令结清。
 
 WES 在内部关联 SCAN1 的 `scan_ref` 和发给 WMS 的原校验 `operation_id`。WMS 按工单号查期望产品，并用外码解析实际产品、盖型和数量。取箱来源由 WES 从原 ARM01 指令读取。校验响应回显原 `operation_id`，匹配当前待开箱纸箱及有效扫码后，WES 才登记开箱指令，并保存其与原扫码和校验决定的关联。
 
-开箱机自行联动清空箱及送箱。ARM01 提前备箱须与 ECS 确认独立上游等待位及可用回报、待用箱扣留与放行、与空箱离位和缓存恢复的互锁，以及计划变化后的箱体去向。确认前按串行流程取箱。已有未结清的 ARM01 指令沿原身份核对，选源等待原动作。
+ARM03 按设备互锁清走空箱。取料位空出时，ARM02 如有按原授权开好的箱，设备自动送箱。ARM01 仍串行供箱，WES 匹配原额度最终 Result 和新箱到位再授权取料。
 
 ### 4.1 缺箱后的补给恢复
 
-ARM01 明确缺箱且未搬箱后，WES 按 WMS 方案在相应工位复用公共 RackDispatch。公共作业只推进新栈板 ENTER，搬运模板为 `f0`。WES 保存原缺箱动作与该入场作业的关联，门禁和现场互锁由 AGV/MCS 与 ECS 处理。C/D 空栈板处理走独立流程。 [新栈板入场](opening-machine-api.md#replenishment-handoff)
+ARM01 明确缺箱且未搬箱后，WES 主动向 WMS 求方案。ECS 取空事件先由 WES 接收并转报 WMS，保留原开工绑定。WMS 核对已收妥的取空事实及设备侧实际清位证据，证据不足时返回 WAIT 和重试时间。WES 核对证据归属的工位和原板或入场轮次，经公共 RackDispatch 释放匹配的旧作业并只登记一次新 ENTER。公共 Transport 源点传原栈板号，WMS 定位库区。AGV/MCS 与 ECS 确认可取箱后，WMS 回原 f0 成功。C/D、E/F 工位事件由 WES 转报 WMS，独立于配对。 [补板报文与跨单证据](opening-machine-api.md#replenishment-handoff)
 
 ```python
 def resume_after_replenishment(s, waiting, enter_result):
@@ -241,13 +199,11 @@ def resume_after_replenishment(s, waiting, enter_result):
 
 ## 5. Python 伪代码：额度结算与补取
 
-设备按 WES 下发的最大取层数限制实际 GET。每取出一层占用一层额度，达到额度后停止下一次取料并保留箱内余料。额度内既有成功层，也可能有 `PUT_COMPLETED` 报告 `PUT_FAILED` 的整层 NG。额外补取由 WES 在结算后另行授权。本节采用原额度 Result 统一入账的方案，逐层事件作为该额度的明细。
+设备按 WES 下发的最大取层数限制实际 GET。每取出一层占用一层额度，达到额度后停止下一次取料并保留箱内余料。额度内既有成功层，也可能有 `PUT_COMPLETED` 报告 `PUT_FAILED` 的整层 NG。每条 `PICK_LAYER_QUOTA` 对应一份最终 Result，WES 按原 `command_code` 入账一次，同箱补取在结算后使用新 `command_code`。逐层事件按各自的额度与层序追溯。 [同箱补取示例](opening-machine-api.md#ecs-quota-supplement-example)
 
 下列逻辑字段可先用于本地模拟，正式报文按开发契约对齐。`validate_original` 核对任务、产品、盖型、箱号、原 `command_code`、授权额度和下发时的箱余量。原结果重复到达时沿用已处理状态。同身份内容冲突时暂停并核对。
 
-`box_empty_confirmed`、`remainder_verified` 和 `failed_attempt_confirmed_zero` 表示已核对的设备事实。离箱数量不明或只离箱 1 片时保留原额度及核对状态。以下布尔值用于表达判定，实际承载按 ECS 联调确认。`validate_original` 还校验已收逐层事实和原箱离位事实之间的矛盾，例如旧箱已确认空箱离位却报告箱内仍有料。
-
-每层 `GET_COMPLETED` 与终局 `PUT_COMPLETED` 用原取料额度指令号和额度内层序号配对。ECS 重发时保持 `device_code`、`event_type`、事件体 `timestamp` 和 `data` 不变，WES 通用接收器据此识别重复事件。按本稿拟定的额度结算方案，逐层事件作为明细，WES 以原额度指令 Result 统一入账，重复事件和重复 Result 都只对应同一份补取资格。
+`box_empty_confirmed`、`remainder_verified` 和 `failed_attempt_confirmed_zero` 表示已核对的设备事实。数量未知时设备侧核实，WES 保留原额度及箱位。取空时原最终 Result 以 `carton_departed` 确认原箱实际离位。数量与离位字段不符时保留原动作和占位待核对。单独出现的 GET/PUT 冲突留作追溯，正常结算以合法最终 Result 为准。
 
 ```python
 def settle_quota(s, original, result):
@@ -260,7 +216,9 @@ def settle_quota(s, original, result):
         if (
             result.unsettled != 0
             or result.box_remaining is None
-            or result.pick_count_unknown_or_partial
+            or result.pick_count_unknown
+            or type(result.carton_departed) is not bool
+            or result.carton_departed != (result.box_remaining == 0)
             or (result.stop_reason == "PICK_FAILED" and not result.failed_attempt_confirmed_zero)
         ):
             retain_pending_and_request_original_settlement(original, result)
@@ -281,6 +239,7 @@ def settle_quota(s, original, result):
             delta > 0
             and result.stop_reason == "QUOTA_REACHED"
             and result.drawn == original.max_get_layers
+            and expected == 0
             and result.remainder_verified
         )
         if delta != 0 and not (shortage or excess):
@@ -294,19 +253,21 @@ def settle_quota(s, original, result):
         s.good[side] += result.good
         s.ng[side] += result.confirmed_ng
         box.remaining = result.box_remaining
-        box.usable_remaining = min(box.remaining, box.usable_remaining - result.drawn)
+        if excess:
+            box.usable_remaining = box.remaining
+        else:
+            box.usable_remaining = min(box.remaining, box.usable_remaining - result.drawn)
 
         if delta != 0:
             register_discrepancy_once(original, box, expected, box.remaining)
-        if excess or (box.remaining > 0 and box.usable_remaining == 0):
-            box.hold_reason = "WAIT_WMS_EXCESS_DISPOSITION"
         if result.stop_reason == "PICK_FAILED":
             box.hold_reason = "WAIT_ECS_PICK_RECOVERY"
 
         assert s.drawn[side] == s.good[side] + s.ng[side]
+        if result.carton_departed:
+            release_matching_carton_occupancy(s, box)
         mark_original_result_applied(original.id, result)
         release_original_pending(s, original)
-        original.next_carton_plan = next_carton_candidate(s, s.good)
         advance_source(s)
 ```
 
@@ -314,20 +275,20 @@ def settle_quota(s, original, result):
 
 | 反例 | 入账和恢复 |
 | --- | --- |
-| 外码 22，实物 20，10 层均成功 | 预期箱余 2 片、实物 0，结算取出和成功各 20 片，报告短少 2 片。原额度结清且空箱实际离位后恢复供箱，库存差异报告独立恢复。 [提前箱空](opening-machine-api.md#carton-early-empty) |
-| 外码 22，实物 24，11 层均成功 | 预期箱余 0、核实余 2 片，结算取出和成功各 22 片，报告多料 2 片。WMS 批准且仍有缺口时才可再取最多 1 层；退料时待实际移出再选源。两侧已达标时可按交接规则留箱。 [多料处置](opening-machine-api.md#carton-excess) |
+| 外码 22，实物 20，10 层均成功 | 预期箱余 2 片、实物 0，结算取出和成功各 20 片，报告短少 2 片。原最终 Result 同时结清额度并确认空箱已离位，随后恢复供箱。差异报告独立交付。 [提前箱空](opening-machine-api.md#carton-early-empty) |
+| 外码 22，实物 24，11 层均成功 | 预期箱余 0、核实余 2 片，结算取出和成功各 22 片，报告多料 2 片。核实余料计为可用，本侧仍有缺口且原箱在位时可再授权 1 层。本侧已达标时留箱，计入下一单余量下限。 [多料留箱](opening-machine-api.md#carton-excess) |
 | 前 4 层成功，第 5 层取料失败且确认 0 片离箱 | 取出及成功各 8 片，NG 为 0，箱余 14 片。保持原箱，等 ECS 恢复证据后重算额度。失败尝试无逐层 GET/PUT。 [取料失败](opening-machine-api.md#quota-pick-failed) |
-| 离位、额度 Result 与下一箱到位乱序 | 离位只释放匹配占位，Result 更新原箱记录；下一箱到位事实可先存。前一额度结清、原箱实际离位且下一箱的原供箱关联及占位都匹配后，才下发下一箱额度。 |
+| 原额度 Result 与新箱到位乱序 | 到位可以先保存。匹配的原最终 Result 一次结算并释放原空箱占位，匹配新箱到位和开箱授权后才发新额度。重复原结果只归原箱。 |
 
-若设备已返回终局 Result，但仍有物料未结清，WES 保留原 Result 并挂起后续额度，通过另行关联的核对证据完成结算。不能覆盖原终局记录，也不能将同一身份改写成另一份成功 Result。该恢复证据合同需 ECS/WES 双方补齐。
+ECS 在已取各层实际结清、数量核实后发唯一最终 Result。取空时还须等实际离位，并随原结果回报。同命令重发原结果。若收到不符合终局约定的报文，保留原状态待核对。原结果失实时，WES 根据设备侧实物证据和具名确认调整执行账。设备确认可安全续作且 WES 核清原动作后恢复调度。 [结算与异常处置](opening-machine-api.md#quota-result)
 
 例如目标还差 3 层，WES 授权最多 GET 3 层，结果 2 层成功、1 层确认投料 NG。此时累计成功还差 1 层，下一额度最多再取 1 层。若补取再 NG，则结算该次 NG 后再发下一额度。每次补取都有原始依据，重复回报不会增加第二份额度。
 
-例如目标各 100 片，已成功上盖 0 片、下盖 20 片。22 片上盖箱到位时登记 11 层额度，预计上盖成功 22 片，预判下盖。若实际取出 11 层，其中 2 层投料 NG，结算后上盖实际成功 18 片。两处没有可用余箱时，空箱离位且上料路径可用后改选上盖新箱。
+例如两侧目标各 100 片，已成功上盖 0 片、下盖 20 片。22 片上盖箱到位时只发 11 层额度。最终 Result 确认其中 2 层 NG，上盖实际成功 18 片。当同一结果确认空箱离位、两处无可用余箱且上料路径可用时，再选上盖新箱。
 
 ### 5.1 外部设备回报序列
 
-本段伪代码说明外部设备产生回报的时序，供 WES 构造本地模拟输入。ARM03 取料到皮带与 Buffer 备板并行，物料和匹配载板均到位后由 ARM04 投料。SCAN2/3 的条码用于追溯。Buffer 处理整层投料 NG 后，ECS 在 `PUT_COMPLETED` 中报告 `pick_and_put_result=PUT_FAILED`，以该事件结清本层。成功分支拟使用 PDF 枚举 `PUT_FINISHED`。
+本段伪代码说明外部设备产生回报的时序，供 WES 构造本地模拟输入。ARM03 取料到皮带与 Buffer 备板并行，物料和匹配载板均到位后由 ARM04 投料。SCAN2/3 的条码用于追溯。Buffer 处理整层投料 NG 后，ECS 在 `PUT_COMPLETED` 中报告 `pick_and_put_result=PUT_FAILED`，设备按实际终局结清本层。GET/PUT 可异步重报，回执不阻塞逐层执行。成功分支拟使用 PDF 枚举 `PUT_FINISHED`。
 
 ```python
 def execute_authorized_quota(command):
@@ -343,7 +304,7 @@ def execute_authorized_quota(command):
             return close_or_hold_original_pick(command, actual_gets, results, layer)
         actual_gets += 1
         layer_seq = actual_gets
-        report_get_completed(command, layer_seq=layer_seq)
+        record_get_for_delivery(command, layer_seq=layer_seq)
         move_layer_to_arm04_via_belt(layer)
         board = wait_for_matching_board_at_arm04(board_request)
 
@@ -351,61 +312,40 @@ def execute_authorized_quota(command):
             outcome = arm04_put_same_layer(layer, board)
             if outcome in {"PUT_FINISHED", "PUT_FAILED"}:
                 # PUT_FAILED 由 Buffer 完成整层 NG 处置后产生。
-                report_put_completed(command, layer_seq=layer_seq, pick_and_put_result=outcome)
+                record_put_for_delivery(command, layer_seq=layer_seq, pick_and_put_result=outcome)
                 results.append((layer_seq, outcome))
                 break
             wait_or_recover_same_layer_inside_equipment(layer, board)
 
-    return closed_quota_result(command, actual_gets, results)
+    return finalize_verified_quota(command, actual_gets, results)
 ```
 
-内部等待持续到设备恢复或人工处置。设备按同一层的唯一终局结果推进下一次 GET。取料可在原额度内恢复时由设备自行恢复。`close_or_hold_original_pick` 表示无法继续时按原指令回报已确认的提前箱空、零片离箱失败，或部分离箱及数量不明的核对事实。仅确认整层出箱后才产生该层 GET 和对应 PUT。WES 根据已结清的投料 NG 计算补取资格。
+设备按上一层实际成功或整层 NG 已处理的终局推进下一次 GET。每次取出为完整一层，取料失败的尝试未取出物料。`close_or_hold_original_pick` 表示设备可在原额度内恢复则继续，无法继续则核实早空、取料失败及实际数量，结清所有已取层后再回原最终 Result。数量不明期间保持原额度。逐层记录保留原事件身份。`finalize_verified_quota` 核实实际数量，箱空时等 ARM03 自行清箱并确认实际离位，再回原额度最终 Result。
 
-## 6. Python 伪代码：逐箱耗用、供料汇总与整单完成
-
-两侧成功量分别达到执行目标，且额度、在途层和相关来源动作均已结清后，WES 向 WMS 发送工单级汇总。余箱位置和数量由 WES 保存。若 WMS 确认按箱扣账，在单箱或工单结算时检查该箱是否已无后续取料并已结清，再登记逐箱耗用意图。WMS 的整单完成通知由 WES 转告 ECS，设备自行收尾。
+## 6. 工单汇总与整单完成
 
 ```python
 def supply_is_complete(s):
-    if s.active is not None and s.active.remaining == 0:
-        return False
-    return all(
-        s.good[side] == s.target[side]
-        and not has_unsettled_quota_or_layer(s, side)
-        and not has_unsettled_source_action(s, side)
-        for side in SIDES
-    )
+    return all(s.good[side] == s.target[side] for side in SIDES) and supply_actions_settled(s)
 
 
 def maybe_report_supply_complete(s):
-    if supply_is_complete(s) and not s.supply_complete_reported:
-        persist_supply_summary_intent(s)
-        s.supply_complete_reported = True
-
-
-def maybe_report_carton_consumption(s, carton):
-    if not carton_posting_agreed():
-        return
-    if has_unsettled_carton_quota_or_layer(s.task, carton):
-        return
-    if carton.remaining > 0 and not supply_is_complete(s):
-        return
-    usage = settled_usage_for(s.task, carton)
-    if usage.drawn > 0:
-        persist_carton_consumption_once(s.task, carton, usage)
+    if supply_is_complete(s):
+        persist_supply_summary_once(s)
 
 
 def on_wms_task_completed(s, notice):
-    validate_notice_matches_task(s, notice)
-    if not supply_is_complete(s):
+    if (
+        supply_is_complete(s)
+        and matches_effective_summary(s, notice)
+        and summary_sent_or_possibly_delivered(s)
+    ):
+        persist_completion_forward_once(s, notice)
+    else:
         retain_notice_for_reconciliation(s, notice)
-        return
-    persist_completion_forward_once(s, notice)
 ```
 
-逐箱上报仅统计原工单的已结清额度。缓存箱仍可能在本单续取，移动时继续累计。工单供料结清时，复核有耗用记录的各来源箱，并为尚未登记的余箱耗用保存原报告。按工单和来源箱去重，各报告与对应业务状态同事务保存，发送时将层数换算为片数，重发沿原身份。箱级报告和工单汇总独立恢复。WMS 若要求先扣账，由 WMS 在发送完成通知前判断。
-
-完成通知和转发意图关联保存。设备收到通知后自行补空板、送出 Magazine。来源余箱清场和任务切换按 C10 处理。 [逐箱耗用报文](opening-machine-api.md#carton-consumption-report) · [整单完成通知](opening-machine-api.md#task-completed)
+收口检查包括本单来源动作结清。末箱取空时，原额度最终 Result 须确认实际离位。可用余箱保留原占位，核实后的多料计入可用余量，差异独立上报。逐箱耗用按原工单和原箱保存在 WES。WMS 完成通知引用原有效汇总，匹配且本地已结清即可登记一次转发。收到 ECS 确认可接下一单的原成功 Result 才交接。 [整单完成](opening-machine-api.md#task-completed)
 
 以下计算只用于硬件评审和仿真核对，不进入 WES 选源算法：
 
@@ -420,7 +360,7 @@ def expected_padding_positions(successful_layers, magazine_layers):
 
 新额度最多为 `min(箱剩余层数, target - good)`。原额度开始后，WES 不再发新额度；设备最多执行该额度的 GET。每次 GET 最多成功 1 层，所以本轮即使全成功，也不会使累计成功超过目标。
 
-NG 消耗来源数量但不增加成功量。额度结清后，已确认 NG 使剩余取料预算恢复相同层数，补取从新额度开始。未确认失败、重复结果和超时均不恢复预算。
+NG 消耗来源数量但不增加成功量。额度结清后，以实际成功缺口重算取料额度，补取从新额度开始。未确认失败、重复结果和超时均不恢复预算。
 
 这一结论依赖硬件严格执行最大 GET 次数，并保证整层事实互斥。若设备在后台自行无限补取，或把同一层同时计为成功和 NG，该约束失效。
 
@@ -486,10 +426,10 @@ NG 消耗来源数量但不增加成功量。额度结清后，已确认 NG 使�
 | 用实际 Magazine 离场差硬卡来源 | Buffer 内部状态不可见，可能引入额外循环等待；本稿没有此控制 |
 | 将 4 个空板输入 Magazine 当作 4 个成品缓存 | 资源模型错误；现有推演不覆盖 Buffer 内部流转死锁 |
 
-开发验证以单条来源流程和一个未结清额度为前提。用回报模拟空箱离位、NG、结果缺失、原指令重发及整单通知。验证结果以 WES 的指令、数量和状态变化为准。
+开发验证以单条来源流程和一个未结清额度为前提。模拟带实际离位的原额度最终 Result、新箱到位先送达、NG、原结果缺失和重报，以及整单通知。验证结果以 WES 的指令、数量和状态变化为准。
 
 ### 9.1 卡停修订后的推演
 
-用本文选源和额度结算伪代码配合模拟的对端回报复测。两单各 6 套的双余箱场景在有效腾位和本单开工绑定确认后恢复。22/20 短少、22/24 多料的允许和退料、零片离箱取料失败和恢复均按原身份入账。枚举空箱离位、旧额度 Result、新箱到位的 6 种到达顺序并重放，确认只结算旧箱一次，三个事实匹配后只登记一份新额度。缺证据、错身份或重复回报未提前触发推进。乱序到箱用于验证接收逻辑，实际供箱仍按串行执行。
+以下既有样本用于核对数量和调度，覆盖 22/20 短少、22/24 多料、零片离箱取料失败，以及旧箱结算与新箱到位的乱序及重放。多料留箱和续单余量下限按 [API 验收用例](opening-machine-api.md#102-验收用例) 验证。
 
-固定随机种子 `20261112`，覆盖 20 种需求量（1 至 2501 套）、完整层随机不满箱和每层 0.5% 投料 NG。标准场景 2,000 组，混合注入箱量差异、取料失败、乱序及重复回报 2,000 组。模拟提供匹配的 WMS 处置、ECS 恢复及离位证据后，4,000 组均达到两侧目标，成功量无超量。设备实际确认方式、等待时长和 ARM01 提前备箱仍待联调。
+固定随机种子 `20261112`，覆盖 20 种需求量（1 至 2501 套）、完整层随机不满箱和每层 0.5% 投料 NG。标准场景 2,000 组，混合注入箱量差异、取料失败、乱序及重复回报 2,000 组。既有模拟提供各等待所需的匹配证据后，4,000 组均达到两侧目标，成功量无超量。设备确认方式及实际等待时长待联调。
