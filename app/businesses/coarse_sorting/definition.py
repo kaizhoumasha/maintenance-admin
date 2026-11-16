@@ -14,6 +14,18 @@ DEFINITION = BusinessDefinition(
         PositionSlot(
             position_type="RACK_POSITION", slot_key="OUTPUT_RACK", display_name="出料单层货架位"
         ),
+        PositionSlot(
+            position_type="HANDOFF_POSITION",
+            slot_key="PUT_COMPLETION",
+            display_name="入箱回报点",
+            required=False,
+        ),
+        PositionSlot(
+            position_type="HANDOFF_POSITION",
+            slot_key="NG_COMPLETION",
+            display_name="NG 回报点",
+            required=False,
+        ),
     ),
     initial_entries=(
         InitialEntry(kind="ecs_event", name="SCAN_COMPLETED", device_role="INPUT_ARM"),

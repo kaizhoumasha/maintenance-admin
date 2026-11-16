@@ -39,7 +39,7 @@ async def test_legacy_null_line_remains_readable(client, admin):
 
 
 @pytest.mark.parametrize("line_code,rack", [("RS01", "CLN01"), ("RS02", "CLN02")])
-async def test_coarse_line_saves_only_its_output_rack_position(
+async def test_coarse_line_saves_its_own_completion_positions(
     client, admin, monkeypatch, line_code, rack
 ):
     from app.businesses import catalog
@@ -58,9 +58,25 @@ async def test_coarse_line_saves_only_its_output_rack_position(
     )
     assert response.status_code == 201, response.text
     created = response.json()
+    positions = {
+        "OUTPUT_RACK": rack,
+        "PUT_COMPLETION": f"{line_code}-PUT",
+        "NG_COMPLETION": f"{line_code}-NG",
+    }
+    changed = await client.put(
+        f"/api/v1/work-lines/{created['id']}",
+        headers=admin,
+        json={
+            "line_name": line_code,
+            "version": created["version"],
+            "position_bindings": positions,
+        },
+    )
+    assert changed.status_code == 200, changed.text
     read = await client.get(f"/api/v1/work-lines/{created['id']}", headers=admin)
     assert read.status_code == 200, read.text
-    assert read.json()["position_bindings"] == {"OUTPUT_RACK": rack}
+    assert read.json()["position_bindings"] == positions
+    assert [position["position_code"] for position in read.json()["positions"]] == [rack]
     options = await client.get("/api/v1/businesses", headers=admin)
     assert options.status_code == 200, options.text
     assert options.json()[0]["position_slots"] == [
@@ -69,7 +85,19 @@ async def test_coarse_line_saves_only_its_output_rack_position(
             "display_name": "出料单层货架位",
             "required": True,
             "position_type": "RACK_POSITION",
-        }
+        },
+        {
+            "key": "PUT_COMPLETION",
+            "display_name": "入箱回报点",
+            "required": False,
+            "position_type": "HANDOFF_POSITION",
+        },
+        {
+            "key": "NG_COMPLETION",
+            "display_name": "NG 回报点",
+            "required": False,
+            "position_type": "HANDOFF_POSITION",
+        },
     ]
 
 

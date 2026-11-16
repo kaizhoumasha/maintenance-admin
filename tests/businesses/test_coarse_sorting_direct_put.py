@@ -44,6 +44,11 @@ async def finish_put(flow, row, put):
 @pytest.mark.parametrize("bin_type", ["3", "2", "WMS-CUSTOM", 42])
 async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct, bin_type):
     flow = direct
+    async with flow.factory.begin() as session:
+        line = await session.get(WorkLine, flow.line_ids[0])
+        line.position_bindings = {**line.position_bindings, "PUT_COMPLETION": "STATION_OUTPUT1"}
+    flow.output_locations = {flow.workline: "LEGACY_OUTPUT"}
+    flow.rebuild()
     flow.peer.allocate = allocated(flow, bin_type=bin_type)
     row = await reach_allocate(flow)
     scan_id = row["id"]
@@ -77,7 +82,7 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         line.version += 1
         line.is_enabled = False
         line.device_bindings = {"INPUT_ARM": flow.codes[0], "CONVEYOR": flow.conveyor_codes[0]}
-    flow.output_locations = {flow.workline: "STATION_OUTPUT2"}
+        line.position_bindings = {**line.position_bindings, "PUT_COMPLETION": "STATION_OUTPUT2"}
     flow.rebuild()
     assert (
         await flow.result(

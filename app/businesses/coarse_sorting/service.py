@@ -813,7 +813,9 @@ class CoarseSortingService:
         issue = await self._ng_configuration_issue(session, row, line, input_arm)
         if issue:
             return await save(issue, **values)
-        location = self.ng_locations.get(line.line_code)
+        location = line.position_bindings.get(
+            "NG_COMPLETION", self.ng_locations.get(line.line_code)
+        )
         if not location:
             return await save("NG_PLATFORM_CONFIGURATION_REQUIRED", **values)
         try:
@@ -932,7 +934,11 @@ class CoarseSortingService:
             or output is None
             or output.work_line_id != line.id
             or list(line.device_bindings.values()).count(output.device_code) != 1
-            or not (location := self.direct_put_contracts.output_locations.get(line.line_code))
+            or not (
+                location := line.position_bindings.get(
+                    "PUT_COMPLETION", self.direct_put_contracts.output_locations.get(line.line_code)
+                )
+            )
         ):
             return None
         return {
