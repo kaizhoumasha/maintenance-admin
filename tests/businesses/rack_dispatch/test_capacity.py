@@ -113,7 +113,9 @@ async def test_only_strict_original_submit_rejection_releases_entry(uncertain):
         message.delivery_uncertain = uncertain
         await session.flush()
         projection = await dispatch.final_result(session, job_id=job, action_id=action.id)
-        assert projection.closure_reason == "SUBMIT_REJECTION", projection
+        assert projection.closure_reason == (
+            "DELIVERY_OR_RESULT_UNCERTAIN" if uncertain else "SUBMIT_REJECTION"
+        )
         result = await dispatch.advance(session, job_id=job, **evidence(job), now_ms=10)
         assert (result.state == "NOT_ARRIVED") is (not uncertain)
         assert result.pending is uncertain

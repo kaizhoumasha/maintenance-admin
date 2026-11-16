@@ -480,7 +480,7 @@ async def roller_scans(roller_store, monkeypatch):
     from app.integrations.ecs_command.service import CommandOwner, EcsCommands
     from app.integrations.wms_callback import registry as callbacks
     from app.integrations.wms_request import operation as requests
-    from app.models import IntegrationExchange, ReliableMessage
+    from app.models import IntegrationExchange, ReliableMessage, TransportTask, WorkLine
     from app.reliable import Outbox
     from app.reliable.config import TargetConfig
     from app.reliable.store import MessageStore
@@ -536,7 +536,7 @@ async def roller_scans(roller_store, monkeypatch):
         Column("decision", String, nullable=False),
         Column("release_requested", Boolean, nullable=False),
     )
-    models = (IntegrationExchange, ReliableMessage)
+    models = (IntegrationExchange, ReliableMessage, TransportTask, WorkLine)
     for model in models:
         model.__table__.to_metadata(metadata)
     copy_history_tables(metadata)
@@ -1315,7 +1315,7 @@ async def roller_current(roller_scans, roller_declaration):
     metadata = MetaData(schema=SCHEMA)
     from app.models import WorkLinePosition
 
-    for model in (WorkLine, WorkLinePosition, Device, DeviceRoute, TransportTask):
+    for model in (WorkLine, WorkLinePosition, Device, DeviceRoute):
         model.__table__.to_metadata(metadata)
     engine = flow.factory.kw["bind"]
     async with engine.begin() as connection:
