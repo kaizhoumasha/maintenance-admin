@@ -45,6 +45,7 @@ from .models import (
     AutoTaskInput,
     AutoTaskRequest,
 )
+from .outbound_contracts import Accept
 
 
 @dataclass(frozen=True)
@@ -173,27 +174,11 @@ def _ready(data, *, bin_source):
 
 
 def _accept_target(data):
-    if not isinstance(data, dict) or data.get("result") != "ACCEPT":
-        return False
-    target = data.get("target_locator")
-    required = {"type", "rack_id", "rack_face", "slot_id", "rack_layer", "rack_column"}
-    if not isinstance(target, dict) or not required <= target.keys():
-        return False
-    if target["type"] != "RACK_SLOT" or not all(
-        type(target[key]) is int for key in ("rack_layer", "rack_column")
-    ):
-        return False
-    if not all(
-        isinstance(target[key], str)
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}", target[key])
-        for key in ("rack_id", "slot_id")
-    ):
-        return False
     try:
-        validate_face(target["rack_face"])
+        Accept.model_validate(data, extra="ignore")
     except ValueError:
         return False
-    return data.get("target_preparation") in (None, "ROTATE", "REPLACE")
+    return True
 
 
 class AutoRackPorts:
@@ -539,7 +524,6 @@ class AutoRackPorts:
                     and preparation != ("ROTATE" if kind == "ROTATE" else "REPLACE")
                 )
                 or row.target_snapshot != target
-                or row.next_source_action != data.get("next_source_action")
                 or target.get("rack_id") != origin.rack_id
                 or target.get("rack_face") != face
             ):

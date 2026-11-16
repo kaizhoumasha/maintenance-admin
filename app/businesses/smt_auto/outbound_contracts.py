@@ -39,15 +39,15 @@ class Accept(Data):
     result: Literal["ACCEPT"]
     target_locator: Target
     target_preparation: Literal["ROTATE", "REPLACE"] | None = None
-    next_source_action: dict | None = None
 
     @model_validator(mode="before")
     @classmethod
     def optional_fields(cls, value):
         if isinstance(value, dict):
-            for key in ("target_preparation", "next_source_action"):
-                if key in value and value[key] is None:
-                    raise ValueError("optional fields must be absent, not null")
+            if "next_source_action" in value:
+                raise ValueError("outbound ACCEPT no longer authorizes the next pick")
+            if "target_preparation" in value and value["target_preparation"] is None:
+                raise ValueError("target_preparation must be absent, not null")
         return value
 
 

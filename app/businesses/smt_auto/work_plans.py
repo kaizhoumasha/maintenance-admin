@@ -3,14 +3,14 @@
 from dataclasses import asdict
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from app.core.identifiers import uuid7
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.wms_request import WmsRequests
 from app.models import WorkLine
 
-from ._execution_facts import read_decision
+from ._execution_facts import arrival_is_open, read_decision
 from .inbound_contracts import SourceAbsent, Target
 from .locking import lock_line
 from .models import (
@@ -36,11 +36,30 @@ async def outbound_locator_closed(
         model.task_id == task_id,
         model.bin_work_id == bin_work_id,
         model.source_member_id == source_member_id,
-        model.source_closed_basis.is_not(None),
+        or_(
+            model.source_closed_basis.is_not(None),
+            and_(
+                model.source_member_id.is_not(None),
+                model.pick_consumed_at_ms.is_not(None),
+                model.barcode.is_not(None),
+                model.empty_observation.is_(None),
+            ),
+        ),
     )
     if before_plate_id is not None:
         query = query.where(model.id < before_plate_id)
     return any(value == locator for value in await session.scalars(query))
+
+
+def _normal_round(subject, original, trigger_plate_id):
+    if trigger_plate_id is not None:
+        return False
+    if subject.normal_plan_due:
+        return True
+    # A WAIT advances the same work plan, including its release/overlap semantics.
+    return bool(
+        original and original.normal_continuation and original.next_eligible_at_ms is not None
+    )
 
 
 class WorkPlans:
@@ -112,12 +131,22 @@ class WorkPlans:
             )
             if previous_trigger is not None:
                 return previous_trigger
+        outbound = task.business_type == "outbound"
+        normal = outbound and _normal_round(subject, original, trigger_plate_id)
+        if outbound and trigger_plate_id is not None and subject.normal_plan_due:
+            return None
         if original is not None and (
             original.unresolved
-            or (trigger_plate_id is None and original.next_eligible_at_ms is None)
+            or (trigger_plate_id is None and not normal and original.next_eligible_at_ms is None)
             or (original.next_eligible_at_ms is not None and now_ms < original.next_eligible_at_ms)
         ):
             return original
+        if normal and (
+            original is None
+            or task.status not in ("EXECUTING", "CANCELLED")
+            or not await arrival_is_open(self.roller, session, subject)
+        ):
+            return None
         if original is None:
             current = await RollerPorts().read_current_task(session, work_line_id=work_line_id)
             if task.status == "CANCELLED":
@@ -169,6 +198,9 @@ class WorkPlans:
             source_rack_bindings=bindings,
             unresolved=True,
         )
+        if normal:
+            round_.normal_continuation = True
+            subject.normal_plan_due = False
         session.add(round_)
         await self._invalidate(session, work_line_id)
         await session.flush()
@@ -723,12 +755,18 @@ class WorkPlans:
             )
             if existing is not None:
                 return existing
+        normal = _normal_round(member, original, trigger_plate_id)
+        if trigger_plate_id is not None and member.normal_plan_due:
+            return None
+        if normal and (original is None or task.status != "EXECUTING"):
+            return None
         correction = None
         if correct_operation_id is not None:
             if (
                 first is None
                 or first.operation_id != correct_operation_id
                 or trigger_plate_id is not None
+                or normal
                 or member.withdrawn_at_ms is not None
                 or member.withdrawn_by_input_id is not None
                 or task.status != "EXECUTING"
@@ -761,7 +799,9 @@ class WorkPlans:
             and original is not None
             and (
                 original.unresolved
-                or (trigger_plate_id is None and original.next_eligible_at_ms is None)
+                or (
+                    trigger_plate_id is None and not normal and original.next_eligible_at_ms is None
+                )
                 or (
                     original.next_eligible_at_ms is not None
                     and now_ms < original.next_eligible_at_ms
@@ -829,6 +869,7 @@ class WorkPlans:
             purpose="WORK_PLAN",
             source_preparation_action_id=member.preparation_action_id,
             trigger_plate_id=trigger_plate_id,
+            normal_continuation=normal,
             stage_key=stage,
             round_no=original.round_no + 1 if original else 1,
             previous_round_id=original.id if original else None,
@@ -839,6 +880,8 @@ class WorkPlans:
             source_rack_bindings=proof,
             unresolved=True,
         )
+        if normal:
+            member.normal_plan_due = False
         session.add(round_)
         await session.flush()
         if member.first_work_plan_round_id is None:
@@ -934,7 +977,9 @@ class WorkPlans:
             or request["rack_id"] != member.rack_id
             or request["rack_face"] != member.rack_face
             or type(request["arrived_at"]) is not int
+            or request["arrived_at"] != member.arrived_at_ms
             or not 0 <= request["arrived_at"] <= 2**63 - 1
+            or round_.source_preparation_action_id != member.preparation_action_id
             or round_.operation != "outbound.return_rack.work_plan@v1"
         ):
             return round_
