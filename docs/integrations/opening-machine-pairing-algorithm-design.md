@@ -326,10 +326,7 @@ def execute_authorized_quota(command):
 
 ```python
 def supply_is_complete(s):
-    return (
-        all(s.good[side] == s.target[side] for side in SIDES)
-        and supply_actions_settled(s)
-    )
+    return all(s.good[side] == s.target[side] for side in SIDES) and supply_actions_settled(s)
 
 
 def maybe_report_supply_complete(s):
