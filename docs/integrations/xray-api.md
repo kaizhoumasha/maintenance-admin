@@ -1671,7 +1671,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | 公共货架调度 | 通过 RackDispatch／Transport 接入 X-Ray 作业来源、动作映射和数据库约束；业务接入见 [2.10](#xray-rack)，组件见 [调度服务](../../app/businesses/_components/rack_dispatch/service.py)。 |
 | 公共 ECS 投递 | 由公共 Sender 按 [3.3](#xray-recovery) 对 X-Ray 的原 ACK 读取超时执行同号重发，并通过公开读口提供原尝试结论和 Result。 |
 
-等待和结果消费可参考 [SMT 手工](../../app/businesses/smt_manual/manual_bin_flow.py)、[SMT 自动](../../app/businesses/smt_auto/inbound.py)。事务与唤醒沿 [业务包规范](business-packages.md)、[事务配方](business-transaction-recipes.md)。公共唤醒与 Beat 调用同一待办入口，按当前阶段的最早检查时间和稳定 ID 分页。未到期的有效 WAIT 暂缓续问。无原命令或报告待恢复的待核对盘退出常规扫描，收到本盘新 Event 后重新检查原证据。原命令或报告未结时继续恢复原身份。退料架准备按原作业推进，离场决定返回 WAIT 时沿原到期点续问。本地验证使用 [设备 MOCK 验收路径](business-development-single-api-acceptance.md)。本次报文调整需同步更新 WES 请求 DTO、请求组装、正式 WMS 合同及本地 Mock。切换前先收口旧合同的未结请求和报告；已冻结的原请求按登记时的合同、身份和正文恢复。启用专用 Mock 的工作线还需收口旧版已发标、尚未复核或放料的料盘，因为 Mock 发标和架位占用记录保存在进程内。实现及验收结果独立记录。
+等待和结果消费可参考 [SMT 手工](../../app/businesses/smt_manual/manual_bin_flow.py)、[SMT 自动](../../app/businesses/smt_auto/inbound.py)。事务与唤醒沿 [业务包规范](business-packages.md)、[事务配方](business-transaction-recipes.md)。公共唤醒与 Beat 调用同一待办入口，按当前阶段的最早检查时间和稳定 ID 分页。未到期的有效 WAIT 暂缓续问。无原命令或报告待恢复的待核对盘退出常规扫描，收到本盘新 Event 后重新检查原证据。原命令或报告未结时继续恢复原身份。退料架准备按原作业推进，离场决定返回 WAIT 时沿原到期点续问。本地验证使用 [设备 MOCK 验收路径](business-development-single-api-acceptance.md)。本次报文调整需同步更新 WES 请求 DTO、请求组装、正式 WMS 合同及本地 Mock。切换前先收口旧合同的未结请求和报告；已冻结的原请求按登记时的合同、身份和正文恢复。启用专用 Mock 的工作线还需收口旧版已发标、尚未复核或放料的料盘。固定模式的 Mock 发标和架位占用记录保存在进程内。实现及验收结果独立记录。
 
 <a id="xray-acceptance"></a>
 ## 5. 本地开发验收
@@ -1680,7 +1680,11 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 
 ### 5.1 X-Ray 专用 Mock WMS
 
-仅在 `ENVIRONMENT=local` 启用。复用现有 `POST /api/v1/wes/decisions`，在 Mock WMS 模式为 `accept` 时按下表返回。匹配以扫描到的完整原码为准，保留原始大小写和内容。
+仅在 `ENVIRONMENT=local` 启用。复用 `POST /api/v1/wes/decisions`，在 Mock WMS 模式为 `accept` 时按工作线配置返回决定。`XRAY_WMS_MOCK_TARGETS` 默认是空 JSON 对象，每条线可配置固定或随机模式。
+
+#### 固定模式
+
+固定模式按扫描到的完整原码匹配，保留原始大小写和内容。
 
 | 入料 | 清点与贴标 | 正常出口 |
 | --- | --- | --- |
@@ -1688,7 +1692,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | `PTEST-PART-02,Q50000,MTEST-MPN-02,D260102,LTEST-LOT-02,STEST-SERIAL-02` | 清点，标签数量同样使用 ECS 实测值。CCD 读错盘码或未读出时返回 `NG`。 | 同架同面，使用第二盘配置的架位。 |
 | 其他有效原码 | 免清点。 | 通箱，WES 按 `XRAY_TRANSIT_TARGETS` 选位。 |
 
-`XRAY_WMS_MOCK_TARGETS` 是 JSON 对象，默认空。结构为 `workline_code → 完整原码 → RackAccept`，每个 `RackAccept` 使用 [2.9](#xray-target) 的 `ACCEPT / RACK_SLOT` 报文 `data`。两盘使用同架同面的两个不同空位，工作位和坐标须与 `XRAY_RETURN_RACKS` 一致，盘径和厚度按实物填写。使用搬运架且点位可提交准备时，同一次 `ACCEPT` 即返回精确格位及 `target_preparation=REPLACE`。有在途准备且尚未授权本盘时可返回 `WAIT`。已授权的本盘等 RackDispatch 确认原搬运任务完成后，沿用原授权放料。
+固定模式的配置结构为 `workline_code → 完整原码 → RackAccept`，每个 `RackAccept` 使用 [2.9](#xray-target) 的 `ACCEPT / RACK_SLOT` 报文 `data`。两盘使用同架同面的两个不同空位，工作位和坐标须与 `XRAY_RETURN_RACKS` 一致，盘径和厚度按实物填写。使用搬运架且点位可提交准备时，同一次 `ACCEPT` 即返回精确格位及 `target_preparation=REPLACE`。有在途准备且尚未授权本盘时可返回 `WAIT`。已授权的本盘等 RackDispatch 确认原搬运任务完成后，沿用原授权放料。
 
 现场已摆放测试架时，在该联调工作线的 `XRAY_RETURN_RACKS` 配置中填写 `fixed_test_rack` 为实物架号，仅配置当前可用的一面及格位，省略搬运模板。WES 核对指定架号、工作位、面向、格位及公共搬运责任后直接向 ECS 下发 `PUT_TO_RACK`。ECS 核验实际可放性并回传原放盘结果。固定架仅适用于启用本地 X-Ray Mock 的工作线。
 
@@ -1710,6 +1714,26 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 
 该配置只在 `XRAY_WMS_MOCK_TARGETS` 登记 `XRAY-DEMO`。现场配置独立维护，实际搬运沿用原 WMS。
 
+#### 随机模式
+
+随机模式接受符合合同的任意原码。每次新进料独立抽取，10% 免清点、90% 清点。同一条码再次进料时按新请求抽取，重发则沿用首次决定。两条路径均返回 `TRANSIT_BIN`，WES 沿用 `XRAY_TRANSIT_TARGETS` 在 A/B/C/D 四个通箱位中选位。
+
+以 `XRAY-DEMO` 为例，将该线在 `XRAY_WMS_MOCK_TARGETS` 中的固定样例映射替换为以下配置，并为该线配置完整的四个通箱位。`8.1` mm 仅为示例，`reel_thickness` 须填写实测的正数厚度。
+
+```json
+{
+  "XRAY-DEMO": {
+    "random": {"reel_thickness": 8.1}
+  }
+}
+```
+
+清点标签的 `QQTYPC` 使用 WES 转发的设备实测 `actual_qty`，包括 0。完整条码可提供料号、厂家料号、日期和批次。短码等其他格式的原码使用测试占位值 `TEST-PART`、`TEST-MPN`、`260101`、`TEST-LOT`，原码和生成的 `SPKG` 仍关联到同一工作线。
+
+启用前，使用已启用该随机配置的本地联调环境，确认 `DATABASE_URL` 指向已完成应用迁移的目标数据库，再运行一次 `uv run python -m app.businesses.xray.mock_storage`。在已配置的容器或 Python 运行环境中，可直接运行 `python -m app.businesses.xray.mock_storage`。该命令创建随机模式保存原决定和发标记录的专用表，表由联调环境独立初始化，无需新增 Alembic 版本。
+
+#### 共用路由与重发
+
 共享联调环境在 `RELIABLE_TARGETS.targets` 追加以下两个专用目标，`base_url` 使用 WES API 的内网地址。只有 `XRAY_WMS_MOCK_TARGETS` 中登记的工作线会把四个 X-Ray 决策和 `put_report`、`ng_report` 发往 Mock。其他工作线、业务及 Transport 继续使用原目标。已登记的请求按原目标完成恢复。
 
 ```json
@@ -1727,7 +1751,12 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 }
 ```
 
-Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工作线、完整原码的关联。同一请求重放沿用首次响应。CCD 根据 `expected_spkg` 核对原发标记录及实际 `new_barcode`；清点出料以 `barcode` 中的实读新码查找原发标记录并标识测试架位占用，免清点按原码分流。联调 API 保持单 worker，原决定、发标记录及测试架位占用保存在进程内。专用决策端验证 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。启停 MOCK 或改动架位参数前，先收口该线的在途料盘和报告。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
+专用决策端校验 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。Mock 清点按 `operation_id` 生成测试 `SPKG`，并保存其与工作线和进料原码的关联。CCD 根据 `expected_spkg` 核对原发标记录、进料原码及实际 `new_barcode`。清点盘出口按实读新码查找原发标记录。
+
+- 固定模式的原决定、发标和测试架位占用保存在进程内，联调 API 使用单 worker。清点出料会标记已授权的测试架位。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
+- 随机模式保存首次决定、签名请求原正文的摘要和发标记录。相同 `operation_id`、相同原正文字节的已签名请求跨进程或重启后返回首次响应。同号改正文返回 `409 CONFLICT`。重启后以原发标记录继续核对 CCD 和出料。
+
+固定和随机模式分别保存决定与发标记录。启停 Mock、切换该线模式或改动固定架位参数前，先收口该线的在途料盘、请求和报告。
 
 ### 5.2 回归场景
 
@@ -1739,6 +1768,7 @@ Mock 清点以 `operation_id` 为种子生成测试 SPKG，并保存 SPKG 与工
 | Result／Event 乱序和冲突 | 清点双回调使用同一实测值，覆盖两种顺序及重复。按 2.3.3、2.6.1、2.8.3、2.14.3 核对成功／失败、数量、模式和实际去向冲突。冲突留证，暂停登记新动作，已登记动作保留原责任。 |
 | 退料架工作位 | 覆盖补架、换面、换架、仅退架及回库。首盘显式准备或确认空位后只登记一次进场。已知占位、错工作位、配置变化或冲突责任时留证。原架、工作位和面一致后沿原选位授权取放。 |
 | 同点并发 | 多盘共享一次架准备。用隔离 PostgreSQL 验证取放与换面、离场互斥，回滚和 40001 后只登记一次原意图。 |
+| 随机 Mock | 同码独立进料分别抽取，同号重发和进程重启沿用原决定。清点使用实测数量，短码可发标，重启后可继续核对 CCD。两条路径均进入通箱。 |
 | 通箱 | 随机一次并冻结完整目标，重启沿用原箱位。覆盖接纳后满箱跨过 300 秒、人工处理、ECS 自动续作及原 Result 补报，实际目标一致才报告。 |
 | 技术异常与实际排出 | 技术失败不由 WES 另发 NG；排出事实按本次进机报告，命令按各自 Result 结算。覆盖 NG Event 与 FAILED／未知命令并存、Event 先到、Result 先到及重复，只形成一个冻结报告。 |
 | WMS 等待与恢复 | 未知响应恢复原请求；有效 WAIT 到最早续问点才新求值。多次不可用、重启或 STALLED 不换身份、不转业务 NG。 |
