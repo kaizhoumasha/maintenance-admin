@@ -569,7 +569,9 @@ async def test_transport_callback_closes_exchange_before_http_response(
 
     async with rig.factory.begin() as session:
         await rack_failure_callback(rig, session, flow.handle, "R1")
-    await reconcile_outbound(rig.factory, now=rig.clock())
+    # Earlier tests can leave more than one page of attempts in the shared store.
+    while await reconcile_outbound(rig.factory, now=rig.clock()):
+        pass
     query = select(TransportHttpExchange).where(
         TransportHttpExchange.transport_task_id == flow.handle.transport_task_id
     )
@@ -587,7 +589,8 @@ async def test_transport_callback_closes_exchange_before_http_response(
             flow.claim, outcome
         )
         # Transport acceptance committed, but the sender never recorded completion.
-        await reconcile_outbound(rig.factory, now=rig.clock())
+        while await reconcile_outbound(rig.factory, now=rig.clock()):
+            pass
         async with rig.factory() as session:
             row = (await session.scalars(query)).one()
             assert (row.id, row.finished_at, row.close_reason) == (
