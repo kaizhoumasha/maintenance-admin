@@ -2,7 +2,14 @@
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, TypeAdapter, model_validator
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    model_validator,
+)
 
 from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 from app.integrations.wms_transport.types import validate_face
@@ -19,6 +26,8 @@ class DrainRequest(RequestPayload):
 
 
 class Candidate(RequestPayload):
+    model_config = ConfigDict(extra="ignore")
+
     rack_id: Identifier
     rack_face: Annotated[list[RackFace], Field(min_length=1)]
 
@@ -30,6 +39,8 @@ class Candidate(RequestPayload):
 
 
 class Ready(RequestPayload):
+    model_config = ConfigDict(extra="ignore")
+
     result: Literal["READY"]
     racks: Annotated[list[Candidate], Field(min_length=1)]
 
@@ -41,9 +52,22 @@ class Ready(RequestPayload):
 
 
 class Wait(RequestPayload):
+    model_config = ConfigDict(extra="ignore")
+
     result: Literal["WAIT"]
     reason_code: Literal["NO_DRAIN_RACK_AVAILABLE"]
     retry_after_ms: Annotated[int, Field(ge=1, le=60000)]
 
 
-DECISION = TypeAdapter(Annotated[Ready | Wait, Field(discriminator="result")])
+def _reject_mixed_fields(value: object) -> object:
+    if isinstance(value, dict) and (
+        (value.get("result") == "READY" and value.keys() & {"reason_code", "retry_after_ms"})
+        or (value.get("result") == "WAIT" and "racks" in value)
+    ):
+        raise ValueError("decision contains fields for another result")
+    return value
+
+
+DECISION = TypeAdapter(
+    Annotated[Ready | Wait, Field(discriminator="result"), BeforeValidator(_reject_mixed_fields)]
+)

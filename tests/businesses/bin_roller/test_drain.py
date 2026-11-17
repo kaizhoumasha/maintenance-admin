@@ -68,7 +68,12 @@ async def test_running_production_without_an_available_rack_drains_the_fifo(roll
     state = (await flow.all_rows("workline_state"))[0]
     assert state["drain_phase"] == "REQUESTED"
     await flow.decide_current(
-        state["drain_message_id"], dict(result="READY", racks=[dict(rack_id="D1", rack_face=["A"])])
+        state["drain_message_id"],
+        dict(
+            result="READY",
+            racks=[dict(rack_id="D1", rack_face=["A"], rack_label="Drain rack")],
+            detailMessage="Rack available",
+        ),
     )
     await flow.advance("DRAIN", state["line_run_id"])
     entry = (await flow.all_rows("rack_action"))[0]
@@ -178,10 +183,17 @@ async def test_expired_wait_registers_one_new_original_evaluation(roller_lifecyc
     state = await request_drain(flow)
     await flow.decide_current(
         state["drain_message_id"],
-        dict(result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms=60000),
+        dict(
+            result="WAIT",
+            reason_code="NO_DRAIN_RACK_AVAILABLE",
+            retry_after_ms=30000,
+            detailMessage="没有可退回箱容器的货架储位",
+        ),
     )
     await flow.advance("DRAIN", state["line_run_id"])
     waiting = (await flow.all_rows("workline_state"))[0]
+    assert waiting["drain_phase"] == "WAIT"
+    assert waiting["drain_retry_at"] is not None
     await flow.advance("DRAIN", state["line_run_id"])
     assert (await flow.all_rows("workline_state"))[0] == waiting
     async with flow.factory.begin() as session:
@@ -320,6 +332,9 @@ async def test_new_task_does_not_convert_original_drain_purpose(roller_lifecycle
         "duplicate_faces",
         "wait_reason",
         "wait_upper",
+        "wait_string_delay",
+        "wait_with_racks",
+        "ready_with_wait_fields",
         "nullable",
     ],
 )
@@ -343,6 +358,15 @@ async def test_drain_contract_is_strict(roller_lifecycle, case):
         "wait_reason": dict(result="WAIT", reason_code="OTHER", retry_after_ms=1),
         "wait_upper": dict(
             result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms=60001
+        ),
+        "wait_string_delay": dict(
+            result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms="30000"
+        ),
+        "wait_with_racks": dict(
+            result="WAIT", reason_code="NO_DRAIN_RACK_AVAILABLE", retry_after_ms=30000, racks=[]
+        ),
+        "ready_with_wait_fields": dict(
+            result="READY", racks=[dict(rack_id="R1", rack_face=["A"])], retry_after_ms=30000
         ),
     }[case]
     with pytest.raises(ValidationError):

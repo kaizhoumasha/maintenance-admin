@@ -399,7 +399,7 @@ Bin 身份、原顺序、生命周期原因和所有者由 WES 本地保存，�
 }
 ```
 
-data 仅 result、racks。racks 非空、rack_id 不重复，可以返回多个货架；**架集合无序，每架 rack_face 面数组非空、有序且不重复**，不把返回数组顺序扩展成全局作业顺序。不要求这些面的容量一次覆盖 required_slot_count，不建立“每面预留一个槽位”或总面数与请求数量绑定的约束；本批原服务及已创建整架动作收口后仍有待回箱时继续申请供架。
+data 必填 result、racks。racks 非空、rack_id 不重复，可以返回多个货架；**架集合无序，每架 rack_face 面数组非空、有序且不重复**，不把返回数组顺序扩展成全局作业顺序。不要求这些面的容量一次覆盖 required_slot_count，不建立“每面预留一个槽位”或总面数与请求数量绑定的约束；本批原服务及已创建整架动作收口后仍有待回箱时继续申请供架。
 
 READY 只是本批可用货架清单，**不是容量预留、逐箱槽位分配或实际到位**。架按原 RACK_MOVE 真实到位后，用普通 return_batch 按当时 FIFO 申请当前面精确目标，再以 BIN_MOVE 回架；不新增 drain 专用退箱或回架报告，不引入独立业务资格判定。
 
@@ -414,7 +414,9 @@ READY 只是本批可用货架清单，**不是容量预留、逐箱槽位分配
 }
 ```
 
-data 仅 result、固定 reason_code 和整数 1～60000 的 retry_after_ms。有效 WAIT 保存固定等待点；到期/有效新事实后新 operation_id 求值，不重新计时或修改旧请求。响应未知/503 用原身份恢复；409/422 留证核对。READY/WAIT 响应也逐层拒绝额外字段，operation_id 必须匹配请求。
+data 必填 result、固定 reason_code 和整数 1～60000 的 retry_after_ms。有效 WAIT 保存固定等待点；到期/有效新事实后新 operation_id 求值，不重新计时或修改旧请求。响应未知/503 用原身份恢复；409/422 留证核对。
+
+WES 忽略 READY/WAIT 的 data 及 READY 的 racks[] 中未知的扩展字段，例如 detailMessage。已知字段的类型、必填项、范围和去重规则仍严格校验，READY 携带 reason_code 或 retry_after_ms、WAIT 携带 racks 均拒绝。响应信封沿用公共校验，operation_id 必须匹配请求。
 
 #### 2.2.4 供架续行与排空
 
@@ -512,7 +514,7 @@ Command 使用 `POST /api/v1/device/command`；Result 使用 `POST /api/v1/callb
 
 技术重试保持原 operation_id、timestamp、冻结正文、候选及目标。已登记意图先按保存的原 message/command/Transport 引用读结果，仅原 Sender 按冻结输入重试，不因当前 target/设备/候选变化重新 send/create；提交响应不明沿原 work 的完整事务推进重读原逻辑依据；连接失败或暂时查空都不证明回滚，已见原记录恢复原身份，登记仍须经完整业务判定/唯一性/依赖校验及成功提交，不另设提交确认流程。有效 drain WAIT 已可靠消费后，满足等待条件才创建新求值；确定 return_batch NO_BATCH 按 C03 结束本面本次服务，不设置重试时间。目标冲突、身份歧义、UNKNOWN/HELD、位置未知都保留原证据和责任，不用改 ID、重新排序或改目标“恢复”；已确认人工搬离并接管的本次回流按第 1.3 节移交责任，保留原证据，不再自动恢复。
 
-可选字段无值省略，除字段明确允许外禁止 null；current_face 的共用离场例外按其字段表。return_batch 沿其 wire 读取已定义字段及冗余字段处理规则，drain 请求/响应逐层拒绝额外字段；不套用统一宽松或严格策略，也不重算历史幂等摘要。
+可选字段无值省略，除字段明确允许外禁止 null；current_face 的共用离场例外按其字段表。return_batch 沿其 wire 读取已定义字段及冗余字段处理规则。drain 请求严格拒绝额外字段，READY/WAIT 响应业务数据按第 2.2 节处理扩展字段。历史幂等摘要沿用原值。
 
 参考来源为 wes_backend 的 `wms-manual-outbound-picking-integration-requirements.md` 第 3.3/3.4、5.6 节及 `wms-outbound-picking-task-integration-requirements.md` 第 9.2.2/9.2.3 节。旧系统存在实现不代表本系统接入或现场通过。
 
