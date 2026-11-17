@@ -319,7 +319,7 @@ def cycle_progress(job):
         "CLEANUP_SUBMISSION_NEEDS_REVIEW",
     ):
         return job.review_reason
-    if job.closure_reason == "DEPARTURE_ACK":
+    if job.closure_reason in ("DEPARTURE_ACK", "RACK_ALREADY_IN_STORAGE"):
         return "RELEASED"
     if job.state == "RELEASING":
         if job.review_reason in (

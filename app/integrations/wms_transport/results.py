@@ -24,7 +24,7 @@ from app.models import (
     TransportTask,
 )
 
-from .adapter import TransportSubmitAdapter
+from .adapter import TransportSubmitAdapter, is_ctu03_storage_rejection
 from .callback.payloads import RackPositionRef, Resulted
 from .protocol import OPERATION
 from .types import (
@@ -79,6 +79,24 @@ class TransportTaskResult:
     closure: str = "UNDETERMINED"
     closure_reason: str = "TASK_NOT_FOUND"
     closure_basis: dict | None = None
+
+    @property
+    def rack_already_in_storage(self) -> bool:
+        # Earlier delivery uncertainty can coexist with a later verified location.
+        return (
+            self.availability == "FOUND"
+            and self.submission_state == "AVAILABLE"
+            and self.submission_response_state == "VALID"
+            and (self.submission_http_status, self.submission_response_code) == (422, "REJECTED")
+            and self.has_submission_acceptance is False
+            and self.outcome is None
+            and self.position_observation is None
+            and not self.has_pending_outcome
+            and not self.member_facts
+            and is_ctu03_storage_rejection(
+                self.frozen or {}, (self.submission_response_data or {}).get("reason_code")
+            )
+        )
 
 
 async def read_rows(

@@ -74,7 +74,8 @@ class RackJob(Base):
             "closure_basis IS NULL) OR "
             "(NOT pending AND closure_reason IS NOT NULL AND closure_basis IS NOT NULL AND "
             "((state='COMPLETED' AND (closure_reason='LEGACY_CLOSED' OR "
-            "(closure_reason='DEPARTURE_ACK' AND completed_at_ms IS NOT NULL))) OR "
+            "(closure_reason IN ('DEPARTURE_ACK','RACK_ALREADY_IN_STORAGE') "
+            "AND completed_at_ms IS NOT NULL))) OR "
             "(state IN ('WITHDRAWN','NOT_ARRIVED') AND closure_reason=state))) OR "
             "(state='CLOSED_BY_SCOPE' AND closure_reason IS NOT NULL AND closure_reason=state "
             "AND closure_basis IS NOT NULL)",

@@ -41,6 +41,13 @@ def _requested_task_id(message: OutgoingMessage) -> str:
     return task_id
 
 
+def is_ctu03_storage_rejection(request: dict, reason: str | None) -> bool:
+    if request.get("rcs_template_id") != "CTU03" or not request.get("rack_id"):
+        return False
+    detail = f"货架({request['rack_id']})当前已在库区，不能执行搬运任务(CTU03)"
+    return reason == f"{detail}任务下发失败：{detail}"
+
+
 class TransportSubmitAdapter:
     """合同 §4:`transport.task.submit@v1` 的原字节透传与同步 ACK 分类。
 
@@ -75,11 +82,9 @@ class TransportSubmitAdapter:
         if pair == (422, "REJECTED"):
             reason = data.get("reason_code")
             request = _json_object(message.request_raw)["data"]
-            storage_rejection = False
-            if request.get("rcs_template_id") == "CTU03" and request.get("rack_id"):
-                detail = f"货架({request['rack_id']})当前已在库区，不能执行搬运任务(CTU03)"
-                storage_rejection = reason == f"{detail}任务下发失败：{detail}"
-            if isinstance(reason, str) and (reason in REJECTION_REASONS or storage_rejection):
+            if isinstance(reason, str) and (
+                reason in REJECTION_REASONS or is_ctu03_storage_rejection(request, reason)
+            ):
                 return Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED)
             return UNKNOWN
         if pair == (503, "UNAVAILABLE"):

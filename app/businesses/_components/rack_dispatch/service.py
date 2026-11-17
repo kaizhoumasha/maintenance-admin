@@ -717,9 +717,14 @@ class RackDispatch:
             job.state != "COMPLETED"
             or job.current_action_id != action.id
             or action.kind != "DEPART"
-            or action.phase != "ACCEPTED"
             or action.source != _point(point)
         ):
+            return False
+        if job.closure_reason == "RACK_ALREADY_IN_STORAGE":
+            result = await self._result(session, job, action)
+            proof = self._storage_rejection_proof(job, action, result)
+            return proof is not None and proof == job.closure_basis
+        if action.phase != "ACCEPTED":
             return False
         result = await self._result(session, job, action)
         if not result or not result.outcome or result.has_pending_outcome:
@@ -1440,19 +1445,7 @@ class RackDispatch:
         unsent_action_id = None
         unsent_departure = None
         if last and last.kind == "DEPART" and last.transport_task_id:
-            basis = await self._departure_acceptance(session, job, actions, now_ms)
-            if basis is not None:
-                last.phase, last.acceptance_basis, last.accepted_at_ms = (
-                    "ACCEPTED",
-                    asdict(basis),
-                    basis.accepted_at,
-                )
-                self._release_scope(
-                    job,
-                    dict(kind="DEPARTURE_ACK", action_id=last.id, acceptance_basis=asdict(basis)),
-                    now_ms,
-                )
-            if basis is not None or not stopped_ctu:
+            if await self._settle_departure(session, job, actions, now_ms) or not stopped_ctu:
                 return
             unsent_departure = await self._never_dispatched_move(session, job, last)
             if unsent_departure is None:
@@ -1750,7 +1743,9 @@ class RackDispatch:
             job.review_reason = "ORIGINAL_REGISTRATION_UNPROVED"
             return _snapshot(job, actions)
         if original and original.kind == "DEPART" and not unbound:
-            await self._accept(session, job, actions, now_ms)
+            if job.state == "RELEASING":
+                await self._settle_departure(session, job, actions, now_ms)
+                await session.flush()
             return _snapshot(job, actions)
         if job.source_kind == "COARSE_WMS_PRESENT":
             if not await self._coarse_presence(session, job):
@@ -2130,7 +2125,7 @@ class RackDispatch:
         if not previous:
             job.release_basis = basis
 
-    async def _departure_acceptance(self, session, job, actions, now_ms):
+    async def _settle_departure(self, session, job, actions, now_ms) -> bool:
         action = actions[-1]
         ready = next((a for a in actions if a.id == action.previous_action_id), None)
         if (
@@ -2147,21 +2142,67 @@ class RackDispatch:
             or action.caller != job.caller
         ):
             job.review_reason = "INVALID_DEPARTURE_INTENT"
-            return
+            return False
         if not await self._consume_decision(session, job, ready, now_ms):
-            return
+            return False
         destination = ready.decision["rack_destination"]
         if action.target != {
             "kind": destination["type"],
             "location_code": destination["location_code"],
         }:
             job.review_reason = "INVALID_DEPARTURE_INTENT"
-            return
+            return False
         acceptance = await self._submission_acceptance(session, job, action)
-        if acceptance is None and action.template == "CTU03":
+        if acceptance is not None:
+            action.phase = "ACCEPTED"
+            action.acceptance_basis = asdict(acceptance)
+            action.accepted_at_ms = acceptance.accepted_at
+            reason = "DEPARTURE_ACK"
+            proof = dict(action_id=action.id, acceptance_basis=action.acceptance_basis)
+        else:
+            if action.template != "CTU03":
+                return False
             result = await self._result(session, job, action)
-            job.review_reason = _submission_blocker(action, result)
-        return acceptance
+            proof = self._storage_rejection_proof(job, action, result)
+            if proof is None:
+                job.review_reason = _submission_blocker(action, result)
+                return False
+            reason = "RACK_ALREADY_IN_STORAGE"
+            job.actual_position = job.actual_face = None
+        if job.state == "CLOSED_BY_SCOPE":
+            self._release_scope(job, dict(kind=reason, **proof), now_ms)
+        else:
+            _close(job, "COMPLETED", reason, proof, now_ms)
+        return True
+
+    @staticmethod
+    def _storage_rejection_proof(job, action, result):
+        if not (
+            result
+            and action.phase == "REGISTERED"
+            and action.template == "CTU03"
+            and result.rack_already_in_storage
+            and result.submission_message_id == action.submit_message_id
+            and result.submission_target == action.submit_target
+            and result.frozen
+            == {
+                "kind": "RACK_MOVE",
+                "rack_id": job.rack_id,
+                "rcs_template_id": "CTU03",
+                "source": action.source,
+                "target": action.target,
+            }
+        ):
+            return None
+        return dict(
+            action_id=action.id,
+            transport_task_id=result.transport_task_id,
+            operation_id=result.operation_id,
+            submission_message_id=result.submission_message_id,
+            http_status=result.submission_http_status,
+            response_code=result.submission_response_code,
+            response_data=result.submission_response_data,
+        )
 
     async def _submission_acceptance(self, session, job, action):
         acceptance = await self.capabilities.transport.get_submission_acceptance(
@@ -2205,27 +2246,6 @@ class RackDispatch:
                 **({"target_face": action.target_face} if action.kind == "ROTATE" else {}),
             }
         )
-
-    async def _accept(self, session, job, actions, now_ms):
-        if job.state != "RELEASING":
-            return
-        basis = await self._departure_acceptance(session, job, actions, now_ms)
-        if basis is None:
-            return
-        action = actions[-1]
-        action.phase, action.acceptance_basis, action.accepted_at_ms = (
-            "ACCEPTED",
-            asdict(basis),
-            basis.accepted_at,
-        )
-        _close(
-            job,
-            "COMPLETED",
-            "DEPARTURE_ACK",
-            dict(action_id=action.id, acceptance_basis=asdict(basis)),
-            now_ms,
-        )
-        await session.flush()
 
 
 async def pending_message_references(session, *, candidate_ids):

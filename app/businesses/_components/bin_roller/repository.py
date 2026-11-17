@@ -282,17 +282,27 @@ class RollerRepository:
         decision = next(
             (a for a in job.actions if departure and a.id == departure.previous_action_id), None
         )
-        handed_off = (
+        original_departure = (
             not job.pending
             and action.position_observation == observation
-            and release.get("kind") == "DEPARTURE_ACK"
             and departure is not None
             and departure.id == job.current_action_id
-            and (departure.kind, departure.template, departure.phase)
-            == ("DEPART", "CTU03", "ACCEPTED")
-            and bool(departure.acceptance_basis)
+            and (departure.kind, departure.template) == ("DEPART", "CTU03")
             and decision is not None
             and (decision.basis or {}).get("position_action_id") == action.id
+        )
+        handed_off = original_departure and (
+            (
+                release.get("kind") == "DEPARTURE_ACK"
+                and departure.phase == "ACCEPTED"
+                and bool(departure.acceptance_basis)
+            )
+            or (
+                release.get("kind") == "RACK_ALREADY_IN_STORAGE"
+                and departure.phase == "REGISTERED"
+                and release.get("transport_task_id") == departure.transport_task_id
+                and release.get("submission_message_id") == departure.submit_message_id
+            )
         )
         return True, "HANDED_OFF" if handed_off else "PENDING"
 

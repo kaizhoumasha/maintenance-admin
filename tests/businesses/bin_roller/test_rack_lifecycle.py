@@ -1253,16 +1253,28 @@ async def test_other_rack_anomaly_is_ordered_against_valid_arrival(roller_lifecy
     assert [feed["id"] for feed in await flow.all_rows("feed")] == ([second] if old_first else [])
 
 
-@pytest.mark.parametrize("template", ["CTU02", "CTU03"])
-@pytest.mark.parametrize("uncertain", [False, True])
-async def test_rack_submit_rejection_preserves_position_and_surfaces_reason(
-    roller_lifecycle, template, uncertain
+@pytest.mark.parametrize(
+    "template,uncertain,storage_rack,wrong_task,released",
+    [
+        ("CTU02", False, None, False, False),
+        ("CTU02", True, None, False, False),
+        ("CTU02", True, "R1", False, False),
+        ("CTU03", False, None, False, False),
+        ("CTU03", True, None, False, False),
+        ("CTU03", False, "R1", False, True),
+        ("CTU03", True, "R1", False, True),
+        ("CTU03", True, "R2", False, False),
+        ("CTU03", True, "R1", True, False),
+    ],
+)
+async def test_rack_submit_rejection_releases_only_original_ctu03_already_in_storage(
+    roller_lifecycle, template, uncertain, storage_rack, wrong_task, released
 ):
     import json
 
     from sqlalchemy import select
 
-    from app.models import ReliableMessage
+    from app.models import ReliableMessage, TransportTask
     from tests.helpers import set_message_bodies
 
     flow = roller_lifecycle
@@ -1283,6 +1295,8 @@ async def test_rack_submit_rejection_preserves_position_and_surfaces_reason(
         )
         await flow.advance("RACK_CYCLE", cycle)
     action = next(a for a in await flow.all_rows("rack_action") if a["kind"] == template)
+    detail = f"货架({storage_rack})当前已在库区，不能执行搬运任务(CTU03)"
+    reason = f"{detail}任务下发失败：{detail}" if storage_rack else "INVALID_DATA"
     async with flow.factory.begin() as session:
         message = await session.scalar(
             select(ReliableMessage).where(ReliableMessage.operation_id == action["operation_id"])
@@ -1294,25 +1308,58 @@ async def test_rack_submit_rejection_preserves_position_and_surfaces_reason(
         )
         message.fail_reason = "REJECTED"
         message.delivery_uncertain = uncertain
+        message.attempts = 3 if uncertain else 1
+        original_tasks = set(await session.scalars(select(TransportTask.transport_task_id)))
+        message_id, request_id = message.id, message.request_record_id
+        request = await read_history_body(session, request_id)
+        response_task = "other-transport" if wrong_task else action["transport_task_id"]
+        response = json.dumps(
+            dict(
+                operation_id=message.operation_id,
+                code="REJECTED",
+                timestamp=2,
+                data=dict(
+                    transport_task_id=response_task,
+                    reason_code=reason,
+                ),
+            )
+        ).encode()
         await set_message_bodies(
             session,
             message,
-            response_raw=json.dumps(
-                dict(
-                    operation_id=message.operation_id,
-                    code="REJECTED",
-                    timestamp=2,
-                    data=dict(
-                        transport_task_id=action["transport_task_id"], reason_code="INVALID_DATA"
-                    ),
-                )
-            ).encode(),
+            response_raw=response,
         )
+        response_id = message.terminal_response_record_id
     for _ in range(3):
         await flow.advance("RACK_CYCLE", cycle)
     async with flow.factory() as session:
-        job = await flow.roller.rack_dispatch.progress(session, job_id=cycle)
-        assert job.pending
-        assert job.review_reason == ("SUBMISSION_UNCERTAIN" if uncertain else "SUBMIT_REJECTION")
-        assert job.actual_position == dict(kind="RACK_POSITION", location_code="RACK-WORK")
+        dispatch = flow.roller.rack_dispatch
+        job = await dispatch.progress(session, job_id=cycle)
+        if released:
+            assert not job.pending and job.review_reason is None
+            assert job.closure_reason == "RACK_ALREADY_IN_STORAGE"
+            assert job.actual_position is None
+            assert job.actions[-1].acceptance_basis is None
+            assert await dispatch.point_vacant_for_entry(session, point="RACK-WORK", rack_id="R2")
+        else:
+            assert job.pending
+            blocker = "SUBMISSION_UNCERTAIN" if uncertain else "SUBMIT_REJECTION"
+            assert job.review_reason == blocker
+            assert job.actual_position == dict(kind="RACK_POSITION", location_code="RACK-WORK")
+        message = await session.get(ReliableMessage, message_id)
+        assert (message.status, message.last_http_status, message.attempts) == (
+            "FAILED",
+            422,
+            3 if uncertain else 1,
+        )
+        assert (message.request_record_id, message.terminal_response_record_id) == (
+            request_id,
+            response_id,
+        )
+        assert await read_history_body(session, request_id) == request
+        assert await read_history_body(session, response_id) == response
+        tasks = (await session.scalars(select(TransportTask))).all()
+        assert {t.transport_task_id for t in tasks} == original_tasks
+        departure = next(t for t in tasks if t.transport_task_id == action["transport_task_id"])
+        assert departure.submission_acceptance is None and departure.applied_outcome is None
     assert len(await flow.all_rows("rack_action")) == 2
