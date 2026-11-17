@@ -61,23 +61,12 @@ class RackAccept(Accept):
 
 class BinReject(Data):
     result: Literal["REJECT"]
-    business_exception_code: Literal["MATERIAL_REJECTED", "SOURCE_CELL_MISMATCH"]
     ng_locator: NgLocator
     source_disposition: Literal["CONTINUE", "CLOSE"]
-
-    @model_validator(mode="after")
-    def mismatch(self):
-        if (
-            self.business_exception_code == "SOURCE_CELL_MISMATCH"
-            and self.source_disposition != "CLOSE"
-        ):
-            raise ValueError("mismatched Cell closes")
-        return self
 
 
 class RackReject(Data):
     result: Literal["REJECT"]
-    business_exception_code: Literal["MATERIAL_REJECTED"]
     ng_locator: NgLocator
     source_disposition: Literal["CLOSE"]
 

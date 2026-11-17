@@ -1600,18 +1600,13 @@ HTTP 状态固定为 `200`，`code` 固定为 `DECIDED`。公共字段见[公共
 | 字段 | JSON 类型 | 必填 | 说明与约束 |
 | --- | --- | --- | --- |
 | `data.result` | string | 是 | 固定为 `REJECT`，WMS 已形成确定的异常处理决定 |
-| `data.business_exception_code` | string | 是 | 枚举 `MATERIAL_REJECTED`、`SOURCE_CELL_MISMATCH` |
+| `data.business_exception_code` | string | 否 | WMS 可附带拒绝原因，WES 仅随原回执保存备查 |
 | `data.ng_locator` | object | 是 | WMS 批准的 NG 位置 |
 | `data.ng_locator.type` | string | 是 | 固定为 `NG_ZONE` |
 | `data.ng_locator.zone_code` | string | 是 | NG 区域编码，使用与请求业务编码相同的正则约束 |
 | `data.source_disposition` | string | 是 | `CONTINUE` 表示本盘确认进入 NG 区后允许当前 Cell 继续取料；`CLOSE` 表示本盘确认进入 NG 区后关闭当前来源 |
 
-| `business_exception_code` | 含义 | 允许的 `source_disposition` |
-| --- | --- | --- |
-| `MATERIAL_REJECTED` | 本盘物料被拒绝 | `CONTINUE`、`CLOSE` |
-| `SOURCE_CELL_MISMATCH` | 来源料格不匹配 | 仅 `CLOSE` |
-
-P06 已本方确认：原 NG 放置成功且本业务 NG movement_report 已收妥后，按 §5.9.2 复用 bin.work_plan 取得完整新 READY。CONTINUE 允许原 Cell 继续参与；CLOSE 排除已关闭 Cell，不扩大为整箱关闭。没有完整新授权不得沿旧层数或旧参数取下一盘。
+WES 根据 `REJECT` 和有效的 `ng_locator` 生成 NG 搬运指令。`source_disposition` 决定该盘 NG 放置成功且 movement_report 已收妥后的来源处理。P06 已本方确认：按 §5.9.2 复用 bin.work_plan 取得完整新 READY。CONTINUE 允许原 Cell 继续参与；CLOSE 排除已关闭 Cell，不扩大为整箱关闭。没有完整新授权不得沿旧层数或旧参数取下一盘。
 
 `REJECT` 不发送 `target_locator`、`target_preparation` 或 `retry_after_ms`。
 
@@ -1744,10 +1739,10 @@ HTTP `200 / DECIDED`，公共字段见[公共响应说明](#protocol-envelope)�
 
 | `data.result` | 必填字段 | 约束 |
 | --- | --- | --- |
-| `REJECT` | `business_exception_code + ng_locator + source_disposition` | `business_exception_code=MATERIAL_REJECTED`；`ng_locator.type=NG_ZONE`，`ng_locator.zone_code` 为 WMS 授权区域编码；`source_disposition=CLOSE`，关闭本盘来源，不推定整个架面完成 |
+| `REJECT` | `ng_locator + source_disposition` | `ng_locator.type=NG_ZONE`，`ng_locator.zone_code` 为 WMS 授权区域编码；`source_disposition=CLOSE`，关闭本盘来源，不推定整个架面完成。WMS 可附带 `business_exception_code`，WES 随原回执保存 |
 | `WAIT` | `retry_after_ms` | 整数 `1..60000`；尚未形成最终目标，不发送目标或 NG 字段 |
 
-REJECT 不返回 `SOURCE_CELL_MISMATCH` 或 `CONTINUE`，不套用 Cell 的异常范围。P06 已本方确认：NG 放置及本业务 NG 报告收口后，按 §5.9.2 复用 return_rack.work_plan 取得当前面其他 SLOT 的完整新 READY；排除已关闭 SLOT，不据 CLOSE 推定整面结束。
+P06 已本方确认：NG 放置及本业务 NG 报告收口后，按 §5.9.2 复用 return_rack.work_plan 取得当前面其他 SLOT 的完整新 READY；排除已关闭 SLOT，不据 CLOSE 推定整面结束。
 
 <a id="rack-decide-4"></a>
 ##### 4.3.3.4 错误响应与重复请求约束
@@ -3862,7 +3857,7 @@ NG 不报告的约定适用于本文自动上架业务；其他业务沿各自�
 | 分支 | 本业务当前合同 |
 | --- | --- |
 | WMS WAIT | 保留原盘/作业事实，到期续问；不解释成 NG，见 §5.3 |
-| WMS REJECT | 沿 BIN 的 business_exception_code/source_disposition 或 RackSlot 的本盘关闭语义；不将 REJECT 缺后继当整面完成 |
+| WMS REJECT | 按授权 NG 区搬运，后续沿 BIN 的 `source_disposition` 或 RackSlot 的本盘关闭语义推进 |
 | NG 放置 | KT11 ARM01、KT14 ARM03 执行 `STATION_SCAN/SCAN_PLATFORM → STATION_NG/SCAN_NG`，两端各传 `location_id` 和 `location_type`。原 NG 命令有效应用的 `SUCCESS/1/PUT_FINISHED` 确认放置。报告沿原 REJECT.ng_locator，发生时间取该原 Result.finish_time |
 | BIN CONTINUE、RackSlot 异常后的后继 | P06 已确认，原 NG 成功及本业务 NG 报告收口后按 §5.9.2 复用所属 work_plan，取得完整新授权；CLOSE 不扩大为整箱/整面关闭 |
 | 明确空取 | 按 §4.5.2 消费原取盘的 FAILED/0/PICK_FAILED，沿 empty_decide 的 RETRY/WAIT/SOURCE_DONE。SOURCE_DONE 后按 §5.9.2 合法续问 |
