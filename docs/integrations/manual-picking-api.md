@@ -537,6 +537,8 @@ PLAN_REVISION_STALE 的 current_plan_revision 必须大于请求版本；版本�
 
 两方向的完整本地条件见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)：按原成员及撤销事实核对供箱、已受理 SCAN2 作业和原释放意图；出库再核对直接取料及必报事实。出库未声明供箱来源但指定 target_rack 时，原转运架进场成功及本线工作位/面向可靠到位是确认前置，未知/失败不补认；未指定不增门槛，也不扩大为等待该架离场。
 
+已撤销并关闭的供箱架面，若从未登记供箱或取箱，且原进场或换面已应用明确的 `CANCELLED` 结果、没有未决结果或更新的到位回报，则计为 0 箱，原架面与搬运证据继续保留。
+
 从未发起准入的 HOLD 不属于已受理作业，不计入完成资格及 arrivals 语义基准；原扫码、arrival、任务、原因和证据仍保存，不发准入、不补放行。后续合法新经过只结清自身原作业。DEFERRED 即使尚无准入请求，及未决准入、WAIT、WORK_REQUIRED、REVIEW 仍按原规则阻断，原确认对新收到事实的竞态复核保留。
 
 最后一箱已完成且唯一原放行已登记后，COMPLETED 先于该放行 Result 到达不构成任务矛盾。另有真实新 SCAN2 到箱时则保存原 arrival/任务关联，原完成确认未决期间暂缓新箱首次准入，原 WAIT、人工作业、完工、释放和公共义务继续；有效 STALE/BUSINESS_IN_PROGRESS 消费并满足原条件后才启动暂存箱准入。旧 COMPLETED 与新增计划/暂存作业矛盾时留证待 WMS 核对，不结束任务、不直接放箱或换号绕过终局。

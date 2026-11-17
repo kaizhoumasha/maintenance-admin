@@ -205,6 +205,41 @@ class RollerRepository:
             raise ValueError("original supply job association mismatch")
         await self.update(session, "face_work", demand_id, rack_job_id=cycle_id)
 
+    async def _preparation_cancelled(self, session, face):
+        job = await self.rack_dispatch.progress(session, job_id=face["rack_job_id"])
+        if not job or (
+            job.origin.source_kind,
+            job.origin.work_line_id,
+            job.origin.task_id,
+            job.origin.rack_id,
+        ) != ("ROLLER_ORDINARY", self.work_line_id, face["scope_id"], face["rack_id"]):
+            return False
+        action = next((a for a in job.actions if a.id == face["preparation_action_id"]), None)
+        if not (
+            action
+            and action.kind in ("ENTER", "ROTATE")
+            and action.target_face == face["rack_face"]
+            and action.phase == "APPLIED"
+            and (action.outcome or {}).get("status") == "CANCELLED"
+        ):
+            return False
+        result = await self.rack_dispatch.final_result(session, job_id=job.id, action_id=action.id)
+        return bool(
+            result
+            and result.closure == "CLOSED"
+            and result.frozen
+            and result.frozen.get("rack_id") == face["rack_id"]
+            and result.frozen.get("target_face") == face["rack_face"]
+            and result.outcome
+            and result.outcome["status"] == "CANCELLED"
+            and result.outcome_revision == action.outcome_revision
+            and not result.has_pending_outcome
+            and not (
+                result.position_observation
+                and result.position_observation["outcome_revision"] > action.outcome_revision
+            )
+        )
+
     async def supply_progress(self, session, task_id):
         table = self.tables["face_work"]
         rows = (
@@ -232,19 +267,32 @@ class RollerRepository:
                     manifest["result"] == "RACK_FACE_DONE"
                     or face["feed_cursor"] == len(manifest.get("bins", ()))
                 )
-            withdrawn_before_start = (
+            withdrawn_without_feed = (
                 face["closed_at"] is not None
                 and face["close_reason"] == "WITHDRAWN"
                 and face["demand_state"] == "WITHDRAWN"
                 and face["feed_operation_id"] is None
-                and face["preparation_action_id"] is None
                 and face["feed_cursor"] == 0
                 and face["current_transport_task_id"] is None
+            )
+            withdrawn_before_start = (
+                withdrawn_without_feed and face["preparation_action_id"] is None
             )
             # The cursor advances only after strict original feed success, never submission ACK.
             fed_bin_count = 0 if withdrawn_before_start else None
             if manifest is not None and 0 <= face["feed_cursor"] <= len(manifest.get("bins", ())):
                 fed_bin_count = face["feed_cursor"]
+            elif (
+                withdrawn_without_feed
+                and face["phase"] == "WAIT_RACK"
+                and face["rack_job_id"] is not None
+                and face["preparation_action_id"] is not None
+                and face["feed_message_id"] is None
+                and face["step_id"] is None
+                and face["current_client_request_id"] is None
+                and await self._preparation_cancelled(session, face)
+            ):
+                fed_bin_count = 0
             ids = tuple(
                 str(face[k])
                 for k in (
