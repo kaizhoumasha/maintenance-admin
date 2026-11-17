@@ -224,8 +224,10 @@ class CoarseSortingService:
         active_round = self.mock_rounds.get(row["workline_code"])
         validation = row["validation_response"] or {}
         if (
-            (round_id or validation.get("target") == COARSE_MOCK_DECISIONS_TARGET)
-            and (not round_id or round_id != active_round)
+            (
+                round_id != active_round
+                or (not round_id and validation.get("target") == COARSE_MOCK_DECISIONS_TARGET)
+            )
             and row["state"] != "AWAITING_REPORT"
             and not (known_ng and action and action["kind"] == "MOVE_TO_NG")
         ):
@@ -338,8 +340,6 @@ class CoarseSortingService:
                 )
             ):
                 return await save("VALIDATION_RECONCILIATION_REQUIRED")
-            if round_id != active_round:
-                return await save("MOCK_ROUND_RECONCILIATION_REQUIRED")
             payload = row["payload"]
             operation_id = str(uuid7())
             model = self.validate_bind(
