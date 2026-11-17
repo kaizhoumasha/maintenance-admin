@@ -127,4 +127,6 @@ async def wake_execution(session_factory, execution_id, advance_owned_business):
 
 新登记可显式传入 `ScopeRef(owner_domain, "TASK" | "LINE", scope_id)`；身份和范围一起冻结。终态业务事务调用 `Outbox.stop_scope` 只停止精确匹配的未结束投递，标记 ABANDONED、清除租约和排期。ABANDONED 不表示物理成功/失败或对端取消；已观察响应和原结果继续按各公开读口读取。FACTS/独立报告可保持无范围，不因某 TASK 完成而批量停止。
 
+原业务可以显式指定停止原因读取同一原消息已派发尝试的迟到响应。读口重新核对原尝试、原请求和响应信封，返回原响应记录引用，投递状态仍为 ABANDONED。该读口供停止后的原义务结算，不发新请求。
+
 Sender 以原消息状态/租约为发送门禁；带范围标签的消息提交首个 dispatch_started_at 后才允许 HTTP，未标签消息不写入该新增证据并保持原保守判断；stop 先提交则旧 claim 不能发送，gate 先提交则该原次可能已发送。attempts/last_attempt_at 不是派发证明。两类发送均不回查业务，finish/recovery/settle/resume 不复活 ABANDONED。Transport 公开结果的 submission_dispatch_started 对新范围消息为布尔值，旧未标签消息为 None；不能从消息缺失/投递终态推断从未下发。

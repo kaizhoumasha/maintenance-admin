@@ -1,15 +1,47 @@
 """Shared production completion checks; physical release Results retain their own recovery."""
 
-from collections.abc import Sequence
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 
-from .ports import Scan2Arrival, SupplyProgress
+from .ports import Scan2Arrival, SourceFaceRef, SupplyProgress
 
 
-def supply_accounted_for(progress: Sequence[SupplyProgress], *, production_count: int) -> bool:
-    return (
-        all(p.fed_bin_count is not None for p in progress)
-        and sum(p.fed_bin_count for p in progress) <= production_count
-    )
+async def supply_bypass_evidence(
+    roller,
+    session,
+    *,
+    work_line_id: int,
+    task_id: str,
+    progress: Sequence[SupplyProgress],
+    production_codes: Iterable[str],
+    cancellations: Mapping[SourceFaceRef, tuple[int | str, int]],
+) -> list[list] | None:
+    """Return evidence for actual fed boxes accounted for outside SCAN2."""
+    if any(p.fed_bin_count != len(p.fed_bin_codes) for p in progress):
+        return None
+    supplied = Counter(code for p in progress for code in p.fed_bin_codes)
+    production = Counter(production_codes)
+    missing = supplied - production
+    bypasses = []
+    for fact in progress:
+        cancellation = cancellations.get(fact.source)
+        if cancellation is None:
+            continue
+        original_id, withdrawn_at_ms = cancellation
+        for code in fact.fed_bin_codes:
+            if code not in missing or supplied[code] != 1:
+                continue
+            bypass = await roller.cancelled_bin_bypass(
+                session,
+                work_line_id=work_line_id,
+                task_id=task_id,
+                bin_code=code,
+                withdrawn_at_ms=withdrawn_at_ms,
+            )
+            if bypass is not None:
+                bypasses.append([original_id, *bypass])
+                del missing[code]
+    return None if missing else bypasses
 
 
 async def release_intent(roller, session, *, arrival: Scan2Arrival, task_id, command_code):

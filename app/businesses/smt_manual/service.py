@@ -76,6 +76,21 @@ class SmtManualService(SmtManualTaskFlow):
             task.c.task_type == "MANUAL",
             or_(
                 task.c.status.in_(("QUEUED", "PREPARING", "EXECUTING")),
+                (task.c.status == "CANCELLED")
+                & select(confirmation.c.operation_id)
+                .where(
+                    confirmation.c.task_id == task.c.task_id,
+                    confirmation.c.work_line_id == task.c.work_line_id,
+                    confirmation.c.state == "REQUESTED",
+                    or_(
+                        (confirmation.c.kind == "PREPARE")
+                        & (confirmation.c.operation_id == task.c.prepare_operation_id)
+                        & (confirmation.c.message_id == task.c.prepare_message_id),
+                        (confirmation.c.kind == "COMPLETION_CONFIRM")
+                        & (confirmation.c.operation_id == task.c.confirmation_operation_id),
+                    ),
+                )
+                .exists(),
                 select(notice.c.operation_id)
                 .where(
                     notice.c.task_id == task.c.task_id,

@@ -205,7 +205,7 @@ class RollerRepository:
             raise ValueError("original supply job association mismatch")
         await self.update(session, "face_work", demand_id, rack_job_id=cycle_id)
 
-    async def _preparation_cancelled(self, session, face):
+    async def _withdrawn_preparation(self, session, face):
         job = await self.rack_dispatch.progress(session, job_id=face["rack_job_id"])
         if not job or (
             job.origin.source_kind,
@@ -213,32 +213,88 @@ class RollerRepository:
             job.origin.task_id,
             job.origin.rack_id,
         ) != ("ROLLER_ORDINARY", self.work_line_id, face["scope_id"], face["rack_id"]):
-            return False
+            return False, None
         action = next((a for a in job.actions if a.id == face["preparation_action_id"]), None)
         if not (
             action
             and action.kind in ("ENTER", "ROTATE")
             and action.target_face == face["rack_face"]
-            and action.phase == "APPLIED"
-            and (action.outcome or {}).get("status") == "CANCELLED"
         ):
-            return False
+            return False, None
         result = await self.rack_dispatch.final_result(session, job_id=job.id, action_id=action.id)
-        return bool(
+        if not (
             result
             and result.closure == "CLOSED"
             and result.frozen
             and result.frozen.get("rack_id") == face["rack_id"]
             and result.frozen.get("target_face") == face["rack_face"]
-            and result.outcome
-            and result.outcome["status"] == "CANCELLED"
-            and result.outcome_revision == action.outcome_revision
             and not result.has_pending_outcome
-            and not (
-                result.position_observation
-                and result.position_observation["outcome_revision"] > action.outcome_revision
-            )
+        ):
+            return False, None
+        observation = result.position_observation
+        rejection = (job.closure_basis or {}).get("submission_rejection")
+        not_arrived = (
+            not job.pending
+            and job.closure_reason == "NOT_ARRIVED"
+            and (job.closure_basis or {}).get("action_id") == action.id
         )
+        if result.closure_reason == "SUBMIT_REJECTION":
+            return (
+                not_arrived
+                and bool(rejection)
+                and rejection == result.closure_basis
+                and action.kind == "ENTER"
+                and result.outcome is None
+                and observation is None,
+                None,
+            )
+        if not (
+            action.phase == "APPLIED"
+            and result.outcome
+            and result.outcome == action.outcome
+            and result.outcome_revision == action.outcome_revision
+        ):
+            return False, None
+        if result.outcome["status"] == "FAILED":
+            return (
+                not_arrived
+                and observation is None
+                and not result.outcome["position_unknown"]
+                and bool(result.outcome["final_position"]),
+                None,
+            )
+        if result.outcome["status"] != "CANCELLED":
+            return False, None
+        if not observation or observation["outcome_revision"] <= action.outcome_revision:
+            return True, None
+        if not observation.get("arrival_receipt_id"):
+            return False, None
+        closure = job.closure_basis or {}
+        release = (
+            closure.get("responsibility_release", {})
+            if job.state == "CLOSED_BY_SCOPE"
+            else {
+                **closure,
+                "kind": job.closure_reason,
+            }
+        )
+        departure = next((a for a in job.actions if a.id == release.get("action_id")), None)
+        decision = next(
+            (a for a in job.actions if departure and a.id == departure.previous_action_id), None
+        )
+        handed_off = (
+            not job.pending
+            and action.position_observation == observation
+            and release.get("kind") == "DEPARTURE_ACK"
+            and departure is not None
+            and departure.id == job.current_action_id
+            and (departure.kind, departure.template, departure.phase)
+            == ("DEPART", "CTU03", "ACCEPTED")
+            and bool(departure.acceptance_basis)
+            and decision is not None
+            and (decision.basis or {}).get("position_action_id") == action.id
+        )
+        return True, "HANDED_OFF" if handed_off else "PENDING"
 
     async def supply_progress(self, session, task_id):
         table = self.tables["face_work"]
@@ -280,6 +336,7 @@ class RollerRepository:
             )
             # The cursor advances only after strict original feed success, never submission ACK.
             fed_bin_count = 0 if withdrawn_before_start else None
+            late_arrival = None
             if manifest is not None and 0 <= face["feed_cursor"] <= len(manifest.get("bins", ())):
                 fed_bin_count = face["feed_cursor"]
             elif (
@@ -290,9 +347,10 @@ class RollerRepository:
                 and face["feed_message_id"] is None
                 and face["step_id"] is None
                 and face["current_client_request_id"] is None
-                and await self._preparation_cancelled(session, face)
             ):
-                fed_bin_count = 0
+                no_feed, late_arrival = await self._withdrawn_preparation(session, face)
+                if no_feed:
+                    fed_bin_count = 0
             ids = tuple(
                 str(face[k])
                 for k in (
@@ -318,6 +376,7 @@ class RollerRepository:
                     ),
                     ids,
                     withdrawn_before_start=withdrawn_before_start,
+                    late_arrival=late_arrival,
                     fed_bin_count=fed_bin_count,
                     fed_bin_codes=tuple(
                         item["bin_code"] for item in manifest.get("bins", ())[:fed_bin_count]

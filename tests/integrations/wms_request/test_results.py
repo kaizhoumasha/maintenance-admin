@@ -1,5 +1,5 @@
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -8,9 +8,13 @@ from sqlalchemy import delete, select, update
 from app.core.clock import unix_ms
 from app.core.config import get_settings
 from app.core.identifiers import uuid7
+from app.http_client import DeliveryState, HttpResult
+from app.integrations import history
 from app.integrations.wms_request import WmsRequests
 from app.integrations.wms_request.operation import lookup
 from app.models import ReliableMessage
+from app.reliable import ScopeRef, VerdictKind
+from app.reliable.store import AttemptOutcome, MessageStore
 from tests.helpers import read_history_body, update_message_bodies
 
 OP = "example.decision.ask@v1"
@@ -296,3 +300,49 @@ async def test_result_reader_uses_only_original_terminal_reference(sessions, wms
     async with sessions() as session:
         result = await wms.get_result(session, message_id=mid, operation=OP, operation_id=oid)
         assert result.response_state == "VALID" and result.response_data == {"ok": True}
+
+
+@pytest.mark.parametrize("runtime_authority", [False, True])
+async def test_cancelled_scope_can_read_only_its_original_attempt_reply(
+    sessions, wms, clock, monkeypatch, runtime_authority
+):
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime_authority)
+    scope = ScopeRef("owner", "TASK", "original")
+    wms = WmsRequests(
+        wms.outbox, clock=clock, owner_domain="owner", contract_consumers=lambda _: {"owner"}
+    )
+    oid = str(uuid7())
+    async with sessions.begin() as session:
+        ref = await wms.send(
+            session, lookup(OP).data_model(task_id="T", qty=1), operation_id=oid, scope=scope
+        )
+    identity = dict(message_id=ref.message_id, operation=OP, operation_id=oid)
+    outbox = wms.outbox
+    store = MessageStore(sessions, clock=clock, records=history)
+    (claim,) = await store.claim(1, outbox.targets)
+    target = outbox.targets[claim.message.target]
+    adapter = outbox.adapters[target.protocol]
+    claim = replace(claim, request=adapter.build_request(claim.message, target))
+    assert await store.before_send(claim, target)
+    async with sessions.begin() as session:
+        await outbox.stop_scope(session, scope, reason="TASK_CANCELLED")
+        waiting = await wms.get_result(session, **identity, stopped_reason="TASK_CANCELLED")
+        assert waiting.delivery_status == "ABANDONED" and waiting.awaiting_stopped_response
+    raw = json.dumps(
+        dict(operation_id=oid, code="DECIDED", timestamp=10, data={"ok": True})
+    ).encode()
+    response = HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), raw)
+    verdict = adapter.classify_response(claim.message, response)
+    assert verdict.kind == VerdictKind.DELIVERED
+    assert not await store.finish(claim, AttemptOutcome("DONE", result=response, verdict=verdict))
+    async with sessions() as session:
+        ordinary = await wms.get_result(session, **identity)
+        unrelated = await wms.get_result(session, **identity, stopped_reason="TASK_COMPLETED")
+        observed = await wms.get_result(session, **identity, stopped_reason="TASK_CANCELLED")
+        for current in (ordinary, unrelated):
+            assert current.delivery_status == "ABANDONED" and current.response_state == "NONE"
+        assert observed.delivery_status == "ABANDONED" and not observed.awaiting_stopped_response
+        assert observed.response_state == "VALID" and observed.response_data == {"ok": True}
+        assert observed.late_response_record_id and observed.response_received_at_ms == unix_ms(
+            clock()
+        )

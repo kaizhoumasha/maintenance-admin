@@ -179,7 +179,7 @@ def _ctu_task_stopped(job):
         job.source_kind in ROLLER_SOURCES
         and job.state == "CLOSED_BY_SCOPE"
         and job.scope_kind == "TASK"
-        and (job.closure_basis or {}).get("reason") == "TASK_CANCELLED"
+        and (job.closure_basis or {}).get("reason") in ("TASK_CANCELLED", "TASK_COMPLETED")
     )
 
 
@@ -561,7 +561,11 @@ class RackDispatch:
                     RackJob.state == "NOT_ARRIVED",
                     (RackJob.state == "CLOSED_BY_SCOPE")
                     & (RackJob.scope_kind == "TASK")
-                    & (RackJob.closure_basis["reason"].as_string() == "TASK_CANCELLED"),
+                    & (
+                        RackJob.closure_basis["reason"]
+                        .as_string()
+                        .in_(("TASK_CANCELLED", "TASK_COMPLETED"))
+                    ),
                 ),
                 RackAction.job_id == RackJob.id,
                 RackAction.id == RackJob.current_action_id,
@@ -1431,7 +1435,8 @@ class RackDispatch:
             self._release_scope(job, dict(kind="SUBMIT_REJECTION", **rejection), now_ms)
             return
         last = actions[-1] if actions else None
-        task_cancelled = _ctu_task_stopped(job)
+        stopped_ctu = _ctu_task_stopped(job)
+        task_cancelled = stopped_ctu and job.closure_basis["reason"] == "TASK_CANCELLED"
         unsent_action_id = None
         unsent_departure = None
         if last and last.kind == "DEPART" and last.transport_task_id:
@@ -1447,7 +1452,7 @@ class RackDispatch:
                     dict(kind="DEPARTURE_ACK", action_id=last.id, acceptance_basis=asdict(basis)),
                     now_ms,
                 )
-            if basis is not None or not task_cancelled:
+            if basis is not None or not stopped_ctu:
                 return
             unsent_departure = await self._never_dispatched_move(session, job, last)
             if unsent_departure is None:
@@ -1467,13 +1472,16 @@ class RackDispatch:
             applied_actions = [a for a in actions if a is not last_move]
             last_move = next(a for a in applied_actions if a.id == job.position_action_id)
         cleanup = (
-            task_cancelled
+            stopped_ctu
             and last_move is not None
             and (
                 job.closure_basis.get("ctu_return")
-                or "ctu_box_moves" in job.closure_basis
-                or last_move.phase == "REGISTERED"
                 or (last_move.outcome or {}).get("status") == "CANCELLED"
+                or last.kind in ("DEPARTURE_DECIDE", "DEPART")
+                or (
+                    task_cancelled
+                    and ("ctu_box_moves" in job.closure_basis or last_move.phase == "REGISTERED")
+                )
             )
         )
         applied = await self._applied(session, job, applied_actions)
@@ -1503,7 +1511,7 @@ class RackDispatch:
                         scope=ScopeRef(job.scope_owner, job.scope_kind, job.scope_id),
                         message_id=message_id,
                         operation_id=operation_id,
-                        reason="TASK_CANCELLED",
+                        reason=job.closure_basis["reason"],
                     )
                     if (
                         unsent_departure is not None
@@ -1949,6 +1957,7 @@ class RackDispatch:
         )
 
         stored = previous.decision
+        late_response_id = None
         if (
             previous.operation != OPERATION
             or not previous.decision_operation_id
@@ -1975,6 +1984,7 @@ class RackDispatch:
                 message_id=previous.message_id,
                 operation=previous.operation,
                 operation_id=previous.decision_operation_id,
+                stopped_reason=job.closure_basis["reason"] if _ctu_task_stopped(job) else None,
             )
             if (
                 result.availability != "FOUND"
@@ -1985,6 +1995,7 @@ class RackDispatch:
             ):
                 return False
             stored = result.response_data
+            late_response_id = result.late_response_record_id
         try:
             decision = DECISION.validate_python(stored).model_dump(mode="json")
         except ValueError:
@@ -1997,6 +2008,11 @@ class RackDispatch:
             previous.phase = decision["result"]
             previous.decision = decision
             previous.decision_consumed_at_ms = now_ms
+            if late_response_id is not None:
+                previous.basis = {
+                    **(previous.basis or {}),
+                    "late_response_record_id": late_response_id,
+                }
             if previous.phase == "WAIT":
                 previous.due_at_ms = now_ms + decision["retry_after_ms"]
         return previous.phase == decision["result"]

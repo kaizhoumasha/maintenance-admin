@@ -1,10 +1,8 @@
 """AUTO-owned original release and completion recovery; caller owns one transaction."""
 
-from collections import Counter
-
 from sqlalchemy import select
 
-from app.businesses._components.bin_roller.completion import release_intent, supply_accounted_for
+from app.businesses._components.bin_roller.completion import release_intent, supply_bypass_evidence
 from app.businesses._components.bin_roller.ports import Scan2Arrival, SourceFaceRef
 from app.businesses._components.sorting_task.contracts import CompletionDecision, PrepareAccepted
 from app.businesses._components.sorting_task.request.sorting_task_completion_confirm_v1 import (
@@ -98,11 +96,16 @@ def supply_member_cancelled(member, inputs):
 
 
 def supply_member_closed(member, facts, inputs):
-    """Completed feed or exactly cancelled original never-started public supply."""
-    if len(facts) != 1 or not facts[0].original_ids or facts[0].pending:
+    """Completed feed or an exactly cancelled member with proved zero supply."""
+    if (
+        len(facts) != 1
+        or not facts[0].original_ids
+        or facts[0].pending
+        or facts[0].late_arrival == "PENDING"
+    ):
         return False
     return facts[0].feed_complete or (
-        facts[0].withdrawn_before_start and supply_member_cancelled(member, inputs)
+        facts[0].fed_bin_count == 0 and supply_member_cancelled(member, inputs)
     )
 
 
@@ -603,34 +606,23 @@ class TaskFlow:
                 .order_by(AutoBinWork.id)
             )
         )
-        bypasses = []
-        if task.business_type == "outbound" and not supply_accounted_for(
-            progress, production_count=len(bins)
-        ):
-            production_codes = {b.bin_code for b in bins}
-            fed_codes = Counter(code for fact in progress for code in fact.fed_bin_codes)
-            cancelled = {
-                SourceFaceRef(m.plan_revision, m.rack_id, m.rack_face): m
+        bypasses = await supply_bypass_evidence(
+            self.roller,
+            session,
+            work_line_id=task.work_line_id,
+            task_id=task.task_id,
+            progress=progress,
+            production_codes=(b.bin_code for b in bins),
+            cancellations={
+                SourceFaceRef(m.plan_revision, m.rack_id, m.rack_face): (
+                    m.withdrawn_by_input_id,
+                    m.withdrawn_at_ms,
+                )
                 for m in supplies
-                if supply_member_cancelled(m, inputs)
-            }
-            for fact in progress:
-                member = cancelled.get(fact.source)
-                if member is None:
-                    continue
-                for code in fact.fed_bin_codes:
-                    if fed_codes[code] != 1 or code in production_codes:
-                        continue
-                    bypass = await self.roller.cancelled_bin_bypass(
-                        session,
-                        work_line_id=task.work_line_id,
-                        task_id=task.task_id,
-                        bin_code=code,
-                        withdrawn_at_ms=member.withdrawn_at_ms,
-                    )
-                    if bypass is not None:
-                        bypasses.append([member.withdrawn_by_input_id, *bypass])
-        if not supply_accounted_for(progress, production_count=len(bins) + len(bypasses)):
+                if task.business_type == "outbound" and supply_member_cancelled(m, inputs)
+            },
+        )
+        if bypasses is None:
             return None
         if (
             task.status != "CANCELLED"
