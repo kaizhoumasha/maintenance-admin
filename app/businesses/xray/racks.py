@@ -413,7 +413,10 @@ class XrayRacks:
                 old = await self.observe(
                     session, old, now_ms, prep=prep, allow_departure=authorized
                 )
-            if old.pending or old.closure_reason != "DEPARTURE_ACK":
+            if old.pending or old.closure_reason not in (
+                "DEPARTURE_ACK",
+                "RACK_ALREADY_IN_STORAGE",
+            ):
                 action = old.actions[-1] if old.actions else None
                 if (
                     action
@@ -426,6 +429,8 @@ class XrayRacks:
                 return "RACK_DEPARTURE_PENDING"
             if mode == "DEPART_REQUIRED":
                 prep.pending = False
+                if old.closure_reason == "RACK_ALREADY_IN_STORAGE":
+                    return "RACK_ALREADY_IN_STORAGE"
                 return "RACK_DEPARTURE_ACCEPTED"
 
         if mode == "ROTATE_REQUIRED":

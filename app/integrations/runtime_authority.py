@@ -4,7 +4,7 @@ from app.core.config import get_settings
 
 PREVIOUS_QUERY_REVISION = "http_exchange_query_views"
 QUERY_REVISION = "http_exchange_initiator"
-QUERY_REVISIONS = frozenset({QUERY_REVISION, "smt_auto_outbound_v1"})
+QUERY_REVISIONS = frozenset({QUERY_REVISION, "smt_auto_outbound_v1", "rack_ctu03_storage_release"})
 LEGACY_TABLES = ("integration_exchange", "integration_record", "integration_reference")
 
 
