@@ -1,7 +1,10 @@
 """Coarse sorting Mock decisions and durable test slot reservations."""
 
 import re
+from collections import defaultdict
+from collections.abc import Iterable
 from datetime import UTC, datetime
+from fractions import Fraction
 from hashlib import sha256
 from hmac import compare_digest
 from ipaddress import ip_address
@@ -32,7 +35,7 @@ from app.integrations.wms_request.adapter import (
 )
 from app.models import WorkLine
 
-from .contracts import ALLOCATE, REPORT, VALIDATE, MockRound, RandomMockRound
+from .contracts import ALLOCATE, REPORT, VALIDATE, MockRound, RandomMockCell, RandomMockRound
 from .definition import DEFINITION
 from .mock_storage import CoarseSortingMockRound
 from .request.inbound_coarse_sorting_execution_report_v1 import ExecutionReport
@@ -51,7 +54,7 @@ REEL_BARCODE = re.compile(
 
 
 async def authorize_mock_scan(
-    config: MockRound,
+    rounds_by_workline: dict[str, MockRound],
     session: AsyncSession,
     event: EcsEventEnvelope,
     binding: DeviceBinding | None,
@@ -69,7 +72,8 @@ async def authorize_mock_scan(
     line_code = await session.scalar(
         select(WorkLine.line_code).where(WorkLine.id == binding.work_line_id)
     )
-    if line_code != config.workline_code:
+    config = rounds_by_workline.get(line_code)
+    if config is None:
         return True
     if not real_callback:
         return False
@@ -77,6 +81,10 @@ async def authorize_mock_scan(
         return ip_address(source_ip) in config.ecs_source_ips
     except ValueError:
         return False
+
+
+def _stack_height(reservations: Iterable[dict]) -> Fraction:
+    return sum((Fraction(str(item["thickness_mm"])) for item in reservations), Fraction(0))
 
 
 def _decide(
@@ -90,17 +98,37 @@ def _decide(
         if isinstance(config, RandomMockRound):
             if REEL_BARCODE.fullmatch(payload.barcode) is None:
                 return INVALID
+            if payload.reel_thickness <= 0 and any(
+                cell.max_stack_height_mm is not None for cell in config.empty_cells
+            ):
+                return INVALID
             if not rack_matches:
                 return UNAVAILABLE
             if randbelow(10) == 0:
                 return 200, "DECIDED", {"result": "NG", "reason_code": "MOCK_RANDOM_NG"}
             reservations = state.setdefault("reservations", {})
-            reserved = {reservation["cell"] for reservation in reservations.values()}
-            empty = [index for index in range(len(config.empty_cells)) if index not in reserved]
-            if not empty:
+            by_cell = defaultdict(list)
+            for reservation in reservations.values():
+                by_cell[reservation["cell"]].append(reservation)
+            thickness = Fraction(str(payload.reel_thickness))
+            candidates = []
+            for index, cell in enumerate(config.empty_cells):
+                limit = cell.max_stack_height_mm
+                reserved = by_cell[index]
+                if limit is None:
+                    fits = not reserved
+                else:
+                    fits = _stack_height(reserved) + thickness <= Fraction(str(limit))
+                if fits:
+                    candidates.append(index)
+            if not candidates:
                 return STATE_CONFLICT
             binding_id = f"COARSE-MOCK-{operation_id}"
-            reservations[binding_id] = {"cell": choice(empty)}
+            index = choice(candidates)
+            reserved = {"cell": index}
+            if config.empty_cells[index].max_stack_height_mm is not None:
+                reserved["thickness_mm"] = payload.reel_thickness
+            reservations[binding_id] = reserved
             return 200, "DECIDED", {"result": "OK", "binding_id": binding_id}
 
         if payload.barcode == config.ng_barcode:
@@ -121,8 +149,9 @@ def _decide(
         state["binding_id"] = binding_id
         return 200, "DECIDED", {"result": "OK", "binding_id": binding_id}
 
+    reservations = state.get("reservations", {})
     if isinstance(config, RandomMockRound):
-        reservation = state.get("reservations", {}).get(payload.binding_id)
+        reservation = reservations.get(payload.binding_id)
         if reservation is None:
             return STATE_CONFLICT
         target = config.empty_cells[reservation["cell"]]
@@ -132,10 +161,20 @@ def _decide(
         reservation = state
         target = config.allocation
     if isinstance(payload, StorageAllocate):
+        wait = (200, "DECIDED", {"result": "WAIT", "workline_code": payload.workline_code})
         if not rack_matches or reservation.get("allocated"):
-            return 200, "DECIDED", {"result": "WAIT", "workline_code": payload.workline_code}
+            return wait
+        allocation = target.model_dump(mode="json", exclude={"max_stack_height_mm"})
+        if isinstance(target, RandomMockCell) and target.max_stack_height_mm is not None:
+            stack = [item for item in reservations.values() if item["cell"] == reservation["cell"]]
+            if any(item.get("allocated") and not item.get("reported") for item in stack):
+                return wait
+            height = _stack_height(item for item in stack if item.get("reported"))
+            allocation["reel_totalthickness"] = (
+                height.numerator if height.denominator == 1 else float(height)
+            )
         reservation["allocated"] = True
-        return 200, "DECIDED", target.model_dump(mode="json")
+        return 200, "DECIDED", allocation
 
     if (
         not reservation.get("allocated")
@@ -197,11 +236,11 @@ async def answer(request: Request, endpoint: Endpoint, session: SessionDep) -> R
         payload = model.model_validate(sent["data"])
     except ValueError:
         return respond(*INVALID, now)
-    config = request.app.state.coarse_sorting_mock_round
-    configuration = config.configuration_digest
+    config = request.app.state.coarse_sorting_mock_rounds.get(round_id)
+    configuration = config.configuration_digest if config is not None else None
     body_digest = sha256(raw).hexdigest()
     async with session.begin():
-        if round_id == config.round_id:
+        if config is not None:
             if payload.workline_code != config.workline_code:
                 return respond(*INVALID, now)
             insert = pg_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
@@ -224,7 +263,7 @@ async def answer(request: Request, endpoint: Endpoint, session: SessionDep) -> R
                 return respond(*STATE_CONFLICT, timestamp)
             status = 409 if code == "CONFLICT" else 200
             return respond(status, "DUPLICATE" if code == "RECORDED" else code, data, timestamp)
-        if round_id != config.round_id or ledger.configuration_digest != configuration:
+        if config is None or ledger.configuration_digest != configuration:
             return respond(*STATE_CONFLICT, now)
 
         positions = await session.scalar(

@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from fastapi import FastAPI, Request
+from pytest import mark
 
 from tests.helpers import ecs_status_document, loopback_app, run_alembic
 from tests.migration_helpers import schema_database  # noqa: F401
@@ -30,8 +31,11 @@ async def test_postgres_integration_resumes_original_work_across_processes(schem
     await exercise_integration(url)
 
 
-async def test_configured_mock_line_completes_normal_and_ng_through_the_original_sender(tmp_path):
-    await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'mock.db'}", mock="fixed")
+@mark.parametrize("mode", ["fixed", "dual"])
+async def test_configured_mock_line_completes_normal_and_ng_through_the_original_sender(
+    tmp_path, mode
+):
+    await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'mock.db'}", mock=mode)
 
 
 async def test_postgres_mock_round_with_real_outbox_transactions(schema_database):  # noqa: F811
@@ -166,32 +170,43 @@ async def exercise_integration(integration_database, *, mock=None):
 
     async with loopback_app(peer) as origin:
         if mock:
+            stack_cell = allocation | {"reel_totalthickness": 0, "max_stack_height_mm": 40}
+            config = {
+                "round_id": "test-1",
+                "ecs_source_ips": ["127.0.0.1"],
+                "rack_position": "RACK-POINT",
+            } | (
+                {"normal_barcode": "NORMAL", "ng_barcode": "NG", "allocation": allocation}
+                if mock == "fixed"
+                else {"empty_cells": [stack_cell]}
+            )
+            if mock == "dual":
+                config = [
+                    config
+                    | {
+                        "ecs_source_ips": ["192.0.2.25"],
+                        "rack_position": "CLN01",
+                        "empty_cells": [stack_cell | {"workline_code": "RS01", "rack_id": "CLN01"}],
+                    },
+                    config
+                    | {
+                        "round_id": "test-2",
+                        "empty_cells": [stack_cell | {"workline_code": "RS02", "rack_id": "CLN02"}],
+                    },
+                ]
             await run(
                 "mock",
                 tail=True,
-                COARSE_SORTING_WMS_MOCK=json.dumps(
-                    {
-                        "round_id": "test-1",
-                        "ecs_source_ips": ["127.0.0.1"],
-                        "rack_position": "RACK-POINT",
-                    }
-                    | (
-                        {"empty_cells": [allocation | {"reel_totalthickness": 0}]}
-                        if mock == "random"
-                        else {
-                            "normal_barcode": "NORMAL",
-                            "ng_barcode": "NG",
-                            "allocation": allocation,
-                        }
-                    )
-                ),
+                COARSE_SORTING_WMS_MOCK=json.dumps(config),
             )
             assert not requests and not reports and not transports
-            assert sorted(command["task_type"] for command in commands) == [
-                "MOVE_FORWARD",
-                "MOVE_TO_NG",
-                "PUT_TO_BIN",
-            ]
+            actions = ["MOVE_FORWARD", "MOVE_TO_NG", "PUT_TO_BIN"]
+            if mock != "fixed":
+                actions += ["MOVE_FORWARD", "PUT_TO_BIN"]
+                puts = [wire["params"] for wire in commands if wire["task_type"] == "PUT_TO_BIN"]
+                assert [params["bin_cell_location"] for params in puts] == [2, 2]
+                assert [params["reel_totalthickness"] for params in puts] == [0, 20]
+            assert sorted(command["task_type"] for command in commands) == sorted(actions)
             return
         original = await run("first")
         assert [request["operation"] for request in requests] == [VALIDATE, VALIDATE]
@@ -282,12 +297,14 @@ async def exercise(phase, origin):
     # Drive the worker's task body directly, without a broker or a second sender.
     business_wakeups.enqueue_business = lambda _: None
     if phase in ("first", "mock"):
+        mock_setting = json.loads(os.environ.get("COARSE_SORTING_WMS_MOCK", "{}"))
+        line_code = "RS02" if phase == "mock" and isinstance(mock_setting, list) else "COARSE"
         load_business_models()
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         async with session_factory.begin() as session:
             line, _, _ = await add_bound_device(
-                session, "INPUT", origin, role="INPUT_ARM", line_code="COARSE"
+                session, "INPUT", origin, role="INPUT_ARM", line_code=line_code
             )
             line.business_code = "coarse_sorting"
             line.device_bindings = {
@@ -356,25 +373,28 @@ async def exercise(phase, origin):
                 *a, **kw, client_factory=client_factory
             )
         await stack.enter_async_context(app.router.lifespan_context(app))
-        random_mock = phase == "mock" and isinstance(
-            app.state.coarse_sorting_mock_round, RandomMockRound
+        random_mock = phase == "mock" and any(
+            isinstance(config, RandomMockRound)
+            for config in app.state.coarse_sorting_mock_rounds.values()
         )
         if random_mock:
             from app.businesses.coarse_sorting import mock_wms
 
-            draws = iter((1, 0, 1))
+            draws = iter((1, 0, 1, 1))
             mock_wms.randbelow = lambda _: next(draws)
-        normal, ng, full = (
+        normal, ng, stacked, full = (
             (
                 f"PTEST-{kind},Q2000,MMAKER,D2610,LLOT,SREEL-{kind}"
-                for kind in ("NORMAL", "NG", "FULL")
+                for kind in ("NORMAL", "NG", "STACKED", "FULL")
             )
             if random_mock
-            else ("NORMAL", "NG", "FULL")
+            else ("NORMAL", "NG", "STACKED", "FULL")
         )
         client = await stack.enter_async_context(
             AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         )
+
+        completed_commands = set()
 
         async def complete_commands(results):
             async with asyncio.timeout(12):
@@ -387,6 +407,7 @@ async def exercise(phase, origin):
                                 .where(
                                     IntegrationExchange.task_type.in_(results),
                                     IntegrationExchange.delivery_status == "DONE",
+                                    IntegrationExchange.command_code.not_in(completed_commands),
                                 )
                             )
                         ).all()
@@ -405,6 +426,7 @@ async def exercise(phase, origin):
                     },
                 )
                 assert response.status_code == 200, response.text
+                completed_commands.add(command.command_code)
 
         if phase == "mock":
             probe = {
@@ -434,9 +456,7 @@ async def exercise(phase, origin):
                 runtime,
                 services={
                     **runtime.services,
-                    "coarse_sorting": replace(
-                        runtime.services["coarse_sorting"], mock_workline=None, mock_round_id=None
-                    ),
+                    "coarse_sorting": replace(runtime.services["coarse_sorting"], mock_rounds={}),
                 },
             )
             try:
@@ -482,7 +502,20 @@ async def exercise(phase, origin):
                     await advance_until(expected)
                     response = await client.post(
                         "/api/v1/callback/event",
-                        json=probe | {"timestamp": 3, "data": probe["data"] | {"barcode": full}},
+                        json=probe | {"timestamp": 3, "data": probe["data"] | {"barcode": stacked}},
+                    )
+                    assert response.status_code == 200, response.text
+                    await advance_until(expected | {stacked: "AWAITING_MOVE_RESULT"})
+                    await complete_commands({"MOVE_FORWARD": {"actual_qty": 1}})
+                    await advance_until(expected | {stacked: "AWAITING_PUT_RESULT"})
+                    await complete_commands(
+                        {"PUT_TO_BIN": {"actual_qty": 1, "location": MOCK_OUTPUT_LOCATION}}
+                    )
+                    expected[stacked] = "COMPLETED"
+                    await advance_until(expected)
+                    response = await client.post(
+                        "/api/v1/callback/event",
+                        json=probe | {"timestamp": 4, "data": probe["data"] | {"barcode": full}},
                     )
                     assert response.status_code == 200, response.text
                     expected[full] = "VALIDATION_RECONCILIATION_REQUIRED"

@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
@@ -67,8 +67,7 @@ class CoarseSortingService:
     ng_locations: Mapping[str, str] | None = None
     preparation_table: Table | None = None
     rack_dispatch: RackDispatch | None = None
-    mock_workline: str | None = None
-    mock_round_id: str | None = None
+    mock_rounds: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def direct_put(self) -> bool:
@@ -121,8 +120,8 @@ class CoarseSortingService:
             "reel_diameter": payload.size_inch,
             "reel_thickness": payload.thickness_mm,
         }
-        if self.mock_round_id and line.line_code == self.mock_workline:
-            scan_payload["mock_round_id"] = self.mock_round_id
+        if round_id := self.mock_rounds.get(line.line_code):
+            scan_payload["mock_round_id"] = round_id
         await ctx.session.execute(
             table.insert().values(
                 id=scan_id,
@@ -222,7 +221,7 @@ class CoarseSortingService:
         actions = await self._lock_actions(session, row)
         action = actions.get(row["current_action_id"])
         round_id = row["payload"].get("mock_round_id")
-        active_round = self.mock_round_id if row["workline_code"] == self.mock_workline else None
+        active_round = self.mock_rounds.get(row["workline_code"])
         validation = row["validation_response"] or {}
         if (
             (round_id or validation.get("target") == COARSE_MOCK_DECISIONS_TARGET)

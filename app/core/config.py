@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     COARSE_SORTING_TAIL_ENABLED: bool = False
     COARSE_SORTING_OUTPUT_LOCATIONS: dict[str, str] = Field(default_factory=dict)
     COARSE_SORTING_NG_LOCATIONS: dict[str, str] = Field(default_factory=dict)
-    COARSE_SORTING_WMS_MOCK: dict = Field(default_factory=dict)
+    COARSE_SORTING_WMS_MOCK: dict | list[dict] = Field(default_factory=dict)
     XRAY_TRANSIT_TARGETS: dict[str, dict[str, dict]] = Field(default_factory=dict)
     XRAY_RETURN_RACKS: dict[str, dict] = Field(default_factory=dict)
     XRAY_WMS_MOCK_TARGETS: dict[str, dict[str, dict]] = Field(default_factory=dict)

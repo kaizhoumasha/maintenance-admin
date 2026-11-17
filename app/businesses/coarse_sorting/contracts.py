@@ -130,7 +130,7 @@ class _MockRoundBase(BaseModel):
 
     @property
     def configuration_digest(self) -> str:
-        configuration = self.model_dump(mode="json", exclude={"ecs_source_ips"})
+        configuration = self.model_dump(mode="json", exclude={"ecs_source_ips"}, exclude_none=True)
         if not configuration.get("additional_normal_barcodes"):
             configuration.pop("additional_normal_barcodes", None)
         return canonical_digest(configuration)
@@ -154,8 +154,12 @@ class FixedMockRound(_MockRoundBase):
         return self.allocation.workline_code
 
 
+class RandomMockCell(Allocated):
+    max_stack_height_mm: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+
+
 class RandomMockRound(_MockRoundBase):
-    empty_cells: Annotated[list[Allocated], Field(min_length=1)]
+    empty_cells: Annotated[list[RandomMockCell], Field(min_length=1)]
 
     @property
     def workline_code(self) -> str:
@@ -178,4 +182,16 @@ class RandomMockRound(_MockRoundBase):
 
 
 MockRound = FixedMockRound | RandomMockRound
-mock_round_config = TypeAdapter(MockRound)
+mock_round_config = TypeAdapter(list[MockRound])
+
+
+def parse_mock_rounds(config: dict | list[dict]) -> dict[str, MockRound]:
+    if isinstance(config, dict):
+        config = [config] if config else []
+    rounds = mock_round_config.validate_python(config)
+    by_id = {round_.round_id: round_ for round_ in rounds}
+    if len(by_id) != len(rounds):
+        raise ValueError("Coarse sorting mock requires distinct round IDs")
+    if len({round_.workline_code for round_ in rounds}) != len(rounds):
+        raise ValueError("Coarse sorting mock requires one active round per workline")
+    return by_id
