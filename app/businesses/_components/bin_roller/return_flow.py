@@ -577,7 +577,9 @@ async def close_scope(roller, session, scope: ScopeRef, *, reason):
         .all()
     )
     returns = roller.tables["bin_return"]
-    ctu_box_moves = {} if scope.kind == "TASK" and reason == "TASK_CANCELLED" else None
+    ctu_box_moves = (
+        {} if scope.kind == "TASK" and reason in ("TASK_CANCELLED", "TASK_COMPLETED") else None
+    )
     for face in selected_faces:
         repo = roller.repository(face["work_line_id"])
         if ctu_box_moves is not None and face["rack_job_id"] and face["current_transport_task_id"]:

@@ -126,7 +126,7 @@ catalog 将同键且完整相同的资源合并，资源冲突、输入双重认
 
 BIN_Roller 的 `get_supply_progress` 必须与宿主自己保存的原成员有效/撤销事实一起使用：有效需求要求 feed_complete=true 且 pending=false；未开始撤销可返回 false/false，不要求补造成功。已开始/原 pending 不因撤销跳过，缺预期关联不视为结清；DTO 不提供 withdrawn，宿主不查组件内部表。该进度不等于全局回流或全部架离场，人工完成映射见 [SMT 设计 §7.1](../superpowers/specs/2026-10-31-smt-manual-business-design.md#smt-supply-completion)。
 
-`SupplyProgress.fed_bin_count` 为沿原供箱清单和成功消费游标确认的已投放箱数；原明确空面结束、未开始合法撤销为 0，缺原清单或游标不合法为 None。它不因提交 ACK 或面关闭标记而推断投箱成功。AUTO 和 MANUAL 完成资格复用 `bin_roller.completion.supply_accounted_for`，按任务汇总该数，与原任务已受理生产到箱数核对；宿主不读取组件内部表或建立逐箱供箱映射。两者复用 `release_intent` 核对原 SCAN2 到箱与唯一原放行命令；各自核对生产终局后即可确认，尾箱 Result 独立恢复。
+`SupplyProgress.fed_bin_count` 和 `fed_bin_codes` 沿原供箱清单和成功消费游标确认。明确空面或已有证据的零供箱退订为 0，原清单或游标无法证明时为 None。AUTO 和 MANUAL 按箱码和数量核对原任务已受理的 SCAN2 作业。已取消来源的同一箱有经核对的下游旁路时，该旁路仍关联原供箱和扫码。两者用 `release_intent` 核对原 SCAN2 到箱与唯一原放行命令，各自核对生产终局后即可确认，尾箱 Result 独立恢复。
 
 原供箱检查点尚存时，即使该面或任务已关闭，可靠消息清理也保留其原供箱清单，以支持宿主重查计数；检查点沿既有期限和原架责任门禁清理后解除该引用，不延长保留天数。
 

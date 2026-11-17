@@ -393,7 +393,10 @@ async def advance_cycle(roller, session, cycle_id):
     )
     if ordinary:
         move = next((a for a in reversed(job.actions) if a.kind in ("ENTER", "ROTATE")), None)
-        if move and (move.outcome or {}).get("status") in ("FAILED", "CANCELLED"):
+        rejection = job.closure_reason == "NOT_ARRIVED" and (job.closure_basis or {}).get(
+            "submission_rejection"
+        )
+        if move and (rejection or (move.outcome or {}).get("status") in ("FAILED", "CANCELLED")):
             withdrawn = await session.execute(
                 select(table).where(
                     *repo.scoped(table),
@@ -403,7 +406,9 @@ async def advance_cycle(roller, session, cycle_id):
                 )
             )
             for face in withdrawn.mappings():
-                if _withdrawn_before_use(face):
+                if _withdrawn_before_use(face) and (
+                    not rejection or face["preparation_action_id"] == job.closure_basis["action_id"]
+                ):
                     await repo.close(session, "face_work", face["id"], "WITHDRAWN")
     if not job.pending or job.state != "ACTIVE" or job.release_requested:
         if not job.pending and not ordinary:

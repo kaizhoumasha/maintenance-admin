@@ -6,7 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.businesses._components.bin_roller.completion import supply_accounted_for
+from app.businesses._components.bin_roller.completion import supply_bypass_evidence
 from app.businesses._components.bin_roller.ports import SourceFaceRef, SupplyChange
 from app.businesses._components.bin_roller.service import BinRoller
 from app.businesses._components.sorting_task.contracts import CompletionDecision
@@ -448,6 +448,68 @@ class SmtManualTaskFlow:
         )
         return payload.task_id
 
+    async def reconcile_completion(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: str,
+        operation_id: str,
+        response_timestamp: int,
+        decision_data: dict,
+        evidence_ref: str,
+    ) -> bool:
+        """Attach an operator-verified WMS decision to the exact original request."""
+        if type(response_timestamp) is not int or not 0 <= response_timestamp < 2**63:
+            return False
+        if not evidence_ref.strip():
+            return False
+        await self.repository.original_dispatch_task(session, self.roller, task_id)
+        task = await self.repository.task(session, task_id)
+        if task is None or task["status"] not in {"PREPARING", "EXECUTING"}:
+            return False
+        original = await self.repository.confirmation(session, task)
+        if (
+            original is None
+            or original["operation_id"] != operation_id
+            or original["state"] != "CONFLICT"
+            or original["decision_code"]
+            not in {
+                "COMPLETION_DELIVERY_TERMINAL",
+                "INVALID_COMPLETION_DECISION",
+            }
+            or original["request_snapshot"]
+            != dict(task_id=task_id, last_applied_plan_revision=original["plan_revision"])
+            or original["response"] is None
+        ):
+            return False
+        try:
+            decision = CompletionDecision.parse(200, "DECIDED", decision_data)
+        except ValueError:
+            return False
+        if (
+            decision.result == "PLAN_REVISION_STALE"
+            and decision.current_plan_revision <= original["plan_revision"]
+        ):
+            return False
+        table = self.repository.tables["request"]
+        await session.execute(
+            table.update()
+            .where(table.c.operation == original["operation"], table.c.operation_id == operation_id)
+            .values(
+                state="REQUESTED",
+                decision_code=None,
+                response=dict(
+                    code="DECIDED",
+                    timestamp=response_timestamp,
+                    data=decision_data,
+                    reconciliation=dict(
+                        evidence_ref=evidence_ref, original_response=original["response"]
+                    ),
+                ),
+            )
+        )
+        return True
+
     async def advance_task(
         self, session: AsyncSession, *, task_id: str, locked: bool = False
     ) -> str:
@@ -457,8 +519,9 @@ class SmtManualTaskFlow:
         task = await self.repository.task(session, task_id)
         if task is None:
             return "NOT_FOUND"
-        if task["status"] not in {"PREPARING", "EXECUTING"}:
+        if task["status"] not in {"PREPARING", "EXECUTING", "CANCELLED"}:
             return task["status"]
+        cancelled = task["status"] == "CANCELLED"
         now_ms = unix_ms(self.capabilities.wms.clock())
         if not task["prepare_accepted"]:
             if not task["prepare_message_id"]:
@@ -479,21 +542,43 @@ class SmtManualTaskFlow:
                 .mappings()
                 .one_or_none()
             )
-            if original_prepare is None:
+            if original_prepare is None or (cancelled and original_prepare["state"] != "REQUESTED"):
                 return task["status"]
             result = await self.capabilities.wms.get_result(
                 session,
                 message_id=original_prepare["message_id"],
                 operation="sorting.task.prepare@v1",
                 operation_id=task["prepare_operation_id"],
+                stopped_reason="TASK_CANCELLED" if cancelled else None,
             )
-            if result.availability != "FOUND" or result.response_state != "VALID":
-                return task["status"]
             try:
+                if result.availability != "FOUND" or result.response_state != "VALID":
+                    raise ValueError("original prepare response unavailable")
                 PrepareAccepted.parse(
                     result.http_status, result.response_code, result.response_data
                 )
             except ValueError:
+                if cancelled and result.delivery_terminal and not result.awaiting_stopped_response:
+                    await session.execute(
+                        requests.update()
+                        .where(
+                            requests.c.kind == "PREPARE",
+                            requests.c.operation_id == original_prepare["operation_id"],
+                            requests.c.task_id == task_id,
+                        )
+                        .values(
+                            state="CONFLICT",
+                            decision_code="PREPARE_DELIVERY_TERMINAL",
+                            saved_at_ms=now_ms,
+                            response=dict(
+                                code=result.response_code,
+                                timestamp=result.response_timestamp,
+                                data=result.response_data,
+                                delivery_status=result.delivery_status,
+                                fail_reason=result.fail_reason,
+                            ),
+                        )
+                    )
                 return task["status"]
             await self.repository.save_task(
                 session,
@@ -519,6 +604,11 @@ class SmtManualTaskFlow:
                         code=result.response_code,
                         timestamp=result.response_timestamp,
                         data=result.response_data,
+                        **(
+                            {"late_response_record_id": result.late_response_record_id}
+                            if result.late_response_record_id
+                            else {}
+                        ),
                     ),
                 )
             )
@@ -526,10 +616,28 @@ class SmtManualTaskFlow:
         confirmation = await self.repository.confirmation(session, task)
         if task["confirmation_operation_id"] is not None and confirmation is None:
             return task["status"]
-        ready, basis = await self._completion_basis(session, task, now_ms)
+        ready, basis = (
+            (False, {}) if cancelled else await self._completion_basis(session, task, now_ms)
+        )
         table = self.repository.tables["request"]
-        if confirmation is not None and confirmation["state"] == "REQUESTED":
+        if confirmation is not None and (
+            confirmation["state"] == "REQUESTED"
+            or (
+                confirmation["state"] == "CONFLICT"
+                and confirmation["decision_code"] == "COMPLETED"
+                and ready
+                and basis == confirmation["basis"]
+                and any(
+                    p.late_arrival == "HANDED_OFF"
+                    for p in await self.roller.get_supply_progress(
+                        session, work_line_id=task["work_line_id"], task_id=task_id
+                    )
+                )
+            )
+        ):
             response = confirmation["response"]
+            result = None
+            reason = None
             http_status = 200
             if response is None:
                 result = await self.capabilities.wms.get_result(
@@ -537,38 +645,85 @@ class SmtManualTaskFlow:
                     message_id=confirmation["message_id"],
                     operation="sorting.task.completion_confirm@v1",
                     operation_id=confirmation["operation_id"],
+                    stopped_reason="TASK_CANCELLED" if cancelled else None,
                 )
                 if (
                     result.availability != "FOUND"
                     or result.response_state != "VALID"
                     or result.response_timestamp is None
                 ):
-                    return task["status"]
+                    if not result.delivery_terminal or result.awaiting_stopped_response:
+                        return task["status"]
+                    reason = "COMPLETION_DELIVERY_TERMINAL"
                 http_status = result.http_status
                 response = dict(
                     code=result.response_code,
                     timestamp=result.response_timestamp,
                     data=result.response_data,
+                    **(
+                        {"late_response_record_id": result.late_response_record_id}
+                        if result.late_response_record_id
+                        else {}
+                    ),
                 )
-            try:
-                decision = CompletionDecision.parse(http_status, response["code"], response["data"])
-                if (
-                    decision.result == "PLAN_REVISION_STALE"
-                    and decision.current_plan_revision <= confirmation["plan_revision"]
-                ):
-                    raise ValueError("STALE must exceed the original requested revision")
-            except ValueError:
+            if reason is None:
+                try:
+                    decision = CompletionDecision.parse(
+                        http_status, response["code"], response["data"]
+                    )
+                    if (
+                        decision.result == "PLAN_REVISION_STALE"
+                        and decision.current_plan_revision <= confirmation["plan_revision"]
+                    ):
+                        raise ValueError("STALE must exceed the original requested revision")
+                except ValueError:
+                    if result is None or not result.delivery_terminal:
+                        return task["status"]
+                    reason = (
+                        "INVALID_COMPLETION_DECISION"
+                        if (http_status, result.response_code) == (200, "DECIDED")
+                        else "COMPLETION_DELIVERY_TERMINAL"
+                    )
+            if reason is not None:
+                await session.execute(
+                    table.update()
+                    .where(
+                        table.c.kind == "COMPLETION_CONFIRM",
+                        table.c.operation_id == confirmation["operation_id"],
+                        table.c.task_id == task_id,
+                    )
+                    .values(
+                        state="CONFLICT",
+                        decision_code=reason,
+                        saved_at_ms=now_ms,
+                        response={
+                            **response,
+                            "http_status": http_status,
+                            "delivery_status": result.delivery_status,
+                            "delivery_uncertain": result.delivery_uncertain,
+                            "fail_reason": result.fail_reason,
+                            "response_state": result.response_state,
+                        },
+                    )
+                )
                 return task["status"]
             state = decision.result
             notices = self.repository.tables["input"]
-            if state == "COMPLETED" and await session.scalar(
-                select(notices.c.operation_id)
-                .where(
-                    notices.c.task_id == task_id,
-                    notices.c.operation == BIN_COMPLETION_OPERATION,
-                    notices.c.state == "PENDING",
+            if (
+                state == "COMPLETED"
+                and not cancelled
+                and (
+                    (not ready and basis == confirmation["basis"])
+                    or await session.scalar(
+                        select(notices.c.operation_id)
+                        .where(
+                            notices.c.task_id == task_id,
+                            notices.c.operation == BIN_COMPLETION_OPERATION,
+                            notices.c.state == "PENDING",
+                        )
+                        .limit(1)
+                    )
                 )
-                .limit(1)
             ):
                 if confirmation["response"] is None:
                     await session.execute(
@@ -581,7 +736,7 @@ class SmtManualTaskFlow:
                         .values(response=response)
                     )
                 return task["status"]
-            if state == "COMPLETED" and (not ready or basis != confirmation["basis"]):
+            if state == "COMPLETED" and (cancelled or not ready or basis != confirmation["basis"]):
                 state = "CONFLICT"
             await session.execute(
                 table.update()
@@ -594,13 +749,13 @@ class SmtManualTaskFlow:
                     state="CONFLICT"
                     if state == "CONFLICT"
                     else "WAITING"
-                    if state == "BUSINESS_IN_PROGRESS"
+                    if state == "BUSINESS_IN_PROGRESS" and not cancelled
                     else "CONSUMED",
                     decision_code=decision.result,
                     saved_at_ms=now_ms,
                     response=response,
                     due_at_ms=now_ms + decision.retry_after_ms
-                    if state == "BUSINESS_IN_PROGRESS"
+                    if state == "BUSINESS_IN_PROGRESS" and not cancelled
                     else None,
                 )
             )
@@ -686,46 +841,30 @@ class SmtManualTaskFlow:
         all_progress = await self.roller.get_supply_progress(
             session, work_line_id=task["work_line_id"], task_id=task["task_id"]
         )
-        active_sources = {
-            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+        supply_members = {
+            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"]): m
             for m in members
-            if m["kind"] == "BIN" and m["status"] != "CANCELLED"
+            if m["kind"] == "BIN"
         }
-        cancelled_sources = {
-            SourceFaceRef(m["plan_revision"], m["rack_id"], m["rack_face"])
+        if (
+            len(all_progress) != len(supply_members)
+            or {p.source for p in all_progress} != supply_members.keys()
+        ):
+            return False, {}
+        if any(
+            p.task_id != task["task_id"]
+            or not p.original_ids
+            or p.pending
+            or (not p.feed_complete and supply_members[p.source]["status"] != "CANCELLED")
+            for p in all_progress
+        ):
+            return False, {}
+        if any(
+            (m["status"] == "CANCELLED" and not m["cancelled_operation_id"])
+            or (m["kind"] == "DIRECT" and m["status"] not in {"COMPLETED", "CANCELLED"})
             for m in members
-            if m["kind"] == "BIN" and m["status"] == "CANCELLED"
-        }
-        progress_sources = {p.source for p in all_progress}
-        if progress_sources != active_sources | cancelled_sources:
+        ):
             return False, {}
-        if any(p.pending for p in all_progress if p.source in cancelled_sources):
-            return False, {}
-        progress = tuple(p for p in all_progress if p.source in active_sources)
-        if len(progress) != sum(m["kind"] == "BIN" and m["status"] != "CANCELLED" for m in members):
-            return False, {}
-        for member in members:
-            if member["status"] == "CANCELLED" and not member["cancelled_operation_id"]:
-                return False, {}
-            if member["status"] == "CANCELLED":
-                continue
-            if member["kind"] == "DIRECT":
-                if member["status"] not in {"COMPLETED", "CANCELLED"}:
-                    return False, {}
-                continue
-            matched = [
-                p
-                for p in progress
-                if p.task_id == task["task_id"]
-                and p.source
-                == SourceFaceRef(member["plan_revision"], member["rack_id"], member["rack_face"])
-            ]
-            if len(matched) != 1 or not matched[0].original_ids or matched[0].pending:
-                return False, {}
-            if not matched[0].feed_complete and not (
-                member["status"] == "CANCELLED" and member["cancelled_operation_id"]
-            ):
-                return False, {}
         # Never-admitted HOLD is scan evidence, not an accepted work obligation.
         bins = (
             (
@@ -744,7 +883,52 @@ class SmtManualTaskFlow:
             .mappings()
             .all()
         )
-        if not supply_accounted_for(all_progress, production_count=len(bins)):
+        cancellations = {}
+        cancellation_ids = {
+            m["cancelled_operation_id"]
+            for m in supply_members.values()
+            if m["status"] == "CANCELLED"
+        }
+        if cancellation_ids:
+            inputs = tables["input"]
+            records = {
+                row["operation_id"]: row
+                for row in (
+                    await session.execute(
+                        select(inputs).where(
+                            inputs.c.task_id == task["task_id"],
+                            inputs.c.work_line_id == task["work_line_id"],
+                            inputs.c.operation == "sorting.task.cancel@v1",
+                            inputs.c.operation_id.in_(cancellation_ids),
+                            inputs.c.state == "APPLIED",
+                        )
+                    )
+                ).mappings()
+            }
+            for source, member in supply_members.items():
+                record = records.get(member["cancelled_operation_id"])
+                if (
+                    member["status"] == "CANCELLED"
+                    and record
+                    and record["payload"]["cancel_scope"] == "PLAN_MEMBERS"
+                    and any(
+                        rack["plan_revision"] == member["plan_revision"]
+                        and rack["rack_id"] == member["rack_id"]
+                        and member["rack_face"] in rack["rack_face"]
+                        for rack in record["payload"]["bin_source_racks"] or ()
+                    )
+                ):
+                    cancellations[source] = (record["operation_id"], record["timestamp"])
+        bypasses = await supply_bypass_evidence(
+            self.roller,
+            session,
+            work_line_id=task["work_line_id"],
+            task_id=task["task_id"],
+            progress=all_progress,
+            production_codes=(b["bin_code"] for b in bins),
+            cancellations=cancellations,
+        )
+        if bypasses is None:
             return False, {}
         faces = self.roller.repository(task["work_line_id"]).tables["face_work"]
         if await session.scalar(
@@ -784,13 +968,17 @@ class SmtManualTaskFlow:
         if not await self._rack_completion_ready(session, task, members):
             return False, {}
         # Only business progress belongs here; tail release Results and duplicate receipts do not.
-        return True, dict(
+        basis = dict(
             plan_revision=task["plan_revision"],
             members=[[m["id"], m["status"], m["cancelled_operation_id"]] for m in members],
             arrivals=[
                 [b["arrival_id"], b["command_code"], b["completed_operation_id"]] for b in bins
             ],
         )
+        if bypasses:
+            basis["supply_bypasses"] = bypasses
+        # A saved COMPLETED can still apply to this same basis after the original rack handoff.
+        return not any(p.late_arrival == "PENDING" for p in all_progress), basis
 
     async def _rack_completion_ready(
         self, session: AsyncSession, task: RowMapping, members: Sequence[RowMapping]

@@ -4,27 +4,46 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.businesses._components.bin_roller.completion import release_intent, supply_accounted_for
+from app.businesses._components.bin_roller.completion import release_intent, supply_bypass_evidence
 from app.businesses._components.bin_roller.ports import Scan2Arrival, SourceFaceRef, SupplyProgress
 
 
 @pytest.mark.parametrize(
-    "counts,production_count,expected",
-    [((), 0, True), ((0,), 0, True), ((1, 1), 1, False), ((1, 1), 2, True), ((None,), 5, False)],
+    "count,fed,production,expected",
+    [
+        (0, (), (), True),
+        (2, ("A", "A"), ("A",), False),
+        (2, ("A", "A"), ("A", "A"), True),
+        (2, ("A", "B"), ("A", "C"), False),
+        (2, ("A", "B"), ("B", "A", "C"), True),
+        (None, (), ("A",), False),
+        (1, (), ("A",), False),
+    ],
 )
-def test_supply_requires_known_counts_across_every_source(counts, production_count, expected):
-    progress = tuple(
+async def test_supply_requires_matching_production_for_each_fed_box(
+    count, fed, production, expected
+):
+    progress = (
         SupplyProgress(
             "task",
-            SourceFaceRef(1, f"rack-{index}", "A"),
+            SourceFaceRef(1, "rack", "A"),
             True,
             False,
             ("original",),
             fed_bin_count=count,
-        )
-        for index, count in enumerate(counts)
+            fed_bin_codes=fed,
+        ),
     )
-    assert supply_accounted_for(progress, production_count=production_count) is expected
+    evidence = await supply_bypass_evidence(
+        None,
+        None,
+        work_line_id=1,
+        task_id="task",
+        progress=progress,
+        production_codes=production,
+        cancellations={},
+    )
+    assert (evidence is not None) is expected
 
 
 @pytest.fixture

@@ -38,6 +38,7 @@ class SupplyProgress:
     withdrawn_before_start: bool = False
     fed_bin_count: int | None = None
     fed_bin_codes: tuple[str, ...] = ()
+    late_arrival: Literal["PENDING", "HANDED_OFF"] | None = None
 
 
 @dataclass(frozen=True, slots=True)

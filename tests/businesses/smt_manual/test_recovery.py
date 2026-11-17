@@ -1,5 +1,3 @@
-import pytest
-
 from tests.helpers import read_history_body, update_message_bodies
 
 
@@ -116,16 +114,8 @@ async def test_unassigned_scan4_reaches_drain_through_original_scan_pending(
     assert [d["operation_id"] for d in await flow.rows("drain", component=True)] == [original]
 
 
-@pytest.mark.parametrize(
-    "decision",
-    [
-        dict(result="COMPLETED"),
-        dict(result="PLAN_REVISION_STALE", current_plan_revision=1),
-        dict(result="BUSINESS_IN_PROGRESS", retry_after_ms=1),
-    ],
-)
-async def test_cancelled_task_stops_original_confirmation_consumption(
-    manual_host, manual_completion_tools, decision
+async def test_cancelled_confirmation_needs_proof_of_original_dispatch(
+    manual_host, manual_completion_tools
 ):
     flow = manual_host
     flow.host.first_plan_wait_ms = 1
@@ -136,13 +126,15 @@ async def test_cancelled_task_stops_original_confirmation_consumption(
     assert (
         await flow.deliver(flow.message("cancel", dict(task_id="T1", cancel_scope="TASK")))
     ).status_code == 202
-    await flow.confirmation_response(decision)
-    assert await flow.host.scan_pending(limit=1) == 0
+    await flow.confirmation_response({"result": "COMPLETED"})
+    assert await flow.host.scan_pending(limit=1) == 1
     task = (await flow.rows("task"))[0]
     assert task["status"] == "CANCELLED"
     current = (await flow.rows("confirmation"))[0]
     assert current["operation_id"] == original["operation_id"]
-    assert current["decision_code"] is None and current["state"] == "REQUESTED"
+    assert current["state"] == "CONFLICT"
+    assert current["decision_code"] == "COMPLETION_DELIVERY_TERMINAL"
+    assert current["response"]["data"] is None
     assert await flow.host.scan_pending(limit=1) == 0
     assert len(await flow.confirmations()) == 1
 
@@ -188,7 +180,7 @@ async def test_task_cancel_stops_wait_without_reparenting_on_switch(manual_host)
     assert (await flow.rows("manual_bin"))[0]["command_code"] is None
 
 
-async def test_cancelled_task_keeps_original_late_prepare_result(manual_host):
+async def test_cancelled_prepare_needs_proof_of_original_dispatch(manual_host):
     import json
 
     from sqlalchemy import update
@@ -202,7 +194,6 @@ async def test_cancelled_task_keeps_original_late_prepare_result(manual_host):
     assert (
         await flow.deliver(flow.message("cancel", dict(task_id="T1", cancel_scope="TASK")))
     ).status_code == 202
-    assert await flow.host.scan_pending() == 0
     async with flow.factory.begin() as session:
         await update_message_bodies(
             session,
@@ -219,10 +210,14 @@ async def test_cancelled_task_keeps_original_late_prepare_result(manual_host):
                 )
             ).encode(),
         )
-    assert await flow.host.scan_pending() == 0
+    assert await flow.host.scan_pending() == 1
     current = (await flow.rows("task"))[0]
     assert current["status"] == "CANCELLED" and not current["prepare_accepted"]
     assert current["prepare_operation_id"] == original["prepare_operation_id"]
+    (prepare,) = await flow.rows("request")
+    assert (
+        prepare["state"] == "CONFLICT" and prepare["decision_code"] == "PREPARE_DELIVERY_TERMINAL"
+    )
     assert await flow.host.scan_pending() == 0
 
 

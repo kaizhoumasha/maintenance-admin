@@ -72,10 +72,20 @@ class WmsRequests:
         return names[0]
 
     async def get_result(
-        self, session: AsyncSession, *, message_id: int, operation: str, operation_id: str
+        self,
+        session: AsyncSession,
+        *,
+        message_id: int,
+        operation: str,
+        operation_id: str,
+        stopped_reason: str | None = None,
     ) -> WmsRequestResult:
         return await get_result(
-            session, message_id=message_id, operation=operation, operation_id=operation_id
+            session,
+            message_id=message_id,
+            operation=operation,
+            operation_id=operation_id,
+            stopped_reason=stopped_reason,
         )
 
     async def record_decision_correction(
