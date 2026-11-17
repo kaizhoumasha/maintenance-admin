@@ -156,6 +156,10 @@ class FixedMockRound(_MockRoundBase):
 
 class RandomMockCell(Allocated):
     max_stack_height_mm: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    reel_diameters_inch: (
+        Annotated[list[Annotated[float, Field(gt=0, allow_inf_nan=False)]], Field(min_length=1)]
+        | None
+    ) = None
 
 
 class RandomMockRound(_MockRoundBase):

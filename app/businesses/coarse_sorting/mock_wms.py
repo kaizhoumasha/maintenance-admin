@@ -113,6 +113,11 @@ def _decide(
             thickness = Fraction(str(payload.reel_thickness))
             candidates = []
             for index, cell in enumerate(config.empty_cells):
+                if (
+                    cell.reel_diameters_inch is not None
+                    and payload.reel_diameter not in cell.reel_diameters_inch
+                ):
+                    continue
                 limit = cell.max_stack_height_mm
                 reserved = by_cell[index]
                 if limit is None:
@@ -164,7 +169,9 @@ def _decide(
         wait = (200, "DECIDED", {"result": "WAIT", "workline_code": payload.workline_code})
         if not rack_matches or reservation.get("allocated"):
             return wait
-        allocation = target.model_dump(mode="json", exclude={"max_stack_height_mm"})
+        allocation = target.model_dump(
+            mode="json", exclude={"max_stack_height_mm", "reel_diameters_inch"}
+        )
         if isinstance(target, RandomMockCell) and target.max_stack_height_mm is not None:
             stack = [item for item in reservations.values() if item["cell"] == reservation["cell"]]
             if any(item.get("allocated") and not item.get("reported") for item in stack):

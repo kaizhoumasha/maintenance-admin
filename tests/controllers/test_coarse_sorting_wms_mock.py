@@ -281,6 +281,30 @@ def reel(identity):
     return scan(f"PANY-PART-{identity},Q2000,MMAKER,D2610,LLOT,SREEL-{identity}")
 
 
+@pytest.mark.parametrize(("diameter", "cell_index"), [(7, 1), (13, 7), (15, 7), (8, None)])
+async def test_random_mock_only_allocates_cells_matching_reel_diameter(
+    mock_app, monkeypatch, diameter, cell_index
+):
+    from app.businesses.coarse_sorting import mock_wms
+
+    monkeypatch.setattr(mock_wms, "randbelow", lambda _: 1)
+    first_cell = ALLOCATION | {"reel_diameters_inch": [7], "max_stack_height_mm": 280}
+    large_cell = first_cell | {
+        "cell_id": "TEST-CELL-7",
+        "cell_index": 7,
+        "reel_diameters_inch": [13, 15],
+    }
+    app = mock_app(empty_cells=[first_cell, large_cell])
+    validation = await send(app, "validate_bind", reel("size") | {"reel_diameter": diameter})
+    if cell_index is None:
+        assert validation.status_code == 409
+        return
+    binding = {"binding_id": validation.json()["data"]["binding_id"]}
+    allocation = (await send(app, "storage_allocate", binding)).json()["data"]
+    assert allocation["cell_index"] == cell_index
+    assert "reel_diameters_inch" not in allocation
+
+
 @pytest.mark.parametrize("mock_sessions", ["sqlite", "postgres"], indirect=True)
 async def test_random_mock_stacks_by_thickness_on_both_lines(mock_app, monkeypatch):
     from app.businesses.coarse_sorting import mock_wms
