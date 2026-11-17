@@ -51,7 +51,6 @@ def test_accept_and_reject_are_closed_branch_shapes():
     with pytest.raises(ValidationError):
         RackReject(
             result="REJECT",
-            business_exception_code="MATERIAL_REJECTED",
             ng_locator=dict(type="NG_ZONE", zone_code="NG1"),
             source_disposition="CONTINUE",
         )

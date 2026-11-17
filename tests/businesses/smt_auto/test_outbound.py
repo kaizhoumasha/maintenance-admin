@@ -855,7 +855,6 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
             "outbound.rackslot.material.decide@v1",
             dict(
                 result="REJECT",
-                business_exception_code="MATERIAL_REJECTED",
                 source_disposition="CLOSE",
                 ng_locator=ng,
             ),
@@ -865,6 +864,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
                 session, work_line_id=1, plate_id=plate_id, now_ms=70
             )
             put_code = plate.put_command_code
+            assert put_code
             command = await session.scalar(
                 select(IntegrationExchange).where(
                     IntegrationExchange.role == "ECS_COMMAND",
@@ -1913,18 +1913,25 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
         assert bool(plate.put_command_code) is not rescan
 
 
+@pytest.mark.parametrize("decided_outbound", ["NoRead"], indirect=True)
 @pytest.mark.parametrize(
-    ("placed", "disposition"), [(False, "CLOSE"), (True, "CONTINUE"), (True, "CLOSE")]
+    ("placed", "disposition", "exception_code"),
+    [
+        (False, "CLOSE", "MATERIAL_REJECTED"),
+        (True, "CONTINUE", "BARCODE_INVALID"),
+        (True, "CONTINUE", "SOURCE_CELL_MISMATCH"),
+        (True, "CLOSE", "SOURCE_CELL_MISMATCH"),
+    ],
 )
 async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
-    decided_outbound, placed, disposition
+    decided_outbound, placed, disposition, exception_code
 ):
     host = decided_outbound
     await host.settle(
         "outbound.bin.material.decide@v1",
         dict(
             result="REJECT",
-            business_exception_code="MATERIAL_REJECTED",
+            business_exception_code=exception_code,
             source_disposition=disposition,
             detailMessage="OK",
             target_locator=None,
@@ -1937,6 +1944,8 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
                 session, work_line_id=1, plate_id=host.plate_id, now_ms=now
             )
         assert plate.final_decision_round_id
+        decision = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
+        assert decision.response_snapshot["data"]["business_exception_code"] == exception_code
         assert plate.put_command_code
         code = plate.put_command_code
         line = await session.get(WorkLine, 1)
