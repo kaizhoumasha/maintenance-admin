@@ -2093,7 +2093,11 @@ class CoarseSortingService:
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
-        pending = select(table.c.id).where(table.c.pending.is_(True))
+        now = self.clock()
+        pending = select(table.c.id).where(
+            table.c.pending.is_(True),
+            or_(table.c.next_check_at.is_(None), table.c.next_check_at <= now),
+        )
         if self.ng_locations is None:
             pending = pending.where(
                 table.c.state != "AWAITING_NG",

@@ -70,6 +70,13 @@ class CoarseSortingJob(Base):
         ),
         Index("coarse_sorting_job_state_id_idx", "state", "id"),
         Index("coarse_sorting_job_line_state_idx", "work_line_id", "state"),
+        Index(
+            "coarse_sorting_job_pending_due_idx",
+            "next_check_at",
+            "id",
+            postgresql_where=text("pending"),
+            sqlite_where=text("pending = 1"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)

@@ -150,6 +150,12 @@ class AutoOutboundSourceMember(Base):
             "task_id", "rack_id", "rack_face", name="smt_auto_outbound_source_member_identity"
         ),
         UniqueConstraint("first_work_plan_round_id", name="auto_source_first_round_unique"),
+        Index(
+            "smt_auto_outbound_source_member_terminal_idx",
+            "id",
+            postgresql_where=text("arrived_at_ms IS NOT NULL AND terminal_basis IS NULL"),
+            sqlite_where=text("arrived_at_ms IS NOT NULL AND terminal_basis IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -178,6 +184,22 @@ class AutoBinWork(Base):
     __tablename__ = "smt_auto_bin_work"
     __table_args__ = (
         UniqueConstraint("work_line_id", "arrival_id", name="smt_auto_bin_work_arrival"),
+        Index(
+            "smt_auto_bin_work_pending_idx",
+            "id",
+            postgresql_where=text("pending"),
+            sqlite_where=text("pending = 1"),
+        ),
+        Index(
+            "smt_auto_bin_work_release_idx",
+            "id",
+            postgresql_where=text(
+                "release_command_code IS NOT NULL AND release_consumed_at_ms IS NULL"
+            ),
+            sqlite_where=text(
+                "release_command_code IS NOT NULL AND release_consumed_at_ms IS NULL"
+            ),
+        ),
         CheckConstraint(
             "association IN ('TASK','NO_TASK','EXCEPTION')", name="smt_auto_bin_work_association"
         ),
@@ -213,6 +235,20 @@ class AutoInboundPlate(Base):
     __tablename__ = "smt_auto_inbound_plate"
     __table_args__ = (
         UniqueConstraint("id", "task_id", name="inbound_plate_task"),
+        Index(
+            "smt_auto_inbound_plate_pending_idx",
+            "id",
+            postgresql_where=text("pending"),
+            sqlite_where=text("pending = 1"),
+        ),
+        Index(
+            "smt_auto_inbound_plate_report_idx",
+            "id",
+            postgresql_where=text(
+                "report_message_id IS NOT NULL AND report_consumed_at_ms IS NULL"
+            ),
+            sqlite_where=text("report_message_id IS NOT NULL AND report_consumed_at_ms IS NULL"),
+        ),
         CheckConstraint("grant_kind IN ('READY','NEXT','RETRY')", name="inbound_plate_grant"),
         CheckConstraint(
             "(grant_kind = 'NEXT' AND grant_parent_plate_id IS NOT NULL AND "
@@ -338,6 +374,24 @@ class AutoOutboundPlate(Base):
     __tablename__ = "smt_auto_outbound_plate"
     __table_args__ = (
         UniqueConstraint("id", "task_id", name="outbound_plate_task"),
+        Index(
+            "smt_auto_outbound_plate_pending_idx",
+            "id",
+            postgresql_where=text("pending"),
+            sqlite_where=text("pending = 1"),
+        ),
+        Index(
+            "smt_auto_outbound_plate_report_idx",
+            "id",
+            postgresql_where=text(
+                "report_message_id IS NOT NULL AND report_consumed_at_ms IS NULL "
+                "AND direct_obligations_closed_at_ms IS NULL"
+            ),
+            sqlite_where=text(
+                "report_message_id IS NOT NULL AND report_consumed_at_ms IS NULL "
+                "AND direct_obligations_closed_at_ms IS NULL"
+            ),
+        ),
         CheckConstraint("grant_kind IN ('READY','RETRY')", name="outbound_plate_grant"),
         CheckConstraint(
             "grant_round_id IS NOT NULL",

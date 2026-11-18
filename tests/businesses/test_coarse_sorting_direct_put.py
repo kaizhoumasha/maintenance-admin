@@ -184,6 +184,21 @@ async def test_wait_expiry_opens_one_round_for_original_binding(direct):
     )
 
 
+async def test_scan_pending_skips_future_wait(direct, monkeypatch):
+    flow = direct
+    flow.peer.allocate = {"result": "WAIT", "workline_code": flow.workline}
+    row = await reach_allocate(flow)
+    assert await flow.service.advance(row["id"]) == "NO_AVAILABLE_RACK"
+    called = []
+
+    async def advance(service, identity, **kwargs):
+        called.append(identity)
+
+    monkeypatch.setattr(type(flow.service), "advance", advance)
+    assert await flow.service.scan_pending() == 0
+    assert called == []
+
+
 async def test_unimplemented_departure_preserves_original_decision_without_requery(direct):
     from app.models import ReliableMessage
 
