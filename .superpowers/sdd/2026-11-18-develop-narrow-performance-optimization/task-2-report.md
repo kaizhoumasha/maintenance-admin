@@ -32,3 +32,7 @@ PostgreSQL index creation and PostgreSQL-specific service behavior were not exer
 ## Round 1 follow-up
 
 The existing outbound migration regression test compared the inbound-plate schema snapshot byte-for-byte against the pre-index revision. The test now permits and checks the two intentional pending/report indexes while retaining exact comparisons for all other inbound-plate schema fields and prior indexes. The focused SQLite case passes. PostgreSQL remains skipped without a disposable PostgreSQL URL.
+
+## Round 2 follow-up
+
+The coarse application downgrade helper now invokes the pending-scan-index migration downgrade before the legacy coarse migrations, matching the real head-to-previous order and preventing the old SQLite batch rebuild from referencing the removed `next_check_at` column. The focused SQLite case passes. No production code changed.
