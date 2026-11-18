@@ -50,6 +50,7 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 
 - 当前联调使用 `local`，refresh Cookie 不带 `Secure`，保留 `HttpOnly` 和 `SameSite=Strict`，支持当前 HTTP 同域登录和刷新。正式生产必须切回 `production` 并配置 HTTPS，届时 Cookie 带 `Secure`；联调的 HTTP 验证不替代生产 HTTPS 验收。
 - 本层 nginx 总是把 `X-Forwarded-For` 覆盖成它看到的对端地址(客户端自带的头不会传给 api)。在外层网关之后时,对端是网关 IP,需要在站点专属 nginx 配置的 `server` 里加 `set_real_ip_from <网关地址>; real_ip_header X-Forwarded-For;` 还原,且只信任明确的网关地址,否则限流和审计 IP 会失真。生产制品内的 `deploy/nginx/default.conf` 不可修改,按第 6 节在包外配置并挂载。
+- 默认 nginx 对真实回调入口返回 403。在包外站点配置保留或补齐 `deploy/nginx/default.conf` 的 WMS 和 ECS 回调规则，分别在 `deny all` 前写入实际来源的 `allow <IP 或 CIDR>;`。保留普通 `location /api/` 作为通用转发，并用允许与未允许的来源分别验收。外层代理只有在明确列入 `set_real_ip_from` 且覆盖客户端传入的转发头时，才能用于还原来源。容器内的 Mock 和应用内调试入口沿用原路径。
 - nginx 访问日志不记录查询串和 Referer(用户列表的邮箱/用户名筛选在查询串里)。nginx 的 error 日志在上游出错时仍会带完整请求行,不要把它转发到公共位置。
 - 前端与 `/api` 必须同域(Cookie 是 `SameSite=Strict`)。
 
@@ -79,16 +80,48 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
   docker compose --profile app stop nginx api worker beat
   # 把 .env 里的 JWT_SECRET_KEY 换成新值(openssl rand -hex 32)
   JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh backups/db-<时间>.dump
+  # 核对脚本已完成恢复。若保留了恢复锁，按下文完成收尾后再启动
   docker compose --profile app up -d --force-recreate     # 让所有进程加载新密钥
   ```
 
-  脚本做的事:恢复到全新的临时库(单事务,失败整体回滚并丢弃临时库,原库不动);成功后在**同一个事务里**把原库改名为 `<库>_old_<时间>`、临时库改为原库名(要么都成功,要么都不变);再调用 `scripts/clear_redis_after_restore.sh` 删除 Redis 里的 `refresh:*`、`user_refresh:*` 会话键,以及 Celery 队列(`celery*`,含 kombu 的 `unacked`、`unacked_index` 未确认消息),并校验已清空;限流等其它键不动。没有设 `JWT_ROTATED=yes` 脚本会拒绝执行。
-  - 数据库已切换但 Redis 清理失败时,脚本报错退出:保持 api/worker/beat 停止,排除 Redis 故障后单独执行 `scripts/clear_redis_after_restore.sh`,**不要重新恢复数据库**。
-  - `JWT_ROTATED=yes` 只是你的操作确认,脚本不会校验密钥真的换了;启动前确认 `.env` 里的 `JWT_SECRET_KEY` 与恢复前不同。
-  - 切换失败时原库保持原名,临时库 `<库>_restore` 保留;排除原因(例如连接占用)后直接重跑即可。
+  脚本为每次尝试新建独立临时库，在单个事务内导入备份。导入失败时只清理名称和 OID 均匹配的临时库。导入成功后，在**同一个事务里**把原库改名为 `<库>_old_<时间>`，把临时库改为目标库名。脚本核对切换后的数据库 OID，再调用 `scripts/clear_redis_after_restore.sh` 清除并验证 `refresh:*`、`user_refresh:*`、`celery*`、`unacked` 和 `unacked_index`。限流等其他键保留。启动应用前确认 `.env` 中的 `JWT_SECRET_KEY` 已更新。
+  - 脚本复制数据库属主、是否允许连接、连接权限、连接数限制以及数据库和按角色设置，校验通过才切换库名。原库停用连接时，恢复后的库也保持停用。
+  - 同一 PostgreSQL 实例上，同名目标库一次只接受一项恢复。恢复锁在 PostgreSQL 重启或恢复进程中断后仍有效。数据库切换已提交时，只有完成 TimescaleDB 收尾和 Redis 清理后才能解除恢复锁。
+  - 恢复 TimescaleDB 备份时，脚本在打开临时库前开启数据库级 `timescaledb.restoring`，并检查登录角色及 PostgreSQL 初始化角色的设置有无覆盖。遇到冲突时，核对报错角色的集群级设置和目标库内设置。脚本在临时库校验扩展目录版本。目标库允许连接时，脚本在切换后执行 `SELECT public.timescaledb_post_restore()`。
+  - 脚本确认切换未提交时，原库仍使用原名，日志会报告保留的临时库名和 OID。排除原因（例如连接占用）后可以重跑。如需清理失败的临时库，先确认库名和 OID 均与日志记录一致。若放弃恢复，且原库允许连接并在恢复前运行 TimescaleDB 后台任务，可在原库执行 `SELECT _timescaledb_functions.start_background_workers()` 后恢复应用。
+
+  **恢复锁保留时的处理**
+
+  保持 nginx、api、worker 和 beat 停止，确认所有发起端的本次恢复及其客户端命令均已退出。客户端退出后，PostgreSQL 的切换事务仍可能正在提交。使用实际目标库名，在 `postgres` 维护库查询恢复锁名和 OID。
+
+  ```sql
+  SELECT nspname, oid
+  FROM pg_namespace WHERE nspname = 'restore_guard_' || md5('<目标库名>');
+  ```
+
+  在同一个维护库会话中开启事务并尝试取得切换事务锁。若返回 `f`，执行 `ROLLBACK`，保留恢复锁并检查 PostgreSQL 的切换事务是否还在提交。取得锁并返回 `t` 时，在该事务内执行后续查询。
+
+  ```sql
+  BEGIN ISOLATION LEVEL READ COMMITTED;
+  SELECT pg_try_advisory_xact_lock(<查到的恢复锁 OID>::bigint) AS swap_idle;
+  ```
+
+  ```sql
+  SELECT nspname, oid, obj_description(oid, 'pg_namespace') AS restore
+  FROM pg_namespace WHERE nspname = 'restore_guard_' || md5('<目标库名>')
+    AND oid = <查到的恢复锁 OID>::oid;
+
+  SELECT datname, oid, datallowconn FROM pg_database
+  WHERE datname IN ('<目标库名>', '<记录的 old>', '<记录的 stage>');
+  ```
+
+  - 目标库 OID 等于记录的 `stage_oid`，且 `old` 库 OID 等于 `original_oid`，表示切换已提交。执行 `COMMIT` 结束核对事务。对于 `timescale` 为 `true` 的恢复，若目标库停用连接，确认可以开放后，在维护库执行 `ALTER DATABASE "<目标库名>" ALLOW_CONNECTIONS true`。连接已核对的目标库，检查 `SHOW timescaledb.restoring`，为 `on` 时执行 `SELECT public.timescaledb_post_restore()` 并确认变为 `off`。Redis 清理失败或结果未知时，重试 `scripts/clear_redis_after_restore.sh`。两项均已完成后，确认锁名和锁 OID 仍与本次记录一致，再执行 `DROP SCHEMA "<查到的锁名>"`。按正常流程启动应用。
+  - 目标库 OID 等于 `original_oid`，表示原库仍占用目标库名。核对锁名和锁 OID 后，在持有切换事务锁的同一事务内执行 `DROP SCHEMA "<查到的锁名>"`，再执行 `COMMIT`。排除失败原因后可以重跑。清理临时库前须核对其库名和 OID。
+  - 任一身份无法确认时，执行 `ROLLBACK`，保持服务停止并保留恢复锁，继续核对维护库和发起端日志。
+
   - 恢复后检查:能登录,用户/角色/菜单数量与备份时一致,审计列表可查,恢复前签发的 token 返回 401;确认无误后手动删旧库(`DROP DATABASE "<库>_old_<时间>"`,先 `docker compose exec postgres psql -U admin -d postgres`)。
 - 备份文件含密码哈希、邮箱、授权和审计信息:脚本用 `umask 077`、备份目录 `chmod 700`,文件仅当前用户可读。**升级前已存在的备份不会被追溯修正**,请手动 `chmod 600` 并检查拷贝到其它机器后的权限。
-- 脚本的隔离验收:`scripts/test_backup_restore.sh`(起一次性 Postgres 容器,覆盖备份权限、回退后无残留且可再次建表(不等于真实 Alembic 版本回退后再升级)、切换失败(含第二次改名失败)整体回滚并可重试、Redis 会话/队列/未确认消息被清且不误删其它键、Redis 故障时恢复报告未完成且可单独重试清理、损坏备份不破坏原库、备份失败不留文件、未换密钥拒绝恢复)。改动备份/恢复脚本后要跑。
+- 脚本的隔离验收使用 `scripts/test_backup_restore.sh`，启动一次性 TimescaleDB 和 Redis 容器。覆盖备份权限、数据恢复、临时库同名库保护、两份备份并发恢复、临时库身份变化、改名失败回滚和重试、切换事务等待同步复制时客户端断开、切换提交后收到 SIGTERM、停用连接、时序数据和连续聚合、扩展目录版本不匹配、角色设置冲突、切换前重启 PostgreSQL、后台任务的启动时机、Redis 清理和独立重试、损坏备份、备份失败清理及密钥轮换确认。版本回退用建表和写入模拟。改动备份或恢复脚本后运行。
 
 ## 5. 本地升级与回退演练(允许停机)
 
@@ -584,10 +617,10 @@ PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 
 有存量 SMT 任务的站点分两次迁移。清理命令缺少验收参数时，普通 `upgrade head` 会拒绝升级到清理版本。
 
 1. 停止 API、Worker、Beat 和所有仍写旧任务表的进程并完成备份。先执行 `uv run alembic upgrade sorting_task_authority`。迁移会复制任务状态和恢复字段、切换 AUTO 明细外键并保留两张旧表。出现重复任务号或同一工作线有多个进行中任务时，先核对原任务归属与执行事实。
-2. 启动新版服务。核对任务归属与恢复字段，验证进行中的任务消费原 `prepare`，原收据可重放，归档任务不能重开。
+2. 用与 `sorting_task_authority` 阶段匹配的发布包启动服务。核对任务归属与恢复字段，验证进行中的任务消费原 `prepare`，原收据可重放，归档任务不能重开。
 3. 验收通过后，在独立维护窗口暂停写入，执行 `uv run alembic -x sorting_task_cleanup_verified=true upgrade sorting_task_cleanup`。迁移会核对原任务身份和外键，再删除两张旧表。空库可直接迁移到 `head`。
 
-使用发布包时，沿用站点的 Compose 文件组合。第一次迁移用 `dc run --rm --no-deps migrate alembic upgrade sorting_task_authority`，然后用 `dc up -d --no-deps --no-build --pull never --force-recreate api worker beat` 启动新版服务，避免 Compose 自动推进到清理版本。验收后用 `dc run --rm --no-deps migrate alembic -x sorting_task_cleanup_verified=true upgrade sorting_task_cleanup` 执行清理。
+使用发布包时，沿用站点的 Compose 文件组合。第一次迁移用 `dc run --rm --no-deps migrate alembic upgrade sorting_task_authority`，然后在该阶段发布包目录用 `dc up -d --no-deps --no-build --pull never --force-recreate api worker beat` 启动服务。验收后用下一阶段发布包执行 `dc run --rm --no-deps migrate alembic -x sorting_task_cleanup_verified=true upgrade sorting_task_cleanup`。当前最终发布包的启动检查要求数据库已升级到该包的迁移版本。
 
 恢复写入后，旧表快照会落后于主表。在清理前尝试回退时，主表切换迁移会检查差异并拒绝可能丢失新事实的降级。
 
@@ -597,7 +630,7 @@ PostgreSQL 固定使用 `enterprise_backend` schema；数据库名称与 schema 
 
 1. 停机前取回旧版本完整发布目录和正确恢复点,执行 `verify`、`load`,确认应用 image ID、平台及基础设施制品可用。首次给历史版本补档时,逐个记录正在运行的 api/worker/beat/migrate 的镜像 ID;若四者不同就分别打保留标签、`docker image save` 并保存原配置,不能只保存 API 镜像或从旧代码重建冒充原制品。
 2. 在当前版本目录停止 nginx/api/worker/beat,确认无写入。确认恢复点及其后的数据损失可接受,并在 shared/.env 换成全新 JWT 密钥。
-3. 使用已验收的恢复工具恢复该备份(`JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh <备份>`);配置 `COMPOSE_PROJECT_NAME` 保持原项目。Redis 清理失败只重试清理,不重复恢复数据库。
+3. 使用已验收的恢复工具恢复该备份（`JWT_ROTATED=yes CONFIRM=yes scripts/restore_pg.sh <备份>`），保持原项目的 `COMPOSE_PROJECT_NAME`。若恢复锁保留，按第 4 节核对数据库身份并完成收尾。
 4. 恢复脚本只报告数据库/Redis 完成,不会选择或启动应用。进入目标旧版本目录,链接同一 shared/.env,确认 `image.env` 选择的是旧镜像及站点配置与旧版本兼容。按上述相同命令(包含 release 和 site 覆盖文件)先检查旧镜像迁移,成功后 `up -d --no-build --pull never --force-recreate`。不得使用 `build`、`--build` 或当前版本的 image.env。恢复前确认待启动配置和数据卷仍属于同一 Compose 项目。
 5. 执行旧包的 `check` 并检查数据库版本,再验收旧版本接口、新登录、旧 access/refresh 均 401、菜单权限、审计及队列任务。全部成功前保留备份、旧库和新旧两套制品。
 
