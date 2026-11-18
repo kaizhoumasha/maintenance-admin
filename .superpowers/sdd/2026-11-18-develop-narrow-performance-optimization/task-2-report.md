@@ -28,3 +28,7 @@ The new tests were run before production changes. The migration assertion failed
 ## Concerns
 
 PostgreSQL index creation and PostgreSQL-specific service behavior were not exercised locally because the disposable PostgreSQL test URL was unavailable. The migration uses matching partial predicates for SQLite and PostgreSQL and should be validated in CI.
+
+## Round 1 follow-up
+
+The existing outbound migration regression test compared the inbound-plate schema snapshot byte-for-byte against the pre-index revision. The test now permits and checks the two intentional pending/report indexes while retaining exact comparisons for all other inbound-plate schema fields and prior indexes. The focused SQLite case passes. PostgreSQL remains skipped without a disposable PostgreSQL URL.
