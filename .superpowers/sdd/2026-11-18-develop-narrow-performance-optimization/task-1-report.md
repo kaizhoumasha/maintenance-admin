@@ -26,3 +26,9 @@
 ## 未覆盖范围
 
 未运行完整测试套件，也未进行真实 PostgreSQL 查询计划或生产流量验证。此次改动只覆盖分页 schema 和对应回归测试。
+
+## Review round 1 修复
+
+- 将 `PageParams.check_offset` 的 INT64 范围检查恢复到业务 `MAX_OFFSET` 检查之前，确保数据库范围错误仍可独立触发。
+- 增加 `PageParams(page=9223372036854775809, page_size=1)` 的直接 schema 回归测试，并断言其继续返回“分页 OFFSET 超出数据库范围”。
+- 修复后分页控制器与服务测试共 50 项通过，目标 Ruff 检查通过。

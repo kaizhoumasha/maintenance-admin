@@ -17,10 +17,10 @@ class PageParams(BaseModel):
 
     @model_validator(mode="after")
     def check_offset(self) -> Self:
-        if self.offset > MAX_OFFSET:
-            raise ValueError("分页 OFFSET 超出允许范围")
         if self.offset > 2**63 - 1:
             raise ValueError("分页 OFFSET 超出数据库范围")
+        if self.offset > MAX_OFFSET:
+            raise ValueError("分页 OFFSET 超出允许范围")
         return self
 
     @property
