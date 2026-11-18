@@ -1845,7 +1845,7 @@ class Outbound:
         for plate in plates:
             if plate.id in decisions or plate.id in waiting_picks:
                 continue
-            if not replacements or not await self.closed(session, plate):
+            if not await self.closed(session, plate):
                 return "CONTINUE"
         if replacements:
             for plate in plates:
