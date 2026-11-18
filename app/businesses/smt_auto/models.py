@@ -120,6 +120,7 @@ class AutoSupplyMember(Base):
     withdrawn_by_input_id: Mapped[int | None] = mapped_column(ForeignKey("smt_auto_task_input.id"))
     withdrawn_at_ms: Mapped[int | None] = mapped_column(BigInteger)
     supply_change_id: Mapped[str] = mapped_column(String(200))
+    manual_bypass_evidence: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
 
 
 class AutoInboundSourceMember(Base):

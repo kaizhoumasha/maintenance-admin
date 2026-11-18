@@ -46,6 +46,51 @@ async def test_supply_requires_matching_production_for_each_fed_box(
     assert (evidence is not None) is expected
 
 
+async def test_manual_scan1_scan2_bypass_accounts_for_cancelled_supply():
+    source = SourceFaceRef(5, "510007", "90")
+    evidence = await supply_bypass_evidence(
+        None,
+        None,
+        work_line_id=6,
+        task_id="task",
+        progress=(
+            SupplyProgress(
+                "task",
+                source,
+                True,
+                False,
+                ("passage",),
+                fed_bin_count=1,
+                fed_bin_codes=("A000000070",),
+            ),
+        ),
+        production_codes=(),
+        cancellations={source: (55, 1794951693472)},
+        manual_bypasses={
+            source: {
+                "kind": "MANUAL_SCAN1_SCAN2_BYPASS",
+                "bin_code": "A000000070",
+                "from_point": "SCAN1",
+                "to_point": "SCAN2",
+                "recorded_at_ms": 1795028000000,
+            }
+        },
+    )
+    assert evidence == [
+        [
+            55,
+            "MANUAL_SCAN1_SCAN2_BYPASS",
+            {
+                "kind": "MANUAL_SCAN1_SCAN2_BYPASS",
+                "bin_code": "A000000070",
+                "from_point": "SCAN1",
+                "to_point": "SCAN2",
+                "recorded_at_ms": 1795028000000,
+            },
+        ]
+    ]
+
+
 @pytest.fixture
 def original_release():
     arrival = Scan2Arrival("arrival", 1, "SCAN2", "A000000001-C", "A000000001", 100)
