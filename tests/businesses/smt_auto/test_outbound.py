@@ -50,6 +50,30 @@ from tests.businesses.rack_dispatch import apply_outcome, origin, respond
 from tests.helpers import read_history_body
 
 
+class _TrackingFactory:
+    def __init__(self, factory):
+        self.factory = factory
+        self.active = 0
+
+    def __call__(self, *args, **kwargs):
+        context = self.factory(*args, **kwargs)
+        tracker = self
+
+        class Context:
+            async def __aenter__(self):
+                session = await context.__aenter__()
+                tracker.active += 1
+                return session
+
+            async def __aexit__(self, *exc_info):
+                try:
+                    return await context.__aexit__(*exc_info)
+                finally:
+                    tracker.active -= 1
+
+        return Context()
+
+
 @pytest.fixture(params=[("ARM02", "ARM01"), ("ARM04", "ARM03")])
 async def outbound_host(s5_roller, request, monkeypatch):
     host = s5_roller
@@ -1015,6 +1039,62 @@ async def decided_outbound(outbound_host, request):
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=50)
     return host
+
+
+async def test_pending_scan_closes_snapshot_before_advance(outbound_host, monkeypatch):
+    from dataclasses import replace
+
+    from app.businesses.smt_auto.service import SmtAutoService
+
+    host = outbound_host
+    service = SmtAutoService(
+        replace(host.dispatch.capabilities, ecs=host.ecs),
+        worklines=(),
+    )
+    service.dispatch = host.dispatch
+    service.roller = host.roller
+    service._pending = lambda _: {
+        "TASK": select(AutoTask.task_id).where(
+            AutoTask.status.in_(("QUEUED", "PREPARING", "EXECUTING"))
+        )
+    }
+
+    async def no_upper(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service.dispatch, "pending_upper_id", no_upper)
+    monkeypatch.setattr(service.roller, "get_pending_upper_id", no_upper)
+    tracker = _TrackingFactory(host.factory)
+    service.capabilities = replace(service.capabilities, session_factory=tracker)
+    visited = []
+    active_at_advance = []
+
+    async def advance(kind, record_id, **kwargs):
+        visited.append(record_id)
+        active_at_advance.append(tracker.active)
+        async with host.factory.begin() as session:
+            session.add(
+                AutoTask(
+                    task_id="zz-late",
+                    task_type="AUTO",
+                    business_type="outbound",
+                    work_line_id=1,
+                    workline_code="LINE",
+                    issued_operation_id="late-issued",
+                    issued_timestamp=2,
+                    issued_data={},
+                    status="QUEUED",
+                    queue_revision=1,
+                    dispatch_sequence=2,
+                    plan_revision=0,
+                    pending=True,
+                )
+            )
+
+    monkeypatch.setattr(service, "advance", advance)
+    assert await service.scan_pending(limit=1) == 1
+    assert visited == ["t"]
+    assert active_at_advance == [0]
 
 
 @pytest.mark.parametrize(

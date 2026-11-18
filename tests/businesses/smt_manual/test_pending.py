@@ -7,11 +7,42 @@ from app.businesses.runtime import Capabilities
 from app.businesses.smt_manual.service import KINDS, SmtManualService
 
 
+class _TrackingFactory:
+    def __init__(self, factory):
+        self.factory = factory
+        self.active = 0
+
+    def __call__(self, *args, **kwargs):
+        context = self.factory(*args, **kwargs)
+        tracker = self
+
+        class Context:
+            async def __aenter__(self):
+                try:
+                    session = await context.__aenter__()
+                except Exception:
+                    raise
+                tracker.active += 1
+                return session
+
+            async def __aexit__(self, *exc_info):
+                try:
+                    return await context.__aexit__(*exc_info)
+                finally:
+                    tracker.active -= 1
+
+        return Context()
+
+
 @pytest.mark.parametrize("later_task_id", ["T9", "T15"])
 async def test_pending_pages_cover_production_and_all_roller_kinds(
     manual_host, monkeypatch, later_task_id
 ):
     flow = manual_host
+    from dataclasses import replace
+
+    tracker = _TrackingFactory(flow.factory)
+    flow.host.capabilities = replace(flow.host.capabilities, session_factory=tracker)
     for i in range(3):
         await flow.issue(f"T{i}")
     async with flow.factory.begin() as session:
@@ -141,9 +172,11 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                 )
             )
     visited = []
+    active_at_advance = []
 
     async def waiting(kind, record_id):
         visited.append((kind, record_id))
+        active_at_advance.append(tracker.active)
         if len(visited) == 1:
             await flow.issue(later_task_id)
             raise RuntimeError("one original item failed")
@@ -151,6 +184,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
 
     monkeypatch.setattr(flow.host, "advance", waiting)
     assert await flow.host.scan_pending(limit=1) == len(KINDS) * 3
+    assert set(active_at_advance) == {0}
     assert [k for k, _ in visited[: len(KINDS)]] == list(KINDS)
     assert all(sum(k == kind for k, _ in visited) == 3 for kind in KINDS)
     assert [rid for kind, rid in visited if kind == "SCAN2_RELEASE"] == [
@@ -161,6 +195,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
     assert ("TASK", later_task_id) not in visited
     visited.clear()
     assert await flow.host.scan_pending(limit=2) == len(KINDS) * 3 + 1
+    assert set(active_at_advance) == {0}
     assert ("TASK", later_task_id) in visited
 
 

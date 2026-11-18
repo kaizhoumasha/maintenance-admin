@@ -110,24 +110,29 @@ class SmtManualService(SmtManualTaskFlow):
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         task_id = self.repository.tables["task"].c.task_id
+        upper = {}
         async with self.capabilities.session_factory() as snapshot, snapshot.begin():
             if snapshot.get_bind().dialect.name == "postgresql":
                 # Peer task/operation IDs need not increase with local acceptance time.
                 await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
                 await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            upper = {
-                "TASK": await snapshot.scalar(
-                    self._pending_tasks().order_by(task_id.desc()).limit(1)
-                )
-            }
+            upper["TASK"] = await snapshot.scalar(
+                self._pending_tasks().order_by(task_id.desc()).limit(1)
+            )
             for kind in KINDS[1:]:
                 upper[kind] = await self._pending_owner(kind).get_pending_upper_id(
                     snapshot, kind=kind
                 )
-            cursors = {kind: None for kind in KINDS if upper[kind] is not None}
-            total = 0
-            while cursors:
-                for kind in tuple(cursors):
+        cursors = {kind: None for kind in KINDS if upper[kind] is not None}
+        total = 0
+        while cursors:
+            for kind in tuple(cursors):
+                async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                    if snapshot.get_bind().dialect.name == "postgresql":
+                        await snapshot.connection(
+                            execution_options={"isolation_level": "REPEATABLE READ"}
+                        )
+                        await snapshot.execute(text("SET TRANSACTION READ ONLY"))
                     if kind == "TASK":
                         query = self._pending_tasks().where(task_id <= upper[kind])
                         if cursors[kind] is not None:
@@ -142,24 +147,24 @@ class SmtManualService(SmtManualTaskFlow):
                             limit=limit,
                         )
                         ids = tuple(w.record_id for w in page) if kind in ROLLER_KINDS else page
-                    if not ids:
-                        del cursors[kind]
-                        continue
-                    for record_id in ids:
-                        try:
-                            await self.advance(kind, record_id)
-                        except Exception as error:
-                            log_exception(
-                                logger,
-                                "SMT manual advance failed",
-                                error,
-                                component="smt_manual",
-                                phase="advance",
-                                context={"request_id": record_id},
-                            )
-                        total += 1
-                    cursors[kind] = ids[-1]
-            return total
+                if not ids:
+                    del cursors[kind]
+                    continue
+                for record_id in ids:
+                    try:
+                        await self.advance(kind, record_id)
+                    except Exception as error:
+                        log_exception(
+                            logger,
+                            "SMT manual advance failed",
+                            error,
+                            component="smt_manual",
+                            phase="advance",
+                            context={"request_id": record_id},
+                        )
+                    total += 1
+                cursors[kind] = ids[-1]
+        return total
 
     async def advance(self, kind: str, record_id: str) -> str:
         if kind not in KINDS:
