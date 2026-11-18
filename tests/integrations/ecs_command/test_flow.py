@@ -997,6 +997,7 @@ async def test_loopback_command_result_and_reference_consumption(
     result_timing,
 ):
     import asyncio
+    from dataclasses import replace
 
     import httpx
     from fastapi import FastAPI, Request
@@ -1019,8 +1020,12 @@ async def test_loopback_command_result_and_reference_consumption(
     requests = []
     received_results = []
 
+    # The command ACK may wait for a complete callback round trip on a loaded CI runner.
+    target = replace(ecs.targets["ecs"], timeout_ms=30_000, read_timeout_ms=30_000)
     async with loopback_server(receiver) as callback_origin:
-        async with httpx.AsyncClient(base_url=callback_origin, trust_env=False) as client:
+        async with httpx.AsyncClient(
+            base_url=callback_origin, timeout=20, trust_env=False
+        ) as client:
 
             async def report(code):
                 body = reference.result_body(code, device_result)
@@ -1045,10 +1050,12 @@ async def test_loopback_command_result_and_reference_consumption(
                     lifecycles={PROTOCOL: EcsLifecycle(ecs.service)},
                     records=history_records,
                 )
-                sender = Sender(store, ecs.targets, ecs.adapters, {}, provider=DynamicClients())
+                sender = Sender(
+                    store, {target.name: target}, ecs.adapters, {}, provider=DynamicClients()
+                )
                 try:
                     assert await sender.tick() == 1
-                    async with asyncio.timeout(10):
+                    async with asyncio.timeout(35):
                         await asyncio.gather(*list(sender.inflight))
                     async with ecs.factory.begin() as session:
                         view = await ecs.service.get_command(
