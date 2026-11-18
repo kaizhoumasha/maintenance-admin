@@ -230,6 +230,42 @@ async def test_completion_accounts_for_original_cancelled_bin_at_scan3(
             assert await flow.advance(session, task_id="t", now_ms=250) == "COMPLETED"
 
 
+async def test_completion_accounts_for_recorded_manual_scan1_scan2_bypass(s5_roller):
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = s5_roller
+    await completed_supply(host, count=2)
+    flow = TaskFlow(host.requests, roller=host.roller, dispatch=host.dispatch)
+    await terminal_bin(host, flow)
+    async with host.factory.begin() as session:
+        cancel = AutoTaskInput(
+            task_id="t",
+            operation="sorting.task.cancel@v1",
+            operation_id="cancel",
+            request_timestamp=210,
+            first_received_at_ms=210,
+            effective_digest="cancel",
+            contract_version="1",
+            effective_request={
+                "cancel_scope": "PLAN_MEMBERS",
+                "bin_source_racks": [{"plan_revision": 1, "rack_id": "R", "rack_face": ["90"]}],
+            },
+            disposition="APPLIED",
+        )
+        session.add(cancel)
+        await session.flush()
+        member = await session.scalar(select(AutoSupplyMember))
+        member.withdrawn_at_ms, member.withdrawn_by_input_id = 210, cancel.id
+        member.manual_bypass_evidence = {
+            "kind": "MANUAL_SCAN1_SCAN2_BYPASS",
+            "bin_code": "A000000002",
+            "from_point": "SCAN1",
+            "to_point": "SCAN2",
+            "recorded_at_ms": 220,
+        }
+        assert await flow.advance(session, task_id="t", now_ms=230) == "CONFIRMING"
+
+
 @pytest.mark.parametrize("count", [1, 2])
 async def test_successful_supply_waits_for_bins_to_enter_production(s5_roller, count):
     from app.businesses.smt_auto.task_flow import TaskFlow

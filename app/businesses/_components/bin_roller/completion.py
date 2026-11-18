@@ -15,6 +15,7 @@ async def supply_bypass_evidence(
     progress: Sequence[SupplyProgress],
     production_codes: Iterable[str],
     cancellations: Mapping[SourceFaceRef, tuple[int | str, int]],
+    manual_bypasses: Mapping[SourceFaceRef, Mapping] | None = None,
 ) -> list[list] | None:
     """Return evidence for actual fed boxes accounted for outside SCAN2."""
     if any(p.fed_bin_count != len(p.fed_bin_codes) for p in progress):
@@ -31,15 +32,30 @@ async def supply_bypass_evidence(
         for code in fact.fed_bin_codes:
             if code not in missing or supplied[code] != 1:
                 continue
-            bypass = await roller.cancelled_bin_bypass(
-                session,
-                work_line_id=work_line_id,
-                task_id=task_id,
-                bin_code=code,
-                withdrawn_at_ms=withdrawn_at_ms,
-            )
+            evidence = (manual_bypasses or {}).get(fact.source)
+            bypass = None
+            if roller is not None:
+                bypass = await roller.cancelled_bin_bypass(
+                    session,
+                    work_line_id=work_line_id,
+                    task_id=task_id,
+                    bin_code=code,
+                    withdrawn_at_ms=withdrawn_at_ms,
+                )
             if bypass is not None:
                 bypasses.append([original_id, *bypass])
+                del missing[code]
+                continue
+            if (
+                isinstance(evidence, Mapping)
+                and evidence.get("kind") == "MANUAL_SCAN1_SCAN2_BYPASS"
+                and evidence.get("bin_code") == code
+                and evidence.get("from_point") == "SCAN1"
+                and evidence.get("to_point") == "SCAN2"
+                and isinstance(evidence.get("recorded_at_ms"), int)
+                and evidence["recorded_at_ms"] >= withdrawn_at_ms
+            ):
+                bypasses.append([original_id, "MANUAL_SCAN1_SCAN2_BYPASS", dict(evidence)])
                 del missing[code]
     return None if missing else bypasses
 

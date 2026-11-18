@@ -621,6 +621,11 @@ class TaskFlow:
                 for m in supplies
                 if task.business_type == "outbound" and supply_member_cancelled(m, inputs)
             },
+            manual_bypasses={
+                SourceFaceRef(m.plan_revision, m.rack_id, m.rack_face): m.manual_bypass_evidence
+                for m in supplies
+                if m.manual_bypass_evidence is not None
+            },
         )
         if bypasses is None:
             return None
