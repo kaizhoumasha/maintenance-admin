@@ -9,7 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 from app.businesses._components.rack_dispatch.composition import COMPONENT
 
 from . import composition
-from .contracts import Reference, mock_round_config
+from .contracts import Reference, parse_mock_rounds
 from .definition import DEFINITION as DEFINITION
 from .ecs_command import MoveToNg, PutToBin
 
@@ -46,7 +46,7 @@ def validate_configuration(settings) -> None:
             COARSE_MOCK_FACTS_TARGET,
         )
 
-        mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
+        parse_mock_rounds(settings.COARSE_SORTING_WMS_MOCK)
         for protocol, name in (
             ("wms-decisions", COARSE_MOCK_DECISIONS_TARGET),
             ("wms-facts", COARSE_MOCK_FACTS_TARGET),
@@ -78,9 +78,7 @@ def build_service(capabilities):
     from app.core import get_settings
 
     settings = get_settings()
-    mock = None
-    if settings.COARSE_SORTING_WMS_MOCK:
-        mock = mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
+    rounds = parse_mock_rounds(settings.COARSE_SORTING_WMS_MOCK)
     return replace(
         composition.build_rack_service(
             capabilities,
@@ -88,6 +86,5 @@ def build_service(capabilities):
             clock=lambda: datetime.now(UTC),
         ),
         ng_locations=settings.COARSE_SORTING_NG_LOCATIONS,
-        mock_workline=mock.workline_code if mock else None,
-        mock_round_id=mock.round_id if mock else None,
+        mock_rounds={config.workline_code: round_id for round_id, config in rounds.items()},
     )
