@@ -40,6 +40,10 @@ SCAN = {"location_id": "STATION_SCAN", "location_type": "SCAN_PLATFORM"}
 NG = {"location_id": "STATION_NG", "location_type": "SCAN_NG"}
 
 
+def _is_no_read(barcode: str | None) -> bool:
+    return (barcode or "").strip().casefold() in ("", "noread")
+
+
 class Outbound:
     def __init__(self, requests, ecs, dispatch, roller, *, settings=()):
         values = (settings,) if isinstance(settings, PhysicalSettings) else tuple(settings)
@@ -168,6 +172,35 @@ class Outbound:
                 ctx.note("PLATFORM_SCAN_REVISION_MISMATCH")
                 return
             pending = snapshot.get("pending_platform_scan")
+            if _is_no_read(payload.barcode):
+                if (
+                    not _is_no_read(plate.barcode)
+                    or pending is not None
+                    or plate.put_command_code is not None
+                    or plate.final_decision_round_id is not None
+                    or await self._material_rounds(ctx.session, plate)
+                ):
+                    ctx.note("PLATFORM_SCAN_NO_READ")
+                    return
+                # Older scanners may version failed attempts before reporting the first read.
+                plate.barcode, plate.scanned_at_ms = scan
+                plate.source_arrival_snapshot = {
+                    **snapshot,
+                    "pick_command": {
+                        **command,
+                        "platform_scan_event_id": ctx.receipt_id,
+                        "platform_scan_revision": payload.scan_revision,
+                    },
+                }
+                ctx.bind_application(
+                    EventApplicationRef(
+                        "AUTO_OUTBOUND_PLATE",
+                        str(plate.id),
+                        ctx.receipt_id,
+                        predecessor_event_id=event_id,
+                    )
+                )
+                return
             if pending is not None and (pending["barcode"], pending["timestamp"]) != scan:
                 ctx.note("PLATFORM_SCAN_CONFLICT")
                 return
@@ -209,7 +242,7 @@ class Outbound:
                 pick = await self._result(ctx.session, plate, "pick")
                 if (
                     pick is not None
-                    and pick.data.get("barcode") is not None
+                    and not _is_no_read(pick.data.get("barcode"))
                     and (pick.data["barcode"], pick.data["scanned_at"]) != scan
                 ):
                     ctx.note("PLATFORM_SCAN_CONFLICT")
@@ -316,7 +349,7 @@ class Outbound:
                 plate.bin_work_id is None
                 and not correcting
                 and command.get("platform_scan_revision", 1) == 1
-                and pick.data.get("barcode") is not None
+                and not _is_no_read(pick.data.get("barcode"))
                 and (pick.data["barcode"], pick.data["scanned_at"])
                 != (plate.barcode, plate.scanned_at_ms)
             ):
@@ -756,6 +789,8 @@ class Outbound:
         if handoff is not None and await self._arm_result(session, phase="put", **handoff) is None:
             return plate
         pending_scan = plate.source_arrival_snapshot.get("pending_platform_scan")
+        if pending_scan is not None and _is_no_read(pending_scan["barcode"]):
+            pending_scan = None
         correcting = (
             pending_scan is not None
             and plate.put_command_code is None
@@ -769,7 +804,8 @@ class Outbound:
                     session, task, plate, empty, now_ms, allow_continue=enabled, bindings=bindings
                 )
             return plate
-        if plate.pick_consumed_at_ms is None:
+        no_read = _is_no_read(scan.barcode)
+        if plate.pick_consumed_at_ms is None and (not no_read or correcting):
             plate.pick_consumed_at_ms = now_ms
             plate.barcode, plate.scanned_at_ms = scan.barcode, scan.scanned_at
         context = {k: v for k, v in plate.source_locator.items() if k != "type"}
@@ -863,6 +899,8 @@ class Outbound:
                     return plate
                 retry = True
         if current is None or retry:
+            if no_read:
+                return plate
             identity = str(uuid7())
             model = BinDecide if plate.bin_work_id else RackDecide
             ref = await self.requests.send(session, model(**context), operation_id=identity)

@@ -1998,6 +1998,78 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
 
 
 @pytest.mark.parametrize("decided_outbound", ["NoRead"], indirect=True)
+@pytest.mark.parametrize("direction_host", ["sqlite", "postgres"], indirect=True)
+async def test_bin_waits_for_readable_platform_scan(decided_outbound):
+    host = decided_outbound
+    async with host.factory() as session:
+        plate = await session.get(AutoOutboundPlate, host.plate_id)
+        code = plate.pick_command_code
+        operation = "outbound.bin.material.decide@v1"
+        requests = select(ReliableMessage).where(ReliableMessage.operation == operation)
+        assert await session.scalar(requests) is None
+        assert plate.pending and plate.put_command_code is None
+
+    assert (
+        await host.platform_scan(code, barcode=" NOREAD ", timestamp=89, scan_revision=2)
+    ).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=90)
+        assert await session.scalar(requests) is None
+
+    for now in (92, 93):
+        assert (
+            await host.platform_scan(code, barcode="REEL-BIN-1", timestamp=91, scan_revision=3)
+        ).status_code == 200
+        async with host.factory.begin() as session:
+            await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=now)
+
+    assert (
+        await host.platform_scan(code, barcode="NoRead", timestamp=94, scan_revision=4)
+    ).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=95)
+    async with host.factory() as session:
+        (message,) = (await session.scalars(requests)).all()
+        assert message.pause_reason is None
+        request = json.loads(await read_history_body(session, message.request_record_id))
+        assert request["data"]["barcode"] == "REEL-BIN-1"
+        assert request["data"]["scanned_at"] == 91
+
+
+@pytest.mark.parametrize("unread_source", ["event", "result"])
+@pytest.mark.parametrize("direction_host", ["sqlite", "postgres"], indirect=True)
+async def test_rackslot_waits_for_readable_platform_scan(outbound_host, unread_source):
+    host = outbound_host
+    _, _, plate_id = await return_face(host)
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
+        code = plate.pick_command_code
+    if unread_source == "event":
+        assert (await host.platform_scan(code, barcode="NoRead")).status_code == 200
+        assert (await host.arm_result(code)).status_code == 200
+    else:
+        assert (await host.arm_result(code, barcode="NoRead", scanned_at=88)).status_code == 200
+
+    operation = "outbound.rackslot.material.decide@v1"
+    requests = select(ReliableMessage).where(ReliableMessage.operation == operation)
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=90)
+        assert await session.scalar(requests) is None
+        assert plate.pending and plate.put_command_code is None
+
+    revision = 2 if unread_source == "event" else 1
+    assert (
+        await host.platform_scan(code, barcode="REEL-RACK-1", timestamp=91, scan_revision=revision)
+    ).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=92)
+        (message,) = (await session.scalars(requests)).all()
+        request = json.loads(await read_history_body(session, message.request_record_id))
+        assert request["data"]["barcode"] == "REEL-RACK-1"
+        assert request["data"]["scanned_at"] == 91
+
+
+@pytest.mark.parametrize("decided_outbound", ["UNRECOGNIZED-REEL"], indirect=True)
 @pytest.mark.parametrize(
     ("placed", "disposition", "exception_code", "rescan", "reconciled"),
     [
@@ -2089,7 +2161,7 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
             assert not await host.outbound.closed(session, plate)
             return
         assert plate.report_data["to_locator"] == dict(type="NG_ZONE", zone_code="MATERIAL_NG_01")
-        assert plate.report_data["barcode"] == "NoRead"
+        assert plate.report_data["barcode"] == "UNRECOGNIZED-REEL"
         assert plate.report_data["occurred_at"] == 99
         assert not await host.outbound.closed(session, plate)
     if reconciled:
@@ -2134,7 +2206,7 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
         assert plate.pending
         if rescan:
             assert plate.source_arrival_snapshot["pending_platform_scan"] == correction
-            assert plate.barcode == "NoRead"
+            assert plate.barcode == "UNRECOGNIZED-REEL"
             (message,) = await session.scalars(
                 select(ReliableMessage).where(ReliableMessage.operation == operation)
             )
