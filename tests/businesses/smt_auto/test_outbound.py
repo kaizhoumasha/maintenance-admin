@@ -2250,6 +2250,78 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
         assert await host.outbound.bin_closed(session, work)
 
 
+async def test_closed_rejected_plate_does_not_hold_target_departure(decided_outbound):
+    from app.businesses.smt_auto.outbound_racks import OutboundRacks
+    from app.businesses.smt_auto.task_flow import TaskFlow
+
+    host = decided_outbound
+    racks = OutboundRacks(host.outbound, station_id="station")
+    flow = TaskFlow(
+        host.requests, roller=host.roller, dispatch=host.dispatch, outbound=host.outbound
+    )
+    await host.settle(
+        "outbound.bin.material.decide@v1",
+        dict(
+            result="REJECT",
+            business_exception_code="MATERIAL_REJECTED",
+            source_disposition="CLOSE",
+            detailMessage="OK",
+            ng_locator=dict(type="NG_ZONE", zone_code="MATERIAL_NG_01"),
+        ),
+    )
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        put_code = plate.put_command_code
+        target_job = next(
+            job
+            for job in await host.dispatch.jobs(
+                session, work_line_id=1, source_kinds=("AUTO_OUTBOUND_TARGET",)
+            )
+            if job.origin.task_id == "t"
+        )
+        assert put_code
+
+    assert (await host.arm_result(put_code)).status_code == 200
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=80)
+    await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
+    async with host.factory.begin() as session:
+        await host.outbound.advance_report(session, plate_id=host.plate_id, now_ms=90)
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=100)
+        await host.outbound.advance(session, work_line_id=1, plate_id=host.plate_id, now_ms=110)
+    await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
+    async with host.factory.begin() as session:
+        await consume_bin_plan(host, session, now_ms=120)
+        work = await session.get(AutoBinWork, host.work_id)
+        assert (
+            await flow.release_bin(session, work_line_id=1, arrival_id=work.arrival_id, now_ms=120)
+            == "RELEASING"
+        )
+        release_code = work.release_command_code
+    assert (await host.result(release_code)).status_code == 200
+    async with host.factory.begin() as session:
+        await flow.consume_release(session, work_line_id=1, arrival_id=work.arrival_id, now_ms=121)
+        await racks.advance(session, task_id="t", now_ms=122)
+        target = await host.dispatch.progress(session, job_id=target_job.id)
+        assert [action.kind for action in target.actions] == ["ENTER", "DEPARTURE_DECIDE"]
+
+    await host.settle(
+        "rack.departure_decide@v1",
+        {"result": "READY", "rack_destination": {"type": "ZONE", "location_code": "SMT_B"}},
+    )
+    async with host.factory.begin() as session:
+        await racks.advance(session, task_id="t", now_ms=123)
+        await racks.advance(session, task_id="t", now_ms=124)
+        target = await host.dispatch.progress(session, job_id=target_job.id)
+        assert [action.kind for action in target.actions] == [
+            "ENTER",
+            "DEPARTURE_DECIDE",
+            "DEPART",
+        ]
+
+
 async def test_return_faces_reuse_original_job_only_after_terminal_face(outbound_host):
     from app.businesses.smt_auto.models import AutoOutboundSourceMember
     from app.businesses.smt_auto.outbound_racks import OutboundRacks
