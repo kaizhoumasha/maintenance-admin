@@ -70,6 +70,22 @@ async def test_other_lines_device_cannot_complete_original_role_command(coarse_f
     assert (await flow.rows())[0]["move_result"] is None
 
 
+async def test_starting_mock_holds_previous_formal_work_after_late_move_result(coarse_forward):
+    from dataclasses import replace
+
+    flow = coarse_forward
+    row = await flow.prepare_command()
+    assert await flow.dispatch() == 1
+    service = replace(flow.service, mock_rounds={row["workline_code"]: "new-round"})
+
+    assert (await flow.result(row)).status_code == 200
+    assert await service.advance(row["id"]) == "MOCK_ROUND_RECONCILIATION_REQUIRED"
+    saved = (await flow.rows())[0]
+    assert saved["command_code"] == row["command_code"]
+    assert saved["payload"] == row["payload"]
+    assert await flow.dispatch() == 0
+
+
 async def test_two_lines_complete_original_move_and_keep_raw_identity(coarse_forward):
     flow = coarse_forward
     for device in (0, 1):

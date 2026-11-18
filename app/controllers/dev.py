@@ -96,13 +96,15 @@ def include_dev_routers(
             settings.XRAY_WMS_MOCK_TARGETS, settings.XRAY_RETURN_RACKS
         )
     if settings.COARSE_SORTING_WMS_MOCK:
-        from app.businesses.coarse_sorting.contracts import mock_round_config
+        from app.businesses.coarse_sorting.contracts import parse_mock_rounds
         from app.businesses.coarse_sorting.mock_wms import authorize_mock_scan
         from app.businesses.coarse_sorting.mock_wms import router as coarse_mock_router
 
-        mock_round = mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
-        app.state.coarse_sorting_mock_round = mock_round
-        app.state.ecs_event_authorizer = partial(authorize_mock_scan, mock_round)
+        rounds = parse_mock_rounds(settings.COARSE_SORTING_WMS_MOCK)
+        app.state.coarse_sorting_mock_rounds = rounds
+        app.state.ecs_event_authorizer = partial(
+            authorize_mock_scan, {config.workline_code: config for config in rounds.values()}
+        )
         app.include_router(coarse_mock_router, prefix=prefix)
     app.include_router(mock_wms_router, prefix=prefix)
     app.include_router(callback_router, prefix=prefix)

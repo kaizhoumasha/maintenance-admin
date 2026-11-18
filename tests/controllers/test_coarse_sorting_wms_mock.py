@@ -47,39 +47,40 @@ async def mock_sessions(request, asset_factory, postgres_tables):
 
 @pytest.fixture
 async def mock_app(mock_sessions, monkeypatch):
-    settings = get_settings().model_copy(
-        update={
-            "COARSE_SORTING_WMS_MOCK": {
-                "round_id": str(uuid7()),
-                "ecs_source_ips": ["127.0.0.1"],
-                "normal_barcode": "RAW-OK",
-                "ng_barcode": "RAW-NG",
-                "rack_position": "CLN01",
-                "allocation": ALLOCATION,
-            }
-        }
-    )
+    settings = get_settings().model_copy()
+    config = {
+        "round_id": str(uuid7()),
+        "ecs_source_ips": ["127.0.0.1"],
+        "normal_barcode": "RAW-OK",
+        "ng_barcode": "RAW-NG",
+        "rack_position": "CLN01",
+        "allocation": ALLOCATION,
+    }
     monkeypatch.setattr(dev, "get_settings", lambda: settings)
 
     async with mock_sessions.begin() as session:
-        session.add(
-            WorkLine(
-                line_code="RS01",
-                line_name="粗分一线",
-                business_code="coarse_sorting",
-                position_bindings={"OUTPUT_RACK": "CLN01"},
+        for line, rack in (("RS01", "CLN01"), ("RS02", "CLN02")):
+            session.add(
+                WorkLine(
+                    line_code=line,
+                    line_name=line,
+                    business_code="coarse_sorting",
+                    position_bindings={"OUTPUT_RACK": rack},
+                )
             )
-        )
 
     async def get_test_session():
         async with mock_sessions() as session:
             yield session
 
-    def build(**changes):
+    def build(*, second_round=None, **changes):
         if "empty_cells" in changes:
             for key in ("normal_barcode", "ng_barcode", "allocation"):
-                settings.COARSE_SORTING_WMS_MOCK.pop(key, None)
-        settings.COARSE_SORTING_WMS_MOCK.update(changes)
+                config.pop(key, None)
+        config.update(changes)
+        settings.COARSE_SORTING_WMS_MOCK = (
+            [config, second_round] if second_round is not None else config
+        )
         app = FastAPI()
         app.dependency_overrides[get_session] = get_test_session
         dev.include_dev_routers(app, environment="local", command_bindings=())
@@ -107,7 +108,7 @@ async def send(
             "data": {"workline_code": "RS01", **data},
         }
     ).encode()
-    round_id = round_id or app.state.coarse_sorting_mock_round.round_id
+    round_id = round_id or next(iter(app.state.coarse_sorting_mock_rounds))
     headers = {
         COARSE_MOCK_ROUND_HEADER: header_round or round_id,
         **(
@@ -215,6 +216,56 @@ async def test_previous_round_replays_without_claiming_the_new_round(mock_app):
     assert (await send(next_round, "validate_bind", scan("RAW-OK"))).status_code == 200
 
 
+def rs02_round(round_id):
+    return {
+        "round_id": round_id,
+        "ecs_source_ips": ["192.0.2.25"],
+        "rack_position": "CLN02",
+        "normal_barcode": "RAW-OK",
+        "ng_barcode": "RAW-NG",
+        "allocation": ALLOCATION | {"workline_code": "RS02", "rack_id": "TEST-RACK-2"},
+    }
+
+
+async def test_mock_rounds_reserve_independently_and_survive_rotation_on_one_line(mock_app):
+    second_round = rs02_round("rs02-old")
+    first = mock_app(round_id="rs01", second_round=second_round)
+    rs02_scan = scan("RAW-OK") | {"workline_code": "RS02"}
+    wrong_line = await send(first, "validate_bind", rs02_scan, round_id="rs01")
+    assert wrong_line.status_code == 422
+
+    rs02_id = str(uuid7())
+    rs01, rs02 = await asyncio.gather(
+        send(first, "validate_bind", scan("RAW-OK"), round_id="rs01"),
+        send(first, "validate_bind", rs02_scan, identity=rs02_id, round_id="rs02-old"),
+    )
+    assert rs01.status_code == rs02.status_code == 200
+    for response, round_id, allocation in (
+        (rs01, "rs01", ALLOCATION),
+        (rs02, "rs02-old", second_round["allocation"]),
+    ):
+        binding = {
+            "binding_id": response.json()["data"]["binding_id"],
+            "workline_code": allocation["workline_code"],
+        }
+        allocated = await send(first, "storage_allocate", binding, round_id=round_id)
+        assert allocated.json()["data"] == allocation
+
+    rotated = mock_app(second_round=rs02_round("rs02-new"))
+    replay = await send(rotated, "validate_bind", rs02_scan, identity=rs02_id, round_id="rs02-old")
+    assert replay.json() == rs02.json()
+    assert (await send(rotated, "validate_bind", rs02_scan, round_id="rs02-old")).status_code == 409
+    assert (await send(rotated, "validate_bind", scan("RAW-OK"))).status_code == 409
+    assert (await send(rotated, "validate_bind", rs02_scan, round_id="rs02-new")).status_code == 200
+
+
+def test_mock_rejects_duplicate_round_ids_and_multiple_rounds_for_one_line(mock_app):
+    with pytest.raises(ValueError, match="distinct round IDs"):
+        mock_app(round_id="shared", second_round=rs02_round("shared"))
+    with pytest.raises(ValueError, match="one active round per workline"):
+        mock_app(second_round=rs02_round("another") | {"allocation": ALLOCATION})
+
+
 async def test_additional_barcodes_share_the_rounds_one_normal_slot(mock_app):
     app = mock_app(additional_normal_barcodes=["RAW-ALT-1", "RAW-ALT-2"])
     accepted = await send(app, "validate_bind", scan("RAW-ALT-2"))
@@ -228,6 +279,94 @@ async def test_additional_barcodes_share_the_rounds_one_normal_slot(mock_app):
 
 def reel(identity):
     return scan(f"PANY-PART-{identity},Q2000,MMAKER,D2610,LLOT,SREEL-{identity}")
+
+
+@pytest.mark.parametrize(("diameter", "cell_index"), [(7, 1), (13, 7), (15, 7), (8, None)])
+async def test_random_mock_only_allocates_cells_matching_reel_diameter(
+    mock_app, monkeypatch, diameter, cell_index
+):
+    from app.businesses.coarse_sorting import mock_wms
+
+    monkeypatch.setattr(mock_wms, "randbelow", lambda _: 1)
+    first_cell = ALLOCATION | {"reel_diameters_inch": [7], "max_stack_height_mm": 280}
+    large_cell = first_cell | {
+        "cell_id": "TEST-CELL-7",
+        "cell_index": 7,
+        "reel_diameters_inch": [13, 15],
+    }
+    app = mock_app(empty_cells=[first_cell, large_cell])
+    validation = await send(app, "validate_bind", reel("size") | {"reel_diameter": diameter})
+    if cell_index is None:
+        assert validation.status_code == 409
+        return
+    binding = {"binding_id": validation.json()["data"]["binding_id"]}
+    allocation = (await send(app, "storage_allocate", binding)).json()["data"]
+    assert allocation["cell_index"] == cell_index
+    assert "reel_diameters_inch" not in allocation
+
+
+@pytest.mark.parametrize("mock_sessions", ["sqlite", "postgres"], indirect=True)
+async def test_random_mock_stacks_by_thickness_on_both_lines(mock_app, monkeypatch):
+    from app.businesses.coarse_sorting import mock_wms
+
+    monkeypatch.setattr(mock_wms, "randbelow", lambda _: 1)
+    rs02 = rs02_round("rs02-stack")
+    rs02_cell = rs02.pop("allocation") | {"max_stack_height_mm": 0.3}
+    rs02.pop("normal_barcode")
+    rs02.pop("ng_barcode")
+    rs02["empty_cells"] = [rs02_cell]
+    app = mock_app(
+        round_id="rs01-stack",
+        empty_cells=[ALLOCATION | {"max_stack_height_mm": 0.3}],
+        second_round=rs02,
+    )
+
+    async def stack(line, round_id):
+        async def validate(identity, thickness):
+            return await send(
+                app,
+                "validate_bind",
+                reel(identity) | {"workline_code": line, "reel_thickness": thickness},
+                round_id=round_id,
+            )
+
+        async def allocate(binding, identity=None):
+            return await send(
+                app, "storage_allocate", binding, identity=identity, round_id=round_id
+            )
+
+        assert (await validate("ZERO", 0)).status_code == 422
+        assert (await validate("TOO-TALL", 0.31)).status_code == 409
+        first, second = await asyncio.gather(validate("FIRST", 0.1), validate("SECOND", 0.2))
+        assert first.status_code == second.status_code == 200
+        assert (await validate("FULL", 0.1)).status_code == 409
+        first = {"workline_code": line, "binding_id": first.json()["data"]["binding_id"]}
+        second = {"workline_code": line, "binding_id": second.json()["data"]["binding_id"]}
+
+        first_slot = (await allocate(first)).json()["data"]
+        assert first_slot["reel_totalthickness"] == 0
+        assert "max_stack_height_mm" not in first_slot
+        wait_id = str(uuid7())
+        wait = await allocate(second, wait_id)
+        assert wait.json()["data"] == {"result": "WAIT", "workline_code": line}
+
+        report = first | {
+            key: first_slot[key] for key in ("bin_code", "bin_location", "cell_id", "cell_index")
+        }
+        report_id = str(uuid7())
+        for code in ("RECORDED", "DUPLICATE"):
+            response = await send(
+                app,
+                "execution_report",
+                report | {"completed_at": 2000},
+                identity=report_id,
+                round_id=round_id,
+            )
+            assert response.json()["code"] == code
+        assert (await allocate(second, wait_id)).json() == wait.json()
+        assert (await allocate(second)).json()["data"] == first_slot | {"reel_totalthickness": 0.1}
+
+    await asyncio.gather(stack("RS01", "rs01-stack"), stack("RS02", "rs02-stack"))
 
 
 @pytest.mark.parametrize("mock_sessions", ["sqlite", "postgres"], indirect=True)
@@ -290,7 +429,7 @@ async def test_random_mock_reserves_distinct_cells_and_replays_original_decision
     same = await send(restarted, "validate_bind", reel("full"), identity=full_id)
     assert same.status_code == 409
     assert same.json() == full.json()
-    round_id = restarted.state.coarse_sorting_mock_round.round_id
+    round_id = next(iter(restarted.state.coarse_sorting_mock_rounds))
     rotated = mock_app(round_id="next-round")
     old = await send(rotated, "validate_bind", reel("full"), identity=full_id, round_id=round_id)
     assert old.status_code == 409

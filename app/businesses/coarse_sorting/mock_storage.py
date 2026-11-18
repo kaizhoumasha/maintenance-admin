@@ -8,7 +8,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from app.database import SCHEMA
 from app.models.base import NAMING_CONVENTION
 
-from .contracts import mock_round_config
+from .contracts import parse_mock_rounds
 
 
 class MockBase(DeclarativeBase):
@@ -30,17 +30,20 @@ async def initialize() -> None:
     settings = get_settings()
     if settings.ENVIRONMENT != "local" or not settings.COARSE_SORTING_WMS_MOCK:
         raise SystemExit("Coarse sorting Mock storage requires an enabled local round")
-    config = mock_round_config.validate_python(settings.COARSE_SORTING_WMS_MOCK)
+    rounds = parse_mock_rounds(settings.COARSE_SORTING_WMS_MOCK)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(MockBase.metadata.create_all)
-            recorded = await connection.scalar(
-                select(CoarseSortingMockRound.configuration_digest).where(
-                    CoarseSortingMockRound.round_id == config.round_id
-                )
+            recorded = await connection.execute(
+                select(
+                    CoarseSortingMockRound.round_id, CoarseSortingMockRound.configuration_digest
+                ).where(CoarseSortingMockRound.round_id.in_(rounds))
             )
-            if recorded is not None and recorded != config.configuration_digest:
-                raise SystemExit("Coarse sorting Mock round already owns a different configuration")
+            for round_id, digest in recorded:
+                if digest != rounds[round_id].configuration_digest:
+                    raise SystemExit(
+                        f"Coarse sorting Mock round {round_id} owns a different configuration"
+                    )
     finally:
         await engine.dispose()
 
