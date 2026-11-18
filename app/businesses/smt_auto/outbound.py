@@ -780,11 +780,6 @@ class Outbound:
             else "outbound.rackslot.material.decide@v1"
         )
         rounds = await self._material_rounds(session, plate)
-        if pending_scan is not None and plate.put_command_code is None:
-            await self._apply_platform_scan_correction(
-                session, plate, pending_scan, context, rounds
-            )
-            return plate
         current = rounds[-1] if rounds else None
         if current is not None and timing is not None:
             timing["message_id"] = current.message_id
@@ -821,12 +816,22 @@ class Outbound:
                 if previous.next_eligible_at_ms != previous.consumed_at_ms + wait["retry_after_ms"]:
                     return plate
             previous = item
+        result = await read_decision(self.requests, session, current) if current else None
+        data = result.response_data if result else None
+        # A delivered REJECT keeps authority over NG even with a later scan on record.
+        if (
+            pending_scan is not None
+            and plate.put_command_code is None
+            and (data is None or data.get("result") != "REJECT")
+        ):
+            await self._apply_platform_scan_correction(
+                session, plate, pending_scan, context, rounds
+            )
+            return plate
         retry = False
         if current:
-            result = await read_decision(self.requests, session, current)
-            if result is None:
+            if result is None or data is None:
                 return plate
-            data = result.response_data
             try:
                 validate_material_decision(
                     "bin" if plate.bin_work_id else "rack",
@@ -1438,6 +1443,31 @@ class Outbound:
                 await self._grant(session, plate)
                 and await self._empty_closed(session, plate) is not None
             )
+        if plate.direct_obligations_closed_at_ms is not None and plate.physical_closure_basis == {
+            "kind": "MANUAL_NG",
+            "command_code": plate.put_command_code,
+            "round_id": plate.final_decision_round_id,
+        }:
+            expected = await self._expected_report(session, plate)
+            if (
+                expected is None
+                or expected != plate.report_data
+                or expected["to_locator"]["type"] != "NG_ZONE"
+                or plate.report_message_id is None
+            ):
+                return False
+            decision = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
+            if decision.response_snapshot["data"]["source_disposition"] == "CLOSE" and (
+                plate.source_closed_basis != {"kind": "NG_CLOSE", "round_id": decision.id}
+            ):
+                return False
+            report = await self.requests.get_result(
+                session,
+                message_id=plate.report_message_id,
+                operation=REPORT,
+                operation_id=plate.report_operation_id,
+            )
+            return report.availability == "FOUND" and report.delivery_status == "ABANDONED"
         if (
             plate.report_consumed_at_ms is None
             or plate.report_response is None

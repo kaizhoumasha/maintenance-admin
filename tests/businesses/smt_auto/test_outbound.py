@@ -1999,20 +1999,24 @@ async def test_target_rotation_requires_original_applied_action(decided_outbound
 
 @pytest.mark.parametrize("decided_outbound", ["NoRead"], indirect=True)
 @pytest.mark.parametrize(
-    ("placed", "disposition", "exception_code"),
+    ("placed", "disposition", "exception_code", "rescan", "reconciled"),
     [
-        (False, "CLOSE", "MATERIAL_REJECTED"),
-        (True, "CONTINUE", "BARCODE_INVALID"),
-        (True, "CONTINUE", "SOURCE_CELL_MISMATCH"),
-        (True, "CLOSE", "SOURCE_CELL_MISMATCH"),
+        (False, "CLOSE", "MATERIAL_REJECTED", False, False),
+        (True, "CONTINUE", "BARCODE_INVALID", False, False),
+        (True, "CONTINUE", "BARCODE_INVALID", True, False),
+        (True, "CONTINUE", "BARCODE_INVALID", True, True),
+        (True, "CLOSE", "BARCODE_INVALID", True, True),
+        (True, "CONTINUE", "SOURCE_CELL_MISMATCH", False, False),
+        (True, "CLOSE", "SOURCE_CELL_MISMATCH", False, False),
     ],
 )
 async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
-    decided_outbound, placed, disposition, exception_code
+    decided_outbound, placed, disposition, exception_code, rescan, reconciled, monkeypatch
 ):
     host = decided_outbound
+    operation = "outbound.bin.material.decide@v1"
     await host.settle(
-        "outbound.bin.material.decide@v1",
+        operation,
         dict(
             result="REJECT",
             business_exception_code=exception_code,
@@ -2022,6 +2026,24 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
             ng_locator=dict(type="NG_ZONE", zone_code="MATERIAL_NG_01", label="NG"),
         ),
     )
+    if rescan:
+        async with host.factory() as session:
+            plate = await session.get(AutoOutboundPlate, host.plate_id)
+            pick_code = plate.pick_command_code
+            original = await session.scalar(
+                select(ReliableMessage).where(ReliableMessage.operation == operation)
+            )
+            original_bodies = (
+                await read_history_body(session, original.request_record_id),
+                await read_history_body(session, original.terminal_response_record_id),
+            )
+        assert (
+            await host.platform_scan(pick_code, barcode="rescanned", timestamp=105, scan_revision=2)
+        ).status_code == 200
+        async with host.factory() as session:
+            plate = await session.get(AutoOutboundPlate, host.plate_id)
+            correction = plate.source_arrival_snapshot["pending_platform_scan"]
+            assert correction["revision"] == 2 and correction["barcode"] == "rescanned"
     async with host.factory.begin() as session:
         for now in (60, 70):
             plate = await host.outbound.advance(
@@ -2067,15 +2089,70 @@ async def test_rejected_plate_uses_line_bin_arm_and_requires_original_ng_put(
             assert not await host.outbound.closed(session, plate)
             return
         assert plate.report_data["to_locator"] == dict(type="NG_ZONE", zone_code="MATERIAL_NG_01")
+        assert plate.report_data["barcode"] == "NoRead"
         assert plate.report_data["occurred_at"] == 99
         assert not await host.outbound.closed(session, plate)
-    await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
+    if reconciled:
+        from app.businesses.smt_auto.service import SmtAutoService
+
+        auto = SmtAutoService(replace(host.dispatch.capabilities, ecs=host.ecs), worklines=())
+        auto.dispatch, auto.roller, auto.outbound = host.dispatch, host.roller, host.outbound
+        work = set()
+
+        async def record_advance(kind, record_id, **_):
+            work.add((kind, record_id))
+
+        monkeypatch.setattr(auto, "advance", record_advance)
+        await auto.scan_pending()
+        assert ("OUTBOUND_REPORT", host.plate_id) in work
+        work.clear()
+    if not reconciled:
+        await host.settle("outbound.material.movement_report@v1", {}, "RECORDED")
     async with host.factory.begin() as session:
         plate = await host.outbound.advance_report(session, plate_id=host.plate_id, now_ms=90)
+        if reconciled:
+            plate.physical_closure_basis = dict(
+                kind="MANUAL_NG", command_code=code, round_id=plate.final_decision_round_id
+            )
+            plate.direct_obligations_closed_at_ms = 90
+            assert not await host.outbound.closed(session, plate)
+            report = await session.get(ReliableMessage, plate.report_message_id)
+            report.status = MessageStatus.ABANDONED
+            report.next_attempt_at = None
+            await session.flush()
+            assert plate.report_consumed_at_ms is None and plate.report_response is None
+            if disposition == "CLOSE":
+                assert not await host.outbound.closed(session, plate)
+                plate.source_closed_basis = dict(
+                    kind="NG_CLOSE", round_id=plate.final_decision_round_id
+                )
+            report_data = plate.report_data
+            plate.report_data = {**report_data, "barcode": "another-plate"}
+            assert not await host.outbound.closed(session, plate)
+            plate.report_data = report_data
         assert await host.outbound.closed(session, plate)
         assert plate.pending
+        if rescan:
+            assert plate.source_arrival_snapshot["pending_platform_scan"] == correction
+            assert plate.barcode == "NoRead"
+            (message,) = await session.scalars(
+                select(ReliableMessage).where(ReliableMessage.operation == operation)
+            )
+            assert (message.id, message.status, message.attempts) == (
+                original.id,
+                original.status,
+                original.attempts,
+            )
+            assert (
+                await read_history_body(session, message.request_record_id),
+                await read_history_body(session, message.terminal_response_record_id),
+            ) == original_bodies
 
         assert (plate.source_closed_basis is not None) is (disposition == "CLOSE")
+    if reconciled:
+        await auto.scan_pending()
+        assert ("OUTBOUND_REPORT", host.plate_id) not in work
+        assert ("OUTBOUND_PLATE", host.plate_id) in work
     async with host.factory.begin() as session:
         for now in (100, 110):
             plate = await host.outbound.advance(

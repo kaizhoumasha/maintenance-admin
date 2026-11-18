@@ -10,6 +10,8 @@ SMT AUTO 的入库与出库共用宿主、待办入口和原身份恢复。API�
 | 装配与重启 | [真实 worker/Beat 回归](../../tests/tasks/test_smt_auto_worker.py)使用隔离 PostgreSQL 和 Redis，通过真实 WMS 接收入口在提交后唤醒 worker，并在重启后恢复同一条原 PREPARE；还通过真实 SCAN2 接收入口验证并发首问去重、NO_WORK、任务取消后原释放命令和 ECS SUCCESS 恢复。测试进程使用正式运行目录 | WMS 响应由测试写入原交付记录，物理设备联调待验收 |
 | 迁移 | [来源约束升降级回归](../../tests/migrations/test_smt_auto_rack_sources.py)覆盖 SQLite/PostgreSQL、原公共 RackJob/RackAction 保留、有 AUTO 原证据时拒绝有损降级 | 仅应用于隔离测试数据库 |
 
+出库 NG 人工核对后的软件验收按原盘证据判断。系统核对原 WMS `REJECT`、对应的原 NG 放盘成功结果，以及与原判定条码和 NG 去向一致的原移动报告。人工结清依据须引用同一决定和放盘指令，原报告须已停止（`ABANDONED`）。原决定要求关闭来源（`CLOSE`）时，还须有同一轮的来源关闭依据。已登记人工结清的报告退出待办扫描，料盘经上述核对后继续按原决定推进。隔离回归以预置证据验证这些条件，现场仍须核对实际放置及 WMS 处置。
+
 此前启用隔离 PostgreSQL 和 Redis 的受影响回归为 **1906 通过、4 跳过**。整仓默认运行 **4101 通过、2104 跳过**，一项既有粗分测试因环境缺少 `TEST_REDIS_URL` 失败，提供隔离 Redis 后单独重跑通过。Ruff、格式、差异检查与单 head 核验通过，代码 head 为 `smtautosources`。
 
 本轮收尾在独立 PostgreSQL 17 与 Redis 8 上通过 **681 项**，覆盖 SMT AUTO、RackDispatch、BIN_Roller 原证据保留、两线模拟绑定、迁移、worker/Beat 和清理任务。Ruff、格式与差异检查通过。

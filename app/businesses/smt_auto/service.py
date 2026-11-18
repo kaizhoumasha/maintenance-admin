@@ -170,6 +170,7 @@ class SmtAutoService(AutoTaskService):
             "OUTBOUND_REPORT": select(AutoOutboundPlate.id).where(
                 AutoOutboundPlate.report_message_id.is_not(None),
                 AutoOutboundPlate.report_consumed_at_ms.is_(None),
+                AutoOutboundPlate.direct_obligations_closed_at_ms.is_(None),
             ),
             "ARCHIVE": select(AutoTask.task_id).where(
                 AutoTask.business_type == "inbound",
