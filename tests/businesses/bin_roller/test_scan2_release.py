@@ -119,5 +119,7 @@ async def test_earlier_unassociated_scan4_does_not_bind_to_later_scan3_round(rol
     await flow.scan("SCAN4", "A000000001-B", timestamp=30)
     unchanged = next(r for r in await flow.current_rows("bin_return") if r["id"] == orphan["id"])
     assert unchanged["scan3_event_id"] is None and unchanged["scan4_command_code"] is None
-    async with flow.factory() as session:
-        assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()
+    assert unchanged["first_scan4_event_id"] == orphan["scan4_event_id"]
+    assert unchanged["fifo_visit_key"] == orphan["fifo_visit_key"]
+    matching = next(r for r in await flow.current_rows("bin_return") if r["id"] != orphan["id"])
+    assert matching["scan4_command_code"] is None

@@ -4161,6 +4161,8 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 
 发送方按字段表构造；WES本地RequestPayload严格且禁止额外字段。接收方默认校验已定义字段、忽略真正未知字段，operation另行要求严格data/层级时从其规定。已定义但跨模式/分支冲突的字段不能当未知静默丢弃：NO_WORK带取盘授权、WAIT带目标、REJECT带正常target或计划混入其他方向资源均拒绝/保留无效响应，不删字段后执行。类型严格不等于所有接口逐层拒绝未知字段，公共drain等独立合同仍保持。
 
+为兼容既有 SMT AUTO 出库对端，逐盘物料决定的 `REJECT` 可带 `target_locator: null`。非空的正常目标仍会使决定无效。
+
 <a id="putaway-field-rules"></a>
 #### 9.2.1 inbound 逐盘专属字段与WMS数值责任
 

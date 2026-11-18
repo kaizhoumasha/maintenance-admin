@@ -103,9 +103,16 @@ async def get_user(user_id: DatabaseId, session: SessionDep):
     "/{user_id}/roles",
     status_code=status.HTTP_204_NO_CONTENT,
     responses=error_responses(404),
-    dependencies=[Depends(require_permission("admin:user:assign_role"))],
 )
-async def set_user_roles(user_id: DatabaseId, data: UserRolesIn, session: SessionDep) -> None:
+async def set_user_roles(
+    user_id: DatabaseId,
+    data: UserRolesIn,
+    session: SessionDep,
+    actor: Annotated[User, Depends(require_permission("admin:user:assign_role"))],
+) -> None:
+    await rbac_service.authorize_management(
+        session, actor, "admin:user:assign_role", user_id=user_id, role_ids=data.role_ids
+    )
     await rbac_service.set_user_roles(session, user_id, data.role_ids)
 
 
@@ -118,19 +125,25 @@ async def update_user(
     user_id: DatabaseId,
     data: UserUpdate,
     session: SessionDep,
-    redis: RedisDep,
     actor: Annotated[User, Depends(require_permission("admin:user:update"))],
 ):
-    return await user_service.update_user(session, redis, actor.id, user_id, data)
+    await rbac_service.authorize_management(session, actor, "admin:user:update", user_id=user_id)
+    return await user_service.update_user(session, actor.id, user_id, data)
 
 
 @router.post(
     "/{user_id}/reset-password",
     status_code=status.HTTP_204_NO_CONTENT,
     responses=error_responses(404),
-    dependencies=[Depends(require_permission("admin:user:reset_password"))],
 )
 async def reset_password(
-    user_id: DatabaseId, data: PasswordReset, session: SessionDep, redis: RedisDep
+    user_id: DatabaseId,
+    data: PasswordReset,
+    session: SessionDep,
+    redis: RedisDep,
+    actor: Annotated[User, Depends(require_permission("admin:user:reset_password"))],
 ) -> None:
+    await rbac_service.authorize_management(
+        session, actor, "admin:user:reset_password", user_id=user_id
+    )
     await user_service.reset_password(session, redis, user_id, data.new_password)

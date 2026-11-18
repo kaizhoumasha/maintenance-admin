@@ -52,13 +52,15 @@ async def test_settlement_can_restore_original_exchange_without_sender(storage, 
             await session.execute(
                 text(
                     "SELECT close_reason, attempt_state, request_wire, response_wire, "
-                    "late_response_at, initiator FROM wms_http_exchange WHERE message_id=:id"
+                    "late_response_at, initiator, peer_endpoint "
+                    "FROM wms_http_exchange WHERE message_id=:id"
                 ),
                 {"id": claim.message_id},
             )
         ).one()
         assert result[:3] == ("SETTLED_BY_CALLBACK", "DELIVERY_UNKNOWN", request.body)
         assert result.initiator == "WES"
+        assert result.peer_endpoint == target.base_url
         assert result.response_wire == (b"ok" if late else None)
         assert (result.late_response_at is not None) == late
 
@@ -214,3 +216,71 @@ async def test_retention_does_not_recreate_an_attempt_expired_during_projection(
                 )
                 == 0
             )
+
+
+async def test_cleanup_removes_expired_unprojected_attempt(rig):
+    from datetime import timedelta
+
+    from app.integrations.http_exchanges import cleanup_exchanges
+
+    target = TargetConfig(rig.target.name, rig.target.base_url, "wms-decisions")
+    rig.outbox.targets[target.name] = target
+    rig.outbox.adapters[target.protocol] = rig.adapter
+    async with rig.factory.begin() as session:
+        await rig.outbox.enqueue(session, rig.draft())
+    (claim,) = await rig.store.claim(1, {target.name: target})
+    request = HttpRequest("POST", "/decisions", body=claim.message.request_raw)
+    assert await rig.store.before_send(replace(claim, request=request), target)
+    async with rig.factory.begin() as session:
+        assert await rig.outbox.settle(session, target.name, "opaque", "id")
+
+    await cleanup_exchanges(rig.factory, 90, now=rig.clock() + timedelta(days=91))
+    async with rig.factory() as session:
+        for table in ("reliable_delivery_attempt", "http_projection_pending"):
+            assert await session.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+
+
+async def test_sqlite_projection_keeps_settlement_committed_after_read(rig):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.sql.dml import Insert
+
+    target = TargetConfig(rig.target.name, rig.target.base_url, "wms-decisions")
+    rig.outbox.targets[target.name] = target
+    rig.outbox.adapters[target.protocol] = rig.adapter
+    async with rig.factory.begin() as session:
+        await rig.outbox.enqueue(session, rig.draft())
+    (claim,) = await rig.store.claim(1, {target.name: target})
+    request = HttpRequest("POST", "/decisions", body=claim.message.request_raw)
+    assert await rig.store.before_send(replace(claim, request=request), target)
+
+    loaded = asyncio.Event()
+    finish = asyncio.Event()
+
+    class PausedProjection(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            if isinstance(statement, Insert) and statement.table.name == "wms_http_exchange":
+                loaded.set()
+                await finish.wait()
+            return await super().execute(statement, *args, **kwargs)
+
+    projection_factory = async_sessionmaker(rig.engine, class_=PausedProjection)
+    projection = asyncio.create_task(reconcile_outbound(projection_factory, now=rig.clock()))
+    try:
+        await asyncio.wait_for(loaded.wait(), 5)
+        async with rig.factory.begin() as session:
+            assert await rig.outbox.settle(session, target.name, "opaque", "id")
+    finally:
+        finish.set()
+        await projection
+
+    await reconcile_outbound(rig.factory, now=rig.clock())
+    async with rig.factory() as session:
+        assert (
+            await session.scalar(
+                text("SELECT close_reason FROM wms_http_exchange WHERE message_id = :id"),
+                {"id": claim.message_id},
+            )
+            == "SETTLED_BY_CALLBACK"
+        )

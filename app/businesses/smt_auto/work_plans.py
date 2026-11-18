@@ -70,8 +70,19 @@ class WorkPlans:
         self.outbound = None
         self.roller = None
 
-    async def start_bin(self, session, *, work_line_id, arrival_id, now_ms, trigger_plate_id=None):
-        current_bindings = await self._lock_line(session, work_line_id)
+    async def start_bin(
+        self,
+        session,
+        *,
+        work_line_id,
+        arrival_id,
+        now_ms,
+        trigger_plate_id=None,
+        locked_bindings=None,
+    ):
+        current_bindings = locked_bindings
+        if current_bindings is None:
+            current_bindings = await self._lock_line(session, work_line_id)
         subject = await session.scalar(
             select(AutoBinWork)
             .where(AutoBinWork.work_line_id == work_line_id, AutoBinWork.arrival_id == arrival_id)
@@ -715,8 +726,11 @@ class WorkPlans:
         now_ms,
         trigger_plate_id=None,
         correct_operation_id=None,
+        locked_bindings=None,
     ):
-        current_bindings = await self._lock_line(session, work_line_id)
+        current_bindings = locked_bindings
+        if current_bindings is None:
+            current_bindings = await self._lock_line(session, work_line_id)
         member = await session.get(AutoOutboundSourceMember, member_id, with_for_update=True)
         if member is None or member.terminal_basis is not None:
             return None

@@ -121,6 +121,46 @@ async def test_maintenance_batch_is_independent_of_send_claims(storage):
         assert all(row.lease_id is None for row in rows)
 
 
+async def test_corrupt_frozen_request_does_not_block_other_messages(storage):
+    from app.reliable.sender import Sender
+    from app.reliable.testing import ScriptedHttpClient
+
+    rig = storage
+    async with rig.factory.begin() as session:
+        interrupted = await rig.outbox.enqueue(session, rig.draft("interrupted"))
+    assert len(await rig.store.claim(1, rig.targets)) == 1
+    rig.clock.advance(16)
+    async with rig.factory.begin() as session:
+        corrupt = await rig.outbox.enqueue(session, rig.draft("corrupt"))
+        healthy = await rig.outbox.enqueue(session, rig.draft("healthy"))
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id.in_((interrupted.message_id, corrupt.message_id)))
+            .values(frozen_request_wire=b"corrupt bytes")
+        )
+    client = ScriptedHttpClient(
+        HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+    )
+    sender = Sender(
+        rig.store, rig.targets, rig.adapters, {rig.target.name: client}, clock=rig.clock
+    )
+    try:
+        assert await sender.tick() == 1
+        await asyncio.gather(*sender.inflight)
+    finally:
+        await sender.aclose()
+    assert [dict(request.headers)["X-Operation-Id"] for request in client.requests] == ["healthy"]
+    async with rig.factory() as session:
+        saved = await session.get(ReliableMessage, corrupt.message_id)
+        assert (saved.status, saved.attempts, saved.frozen_request_wire) == (
+            "HELD",
+            0,
+            b"corrupt bytes",
+        )
+        assert (await session.get(ReliableMessage, healthy.message_id)).status == "DONE"
+        assert (await session.get(ReliableMessage, interrupted.message_id)).status == "PENDING"
+
+
 async def test_maintenance_batches_remain_finite(storage):
     from app.reliable.config import ReliableConfig
     from app.reliable.sender import Sender
@@ -523,7 +563,7 @@ async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(stor
         budget=ReliableConfig(rig.targets, shutdown_grace_s=0.05),
     )
     await sender.tick()
-    await started.wait()
+    await asyncio.wait_for(started.wait(), timeout=3)
     tasks = list(sender.inflight)
     try:
         async with asyncio.timeout(0.5):

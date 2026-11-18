@@ -102,7 +102,9 @@ async def advance_return(roller, session, face_id):
     if face["phase"] == "RETURN_WINDOW":
         candidates = await roller.get_return_candidates(session, work_line_id=repo.work_line_id)
         if not candidates:
-            if await roller.return_channel_empty(session, work_line_id=repo.work_line_id):
+            if face["window_kind"] == "SEGMENT" or await roller.return_channel_empty(
+                session, work_line_id=repo.work_line_id
+            ):
                 await end_window(roller, session, face)
                 return "WINDOW_ENDED"
             return "WAITING_FOR_FIFO_HEAD"
@@ -617,41 +619,15 @@ async def close_scope(roller, session, scope: ScopeRef, *, reason):
                         else "WAITING"
                     )
                 else:
+                    caller = TransportCaller(**member["caller"])
                     result = await roller.capabilities.transport.get_result(
                         session,
                         transport_task_id=member["transport_task_id"],
                         client_request_id=member["client_request_id"],
-                        caller=TransportCaller(**member["caller"]),
+                        caller=caller,
                     )
-                    stop = stops.get(result.submission_message_id)
-                    acceptance = await roller.capabilities.transport.get_submission_acceptance(
-                        session,
-                        transport_task_id=member["transport_task_id"],
-                        client_request_id=member["client_request_id"],
-                        caller=TransportCaller(**member["caller"]),
-                    )
-                    if (
-                        (
-                            (stop and stop.dispatch == "NEVER_DISPATCHED")
-                            or result.submission_dispatch_started is False
-                        )
-                        and acceptance.state == "MISSING"
-                        and not result.outcome
-                        and not result.has_pending_outcome
-                        and not result.member_facts
-                        and result.submission_delivery_uncertain is False
-                    ):
-                        values.update(
-                            return_state="READY"
-                            if member["is_current"] and member["scan4_consumed_result_id"]
-                            else "WAITING",
-                            transport_task_id=None,
-                            client_request_id=None,
-                            caller=None,
-                            consumed_outcome_revision=None,
-                        )
-                    else:
-                        values["return_state"] = "WAIT_FACT"
+                    unsent = await undispatched_return(roller, session, member, result, caller)
+                    values.update(unsent if unsent is not None else {"return_state": "WAIT_FACT"})
             await repo.update(session, "bin_return", member["id"], **values)
             if values.get("return_state") == "WAIT_FACT":
                 await consume_return_fact(roller, session, return_id=member["id"])
@@ -741,6 +717,33 @@ async def close_scope(roller, session, scope: ScopeRef, *, reason):
             )
 
 
+async def undispatched_return(roller, session, row, result, caller):
+    if (
+        result.owner_domain != roller.context.domain
+        or result.kind != "BIN_MOVE"
+        or not result.submission_proven_unsent
+        or row["consumed_outcome_revision"] is not None
+    ):
+        return None
+    acceptance = await roller.capabilities.transport.get_submission_acceptance(
+        session,
+        transport_task_id=row["transport_task_id"],
+        client_request_id=row["client_request_id"],
+        caller=caller,
+    )
+    if acceptance.state != "MISSING":
+        return None
+    return dict(
+        return_state="READY"
+        if row["is_current"] and row["scan4_consumed_result_id"]
+        else "WAITING",
+        transport_task_id=None,
+        client_request_id=None,
+        caller=None,
+        consumed_outcome_revision=None,
+    )
+
+
 async def consume_return_fact(roller, session, *, return_id):
     row = await roller.original_record(session, "bin_return", return_id)
     if row["closed_at"] or row["return_state"] != "WAIT_FACT":
@@ -752,6 +755,12 @@ async def consume_return_fact(roller, session, *, return_id):
         client_request_id=row["client_request_id"],
         caller=caller,
     )
+    unsent = await undispatched_return(roller, session, row, result, caller)
+    if unsent is not None:
+        repo = roller.repository(row["work_line_id"])
+        await repo.update(session, "bin_return", return_id, **unsent)
+        await repo.close_retired_return(session, return_id)
+        return
     if not valid_move(
         result,
         owner=roller.context.domain,

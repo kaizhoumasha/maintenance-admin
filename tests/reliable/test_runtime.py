@@ -157,10 +157,13 @@ async def test_two_api_lifespans_have_isolated_budgets_and_management_access(
         assert all(row.status == "DONE" for row in rows)
 
 
-async def test_target_without_a_registered_adapter_is_reported_at_startup(monkeypatch, caplog):
+async def test_target_without_a_registered_adapter_is_reported_at_startup(
+    monkeypatch, caplog, tmp_path, sqlite_tables
+):
     import logging
 
     import app.reliable_runtime as runtime
+    from app.database import create_database_engine
     from app.reliable.config import TargetConfig
 
     class IdleSender:
@@ -178,10 +181,16 @@ async def test_target_without_a_registered_adapter_is_reported_at_startup(monkey
     orphan = TargetConfig("orphan", "http://b.test", "wms-transport")
     caplog.set_level(logging.WARNING)
     clients = []
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}"
+    engine = create_database_engine(database_url)
+    try:
+        await sqlite_tables(engine)
+    finally:
+        await engine.dispose()
     async with runtime.reliable_lifespan(
         ReliableConfig({"served": served, "orphan": orphan}),
         {"known": object()},
-        database_url="sqlite+aiosqlite://",
+        database_url=database_url,
         client_factory=lambda config: clients.append(config.destination_key) or object(),
     ):
         pass

@@ -1268,13 +1268,17 @@ async def test_other_rack_anomaly_is_ordered_against_valid_arrival(roller_lifecy
     ],
 )
 async def test_rack_submit_rejection_releases_only_original_ctu03_already_in_storage(
-    roller_lifecycle, template, uncertain, storage_rack, wrong_task, released
+    roller_lifecycle, template, uncertain, storage_rack, wrong_task, released, monkeypatch
 ):
     import json
+    from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import select
 
+    from app.businesses._components.bin_roller import retention
+    from app.businesses._components.rack_dispatch.models import RackJob
     from app.models import ReliableMessage, TransportTask
+    from app.reliable.store import cleanup_terminal
     from tests.helpers import set_message_bodies
 
     flow = roller_lifecycle
@@ -1363,3 +1367,43 @@ async def test_rack_submit_rejection_releases_only_original_ctu03_already_in_sto
         departure = next(t for t in tasks if t.transport_task_id == action["transport_task_id"])
         assert departure.submission_acceptance is None and departure.applied_outcome is None
     assert len(await flow.all_rows("rack_action")) == 2
+
+    if released:
+        monkeypatch.setattr(retention, "TABLES", flow.roller.tables)
+        candidates = (message_id,)
+        async with flow.factory.begin() as session:
+            protected = await retention.protected_message_ids(session, candidate_ids=candidates)
+            assert (
+                await cleanup_terminal(
+                    session,
+                    now=datetime.now(UTC) + timedelta(days=91),
+                    retention_days=90,
+                    candidate_ids=candidates,
+                    protected_ids=protected,
+                )
+                == 1
+            )
+        async with flow.factory() as session:
+            assert await dispatch.point_vacant_for_entry(session, point="RACK-WORK", rack_id="R2")
+            job = await session.get(RackJob, cycle)
+            job.closure_basis = {**job.closure_basis, "submission_message_id": message_id + 1}
+            await session.flush()
+            assert not await dispatch.point_vacant_for_entry(
+                session, point="RACK-WORK", rack_id="R2"
+            )
+
+        await flow.rack_callback(
+            dict(
+                transport_task_id=action["transport_task_id"],
+                rack_id="R1",
+                kind="RACK_MOVE",
+                outcome_revision=1,
+                status="FAILED",
+                failure_code="RCS_EXECUTION_FAILED",
+                final_position=dict(kind="RACK_POSITION", location_code="RACK-WORK"),
+            )
+        )
+        async with flow.factory() as session:
+            assert not await dispatch.point_vacant_for_entry(
+                session, point="RACK-WORK", rack_id="R2"
+            )

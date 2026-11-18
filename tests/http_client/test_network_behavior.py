@@ -265,6 +265,101 @@ async def test_real_redirect_does_not_issue_a_second_request(http_server):
             await client.aclose()
 
 
+async def test_guard_deadline_limits_a_pending_socket_write(http_server, monkeypatch):
+    from app.http_client.client import _GuardedSocketStream
+
+    payload = b"put-to-rack"
+    entered = asyncio.Event()
+    send = _GuardedSocketStream.send
+
+    async def pause_body(stream, item):
+        if item == payload:
+            entered.set()
+            await asyncio.Future()
+        await send(stream, item)
+
+    async def time_left():
+        return 0.05
+
+    monkeypatch.setattr(_GuardedSocketStream, "send", pause_body)
+    async with http_server(reply) as (url, _):
+        client = AsyncHttpClient(HttpClientConfig(url, "local", write_timeout_s=2))
+        try:
+            async with asyncio.timeout(1):
+                result = await client.send(
+                    HttpRequest("POST", "/", body=payload, before_write=time_left)
+                )
+            assert entered.is_set()
+            assert result.failure_kind == FailureKind.WRITE_TIMEOUT
+            assert result.delivery_state == DeliveryState.DELIVERY_UNKNOWN
+        finally:
+            await client.aclose()
+
+
+async def test_native_guard_timeout_before_any_bytes_is_not_sent(http_server):
+    async def authorize():
+        return 1.0
+
+    def expire():
+        raise TimeoutError
+
+    async with http_server(reply) as (url, stats):
+        client = AsyncHttpClient(HttpClientConfig(url, "local"))
+        try:
+            result = await client.send(
+                HttpRequest("POST", "/", body=b"guarded", before_write=authorize, check_wire=expire)
+            )
+            assert result.delivery_state == DeliveryState.NOT_SENT
+            assert result.failure_kind == FailureKind.WRITE_TIMEOUT
+            assert stats["requests"] == 0
+        finally:
+            await client.aclose()
+
+
+@pytest.mark.parametrize("fault", ["backpressure", "short_write", "socket_error"])
+async def test_guarded_write_retries_only_if_no_bytes_were_written(http_server, monkeypatch, fault):
+    import socket
+
+    payload = b"guarded-payload"
+    hits = 0
+    send = socket.socket.send
+
+    def backpressure_once(writer, data, *args, **kwargs):
+        nonlocal hits
+        if data == payload:
+            hits += 1
+            if hits == 1:
+                if fault == "short_write":
+                    return send(writer, data[:4], *args, **kwargs)
+                if fault == "socket_error":
+                    raise BrokenPipeError
+                raise BlockingIOError
+        return send(writer, data, *args, **kwargs)
+
+    async def time_left():
+        return 1.0
+
+    async def recheck():
+        pass
+
+    monkeypatch.setattr(socket.socket, "send", backpressure_once)
+    async with http_server(reply) as (url, stats):
+        client = AsyncHttpClient(HttpClientConfig(url, "local", read_timeout_s=0.05))
+        try:
+            result = await client.send(
+                HttpRequest("POST", "/", body=payload, before_write=time_left, recheck_wire=recheck)
+            )
+            if fault != "backpressure":
+                assert result.delivery_state == DeliveryState.DELIVERY_UNKNOWN
+                assert result.failure_kind == FailureKind.WRITE_ERROR
+                assert stats["requests"] == 0
+            else:
+                assert result.body == b"ok"
+                assert hits == 2
+        finally:
+            await client.aclose()
+
+
 async def test_cancellation_during_body_read_releases_pool(http_server):
     body_started = asyncio.Event()
 

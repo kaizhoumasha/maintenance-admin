@@ -104,7 +104,9 @@ class XrayRacks:
         )
         if not point:
             return None
-        jobs = await self.dispatch.admission_jobs(session, work_line_id=line.id)
+        jobs = await self.dispatch.admission_jobs(
+            session, work_line_id=line.id, include_late_arrivals=True
+        )
         await self.dispatch.lock_admission_jobs(session, job_ids=tuple(job.id for job in jobs))
         latest = await session.scalar(
             select(RackPreparation)
@@ -136,7 +138,9 @@ class XrayRacks:
             )
         )
 
-    async def observe(self, session, job, now_ms, *, prep=None, allow_departure=False):
+    async def observe(
+        self, session, job, now_ms, *, prep=None, allow_departure=False, withdraw_departure=False
+    ):
         point = job.origin.point
         occupied = await self._handoffs(session, point)
         anchor = (
@@ -160,6 +164,7 @@ class XrayRacks:
             ),
             handoff=DirectHandoff(ref, "BLOCKED" if occupied else "CLEAR", (coverage,)),
             allow_new_departure=allow_departure,
+            withdraw_xray_departure=withdraw_departure,
         )
 
     async def _ready(self, session, line_id, point, now_ms):
@@ -301,6 +306,7 @@ class XrayRacks:
                 Reel.work_line_id == reel.work_line_id,
                 Reel.id != reel.id,
                 Reel.pending,
+                Reel.conflict.is_(None),
                 Reel.destination["type"].as_string().is_(None),
                 ReelOperation.stage == "OUTLET",
                 ReelOperation.response["result"].as_string() == "ACCEPT",
@@ -339,7 +345,7 @@ class XrayRacks:
         )
         context = {"rack_locator": location, "rack_point": point.config.location_code}
         if job is not None:
-            action = job.actions[-1]
+            action = next(a for a in job.actions if a.id == job.position_action_id)
             context.update(
                 rack_job_id=job.id,
                 rack_action_id=action.id,
@@ -359,13 +365,18 @@ class XrayRacks:
         session.add(prep)
         await session.flush()
         intent.rack_preparation_id = prep.id
-        await self.advance(session, prep, PointState(point.config, point.binding, prep), now_ms)
+        await self.advance(
+            session,
+            prep,
+            PointState(point.config, point.binding, prep),
+            now_ms,
+            intent=intent,
+            reel=reel,
+        )
         return "RACK_PREPARATION_PENDING", None
 
-    async def advance(self, session, prep, point, now_ms):
+    async def advance(self, session, prep, point, now_ms, *, intent, reel):
         prep.next_check_at_ms = 0
-        intent = await session.get(ReelOperation, prep.operation_id)
-        reel = await session.get(Reel, intent.reel_key) if intent else None
         if not reel or not intent.rack_basis or not intent.response:
             return "RACK_PREPARATION_EVIDENCE_MISSING"
         plan = intent.response
@@ -406,17 +417,34 @@ class XrayRacks:
             and point.binding == intent.rack_basis["binding"]
             and point.config.location_code == prep.point
         )
+        allow_new = authorized and not reel.conflict
         if mode != "REPLENISH_REQUIRED" and not self._matches(prep, old, expected_old):
             return "RACK_PREPARATION_EVIDENCE_MISSING"
         if mode in {"DEPART_REQUIRED", "REPLACE_REQUIRED"}:
             if old.pending:
                 old = await self.observe(
-                    session, old, now_ms, prep=prep, allow_departure=authorized
+                    session,
+                    old,
+                    now_ms,
+                    prep=prep,
+                    allow_departure=allow_new,
+                    withdraw_departure=bool(reel.conflict),
                 )
             if old.pending or old.closure_reason not in (
                 "DEPARTURE_ACK",
                 "RACK_ALREADY_IN_STORAGE",
             ):
+                if (
+                    reel.conflict
+                    and prep.incoming_job_id is None
+                    and prep.action_id is None
+                    and old.state == "ACTIVE"
+                    and old.review_reason is None
+                    and old.position_action_id is not None
+                    and old.current_action_id == old.position_action_id
+                ):
+                    prep.pending = False
+                    return "RACK_PREPARATION_WITHDRAWN"
                 action = old.actions[-1] if old.actions else None
                 if (
                     action
@@ -444,7 +472,7 @@ class XrayRacks:
             )
             if prep.incoming_job_id and not self._matches(prep, job, rack):
                 return "RACK_PREPARATION_EVIDENCE_MISSING"
-            if job is None and authorized:
+            if job is None and allow_new:
                 if await self.dispatch.has_conflicting_responsibility(
                     session, point=prep.point, rack_id=rack
                 ) or await self.dispatch.has_position_conflict(session, point=prep.point):
@@ -469,9 +497,12 @@ class XrayRacks:
                     ),
                 )
                 job = await self.dispatch.progress(session, job_id=prep.incoming_job_id)
+        if reel.conflict and prep.action_id is None and (kind == "ROTATE" or job is None):
+            prep.pending = False
+            return "RACK_PREPARATION_WITHDRAWN"
         if job is None:
             return "RACK_CONFIGURATION_CHANGED"
-        if prep.action_id is None and authorized and not await self._handoffs(session, prep.point):
+        if prep.action_id is None and allow_new and not await self._handoffs(session, prep.point):
             if implicit_entry and not await self.dispatch.point_vacant_for_entry(
                 session, point=prep.point, rack_id=rack, exclude_job_id=job.id
             ):
@@ -485,7 +516,32 @@ class XrayRacks:
             )
         if prep.action_id is None:
             return "RACK_PREPARATION_PENDING"
-        await self.observe(session, job, now_ms, prep=prep)
+        job = await self.observe(session, job, now_ms, prep=prep)
+        if (
+            not job.pending
+            and job.closure_reason == "NOT_ARRIVED"
+            and job.current_action_id == prep.action_id
+            and (proof := job.closure_basis)
+            and proof.get("action_id") == prep.action_id
+        ):
+            # The original Transport result can carry a newer position observation.
+            result = await self.dispatch.final_result(
+                session, job_id=job.id, action_id=prep.action_id
+            )
+            if (
+                result is not None
+                and result.closure == "CLOSED"
+                and not result.has_pending_outcome
+                and result.outcome == proof.get("outcome")
+                and (
+                    result.outcome is not None
+                    or result.closure_basis == proof.get("submission_rejection")
+                )
+                and (result.position_observation or {}).get("outcome_revision", 0)
+                <= (result.outcome_revision or 0)
+            ):
+                prep.pending = False
+                return "RACK_NOT_ARRIVED"
         ready = await self.dispatch.get_point_preparations(
             session, work_line_id=prep.work_line_id, point=prep.point, source_kinds=XRAY_SOURCES
         )

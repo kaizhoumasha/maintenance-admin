@@ -185,6 +185,18 @@ def targets_for_protocol(targets: Mapping[str, TargetConfig], protocol: str) -> 
     ]
 
 
+def static_retry_budgets(config: ReliableConfig) -> list[dict]:
+    return [
+        dict(
+            target=target.name,
+            protocol=target.protocol,
+            retry_limit=target.max_not_received_attempts,
+        )
+        for target in config.targets.values()
+        if target.address_mode == "STATIC"
+    ]
+
+
 def target_config_hint(targets: Mapping[str, TargetConfig], protocol: str) -> str:
     """缺少某协议的目标时附在错误后面:列出现有目标和一个可复制的配置示例。"""
     existing = ", ".join(f"{n}[{t.protocol}]" for n, t in targets.items())

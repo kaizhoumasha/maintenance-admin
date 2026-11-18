@@ -1,7 +1,10 @@
+from typing import Annotated
+
 from fastapi import Depends, status
 
 from app.core import SessionDep, error_responses, require_permission
 from app.core.routing import new_router
+from app.models import User
 from app.schemas.base import DatabaseId
 from app.schemas.rbac import RoleCreate, RolePermissionsIn, RoleRead, RoleUpdate
 from app.services import rbac_service
@@ -21,9 +24,19 @@ async def list_roles(session: SessionDep):
     response_model=RoleRead,
     status_code=status.HTTP_201_CREATED,
     responses=error_responses(409),
-    dependencies=[Depends(require_permission("admin:role:create"))],
 )
-async def create_role(data: RoleCreate, session: SessionDep):
+async def create_role(
+    data: RoleCreate,
+    session: SessionDep,
+    actor: Annotated[User, Depends(require_permission("admin:role:create"))],
+):
+    await rbac_service.authorize_management(
+        session,
+        actor,
+        "admin:role:create",
+        codes=data.permissions,
+        reserved_role=data.name == "admin",
+    )
     return await rbac_service.create_role(session, data.name, data.permissions)
 
 
@@ -31,9 +44,16 @@ async def create_role(data: RoleCreate, session: SessionDep):
     "/{role_id}/permissions",
     response_model=RoleRead,
     responses=error_responses(404),
-    dependencies=[Depends(require_permission("admin:role:set_permissions"))],
 )
-async def set_role_permissions(role_id: DatabaseId, data: RolePermissionsIn, session: SessionDep):
+async def set_role_permissions(
+    role_id: DatabaseId,
+    data: RolePermissionsIn,
+    session: SessionDep,
+    actor: Annotated[User, Depends(require_permission("admin:role:set_permissions"))],
+):
+    await rbac_service.authorize_management(
+        session, actor, "admin:role:set_permissions", role_ids=(role_id,), codes=data.permissions
+    )
     return await rbac_service.set_role_permissions(session, role_id, data.permissions)
 
 

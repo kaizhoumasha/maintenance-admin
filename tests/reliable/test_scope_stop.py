@@ -31,6 +31,7 @@ async def test_scope_stop_fences_claim_and_preserves_dispatch_fact(storage, deli
     claim = next(item for item in claims if item.message_id == result.message_id)
     if gate_first:
         assert await rig.store.before_send(claim, rig.target)
+        assert await rig.store.before_send(claim, rig.target) is None
     async with rig.factory.begin() as session:
         stopped = await rig.outbox.stop_scope(session, scope, reason="TASK_COMPLETED")
         assert len(stopped) == 1

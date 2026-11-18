@@ -7,7 +7,7 @@ from app.diagnostics import log_exception
 from app.http_client import DeliveryState, FailureKind, HttpClient, HttpResult, validate_request
 
 from .config import TargetConfig
-from .lifecycle import EvidencePersistenceError, PreDispatchTimeout
+from .lifecycle import EvidencePersistenceError, PreDispatchTimeout, PreDispatchUnavailable
 from .policy import retry_delay_s
 from .store import AttemptOutcome, Claim, MessageStore, utc_datetime
 from .types import (
@@ -20,6 +20,34 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _guarded_request(request, before_write, check_wire, deadline, clock, note_write=None):
+    if before_write is None:
+        return request
+
+    async def authorize_write():
+        if deadline <= utc_datetime(clock()):
+            raise TimeoutError("HTTP write deadline elapsed")
+        await before_write()
+        remaining = (deadline - utc_datetime(clock())).total_seconds()
+        if remaining <= 0:
+            raise TimeoutError("HTTP write deadline elapsed")
+        return remaining
+
+    def verify_write():
+        if check_wire is not None:
+            check_wire()
+        if deadline <= utc_datetime(clock()):
+            raise TimeoutError("HTTP write deadline elapsed")
+
+    return replace(
+        request,
+        before_write=authorize_write,
+        check_wire=verify_write,
+        recheck_wire=before_write,
+        on_wire_write=note_write,
+    )
 
 
 async def send_one(
@@ -67,8 +95,24 @@ async def send_one(
             until = await store.before_send(replace(claim, request=request), target)
             if until is None:
                 return
-            phase = "send"
-            result = await client.send(request)
+            phase = "send_guard"
+            hold_reason = None
+            before_write = None
+            deadline = min(until, claim.message.expires_at or until)
+            try:
+                async with store.snapshots.http_guard(claim, target.protocol) as guard:
+                    hold_reason, before_write, check_wire, note_write = guard
+                    if hold_reason or deadline <= utc_datetime(store.clock()):
+                        result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
+                    else:
+                        phase = "send"
+                        result = await client.send(
+                            _guarded_request(
+                                request, before_write, check_wire, deadline, store.clock, note_write
+                            )
+                        )
+            except PreDispatchUnavailable:
+                result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
             if not isinstance(result, HttpResult):
                 raise ValueError("invalid HTTP result")
             if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
@@ -81,7 +125,26 @@ async def send_one(
                 if verdict.kind == VerdictKind.DELIVERED and verdict.response != result.body:
                     raise ValueError("adapter changed response bytes")
             phase = "apply_outcome"
-            if verdict is not None and verdict.kind == VerdictKind.DELIVERED:
+            if hold_reason:
+                outcome = AttemptOutcome(
+                    MessageStatus.STALLED, result=result, pause_reason=hold_reason
+                )
+            elif (
+                before_write is not None and result.delivery_state == DeliveryState.DELIVERY_UNKNOWN
+            ):
+                outcome = AttemptOutcome(
+                    MessageStatus.STALLED,
+                    result=result,
+                    pause_reason="DELIVERY_UNKNOWN",
+                    delivery_uncertain=True,
+                )
+            elif (
+                result.delivery_state == DeliveryState.NOT_SENT
+                and claim.message.expires_at is not None
+                and claim.message.expires_at <= utc_datetime(store.clock())
+            ):
+                outcome = AttemptOutcome(MessageStatus.EXPIRED, result=result)
+            elif verdict is not None and verdict.kind == VerdictKind.DELIVERED:
                 outcome = AttemptOutcome(MessageStatus.DONE, result=result, verdict=verdict)
             elif verdict is not None and verdict.kind == VerdictKind.PEER_TERMINAL:
                 outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)
@@ -90,10 +153,17 @@ async def send_one(
                 definite = result.delivery_state == DeliveryState.NOT_SENT or (
                     verdict is not None and verdict.kind == VerdictKind.NOT_RECEIVED
                 )
-                uncertain = claim.delivery_uncertain or not definite
+                scoped = claim.message.scope is not None
+                uncertain = not definite or (not scoped and claim.delivery_uncertain)
                 count = claim.not_received_count + definite
                 budget = target.max_not_received_attempts
-                if budget is not None and definite and not uncertain and count >= budget:
+                if (
+                    not scoped
+                    and budget is not None
+                    and definite
+                    and not uncertain
+                    and count >= budget
+                ):
                     outcome = AttemptOutcome(
                         MessageStatus.STALLED,
                         result=result,
@@ -111,6 +181,7 @@ async def send_one(
                         next_attempt_at=utc_datetime(clock()) + timedelta(seconds=delay),
                         not_received_count=count,
                         delivery_uncertain=uncertain,
+                        retry_budget=budget if scoped else None,
                     )
     except EvidencePersistenceError:
         raise
@@ -171,6 +242,7 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
 
     result = verdict = None
     gated = False
+    hold_reason = None
     pre_reason = "CONFIG_DRIFT"
     phase = "prepare"
     try:
@@ -201,14 +273,22 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                     phase = "acquire_client"
                     return
                 gated = True
-                now = utc_datetime(clock())
-                if until <= now or (
-                    claim.message.expires_at is not None and claim.message.expires_at <= now
-                ):
+                phase = "send_guard"
+                try:
+                    async with store.snapshots.http_guard(claim) as guard:
+                        hold_reason, before_write, check_wire, note_write = guard
+                        deadline = min(until, claim.message.expires_at or until)
+                        if hold_reason or deadline <= utc_datetime(clock()):
+                            result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
+                        else:
+                            phase = "send"
+                            result = await client.send(
+                                _guarded_request(
+                                    request, before_write, check_wire, deadline, clock, note_write
+                                )
+                            )
+                except PreDispatchUnavailable:
                     result = HttpResult(DeliveryState.NOT_SENT, None, None, (), None)
-                else:
-                    phase = "send"
-                    result = await client.send(request)
             if not isinstance(result, HttpResult):
                 raise ValueError("invalid HTTP result")
             if result.delivery_state == DeliveryState.HTTP_RESPONSE_COMPLETE:
@@ -225,7 +305,9 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         definite = result.delivery_state == DeliveryState.NOT_SENT or (
             verdict and verdict.kind == VerdictKind.NOT_RECEIVED
         )
-        if verdict and verdict.kind == VerdictKind.DELIVERED:
+        if hold_reason:
+            outcome = AttemptOutcome(MessageStatus.HELD, result=result, pause_reason=hold_reason)
+        elif verdict and verdict.kind == VerdictKind.DELIVERED:
             outcome = AttemptOutcome(MessageStatus.DONE, result=result, verdict=verdict)
         elif verdict and verdict.kind == VerdictKind.PEER_TERMINAL:
             outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)

@@ -12,7 +12,14 @@ from sqlalchemy.orm import aliased
 
 from app.core.identifiers import uuid7
 from app.integrations.http_exchanges import close_attempt as close_attempt
+from app.integrations.http_exchanges import dispatch_attempt_summary as dispatch_attempt_summary
+from app.integrations.http_exchanges import (
+    dispatch_history_incomplete as dispatch_history_incomplete,
+)
+from app.integrations.http_exchanges import legacy_dispatch_gate_count as legacy_dispatch_gate_count
 from app.integrations.http_exchanges import note_response, open_attempt
+from app.integrations.http_exchanges import record_late_not_sent as record_late_not_sent
+from app.integrations.http_exchanges import reset_retry_budget as reset_retry_budget
 from app.integrations.runtime_authority import enabled
 from app.models import EcsSendEvidence, IntegrationExchange, IntegrationRecord, IntegrationReference
 from app.reliable.lifecycle import (

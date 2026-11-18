@@ -27,7 +27,7 @@ from app.reliable import Outbox
 from app.reliable.lifecycle import transaction_limits
 from app.transactions import after_commit
 
-from .contracts import ResultEnvelope
+from .contracts import PauseReason, ResultEnvelope
 from .protocol import OPERATION
 
 ACK = {"code": 200, "message": "ACK"}
@@ -155,11 +155,44 @@ async def receive_ecs_result(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    from .lifecycle import get_attempt_conclusions
+    from .lifecycle import EcsLifecycle, get_attempt_conclusions, original_request_wire
+    from .protocol import PROTOCOL
 
-    attempts = await get_attempt_conclusions(session, exchange_id=command.id)
+    integrity_hold = PauseReason.FROZEN_REQUEST_INTEGRITY
+    damaged_copy = command.hold_reason == integrity_hold or (
+        message is not None and message.pause_reason == integrity_hold
+    )
+    if message is not None and not damaged_copy:
+        try:
+            await history_records.frozen_requests(session, rows=(message,))
+        except history_records.EvidenceIntegrityError:
+            damaged_copy = True
+    resolvable_pauses = {
+        "DELIVERY_UNKNOWN",
+        "LEASE_INTERRUPTED",
+        integrity_hold,
+        PauseReason.RACK_POSITION_CONFLICT,
+    }
+    attempts = await get_attempt_conclusions(
+        session, exchange_id=command.id, require_open=damaged_copy
+    )
     possible = any(outcome in ("OPEN_ATTEMPT", "UNKNOWN", "ACK") for outcome in attempts.values())
-    resolvable_pauses = {"DELIVERY_UNKNOWN", "LEASE_INTERRUPTED"}
+    if damaged_copy and possible:
+        # The outbound copy may be damaged while the original command is still provable.
+        possible = (
+            message is not None
+            and message.exchange_id == command.id
+            and message.delivery_snapshot == command.delivery_snapshot
+            and (
+                isinstance(command, EcsCommand)
+                or message.request_record_id == command.request_record_id
+            )
+        )
+        if possible:
+            try:
+                possible = await original_request_wire(session, command) is not None
+            except history_records.EvidenceIntegrityError:
+                possible = False
     if command.route["route_id"].startswith("device.route.") and command.route[
         "version"
     ].startswith("2:"):
@@ -191,9 +224,6 @@ async def receive_ecs_result(
         command.applied_result_id = digest
         command.hold_reason = None
         applied = True
-    from .lifecycle import EcsLifecycle
-    from .protocol import PROTOCOL
-
     outbox = Outbox({}, {}, lifecycles={PROTOCOL: EcsLifecycle(service)}, records=history_records)
     if applied:
         await outbox.settle(session, command.target, OPERATION, command.command_code)

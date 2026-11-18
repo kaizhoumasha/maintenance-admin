@@ -153,6 +153,96 @@ async def test_frozen_request_reference_keeps_independent_integrity(ecs):
         assert message.pause_reason == "CONFIG_DRIFT"
 
 
+async def test_corrupt_frozen_snapshot_is_held_before_dispatch(ecs):
+    import time
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == command.command_code)
+        )
+        message_id = message.id
+        message.frozen_request_wire = b"corrupt bytes"
+    store = await make_store(ecs)
+    assert await store.maintain_snapshots(10, ecs.targets, time.monotonic() + 5) == 1
+    assert await store.claim(1, ecs.targets) == ()
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, message_id)
+        assert (message.status, message.pause_reason, message.dispatch_started_at) == (
+            "HELD",
+            "FROZEN_REQUEST_INTEGRITY",
+            None,
+        )
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        rejected = await receive_ecs_result(session, raw, ecs.service)
+        assert rejected.status_code == 409
+        assert rejected.body["message"] == "RESULT_BEFORE_DISPATCH"
+    async with ecs.factory.begin() as session:
+        replayed = await receive_ecs_result(session, raw, ecs.service)
+        assert replayed.pure_replay and replayed.body == rejected.body
+
+
+@pytest.mark.parametrize("runtime", [False, True])
+@pytest.mark.parametrize("maintained", [False, True])
+@pytest.mark.parametrize("original_intact", [False, True])
+async def test_late_result_uses_original_evidence_when_send_copy_is_corrupt(
+    ecs, monkeypatch, request, runtime, maintained, original_intact
+):
+    import time
+    from datetime import timedelta
+    from hashlib import sha256
+
+    from app.core.config import get_settings
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import EcsCommand, IntegrationRecord
+
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime)
+    command = await prepare(ecs, key=request.node.name)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    until = await store.before_send(claim, ecs.targets["ecs"])
+    assert until is not None
+    async with ecs.factory.begin() as session:
+        message = await session.get(ReliableMessage, claim.message_id)
+        message.frozen_request_wire = b"damaged transport copy"
+        if not original_intact:
+            if runtime:
+                canonical = await session.get(EcsCommand, command.command_code)
+                canonical.request_wire = b"damaged original"
+            else:
+                canonical = await session.get(IntegrationRecord, message.request_record_id)
+                canonical.raw_body = b"damaged original"
+                canonical.stored_bytes = len(canonical.raw_body)
+                canonical.body_sha256 = sha256(canonical.raw_body).hexdigest()
+    if maintained:
+        store.clock = lambda: until + timedelta(seconds=1)
+        assert await store.maintain_snapshots(10, ecs.targets, time.monotonic() + 5) == 1
+        assert await store.claim(1, ecs.targets) == ()
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        response = await receive_ecs_result(session, raw, ecs.service)
+        assert response.status_code == (200 if original_intact else 409)
+    async with ecs.factory.begin() as session:
+        replayed = await receive_ecs_result(session, raw, ecs.service)
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        message = await session.get(ReliableMessage, claim.message_id)
+        assert replayed.pure_replay and replayed.body == response.body
+        if original_intact:
+            assert (
+                view.status == "SUCCEEDED" and view.result["command_code"] == command.command_code
+            )
+            assert message.status == "DONE"
+        else:
+            assert view.status == "RECONCILING" and view.result is None
+            assert message.status == "HELD"
+        assert message.frozen_request_wire == b"damaged transport copy"
+
+
 async def test_first_result_before_http_response_applies_once(ecs):
     from app.integrations.ecs_command.result import receive_ecs_result
 
@@ -536,25 +626,42 @@ async def test_sender_http_and_result_http_complete_before_ack(ecs):
         await sender.aclose()
 
 
-async def test_public_pause_keeps_projection_and_blocks_result(ecs):
+@pytest.mark.parametrize(
+    "reason,gated,expected_code",
+    [
+        ("AUTHORIZATION_REVOKED", True, 409),
+        ("RACK_POSITION_CONFLICT", False, 409),
+        ("RACK_POSITION_CONFLICT", True, 200),
+    ],
+)
+async def test_paused_command_only_accepts_results_with_original_dispatch_evidence(
+    ecs, reason, gated, expected_code
+):
     from app.integrations.ecs_command.result import receive_ecs_result
 
     command = await prepare(ecs)
     store = await make_store(ecs)
     claim = (await store.claim(1, ecs.targets))[0]
-    await store.before_send(claim, ecs.targets["ecs"])
+    if gated:
+        assert await store.before_send(claim, ecs.targets["ecs"])
     async with ecs.factory.begin() as session:
         assert await ecs.outbox.hold(
-            session, "ecs", "ecs.command", command.command_code, reason="AUTHORIZATION_REVOKED"
+            session, "ecs", "ecs.command", command.command_code, reason=reason
         )
     async with ecs.factory.begin() as session:
         view = await ecs.service.get_command(
             session, owner=ecs.owner, command_code=command.command_code
         )
-        assert view.status == "RECONCILING" and view.hold_reason == "AUTHORIZATION_REVOKED"
+        assert view.status == "RECONCILING" and view.hold_reason == reason
         assert (
             await receive_ecs_result(session, result_body(command.command_code), ecs.service)
-        ).status_code == 409
+        ).status_code == expected_code
+    if expected_code == 200:
+        async with ecs.factory() as session:
+            view = await ecs.service.get_command(
+                session, owner=ecs.owner, command_code=command.command_code
+            )
+            assert view.status == "SUCCEEDED"
 
 
 async def test_bare_snapshot_settle_does_not_invent_command_acceptance(ecs):

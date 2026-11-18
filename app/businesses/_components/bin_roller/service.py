@@ -333,7 +333,7 @@ class BinRoller:
         from .scan_flow import applied_result, point_view
 
         candidates = []
-        for row in await self.repository(work_line_id).return_queue(session):
+        async for row in self.repository(work_line_id).return_queue(session):
             if row["return_state"] != "READY":
                 break
             event, view = await point_view(self, session, row, "SCAN4")
@@ -355,26 +355,24 @@ class BinRoller:
     async def return_channel_empty(self, session, *, work_line_id):
         repo = self.repository(work_line_id)
         table = self.tables["bin_return"]
-        return (
-            await session.scalar(
-                select(table.c.id)
-                .where(
-                    *repo.scoped(table),
-                    table.c.closed_at.is_(None),
-                    or_(
-                        table.c.is_current.is_(True)
-                        & (
-                            (table.c.return_state != "OBSERVED")
-                            | table.c.scan4_event_id.is_not(None)
-                        ),
-                        table.c.selected_face_work_id.is_not(None),
-                        table.c.return_state == "WAIT_FACT",
-                    ),
-                )
-                .limit(1)
+        pending = await session.scalar(
+            select(table.c.id)
+            .where(
+                *repo.scoped(table),
+                table.c.closed_at.is_(None),
+                or_(
+                    table.c.is_current.is_(True) & (table.c.return_state != "OBSERVED"),
+                    table.c.selected_face_work_id.is_not(None),
+                    table.c.return_state == "WAIT_FACT",
+                ),
             )
-            is None
+            .limit(1)
         )
+        if pending is not None:
+            return False
+        async for _ in repo.return_queue(session):
+            return False
+        return True
 
     async def check_drain(self, session, work_line_id):
         from .return_flow import advance_drain

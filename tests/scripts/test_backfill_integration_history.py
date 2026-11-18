@@ -744,6 +744,7 @@ async def test_cleanup_preserves_uncut_sources_and_only_removes_verified_old_cop
     from datetime import timedelta
 
     from app.businesses.smt_auto import retention as auto_retention
+    from app.integrations import runtime_authority
     from app.tasks.callback_tasks import run_cleanup, run_history_cleanup, run_receipt_cleanup
     from app.tasks.reliable_tasks import run_cleanup as reliable_cleanup
     from scripts.backfill_integration_history import SOURCES, backfill_batch
@@ -751,7 +752,8 @@ async def test_cleanup_preserves_uncut_sources_and_only_removes_verified_old_cop
     async def no_auto_references(*args, **kwargs):
         return ()
 
-    # This fixture stops at the historical receipt cutover, before the current SMT task schema.
+    # Exercise the historical cleanup rules without booting a current release on the old schema.
+    monkeypatch.setattr(runtime_authority, "_require_current_schema", lambda _connection: None)
     monkeypatch.setattr(auto_retention, "wms_message_references", no_auto_references)
     old = NOW - timedelta(days=100)
     async with legacy.begin() as session:
@@ -912,6 +914,7 @@ async def test_migrated_pending_command_keeps_its_original_send_gate(
     from migrations.integration_history_contract_v2 import WRITERS
     from scripts.backfill_integration_history import SOURCES, backfill_batch
     from tests.helpers import run_alembic
+    from tests.migration_helpers import set_reliable_runtime_test_columns
 
     code, _ = await seed_command_message(legacy)
     snapshot = {"origin": "http://ecs.test", "protocol": "ecs-command", "unknown_policy": "HOLD"}
@@ -957,6 +960,7 @@ async def test_migrated_pending_command_keeps_its_original_send_gate(
         "http_exchange_runtime_expand",
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    await set_reliable_runtime_test_columns(state_migration.engine, present=True)
 
     class Routes:
         async def authorize_frozen(self, session, route):

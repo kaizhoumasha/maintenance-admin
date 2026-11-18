@@ -25,7 +25,7 @@ from .models import (
     AutoTask,
     AutoTaskInput,
 )
-from .outbound_contracts import DECISIONS, EMPTY_DECISION
+from .outbound_contracts import EMPTY_DECISION, validate_material_decision
 from .request.outbound_bin_material_decide_v1 import MaterialDecide as BinDecide
 from .request.outbound_material_movement_report_v1 import MovementReport
 from .request.outbound_rackslot_material_decide_v1 import MaterialDecide as RackDecide
@@ -645,6 +645,18 @@ class Outbound:
 
     async def advance(self, session, *, work_line_id, plate_id, now_ms, timing=None):
         bindings = await lock_line(session, self.dispatch, work_line_id, timing=timing)
+        return await self.advance_locked(
+            session,
+            work_line_id=work_line_id,
+            plate_id=plate_id,
+            now_ms=now_ms,
+            bindings=bindings,
+            timing=timing,
+        )
+
+    async def advance_locked(
+        self, session, *, work_line_id, plate_id, now_ms, bindings, timing=None
+    ):
         plate = await session.get(AutoOutboundPlate, plate_id)
         task = await session.get(AutoTask, plate.task_id) if plate else None
         if task is None or task.work_line_id != work_line_id or task.business_type != "outbound":
@@ -753,7 +765,9 @@ class Outbound:
         if scan is None:
             empty = await self._result(session, plate, "pick", empty=True)
             if empty is not None and await self._grant(session, plate):
-                await self._empty(session, task, plate, empty, now_ms, allow_continue=enabled)
+                await self._empty(
+                    session, task, plate, empty, now_ms, allow_continue=enabled, bindings=bindings
+                )
             return plate
         if plate.pick_consumed_at_ms is None:
             plate.pick_consumed_at_ms = now_ms
@@ -793,9 +807,18 @@ class Outbound:
                     or original.response_data != wait
                     or wait.get("result") != "WAIT"
                     or previous.unresolved
-                    or previous.next_eligible_at_ms
-                    != previous.consumed_at_ms + wait.get("retry_after_ms", 0)
+                    or previous.consumed_at_ms is None
                 ):
+                    return plate
+                try:
+                    validate_material_decision(
+                        "bin" if plate.bin_work_id else "rack",
+                        wait,
+                        original_put=plate.put_command_code is not None,
+                    )
+                except (ValueError, TypeError):
+                    return plate
+                if previous.next_eligible_at_ms != previous.consumed_at_ms + wait["retry_after_ms"]:
                     return plate
             previous = item
         retry = False
@@ -805,8 +828,10 @@ class Outbound:
                 return plate
             data = result.response_data
             try:
-                DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(
-                    data, extra="ignore"
+                validate_material_decision(
+                    "bin" if plate.bin_work_id else "rack",
+                    data,
+                    original_put=plate.put_command_code is not None,
                 )
             except (ValueError, TypeError):
                 return plate
@@ -864,7 +889,9 @@ class Outbound:
             plate.final_decision_round_id = current.id
             plate.target_snapshot = target
             if not is_ng:
-                await self._continue_normal(session, task, plate, now_ms, enabled=enabled)
+                await self._continue_normal(
+                    session, task, plate, now_ms, enabled=enabled, bindings=bindings
+                )
         if plate.target_snapshot != target:
             return plate
         if plate.put_command_code is None:
@@ -934,7 +961,9 @@ class Outbound:
             )
             plate.report_message_id, plate.report_data = ref.message_id, report
         if is_ng and enabled:
-            round_ = await self._continue_exception(session, task, plate, now_ms, source_done=False)
+            round_ = await self._continue_exception(
+                session, task, plate, now_ms, source_done=False, bindings=bindings
+            )
             if round_ is not None:
                 plate.pending = False
         await session.flush()
@@ -1052,7 +1081,7 @@ class Outbound:
     def _empty_basis(plate, round_):
         return dict(kind="EMPTY", command_code=plate.pick_command_code, round_id=round_.id)
 
-    async def _empty(self, session, task, plate, result, now_ms, *, allow_continue):
+    async def _empty(self, session, task, plate, result, now_ms, *, allow_continue, bindings):
         from .request.outbound_source_empty_decide_v1 import EmptyDecide
 
         context = await self._empty_context(session, plate, result)
@@ -1068,7 +1097,7 @@ class Outbound:
             if not round_.unresolved:
                 if await self._empty_closed(session, plate) == "SOURCE_DONE":
                     if allow_continue and await self._continue_exception(
-                        session, task, plate, now_ms, source_done=True
+                        session, task, plate, now_ms, source_done=True, bindings=bindings
                     ):
                         plate.pending = False
                     return
@@ -1123,7 +1152,7 @@ class Outbound:
                     else:
                         plate.source_closed_basis = dict(kind="SOURCE_DONE", round_id=round_.id)
                         if allow_continue and await self._continue_exception(
-                            session, task, plate, now_ms, source_done=True
+                            session, task, plate, now_ms, source_done=True, bindings=bindings
                         ):
                             plate.pending = False
                 await session.flush()
@@ -1161,7 +1190,7 @@ class Outbound:
             )
         )
 
-    async def _continue_exception(self, session, task, plate, now_ms, *, source_done):
+    async def _continue_exception(self, session, task, plate, now_ms, *, source_done, bindings):
         if source_done and await self._empty_closed(session, plate) != "SOURCE_DONE":
             return None
         if not source_done and not await self.closed(session, plate):
@@ -1173,7 +1202,6 @@ class Outbound:
             task.status == "CANCELLED" and plate.bin_work_id is not None
         ):
             return None
-        bindings = await lock_line(session, self.dispatch, task.work_line_id)
         if not await self._source_ready(session, task, plate, bindings):
             return None
         others = [
@@ -1188,7 +1216,12 @@ class Outbound:
                 session, other
             ):
                 return None
-        common = dict(work_line_id=task.work_line_id, now_ms=now_ms, trigger_plate_id=plate.id)
+        common = dict(
+            work_line_id=task.work_line_id,
+            now_ms=now_ms,
+            trigger_plate_id=plate.id,
+            locked_bindings=bindings,
+        )
         if plate.bin_work_id is not None:
             work = await session.get(AutoBinWork, plate.bin_work_id)
             round_ = await self.work_plans.start_bin(session, arrival_id=work.arrival_id, **common)
@@ -1198,22 +1231,20 @@ class Outbound:
             )
         return round_ if round_ is not None and round_.trigger_plate_id == plate.id else None
 
-    async def _continue_normal(self, session, task, plate, now_ms, *, enabled):
-        bindings = dict(work_line_id=task.work_line_id, now_ms=now_ms)
+    async def _continue_normal(self, session, task, plate, now_ms, *, enabled, bindings):
+        common = dict(work_line_id=task.work_line_id, now_ms=now_ms, locked_bindings=bindings)
         if plate.bin_work_id is not None:
             work = await session.get(AutoBinWork, plate.bin_work_id)
             if work is not None and task.status in ("EXECUTING", "CANCELLED"):
                 work.normal_plan_due = True
                 if enabled:
-                    await self.work_plans.start_bin(session, arrival_id=work.arrival_id, **bindings)
+                    await self.work_plans.start_bin(session, arrival_id=work.arrival_id, **common)
         else:
             member = await session.get(AutoOutboundSourceMember, plate.source_member_id)
             if member is not None and task.status == "EXECUTING":
                 member.normal_plan_due = True
                 if enabled:
-                    await self.work_plans.start_return_face(
-                        session, member_id=member.id, **bindings
-                    )
+                    await self.work_plans.start_return_face(session, member_id=member.id, **common)
 
     async def _final_material(self, session, plate):
         if plate.put_command_code is None and plate.source_arrival_snapshot.get(
@@ -1249,7 +1280,11 @@ class Outbound:
         ):
             return None
         try:
-            DECISIONS["bin" if plate.bin_work_id else "rack"].validate_python(data, extra="ignore")
+            validate_material_decision(
+                "bin" if plate.bin_work_id else "rack",
+                data,
+                original_put=plate.put_command_code is not None,
+            )
         except (ValueError, TypeError):
             return None
         scan = await self._pick_scan(session, plate)
@@ -1279,9 +1314,17 @@ class Outbound:
                     or response is None
                     or response.response_data != wait
                     or wait.get("result") != "WAIT"
-                    or previous.next_eligible_at_ms
-                    != previous.consumed_at_ms + wait.get("retry_after_ms", 0)
                 ):
+                    return None
+                try:
+                    validate_material_decision(
+                        "bin" if plate.bin_work_id else "rack",
+                        wait,
+                        original_put=plate.put_command_code is not None,
+                    )
+                except (ValueError, TypeError):
+                    return None
+                if previous.next_eligible_at_ms != previous.consumed_at_ms + wait["retry_after_ms"]:
                     return None
             previous = item
         if not chain or chain[-1].id != round_.id:

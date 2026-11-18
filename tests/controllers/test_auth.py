@@ -1,5 +1,8 @@
 import jwt
+import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import get_settings
 from app.core.database import get_session
@@ -95,6 +98,26 @@ async def test_valid_signature_but_bad_subject_rejected(client, admin):
 async def test_expired_token_message(client):
     r = await client.get("/api/v1/users/me", headers=_bearer(create_access_token("1", -1)))
     assert r.status_code == 401 and r.json()["message"] == "凭证已过期"
+
+
+@pytest.mark.parametrize("version", [False, True, -1, "0", None, 0.0])
+async def test_signed_invalid_session_version_rejects_both_token_types(
+    client, admin, redis, version
+):
+    access, refresh = await _login(client)
+    secret = get_settings().JWT_SECRET_KEY
+
+    def replace_version(token):
+        claims = jwt.decode(token, secret, algorithms=[ALGORITHM])
+        claims["sv"] = version
+        return jwt.encode(claims, secret, algorithm=ALGORITHM)
+
+    response = await client.get("/api/v1/users/me", headers=_bearer(replace_version(access)))
+    assert response.status_code == 401 and response.json()["code"] == "UNAUTHORIZED"
+    response = await _refresh(client, replace_version(refresh))
+    assert response.status_code == 401 and response.json()["code"] == "UNAUTHORIZED"
+    assert f"refresh:{_jti(refresh)}" in redis.data
+    assert (await _refresh(client, refresh)).status_code == 200
 
 
 # ---- refresh / logout ----
@@ -212,3 +235,56 @@ async def test_redis_down_returns_503(client, admin):
     app.dependency_overrides[get_redis] = lambda: Down()
     r = await client.post("/api/v1/auth/login", json=LOGIN)
     assert r.status_code == 503 and r.json()["code"] == "DATABASE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_reenabled_user_does_not_regain_old_tokens(client, admin, redis, monkeypatch, legacy):
+    user_id = (await client.post("/api/v1/users", json=PAYLOAD, headers=admin)).json()["id"]
+    access, refresh_token = await _login(client, KAI)
+    if legacy:
+        secret = get_settings().JWT_SECRET_KEY
+
+        def legacy_token(token):
+            claims = jwt.decode(token, secret, algorithms=[ALGORITHM])
+            claims.pop("sv", None)
+            return jwt.encode(claims, secret, algorithm=ALGORITHM)
+
+        access, refresh_token = legacy_token(access), legacy_token(refresh_token)
+    assert (await client.get("/api/v1/users/me", headers=_bearer(access))).status_code == 200
+
+    async def redis_outage(*args):
+        raise RedisConnectionError("down")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(redis, "eval", redis_outage)
+        response = await client.put(
+            f"/api/v1/users/{user_id}", json={"is_active": False}, headers=admin
+        )
+    assert (await client.get("/api/v1/users/me", headers=_bearer(access))).status_code == 401
+    assert (
+        await client.put(f"/api/v1/users/{user_id}", json={"is_active": True}, headers=admin)
+    ).status_code == 200
+    assert (await client.get("/api/v1/users/me", headers=_bearer(access))).status_code == 401
+    assert (await _refresh(client, refresh_token)).status_code == 401
+    assert response.status_code == 200
+    client.cookies.clear()
+    new_access, new_refresh = await _login(client, KAI)
+    assert (await client.get("/api/v1/users/me", headers=_bearer(new_access))).status_code == 200
+    assert (await _refresh(client, new_refresh)).status_code == 200
+
+
+async def test_failed_disable_commit_keeps_the_original_session(client, admin, monkeypatch):
+    user_id = (await client.post("/api/v1/users", json=PAYLOAD, headers=admin)).json()["id"]
+    access, refresh_token = await _login(client, KAI)
+
+    async def fail_commit(self):
+        raise OperationalError("COMMIT", None, OSError("disconnected"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncSession, "commit", fail_commit)
+        response = await client.put(
+            f"/api/v1/users/{user_id}", json={"is_active": False}, headers=admin
+        )
+    assert response.status_code == 503
+    assert (await client.get("/api/v1/users/me", headers=_bearer(access))).status_code == 200
+    assert (await _refresh(client, refresh_token)).status_code == 200

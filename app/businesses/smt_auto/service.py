@@ -387,7 +387,16 @@ class SmtAutoService(AutoTaskService):
         line_id = subject.work_line_id if kind == "BIN" else task.work_line_id
         if timing is not None:
             timing["work_line_id"] = line_id
-        await lock_line(session, self.dispatch, line_id, roller=self.roller, timing=timing)
+        # The outbound plate mutates its original task only. Line-level safety checks still
+        # read other tasks' outstanding physical facts while holding the common WorkLine lock.
+        bindings = await lock_line(
+            session,
+            self.dispatch,
+            line_id,
+            roller=self.roller,
+            timing=timing,
+            task_id=task.task_id if kind == "OUTBOUND_PLATE" else None,
+        )
         await session.refresh(subject)
         if decision is not None:
             await session.refresh(decision)
@@ -447,13 +456,21 @@ class SmtAutoService(AutoTaskService):
                     session, work_line_id=line_id, member_id=record_id, now_ms=now_ms
                 )
             return "WAITING"
-        flow = self.inbound if kind == "INBOUND_PLATE" else self.outbound
-        if kind == "OUTBOUND_PLATE" and timing is not None:
+        if kind == "INBOUND_PLATE":
+            return await self.inbound.advance(
+                session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms
+            )
+        if timing is not None:
             original_put = subject.put_command_code
             started = perf_counter()
             locks_before = timing["all_locks_ms"]
-            result = await flow.advance(
-                session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms, timing=timing
+            result = await self.outbound.advance_locked(
+                session,
+                work_line_id=line_id,
+                plate_id=record_id,
+                now_ms=now_ms,
+                bindings=bindings,
+                timing=timing,
             )
             timing["processing_ms"] = max(
                 0, (perf_counter() - started) * 1000 - (timing["all_locks_ms"] - locks_before)
@@ -461,4 +478,10 @@ class SmtAutoService(AutoTaskService):
             if result is not None and result.put_command_code != original_put:
                 timing["put_command_code"] = result.put_command_code
             return result
-        return await flow.advance(session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms)
+        return await self.outbound.advance_locked(
+            session,
+            work_line_id=line_id,
+            plate_id=record_id,
+            now_ms=now_ms,
+            bindings=bindings,
+        )

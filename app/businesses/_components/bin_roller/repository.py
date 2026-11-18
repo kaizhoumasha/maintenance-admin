@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.core.identifiers import uuid7
+from app.integrations.ecs_callback import get_event
 
 from .models import TABLES
 from .ports import SourceFaceRef, SupplyChange, SupplyProgress
@@ -399,19 +400,24 @@ class RollerRepository:
 
     async def return_queue(self, session):
         table = self.tables["bin_return"]
-        return (
-            (
-                await session.execute(
-                    select(table)
-                    .where(
-                        *self.scoped(table),
-                        table.c.closed_at.is_(None),
-                        table.c.first_scan4_event_id.is_not(None),
-                        table.c.is_current.is_(True),
-                    )
-                    .order_by(table.c.first_scan4_received_at, table.c.fifo_visit_key)
-                )
+        rows = await session.execute(
+            select(table)
+            .where(
+                *self.scoped(table),
+                table.c.closed_at.is_(None),
+                table.c.first_scan4_event_id.is_not(None),
+                table.c.is_current.is_(True),
             )
-            .mappings()
-            .all()
+            .order_by(table.c.first_scan4_received_at, table.c.fifo_visit_key)
         )
+        for row in rows.mappings():
+            if row["return_state"] == "OBSERVED":
+                if row["bin_code"] is None:
+                    continue
+                # Older records also froze keys for wrong-facing bins. Missing evidence blocks.
+                event = await get_event(session, event_id=row["first_scan4_event_id"])
+                if event.record and event.record.envelope["data"].get("bin_code") != (
+                    f"{row['bin_code']}-B"
+                ):
+                    continue
+            yield row

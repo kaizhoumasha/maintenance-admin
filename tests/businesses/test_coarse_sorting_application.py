@@ -25,6 +25,28 @@ WMS_TARGETS = json.dumps(
 )
 
 
+@pytest.fixture
+def run_app(tmp_path):
+    root = str(SCAN_MIGRATION.parents[2])
+
+    def run(code, **settings):
+        return subprocess.run(
+            [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {root!r})\n{code}"],
+            cwd=tmp_path,
+            env={
+                "DATABASE_URL": "sqlite+aiosqlite://",
+                "JWT_SECRET_KEY": "test-secret-test-secret-test-secret-32",
+                "REDIS_URL": "redis://127.0.0.1:1/0",
+                **settings,
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    return run
+
+
 def test_scan_contract_exposes_only_device_facts():
     from app.businesses.coarse_sorting.contracts import ScanCompletedData
 
@@ -38,7 +60,7 @@ def test_scan_contract_exposes_only_device_facts():
 
 
 @pytest.mark.parametrize("environment", ["local", "production"])
-def test_main_uses_catalog_owned_coarse_scan_in_every_environment(environment):
+def test_main_uses_catalog_owned_coarse_scan_in_every_environment(environment, run_app):
     code = """
 from app.main import app
 from app.businesses import catalog
@@ -51,24 +73,14 @@ expected = 'app.businesses.coarse_sorting.ecs_event.scan_completed'
 assert handler.registration_source.module == expected
 assert not handler.registration_source.local_only
 """
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        env={
-            **os.environ,
-            "ENVIRONMENT": environment,
-            "DATABASE_URL": "sqlite+aiosqlite://",
-            "RELIABLE_TARGETS": "{}",
-        },
-        capture_output=True,
-        text=True,
-    )
+    result = run_app(code, ENVIRONMENT=environment)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
     "environment,tail", [("production", False), ("local", False), ("local", True)]
 )
-def test_api_and_worker_start_with_the_same_coarse_contracts(environment, tail):
+def test_api_and_worker_start_with_the_same_coarse_contracts(environment, tail, run_app):
     code = """
 import json
 from app.businesses import catalog
@@ -91,17 +103,11 @@ print(json.dumps({
 """
     reports = []
     for module in ("app.main", "app.tasks.celery_app"):
-        result = subprocess.run(
-            [sys.executable, "-c", f"import {module}\n{code}"],
-            env={
-                **os.environ,
-                "ENVIRONMENT": environment,
-                "COARSE_SORTING_TAIL_ENABLED": str(tail).lower(),
-                "DATABASE_URL": "sqlite+aiosqlite://",
-                "RELIABLE_TARGETS": WMS_TARGETS,
-            },
-            capture_output=True,
-            text=True,
+        result = run_app(
+            f"import {module}\n{code}",
+            ENVIRONMENT=environment,
+            COARSE_SORTING_TAIL_ENABLED=str(tail).lower(),
+            RELIABLE_TARGETS=WMS_TARGETS,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         reports.append(json.loads(result.stdout.splitlines()[-1]))
@@ -125,7 +131,9 @@ print(json.dumps({
 
 @pytest.mark.parametrize("module", ["app.main", "app.tasks.celery_app"])
 @pytest.mark.parametrize("invalid_target", ["missing", "snapshot"])
-def test_coarse_integration_cannot_start_without_usable_wms_targets(module, invalid_target):
+def test_coarse_integration_cannot_start_without_usable_wms_targets(
+    module, invalid_target, run_app
+):
     config = json.loads(WMS_TARGETS)
     if invalid_target == "missing":
         del config["targets"]["wms-decisions"]
@@ -134,33 +142,21 @@ def test_coarse_integration_cannot_start_without_usable_wms_targets(module, inva
             "protocol": "wms-decisions",
             "address_mode": "SNAPSHOT",
         }
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
-        env={
-            **os.environ,
-            "ENVIRONMENT": "local",
-            "COARSE_SORTING_TAIL_ENABLED": "true",
-            "RELIABLE_TARGETS": json.dumps(config),
-        },
-        capture_output=True,
-        text=True,
+    result = run_app(
+        f"import {module}",
+        COARSE_SORTING_TAIL_ENABLED="true",
+        RELIABLE_TARGETS=json.dumps(config),
     )
     assert result.returncode != 0
     assert "requires one STATIC target for wms-decisions" in result.stderr
 
 
-def test_worker_rejects_malformed_coarse_locations_at_startup():
-    result = subprocess.run(
-        [sys.executable, "-c", "import app.tasks.celery_app"],
-        env={
-            **os.environ,
-            "ENVIRONMENT": "local",
-            "COARSE_SORTING_TAIL_ENABLED": "true",
-            "COARSE_SORTING_NG_LOCATIONS": '{"COARSE":" "}',
-            "RELIABLE_TARGETS": WMS_TARGETS,
-        },
-        capture_output=True,
-        text=True,
+def test_worker_rejects_malformed_coarse_locations_at_startup(run_app):
+    result = run_app(
+        "import app.tasks.celery_app",
+        COARSE_SORTING_TAIL_ENABLED="true",
+        COARSE_SORTING_NG_LOCATIONS='{"COARSE":" "}',
+        RELIABLE_TARGETS=WMS_TARGETS,
     )
     assert result.returncode != 0
     assert "COARSE_SORTING_NG_LOCATIONS must map workline codes to valid locations" in result.stderr

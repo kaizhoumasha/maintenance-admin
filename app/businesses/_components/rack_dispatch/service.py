@@ -6,7 +6,7 @@ from dataclasses import asdict, fields
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +45,7 @@ from .models import RackAction, RackJob
 AUTO_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
 COARSE_SOURCES = ("COARSE_INCOMING", "COARSE_WMS_PRESENT")
 XRAY_SOURCES = ("XRAY_RETURN",)
+_XRAY_LATE_ARRIVAL_MOVES = (("ENTER", "CTU01"), ("ROTATE", "CTU02"))
 ROLLER_SOURCES = ("ROLLER_ORDINARY", "ROLLER_DRAIN")
 STRICT_SOURCES = (*AUTO_SOURCES, *COARSE_SOURCES, *XRAY_SOURCES)
 TEMPLATES = {
@@ -72,6 +73,14 @@ def _id():
 
 def _point(code):
     return {"kind": "RACK_POSITION", "location_code": code}
+
+
+def _withdrawn_xray_wait(action):
+    return (
+        action.kind == "DEPARTURE_DECIDE"
+        and action.phase == "WAIT"
+        and (action.basis or {}).get("xray_demand_withdrawn_at_ms") is not None
+    )
 
 
 def _caller(row):
@@ -151,6 +160,28 @@ def _close(job, state, reason, basis, now_ms):
 def _late_ctu_arrival(action):
     return bool(
         action.position_observation and action.position_observation.get("arrival_receipt_id")
+    )
+
+
+def _xray_cancelled_move():
+    return (
+        RackJob.source_kind.in_(XRAY_SOURCES)
+        & (RackJob.state == "NOT_ARRIVED")
+        & tuple_(RackAction.kind, RackAction.template).in_(_XRAY_LATE_ARRIVAL_MOVES)
+        & (RackAction.outcome["status"].as_string() == "CANCELLED")
+    )
+
+
+def _late_xray_arrival(job: RackJob, action: RackAction, result: TransportTaskResult) -> bool:
+    proof = job.closure_basis or {}
+    return (
+        (action.kind, action.template) in _XRAY_LATE_ARRIVAL_MOVES
+        and job.current_action_id == action.id
+        and proof.get("action_id") == action.id
+        and result.closure == "CLOSED"
+        and not result.has_pending_outcome
+        and result.outcome == action.outcome == proof.get("outcome")
+        and (result.position_observation or {}).get("arrival_receipt_id") is not None
     )
 
 
@@ -440,7 +471,10 @@ class RackDispatch:
                 )
             ):
                 continue
-            action = job.actions[-1]
+            actions = tuple(a for a in job.actions if not _withdrawn_xray_wait(a))
+            if not actions:
+                continue
+            action = actions[-1]
             if (
                 action.id != job.current_action_id
                 or action.id != job.position_action_id
@@ -457,7 +491,7 @@ class RackDispatch:
             ):
                 continue
             valid = True
-            for original in job.actions:
+            for original in actions:
                 result = await self.final_result(session, job_id=job.id, action_id=original.id)
                 if (
                     original.phase != "APPLIED"
@@ -554,18 +588,21 @@ class RackDispatch:
             RackJob.pending,
             select(RackAction.id)
             .where(
-                RackJob.source_kind.in_(ROLLER_SOURCES),
                 RackJob.owner_domain == self.owner_domain,
                 RackJob.original_cycle_id.in_(cycles),
                 or_(
-                    RackJob.state == "NOT_ARRIVED",
-                    (RackJob.state == "CLOSED_BY_SCOPE")
-                    & (RackJob.scope_kind == "TASK")
-                    & (
-                        RackJob.closure_basis["reason"]
-                        .as_string()
-                        .in_(("TASK_CANCELLED", "TASK_COMPLETED"))
+                    RackJob.source_kind.in_(ROLLER_SOURCES)
+                    & or_(
+                        RackJob.state == "NOT_ARRIVED",
+                        (RackJob.state == "CLOSED_BY_SCOPE")
+                        & (RackJob.scope_kind == "TASK")
+                        & (
+                            RackJob.closure_basis["reason"]
+                            .as_string()
+                            .in_(("TASK_CANCELLED", "TASK_COMPLETED"))
+                        ),
                     ),
+                    _xray_cancelled_move(),
                 ),
                 RackAction.job_id == RackJob.id,
                 RackAction.id == RackJob.current_action_id,
@@ -579,7 +616,7 @@ class RackDispatch:
         return select(RackJob.id).where(
             RackJob.owner_domain == self.owner_domain,
             await self._work_pending(session)
-            if set(kinds).intersection(ROLLER_SOURCES)
+            if set(kinds).intersection((*ROLLER_SOURCES, *XRAY_SOURCES))
             else RackJob.pending,
             RackJob.source_kind.in_(kinds),
         )
@@ -669,8 +706,58 @@ class RackDispatch:
                 handed_off.add(source.id)
         return frozenset(handed_off)
 
-    async def has_position_conflict(self, session: AsyncSession, *, point: str) -> bool:
+    async def has_position_conflict(
+        self, session: AsyncSession, *, point: str, lock_xray_arrivals: bool = False
+    ) -> bool:
+        # Read the transport evidence first so projecting it cannot hide the conflict between reads.
+        if self.owner_domain == "xray":
+            if await self._has_late_xray_arrival(session, point, lock=lock_xray_arrivals):
+                return True
+            latest = await self._latest_point_action(session, point, position_evidence_only=True)
+            if latest is not None:
+                job, action = latest
+                if job.closure_reason == "RACK_ALREADY_IN_STORAGE" and action.kind == "DEPART":
+                    if lock_xray_arrivals:
+                        await self.capabilities.transport.lock_position_evidence(
+                            session,
+                            transport_task_ids=(action.transport_task_id,),
+                            original_owner=job.owner_domain,
+                        )
+                    if not await self._storage_release_still_valid(session, job, action):
+                        return True
         return await self._position_conflict(session, point)
+
+    async def _has_late_xray_arrival(
+        self, session: AsyncSession, point: str, *, lock: bool = False
+    ) -> bool:
+        candidates = (
+            select(RackJob, RackAction)
+            .join(RackAction, RackAction.job_id == RackJob.id)
+            .where(
+                RackJob.owner_domain == self.owner_domain,
+                RackJob.point == point,
+                RackJob.current_action_id == RackAction.id,
+                RackAction.transport_task_id.is_not(None),
+                _xray_cancelled_move(),
+            )
+        )
+        rows = (await session.execute(candidates)).all()
+        if not rows:
+            return False
+        transport = self.capabilities.transport
+        if lock:
+            # A callback committed after our snapshot forces a SERIALIZABLE retry here.
+            await transport.lock_position_evidence(
+                session, transport_task_ids=tuple(action.transport_task_id for _, action in rows)
+            )
+        cycles = set(await transport.late_rack_arrival_cycles(session))
+        for job, action in rows:
+            if job.original_cycle_id not in cycles:
+                continue
+            result = await self._result(session, job, action)
+            if result and _late_xray_arrival(job, action, result):
+                return True
+        return False
 
     async def _latest_ctu_arrival(self, session, work_line_id, point, *, after_receipt_id=None):
         return await self.capabilities.transport.latest_rack_arrival_cycle(
@@ -702,14 +789,7 @@ class RackDispatch:
             )
         ):
             return False
-        latest = (
-            select(RackJob, RackAction)
-            .join(RackAction, RackAction.job_id == RackJob.id)
-            .where(RackJob.point == point, RackAction.kind.in_(("ENTER", "ROTATE", "DEPART")))
-            .order_by(RackAction.id.desc())
-            .limit(1)
-        )
-        original = (await session.execute(latest)).one_or_none()
+        original = await self._latest_point_action(session, point)
         if original is None:
             return False
         job, action = original
@@ -721,9 +801,7 @@ class RackDispatch:
         ):
             return False
         if job.closure_reason == "RACK_ALREADY_IN_STORAGE":
-            result = await self._result(session, job, action)
-            proof = self._storage_rejection_proof(job, action, result)
-            return proof is not None and proof == job.closure_basis
+            return await self._storage_release_still_valid(session, job, action)
         if action.phase != "ACCEPTED":
             return False
         result = await self._result(session, job, action)
@@ -741,6 +819,24 @@ class RackDispatch:
             and location
             and location.get("location_code") != point
         )
+
+    async def _latest_point_action(self, session, point, *, position_evidence_only=False):
+        query = (
+            select(RackJob, RackAction)
+            .join(RackAction, RackAction.job_id == RackJob.id)
+            .where(RackJob.point == point, RackAction.kind.in_(("ENTER", "ROTATE", "DEPART")))
+        )
+        if position_evidence_only:
+            query = query.where(
+                RackAction.transport_task_id.is_not(None),
+                or_(RackAction.kind == "DEPART", RackAction.phase == "APPLIED"),
+            )
+        return (await session.execute(query.order_by(RackAction.id.desc()).limit(1))).one_or_none()
+
+    async def _storage_release_still_valid(self, session, job, action):
+        result = await self._result(session, job, action)
+        proof = self._storage_rejection_proof(job, action, result, retained=job.closure_basis)
+        return proof is not None and proof == job.closure_basis
 
     async def _position_conflict(
         self, session, point, *, exclude_job_id=None, unsent_action_id=None
@@ -921,6 +1017,33 @@ class RackDispatch:
             .with_for_update()
         )
 
+    async def authorize_queued_entry(self, session: AsyncSession, *, task) -> str | None:
+        entry = (
+            select(RackJob)
+            .join(RackAction, RackAction.id == RackJob.current_action_id)
+            .where(
+                RackJob.owner_domain == self.owner_domain,
+                RackJob.source_kind.in_(XRAY_SOURCES),
+                RackJob.original_cycle_id == task.cycle_id,
+                RackJob.state == "ACTIVE",
+                RackJob.pending,
+                RackAction.kind == "ENTER",
+                RackAction.phase == "REGISTERED",
+                RackAction.transport_task_id == task.transport_task_id,
+                RackAction.submit_operation_id == task.operation_id,
+            )
+        )
+        work_line_id = entry.with_only_columns(RackJob.work_line_id).scalar_subquery()
+        line = await session.scalar(
+            select(WorkLine.id).where(WorkLine.id == work_line_id).with_for_update(read=True)
+        )
+        job = await session.scalar(entry) if line is not None else None
+        if job is None:
+            return "RACK_ENTRY_EVIDENCE_MISSING"
+        if not await self._entry_available(session, job):
+            return "RACK_POSITION_CONFLICT"
+        return None
+
     async def _entry_available(self, session: AsyncSession, job: RackJob) -> bool:
         line = await session.get(WorkLine, job.work_line_id, populate_existing=True)
         config = await session.scalar(
@@ -937,6 +1060,9 @@ class RackDispatch:
                 and line.position_bindings.get("RETURN_RACK") == job.point
                 and not await self.has_conflicting_responsibility(
                     session, point=job.point, rack_id=job.rack_id, exclude_job_id=job.id
+                )
+                and not await self.has_position_conflict(
+                    session, point=job.point, lock_xray_arrivals=True
                 )
             )
         if job.source_kind in AUTO_SOURCES and job.workline_code != line.line_code:
@@ -1079,7 +1205,7 @@ class RackDispatch:
         ):
             return None
         if actions:
-            last = actions[-1]
+            last = next(a for a in reversed(actions) if not _withdrawn_xray_wait(a))
             applied = await self._applied(session, job, actions)
             if last.phase == "REGISTERED" and job.review_reason == "AWAITING_ORIGINAL_RESULT":
                 return (
@@ -1120,7 +1246,9 @@ class RackDispatch:
             kind=kind,
             source_ref=source_ref,
             completion_rule="ACCEPTED_DEPARTURE" if kind == "DEPART" else "APPLIED_RESULT",
-            previous_action_id=actions[-1].id if actions else None,
+            previous_action_id=next(
+                (a.id for a in reversed(actions) if not _withdrawn_xray_wait(a)), None
+            ),
             previous_decision_phase="READY" if kind == "DEPART" else None,
             phase="REGISTERED",
             caller=job.caller,
@@ -1573,7 +1701,9 @@ class RackDispatch:
                     actual["arrival_face"],
                 )
                 job.position_action_id = action.id
-            if newer_observation and not _late_ctu_arrival(action):
+            if newer_observation and (
+                job.source_kind in XRAY_SOURCES or not _late_ctu_arrival(action)
+            ):
                 action.phase, reason = "REVIEW", "POSITION_CONFLICT"
             elif outcome is None:
                 reason = reason or _submission_blocker(action, result) or "AWAITING_ORIGINAL_RESULT"
@@ -1699,6 +1829,7 @@ class RackDispatch:
         now_ms: int,
         authorized_original_id: str | None = None,
         allow_new_departure: bool = True,
+        withdraw_xray_departure: bool = False,
     ) -> RackProgress:
         job = await self._job(session, job_id, lock=True)
         if not job:
@@ -1706,8 +1837,9 @@ class RackDispatch:
         actions = await self._actions(session, job, lock=True)
         if not job.pending:
             last = actions[-1] if actions else None
+            xray = job.source_kind in XRAY_SOURCES
             recoverable = (
-                job.source_kind in ROLLER_SOURCES
+                (job.source_kind in ROLLER_SOURCES or xray)
                 and (job.state == "NOT_ARRIVED" or _ctu_task_stopped(job))
                 and last is not None
                 and last.template in ("CTU01", "CTU02")
@@ -1718,12 +1850,18 @@ class RackDispatch:
             result = await self._result(session, job, last)
             if not result or not (result.position_observation or {}).get("arrival_receipt_id"):
                 return _snapshot(job, actions)
-            if not await self._applied(session, job, actions):
+            if xray and not _late_xray_arrival(job, last, result):
+                return _snapshot(job, actions)
+            # X-Ray restores occupancy in review without making the cancelled move usable.
+            if not await self._applied(session, job, actions) and not xray:
                 return _snapshot(job, actions)
             if job.state == "NOT_ARRIVED":
                 last.basis = {**(last.basis or {}), "previous_not_arrived": job.closure_basis}
                 job.state, job.closure_reason, job.closure_basis = "ACTIVE", None, None
             job.pending, job.completed_at_ms = True, None
+            if xray:
+                await session.flush()
+                return _snapshot(job, actions)
         if job.state == "CLOSED_BY_SCOPE":
             await self._advance_stopped(session, job, actions, demand, handoff, now_ms)
             await session.flush()
@@ -1781,6 +1919,14 @@ class RackDispatch:
         previous = predecessors[-1] if predecessors else None
         if previous and previous.kind == "DEPARTURE_DECIDE":
             if not await self._consume_decision(session, job, previous, now_ms):
+                return _snapshot(job, actions)
+            if (
+                withdraw_xray_departure
+                and applied
+                and previous is original
+                and self._withdraw_xray_wait(job, actions, demand, now_ms)
+            ):
+                await session.flush()
                 return _snapshot(job, actions)
         known_demand = isinstance(demand, PointDemand) and _at_point(demand, job)
         clear = (
@@ -1943,6 +2089,40 @@ class RackDispatch:
         await session.flush()
         return _snapshot(job, actions)
 
+    @staticmethod
+    def _withdraw_xray_wait(job, actions, demand, now_ms):
+        last = actions[-1]
+        if (
+            job.source_kind not in XRAY_SOURCES
+            or job.state != "RELEASING"
+            or last.id != job.current_action_id
+            or job.actual_position != _point(job.point)
+            or not _at_point(demand, job)
+            or demand.state != "CONTINUE"
+            or len(demand.coverage) != 1
+            or demand.coverage[0].anchor.kind != "put_target_decision"
+        ):
+            return False
+        anchor = _json(asdict(demand.coverage[0].anchor))
+        by_id = {a.id: a for a in actions}
+        chain, action = [], last
+        while action is not None and not _withdrawn_xray_wait(action):
+            original = (action.basis or {}).get("demand", {}).get("coverage", [])
+            if (
+                action.kind != "DEPARTURE_DECIDE"
+                or action.phase != "WAIT"
+                or not any(item.get("anchor") == anchor for item in original)
+            ):
+                return False
+            chain.append(action)
+            action = by_id.get(action.previous_action_id)
+        for action in chain:
+            action.basis = {**action.basis, "xray_demand_withdrawn_at_ms": now_ms}
+        job.state = "ACTIVE"
+        job.release_requested = False
+        job.current_action_id = job.position_action_id
+        return True
+
     async def _consume_decision(self, session, job, previous, now_ms):
         """Read the original response once, including when new movement is blocked."""
         from app.businesses._components.rack_dispatch.request.rack_departure_decide_v1 import (
@@ -2021,6 +2201,9 @@ class RackDispatch:
         last = actions[-1] if actions else None
         predecessor = actions[-2] if last and last.kind == "DEPART" else last
         previous = predecessor if predecessor and predecessor.kind == "DEPARTURE_DECIDE" else None
+        if previous is None and job.source_kind in XRAY_SOURCES:
+            # Even after a rotation, a new departure request must follow the original WAIT chain.
+            previous = next((a for a in reversed(actions) if _withdrawn_xray_wait(a)), None)
         position = next((a for a in actions if a.id == job.position_action_id), None)
         # JSON-normalized original facts also allow a stable comparison after a database round trip.
         basis = _json(
@@ -2176,14 +2359,11 @@ class RackDispatch:
         return True
 
     @staticmethod
-    def _storage_rejection_proof(job, action, result):
+    def _storage_rejection_proof(job, action, result, *, retained=None):
         if not (
             result
             and action.phase == "REGISTERED"
             and action.template == "CTU03"
-            and result.rack_already_in_storage
-            and result.submission_message_id == action.submit_message_id
-            and result.submission_target == action.submit_target
             and result.frozen
             == {
                 "kind": "RACK_MOVE",
@@ -2194,14 +2374,37 @@ class RackDispatch:
             }
         ):
             return None
+        if result.submission_state == "UNAVAILABLE" and isinstance(retained, dict):
+            # Cleanup removes the delivery row. The live task still checks for newer evidence.
+            status = retained.get("http_status")
+            code = retained.get("response_code")
+            data = retained.get("response_data")
+            if not (
+                type(retained.get("submission_message_id")) is int
+                and action.submit_message_id is not None
+                and action.submit_message_id > 0
+                and action.submit_target
+                and result.matches_rack_storage_rejection(status, code, data)
+            ):
+                return None
+        else:
+            if not (
+                result.rack_already_in_storage
+                and result.submission_message_id == action.submit_message_id
+                and result.submission_target == action.submit_target
+            ):
+                return None
+            status = result.submission_http_status
+            code = result.submission_response_code
+            data = result.submission_response_data
         return dict(
             action_id=action.id,
             transport_task_id=result.transport_task_id,
             operation_id=result.operation_id,
-            submission_message_id=result.submission_message_id,
-            http_status=result.submission_http_status,
-            response_code=result.submission_response_code,
-            response_data=result.submission_response_data,
+            submission_message_id=action.submit_message_id,
+            http_status=status,
+            response_code=code,
+            response_data=data,
         )
 
     async def _submission_acceptance(self, session, job, action):

@@ -84,3 +84,23 @@ DECISIONS = {
     "bin": TypeAdapter(Annotated[BinAccept | BinReject | Wait, Field(discriminator="result")]),
     "rack": TypeAdapter(Annotated[RackAccept | RackReject | Wait, Field(discriminator="result")]),
 }
+
+
+_MATERIAL_FIELDS = (
+    BinAccept.model_fields.keys()
+    | BinReject.model_fields.keys()
+    | Wait.model_fields.keys()
+    | {"next_source_action"}
+)
+
+
+def validate_material_decision(source, data, *, original_put=False):
+    decision = DECISIONS[source].validate_python(data, extra="ignore")
+    if original_put:
+        return
+    other_fields = (_MATERIAL_FIELDS & data.keys()) - type(decision).model_fields.keys()
+    # Existing peers send a null target on REJECT, which carries no normal route authority.
+    if decision.result == "REJECT" and data.get("target_locator") is None:
+        other_fields.discard("target_locator")
+    if other_fields:
+        raise ValueError("outbound material response has fields from another branch")

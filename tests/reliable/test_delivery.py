@@ -185,6 +185,42 @@ async def test_ttl_before_send_and_cancellation_and_save_failure(rig):
         assert (await session.get(ReliableMessage, claim.message_id)).status == "SENDING"
 
 
+@pytest.mark.parametrize("ttl", [None, timedelta(seconds=1)])
+async def test_static_send_rechecks_lease_and_ttl_after_gate(rig, monkeypatch, ttl):
+    from app.reliable.delivery import send_one
+    from app.reliable.testing import ScriptedHttpClient
+
+    async with rig.factory.begin() as session:
+        await rig.outbox.enqueue(session, rig.draft(ttl=ttl))
+    (claim,) = await rig.store.claim(1, rig.targets)
+    gate = rig.store.before_send
+
+    async def delayed_gate(claim, target):
+        until = await gate(claim, target)
+        assert until is not None
+        rig.clock.advance(1 if ttl else (until - rig.clock()).total_seconds())
+        return until
+
+    monkeypatch.setattr(rig.store, "before_send", delayed_gate)
+    client = ScriptedHttpClient(
+        HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+    )
+    await send_one(
+        claim,
+        store=rig.store,
+        targets=rig.targets,
+        adapters=rig.adapters,
+        clients={"peer": client},
+        clock=rig.clock,
+        uniform=lambda low, high: high,
+    )
+    assert client.requests == []
+    async with rig.factory() as session:
+        row = await session.get(ReliableMessage, claim.message_id)
+        assert row.status == ("EXPIRED" if ttl else "PENDING")
+        assert not row.delivery_uncertain
+
+
 async def test_local_error_isolated_and_current_config_revalidated(rig):
     from app.reliable.delivery import send_one
     from app.reliable.testing import ScriptedHttpClient

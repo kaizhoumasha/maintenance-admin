@@ -27,6 +27,16 @@ class BusinessRuntime:
     services: Mapping[str, object]
     progressions: Mapping[str, Callable[..., Awaitable[int]]] = field(default_factory=dict)
 
+    def ecs_dispatch_authorizer(self, command):
+        service = self.services.get(command.owner_domain)
+        select_authorizer = getattr(service, "ecs_dispatch_authorizer", None)
+        return select_authorizer(command) if select_authorizer is not None else None
+
+    def transport_dispatch_authorizer(self, task):
+        service = self.services.get(task.owner_domain)
+        select_authorizer = getattr(service, "transport_dispatch_authorizer", None)
+        return select_authorizer(task) if select_authorizer is not None else None
+
 
 def build_runtime(
     *, outbox, ecs_commands, session_factory, business_code: str | None = None

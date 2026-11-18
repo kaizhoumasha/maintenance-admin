@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -10,7 +11,14 @@ from app.http_client import DeliveryState
 from app.integrations.history import RecordDraft, read_bodies, write_record
 from app.integrations.runtime_authority import enabled
 from app.models import EcsCommand, EcsSendEvidence, IntegrationExchange, IntegrationRecord
-from app.reliable.lifecycle import evidence_transaction, transaction_limits
+from app.reliable.lifecycle import (
+    EvidencePersistenceError,
+    PreDispatchUnavailable,
+    evidence_transaction,
+    http_connection_guard,
+    pre_dispatch_unavailable,
+    transaction_limits,
+)
 from app.reliable.store import AttemptOutcome
 from app.reliable.types import MessageStatus, VerdictKind
 from app.transactions import after_commit
@@ -21,7 +29,7 @@ from .routing import RouteAuthorization
 
 async def get_attempt_conclusions(
     session, *, exchange_id: UUID, require_open: bool = False
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     if enabled():
         with session.no_autoflush:
             rows = await session.execute(
@@ -64,17 +72,32 @@ async def get_attempt_conclusions(
         elif attempt not in conclusions or conclusions[attempt][0] < revision:
             conclusions[attempt] = (revision, outcome)
     return {
-        attempt: conclusions[attempt][1]
-        if attempt in conclusions and (not require_open or attempt in opened)
-        else "OPEN_ATTEMPT"
+        attempt: (
+            None
+            if require_open and attempt not in opened
+            else conclusions[attempt][1]
+            if attempt in conclusions
+            else "OPEN_ATTEMPT"
+        )
         for attempt in opened | conclusions.keys()
     }
 
 
+async def original_request_wire(session, command):
+    if isinstance(command, EcsCommand):
+        wire = command.request_wire
+    else:
+        bodies = await read_bodies(session, record_ids=(command.request_record_id,))
+        stored = bodies.get(command.request_record_id)
+        wire = stored.raw_body if stored is not None else None
+    return wire if wire is not None and sha256(wire).hexdigest() == command.request_sha256 else None
+
+
 class EcsLifecycle:
-    def __init__(self, service, *, on_ack=None):
+    def __init__(self, service, *, on_ack=None, authorize_dispatch=None):
         self.service = service
         self.on_ack = on_ack
+        self.authorize_dispatch = authorize_dispatch
 
     async def lock_context(self, session, identity, *, nowait=False):
         model = EcsCommand if enabled() else IntegrationExchange
@@ -96,10 +119,54 @@ class EcsLifecycle:
                 if authorization == RouteAuthorization.REVOKED
                 else "PRE_GATE_VALIDATION"
             )
+        if self.authorize_dispatch is not None:
+            authorize = self.authorize_dispatch(command)
+            if authorize is not None:
+                return await authorize(session)
         return None
 
+    @asynccontextmanager
+    async def http_guard(self, factory, claim):
+        has_started_writing = None
+        try:
+            if self.authorize_dispatch is not None:
+                async with evidence_transaction(factory) as session:
+                    await transaction_limits(session)
+                    model = EcsCommand if enabled() else IntegrationExchange
+                    # Result may arrive before ACK and needs the command and lease rows itself.
+                    command = await session.scalar(
+                        select(model).where(
+                            model.command_code == claim.message.operation_id,
+                            model.id == claim.message.exchange_id,
+                        )
+                    )
+                    if command is None:
+                        yield PauseReason.PRE_GATE_VALIDATION, None, None, None
+                        return
+                    if self.authorize_dispatch(command) is not None:
+                        reason = await self.authorize(session, command)
+                        if reason is not None:
+                            yield reason, None, None, None
+                            return
+
+                        async with http_connection_guard(session) as guard:
+                            before_write, check_wire, has_started_writing, note_write = guard
+                            yield None, before_write, check_wire, note_write
+                        return
+            yield None, None, None, None
+        except EvidencePersistenceError as error:
+            if (
+                has_started_writing is None or not has_started_writing()
+            ) and pre_dispatch_unavailable(error):
+                raise PreDispatchUnavailable("HTTP guard interrupted before write") from error
+            raise
+
     def may_reclaim_unstarted(self, command):
-        return command.owner_domain == "coarse_sorting" and command.status == "QUEUED"
+        return command.status == "QUEUED" and (
+            command.owner_domain == "coarse_sorting"
+            or command.owner_domain == "xray"
+            and command.task_type == "PUT_TO_RACK"
+        )
 
     async def check_dispatch(self, factory, claim, clock):
         model = EcsCommand if enabled() else IntegrationExchange
@@ -151,19 +218,14 @@ class EcsLifecycle:
             or command.status not in ("QUEUED", "DISPATCHING")
         ):
             return command.hold_reason or "PRE_GATE_VALIDATION"
-        if isinstance(command, EcsCommand):
-            wire = command.request_wire
-            request_matches = command.id == claim.message.exchange_id
-        else:
-            bodies = await read_bodies(session, record_ids=(command.request_record_id,))
-            stored = bodies.get(command.request_record_id)
-            wire = stored.raw_body if stored is not None else None
-            request_matches = command.request_record_id == claim.message.request_record_id
         if (
-            wire != claim.message.request_raw
-            or command.request_sha256 != sha256(claim.message.request_raw).hexdigest()
-            or not request_matches
+            command.id != claim.message.exchange_id
+            or (
+                isinstance(command, IntegrationExchange)
+                and command.request_record_id != claim.message.request_record_id
+            )
             or command.delivery_snapshot != asdict(claim.message.delivery_snapshot)
+            or await original_request_wire(session, command) != claim.message.request_raw
         ):
             return "CONFIG_DRIFT"
         command.dispatch_started_at = now

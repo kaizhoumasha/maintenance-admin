@@ -2,14 +2,19 @@
 
 import asyncio
 import logging
+import socket
 import ssl
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpcore
 import httpx
+from anyio import wait_writable
+from anyio.abc import ByteStream, SocketAttribute
+from anyio.lowlevel import checkpoint
 
 from .types import (
     ClientClosedError,
@@ -23,6 +28,23 @@ from .validation import build_request
 
 logger = logging.getLogger("app.http_client")
 _http_call_active = ContextVar("http_client_call_active", default=False)
+_before_wire_write: ContextVar[
+    Callable[
+        [],
+        Awaitable[
+            tuple[
+                float | None,
+                Callable[[], None] | None,
+                Callable[[], Awaitable[None]] | None,
+                Callable[[], None],
+            ]
+        ],
+    ]
+    | None
+] = ContextVar("http_client_before_wire_write", default=None)
+_check_wire: ContextVar[
+    tuple[Callable[[], None], Callable[[], Awaitable[None]] | None, Callable[[], None]] | None
+] = ContextVar("http_client_check_wire", default=None)
 
 
 class _HttpCallLogFilter(logging.Filter):
@@ -53,6 +75,114 @@ _ERRORS = {
 _NOT_SENT = {FailureKind.POOL_TIMEOUT, FailureKind.CONNECT_TIMEOUT, FailureKind.CONNECT_ERROR}
 
 
+class _GuardedWriteError(Exception):
+    pass
+
+
+class _GuardedSocketStream(ByteStream):
+    def __init__(self, stream: ByteStream):
+        self.stream = stream
+
+    @property
+    def extra_attributes(self):
+        return self.stream.extra_attributes
+
+    async def receive(self, max_bytes=65536):
+        return await self.stream.receive(max_bytes)
+
+    async def send(self, item):
+        checks = _check_wire.get()
+        if checks is None:
+            await self.stream.send(item)
+            return
+        check, recheck, note_write = checks
+        await checkpoint()
+        raw = self.stream.extra(SocketAttribute.raw_socket)
+        try:
+            # Keep pending bytes in this task until the socket accepts them.
+            # The duplicate fd has its own readiness registration, separate from AnyIO's reader.
+            with socket.socket(fileno=socket.dup(raw.fileno())) as writer:
+                writer.setblocking(False)
+                pending = memoryview(item)
+                while pending:
+                    check()
+                    sent = 0
+                    try:
+                        sent = writer.send(pending)
+                    except BlockingIOError:
+                        await wait_writable(writer)
+                    else:
+                        if not sent:
+                            raise _GuardedWriteError
+                        note_write()
+                        pending = pending[sent:]
+                    if pending and recheck is not None:
+                        check()
+                        await recheck()
+                        if sent:
+                            # A successful probe cannot authorize the remainder after a short write.
+                            check()
+                            raise _GuardedWriteError
+        except OSError as error:
+            raise _GuardedWriteError from error
+
+    async def send_eof(self):
+        await self.stream.send_eof()
+
+    async def aclose(self):
+        await self.stream.aclose()
+
+
+class _GuardedStream(httpcore.AsyncNetworkStream):
+    def __init__(self, stream: httpcore.AsyncNetworkStream):
+        self.stream = stream
+
+    async def read(self, max_bytes, timeout=None):  # noqa: ASYNC109
+        return await self.stream.read(max_bytes, timeout)
+
+    async def write(self, buffer, timeout=None):  # noqa: ASYNC109
+        before_write = _before_wire_write.get()
+        if not buffer or before_write is None:
+            await self.stream.write(buffer, timeout)
+            return
+        remaining, check_wire, recheck_wire, note_write = await before_write()
+        if remaining is not None:
+            timeout = min(timeout, remaining) if timeout is not None else remaining
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
+        def check():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise httpcore.WriteTimeout("write deadline elapsed")
+            if check_wire is not None:
+                try:
+                    check_wire()
+                except TimeoutError as error:
+                    raise httpcore.WriteTimeout("write deadline elapsed") from error
+
+        token = _check_wire.set((check, recheck_wire, note_write))
+        try:
+            await self.stream.write(buffer, timeout)
+        finally:
+            _check_wire.reset(token)
+
+    async def aclose(self):
+        await self.stream.aclose()
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):  # noqa: ASYNC109
+        return _GuardedStream(await self.stream.start_tls(ssl_context, server_hostname, timeout))
+
+    def get_extra_info(self, info):
+        return self.stream.get_extra_info(info)
+
+
+class _GuardedBackend(httpcore.AnyIOBackend):
+    async def connect_tcp(self, *args, **kwargs):
+        stream = await super().connect_tcp(*args, **kwargs)
+        # Keep the guarded writer below the optional TLS stream.
+        stream._stream = _GuardedSocketStream(stream._stream)
+        return _GuardedStream(stream)
+
+
 class AsyncHttpClient:
     def __init__(
         self,
@@ -66,6 +196,7 @@ class AsyncHttpClient:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._wire_guarded = transport is None
         if transport is None:
             tls_context = config.tls_context
             if tls_context is None:
@@ -80,15 +211,17 @@ class AsyncHttpClient:
                     if cafile is not None or capath is not None:
                         tls_context = ssl.create_default_context(cafile=cafile, capath=capath)
             transport = httpx.AsyncHTTPTransport(
-                verify=tls_context,
-                trust_env=False,
+                verify=tls_context, trust_env=False, http2=False, retries=0
+            )
+            # HTTPX exposes the transport; HTTP Core exposes the pool's network backend.
+            transport._pool = httpcore.AsyncConnectionPool(
+                ssl_context=tls_context,
                 http2=False,
                 retries=0,
-                limits=httpx.Limits(
-                    max_connections=config.max_connections,
-                    max_keepalive_connections=config.max_keepalive_connections,
-                    keepalive_expiry=config.keepalive_expiry_s,
-                ),
+                max_connections=config.max_connections,
+                max_keepalive_connections=config.max_keepalive_connections,
+                keepalive_expiry=config.keepalive_expiry_s,
+                network_backend=_GuardedBackend(),
             )
         self._transport = transport
         self._client = httpx.AsyncClient(
@@ -130,10 +263,47 @@ class AsyncHttpClient:
                 phase: min(getattr(self._config, f"{phase}_timeout_s"), remaining)
                 for phase in ("connect", "read", "write", "pool")
             }
+            before_write = request.before_write
+
+            def note_write():
+                nonlocal state
+                if state == DeliveryState.NOT_SENT:
+                    state = DeliveryState.DELIVERY_UNKNOWN
+                    if request.on_wire_write is not None:
+                        request.on_wire_write()
+
+            async def check_write():
+                remaining = await before_write() if before_write is not None else None
+                if not wire_guarded:
+                    note_write()
+                return remaining, request.check_wire, request.recheck_wire, note_write
+
+            has_write_guard = before_write is not None or request.check_wire is not None
+            wire_guarded = has_write_guard and self._wire_guarded
+            trace_guarded = (
+                has_write_guard
+                and not wire_guarded
+                and type(self._transport) is httpx.AsyncHTTPTransport
+            )
+            if trace_guarded:
+
+                async def trace(event, _info):
+                    if event.endswith(
+                        (".send_request_headers.started", ".send_request_body.started")
+                    ):
+                        await check_write()
+                        if request.check_wire is not None:
+                            request.check_wire()
+
+                built.extensions["trace"] = trace
+            write_token = _before_wire_write.set(check_write if wire_guarded else None)
             log_token = _http_call_active.set(True)
             try:
                 async with asyncio.timeout_at(loop_started + self._config.total_timeout_s):
-                    state = DeliveryState.DELIVERY_UNKNOWN
+                    if not (wire_guarded or trace_guarded):
+                        await check_write()
+                        if request.check_wire is not None:
+                            request.check_wire()
                     # 直接调用单次 transport,避免 AsyncClient 记录含查询串的完整 URL。
                     response = await self._transport.handle_async_request(built)
                     response.request = built
@@ -162,6 +332,9 @@ class AsyncHttpClient:
                         if failure is None:
                             body = bytes(content)
                             state = DeliveryState.HTTP_RESPONSE_COMPLETE
+            except _GuardedWriteError:
+                # HTTP Core may treat socket write errors as a reason to wait for an early reply.
+                failure = FailureKind.WRITE_ERROR
             except TimeoutError:
                 failure = FailureKind.TOTAL_TIMEOUT
             except (httpx.TransportError, httpx.StreamError) as exc:
@@ -185,6 +358,7 @@ class AsyncHttpClient:
                             )
                 finally:
                     _http_call_active.reset(log_token)
+                    _before_wire_write.reset(write_token)
         result = HttpResult(state, failure, status, headers, body, response_at, datetime.now(UTC))
         logger.log(
             logging.DEBUG if failure is None else logging.WARNING,

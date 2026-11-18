@@ -11,7 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.core.config import get_settings
 from app.database import create_database_engine
-from app.integrations.runtime_authority import QUERY_REVISIONS
+from app.integrations.runtime_authority import query_revisions
 
 TABLES = ("integration_reference", "integration_record", "integration_exchange")
 WRITERS = (
@@ -75,7 +75,7 @@ async def retire(connection, evidence, *, apply):
         raise RetirementRefused("删除准入需要 PostgreSQL")
     if (
         await connection.scalar(text("SELECT version_num FROM alembic_version"))
-        not in QUERY_REVISIONS
+        not in query_revisions()
     ):
         raise RetirementRefused("查询视图迁移尚未完成")
     names = ", ".join(f"enterprise_backend.{name}" for name in TABLES)

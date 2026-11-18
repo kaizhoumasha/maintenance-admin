@@ -38,11 +38,16 @@ sha256sum "$backup"
 ```bash
 cd "/srv/enterprise-backend/releases/<新包目录>"
 dc run --rm --no-deps migrate alembic -x fence_legacy_writes=true upgrade http_exchange_initiator
+dc run --rm --no-deps migrate alembic -x fence_legacy_writes=true upgrade head
 ```
 
 迁移在同一事务核对冻结请求、原租约、回执、ECS 裁决及 Transport 结果来源，安装旧表写入围栏并替换查询视图。失败时保留原版本和旧表；继续停写，按错误给出的原身份调查，确认后重跑。未决旧租约缺少开启记录且无法证明未发送时，按原编号核对对端并保全交付事实。Transport 缺少结果来源时，只有此前留档能证明该结果原本就缺少来源，才按历史未知迁移。禁止填造记录、换号重发和手工改迁移版本。普通 `upgrade head` 会拒绝直接切换有存量的数据库。
 
-已处于 `http_exchange_query_views` 的环境也在停写窗口执行同一条升级命令。新增迁移把已有 HTTP 记录的 `OUTBOUND` 映射为 `WES`、`INBOUND` 映射为 `PEER`，保留原编号和正文。旧三表已删除的环境继续使用 `INTEGRATION_RUNTIME_AUTHORITY=true`。恢复旧镜像时，在停写窗口先用新包执行 `alembic downgrade http_exchange_query_views`，把三张表和两张视图恢复到旧镜像能读取的形态，再启动对应旧版 API 和 worker。
+已处于 `http_exchange_query_views` 的环境也在停写窗口执行上述升级命令。迁移把已有 HTTP 记录的 `OUTBOUND` 映射为 `WES`、`INBOUND` 映射为 `PEER`，保留原编号和正文。旧三表已删除的环境继续使用 `INTEGRATION_RUNTIME_AUTHORITY=true`。
+
+数据库保留会话撤销记录时，迁移会拒绝降级，以免已停用的令牌重新生效。旧镜像回退按[旧镜像恢复流程](../deploy.md#使用旧镜像回退禁止现场重建)核对备份、对应镜像和恢复点之后的写入。
+
+API 和 worker 启动时校验数据库迁移版本与安装包一致。升级到当前版本时，HTTP 后台投影只处理尚未生成诊断或证据版本有更新的发送记录；已有正确版本的诊断不会重建。新发送记录的对端地址取实际发往的地址，历史记录保留原值。
 
 迁移成功后，在共享 `.env` 写入 `INTEGRATION_RUNTIME_AUTHORITY=true`。启动 API 即可能恢复发送与新写入。从启动此步骤起保留新产生的事实，并用实际业务任务验证 worker。确认原收据重放、待办恢复、三类原编号查询、正文权限及审计后，再启动 nginx、切换 `current` 并恢复入口。
 

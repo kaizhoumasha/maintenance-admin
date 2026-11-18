@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 
 from sqlalchemy import delete, func, select
@@ -125,6 +126,7 @@ async def list_worklines(session, params, filters=None):
 async def create_workline(session, data, *, actor, definition_lookup):
     async with mutation(session):
         definition = _definition(data.business_code, definition_lookup)
+        _validate_line_code(data.line_code, definition)
         _validate_positions(data.position_bindings, definition)
         row = WorkLine(**data.model_dump(exclude={"positions"}))
         session.add(row)
@@ -170,6 +172,8 @@ async def update_workline(session, workline_id, data, *, actor, definition_looku
         if row.business_code is not None and business_code != row.business_code:
             raise AppError(ErrorCode.CONFLICT, "已选择的业务不能切换或清空")
         definition = _definition(business_code, definition_lookup) if business_code else None
+        if "business_code" in updates and business_code != row.business_code:
+            _validate_line_code(row.line_code, definition)
         _validate_positions(updates.get("position_bindings", row.position_bindings), definition)
         await validate_bindings(
             session,
@@ -208,6 +212,16 @@ def _definition(code, definition_lookup):
         return definition_lookup(code)
     except LookupError:
         raise AppError(ErrorCode.INVALID_REQUEST, "业务未部署或不存在") from None
+
+
+def _line_code_matches(code, definition):
+    pattern = definition.line_code_pattern if definition is not None else None
+    return pattern is None or re.fullmatch(pattern, code) is not None
+
+
+def _validate_line_code(code, definition):
+    if not _line_code_matches(code, definition):
+        raise AppError(ErrorCode.INVALID_REQUEST, "工作线编码不符合所选业务合同")
 
 
 def _validate_positions(bindings, definition):
@@ -286,6 +300,8 @@ async def business_configuration_issue(
         definition = definition_lookup(business_code)
     except LookupError:
         return "WORKLINE_CONFIGURATION_INCOMPLETE"
+    if not _line_code_matches(line.line_code, definition):
+        return "WORKLINE_CODE_INVALID"
     roles = {role.role_key for role in definition.device_roles}
     positions = {slot.slot_key for slot in definition.position_slots}
     for selected, declared in (

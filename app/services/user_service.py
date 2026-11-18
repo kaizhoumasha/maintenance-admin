@@ -99,14 +99,12 @@ async def create_user(session: AsyncSession, data: UserCreate) -> User:
     return user
 
 
-async def update_user(
-    session: AsyncSession, redis: Redis, actor_id: int, user_id: int, data: UserUpdate
-) -> User:
+async def update_user(session: AsyncSession, actor_id: int, user_id: int, data: UserUpdate) -> User:
     changes = data.model_dump(exclude_none=True)
     disabling = changes.get("is_active") is False
     if disabling:
         await rbac_service.lock_admin_changes(session)
-    user = await get_user(session, user_id, for_update=disabling)
+    user = await get_user(session, user_id, for_update="is_active" in changes)
     if "email" in changes and changes["email"] != user.email:
         if await session.scalar(select(User).where(User.email == changes["email"])):
             raise AppError(ErrorCode.CONFLICT, "邮箱已被注册")
@@ -115,10 +113,10 @@ async def update_user(
     for field, value in changes.items():
         setattr(user, field, value)
     if disabling:
+        # 两种令牌随数据库提交失效，Redis 记录保留原 TTL。
+        user.session_version += 1
         await rbac_service.ensure_admin_remains(session)
     await session.commit()
-    if disabling:
-        await session_service.revoke_all(redis, str(user.id))
     return user
 
 

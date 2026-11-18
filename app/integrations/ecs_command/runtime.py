@@ -24,7 +24,15 @@ def check_assembly(app):
         raise ValueError("ECS assembly conflict; preserve existing service and mappings")
 
 
-def configure_ecs(app, *, routes, annexes, client_factory=AsyncHttpClient, authorize_new=None):
+def configure_ecs(
+    app,
+    *,
+    routes,
+    annexes,
+    client_factory=AsyncHttpClient,
+    authorize_new=None,
+    authorize_dispatch=None,
+):
     check_assembly(app)
     for entry in getattr(routes, "bindings", {}).values():
         if (entry.annex_id, entry.annex_version) not in annexes:
@@ -33,7 +41,9 @@ def configure_ecs(app, *, routes, annexes, client_factory=AsyncHttpClient, autho
     lifecycles = dict(getattr(app.state, "reliable_lifecycles", {}))
     adapters[PROTOCOL] = EcsCommandAdapter()
     service = EcsCommands(None, TARGET, routes, annexes, authorize_new=authorize_new)
-    lifecycles[PROTOCOL] = EcsLifecycle(service, on_ack=ecs_ack_committed)
+    lifecycles[PROTOCOL] = EcsLifecycle(
+        service, on_ack=ecs_ack_committed, authorize_dispatch=authorize_dispatch
+    )
     provider = DynamicClients(factory=client_factory)
     app.state.ecs_commands = service
     app.state.reliable_adapters = adapters

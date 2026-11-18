@@ -266,7 +266,7 @@ class Outbox:
                 else "NEVER_DISPATCHED"
             )
             if port is not None:
-                claim = await MessageStore._claim(self, session, row)
+                claim = await MessageStore._claim(self, session, row, load_request=False)
                 await port.apply_transition(
                     session,
                     context,
@@ -280,6 +280,12 @@ class Outbox:
             await self.records.close_attempt(
                 session, message_id=row.id, lease_id=row.lease_id, at=now, reason="SCOPE_STOPPED"
             )
+            if previous != MessageStatus.SENDING:
+                # The stop found no active lease, even if the previous lease had dispatched.
+                row.lease_not_started = True
+            elif row.lease_not_started is False:
+                row.scope_stopped_lease_id = row.lease_id
+                row.delivery_uncertain = True
             row.status = MessageStatus.ABANDONED
             row.pause_reason = reason
             row.lease_id = row.lease_until = row.next_attempt_at = None
@@ -348,14 +354,16 @@ class Outbox:
                 .values(
                     status=MessageStatus.PENDING,
                     not_received_count=0,
+                    settled_retry_budget=None,
                     next_attempt_at=now,
                     updated_at=now,
                 )
-                .returning(ReliableMessage.trace_id)
+                .returning(ReliableMessage.id, ReliableMessage.trace_id)
             )
         ).first()
         if row is None:
             return False
+        await self.records.reset_retry_budget(session, message_id=row.id)
         context = {
             "target": target,
             "operation": operation,
@@ -508,11 +516,12 @@ class Outbox:
             if row.delivery_snapshot != asdict(snapshot):
                 raise InvalidMessage("snapshot changed during transaction")
             now = utc_datetime(self.clock())
+            # Receipt-driven state changes do not use the transport copy to send.
             message = OutgoingMessage(
                 row.target,
                 row.operation,
                 row.operation_id,
-                (await self.records.frozen_requests(session, rows=(row,)))[row.request_record_id],
+                b"",
                 row.business_key,
                 row.trace_id,
                 utc_datetime(row.created_at, known_sqlite_utc=True),

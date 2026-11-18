@@ -6,6 +6,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import MetaData, Table, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -14,13 +17,46 @@ from app.database import create_database_engine
 from tests.helpers import run_alembic
 
 
+def _reliable_runtime_test_columns(operations, schema, *, present):
+    columns = {
+        "reliable_message": (
+            sa.Column("dispatch_attempt_count", sa.Integer()),
+            sa.Column("undispatched_attempts", sa.Integer(), nullable=False, server_default="0"),
+            sa.Column("settled_retry_budget", sa.Integer()),
+            sa.Column("dispatch_retry_limit", sa.Integer()),
+            sa.Column("budget_checked_lease_id", sa.String(64)),
+            sa.Column("scope_stopped_lease_id", sa.String(64)),
+        ),
+        "reliable_delivery_attempt": (
+            sa.Column(
+                "counts_toward_retry_budget", sa.Boolean(), nullable=False, server_default=sa.true()
+            ),
+        ),
+    }
+    for table, fields in columns.items():
+        for column in fields:
+            if present:
+                operations.add_column(table, column, schema=schema)
+            else:
+                operations.drop_column(table, column.name, schema=schema)
+
+
+async def set_reliable_runtime_test_columns(engine, *, present):
+    """Let current ORM seed an old schema, then restore it before migration."""
+
+    def change(connection):
+        schema = "enterprise_backend" if connection.dialect.name == "postgresql" else None
+        _reliable_runtime_test_columns(
+            Operations(MigrationContext.configure(connection)), schema, present=present
+        )
+
+    async with engine.begin() as connection:
+        await connection.run_sync(change)
+
+
 async def add_http_runtime_test_schema(engine):
     """Provide current ORM columns while preserving the revision under test."""
     from importlib import import_module
-
-    import sqlalchemy as sa
-    from alembic.migration import MigrationContext
-    from alembic.operations import Operations
 
     def expand(connection):
         schema = "enterprise_backend" if connection.dialect.name == "postgresql" else None
@@ -34,6 +70,7 @@ async def add_http_runtime_test_schema(engine):
             for revision in ("http_exchange_expand", "http_exchange_runtime_expand"):
                 migration = import_module(f"migrations.versions.2026-11-13_{revision}")
                 migration.upgrade()
+            _reliable_runtime_test_columns(operations, schema, present=True)
 
     async with engine.begin() as connection:
         await connection.run_sync(expand)
