@@ -295,7 +295,7 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
     values = {prefix + "_event_id": ctx.receipt_id, prefix + "_visit_key": visit_key}
     if key == "bin_return" and point == "SCAN4":
         values.update(scan4_command_code=None, scan4_consumed_result_id=None)
-        if row is None or row["first_scan4_event_id"] is None:
+        if valid_return and (row is None or row["first_scan4_event_id"] is None):
             receipt = await get_event(ctx.session, event_id=ctx.receipt_id)
             if receipt.availability != "FOUND":
                 raise ValueError("original event unavailable during acceptance")

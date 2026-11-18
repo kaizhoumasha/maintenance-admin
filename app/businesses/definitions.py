@@ -72,11 +72,14 @@ class BusinessDefinition:
     device_roles: tuple[DeviceRole, ...] = ()
     position_slots: tuple[PositionSlot, ...] = ()
     initial_entries: tuple[InitialEntry, ...] = ()
+    line_code_pattern: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.code, str) or not _CODE.fullmatch(self.code):
             raise ValueError(f"invalid business code: {self.code!r}")
         _text(self.display_name, "display_name")
+        if self.line_code_pattern is not None:
+            re.compile(self.line_code_pattern)
         for field, item_type, key_field in (
             ("device_roles", DeviceRole, "role_key"),
             ("position_slots", PositionSlot, "slot_key"),

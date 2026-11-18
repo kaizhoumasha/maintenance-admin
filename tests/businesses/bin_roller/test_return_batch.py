@@ -31,6 +31,20 @@ async def test_unknown_request_keeps_frozen_prefix(roller_return):
         )
 
 
+async def test_segment_feed_continues_when_fifo_head_is_not_ready(roller_return):
+    flow = roller_return
+    await flow.scan("SCAN3", "A000000001-B", timestamp=10)
+    await flow.scan("SCAN4", "A000000001-B", timestamp=11)
+    await flow.bins(1, offset=1)
+    async with flow.factory.begin() as session:
+        assert not await flow.roller.return_channel_empty(session, work_line_id=1)
+        face_id = await flow.selected(session, kind="SEGMENT")
+        assert await flow.consume_return(session, face_id) == "WINDOW_ENDED"
+        face = await flow.roller.original_record(session, "face_work", face_id)
+        assert face["phase"] == "WAIT_FEED_DECISION" and face["return_message_id"] is None
+        assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()
+
+
 async def test_partial_ready_keeps_tail(roller_return):
     flow = roller_return
     await flow.bins(3)

@@ -1,11 +1,25 @@
-from sqlalchemy import text
+from functools import lru_cache
+from pathlib import Path
+
+from alembic.script import ScriptDirectory
+from sqlalchemy import inspect, text
 
 from app.core.config import get_settings
 
 PREVIOUS_QUERY_REVISION = "http_exchange_query_views"
 QUERY_REVISION = "http_exchange_initiator"
-QUERY_REVISIONS = frozenset({QUERY_REVISION, "smt_auto_outbound_v1", "rack_ctu03_storage_release"})
 LEGACY_TABLES = ("integration_exchange", "integration_record", "integration_reference")
+
+
+@lru_cache(maxsize=1)
+def query_revisions() -> tuple[str, ...]:
+    scripts = ScriptDirectory(str(Path(__file__).resolve().parents[2] / "migrations"))
+    return tuple(
+        revision.revision
+        for revision in scripts.iterate_revisions(
+            scripts.get_current_head(), QUERY_REVISION, inclusive=True
+        )
+    )
 
 
 def enabled() -> bool:
@@ -68,7 +82,9 @@ def check_reconciled(connection, *, use_runtime, query_revision=QUERY_REVISION):
                 text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'")
             )
         )
-    supported_revisions = QUERY_REVISIONS if query_revision == QUERY_REVISION else {query_revision}
+    supported_revisions = (
+        query_revisions() if query_revision == QUERY_REVISION else (query_revision,)
+    )
     if (
         not has_runtime_tables
         or connection.scalar(text(f"SELECT version_num FROM {ledger}")) not in supported_revisions
@@ -120,7 +136,26 @@ def _has_http_direction(connection):
     )
 
 
+def _require_current_schema(connection):
+    postgres = connection.dialect.name == "postgresql"
+    schema = "enterprise_backend" if postgres else None
+    ledger = f"{schema}.alembic_version" if schema else "alembic_version"
+    present = inspect(connection).has_table("alembic_version", schema=schema)
+    if not present and not postgres:
+        # Unit tests assemble SQLite metadata directly without an Alembic ledger.
+        return
+    installed = (
+        connection.scalars(text(f"SELECT version_num FROM {ledger}")).all() if present else []
+    )
+    required = query_revisions()[0]
+    if installed != [required]:
+        raise RuntimeError(
+            f"database schema revision {installed!r} does not match application revision {required}"
+        )
+
+
 async def require_reconciled(factory):
     async with factory() as session:
         connection = await session.connection()
         await connection.run_sync(check_reconciled, use_runtime=enabled())
+        await connection.run_sync(_require_current_schema)

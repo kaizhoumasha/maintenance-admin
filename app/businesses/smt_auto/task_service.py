@@ -391,7 +391,7 @@ class AutoTaskService:
                 prior.effective_digest == _digest(payload)
                 and prior.request_timestamp == ctx.timestamp
             ):
-                return Duplicate({"task_id": task.task_id, "status": task.status})
+                return Duplicate()
             raise Conflict({"reason_code": "IDEMPOTENCY_CONFLICT"})
         if payload.cancel_scope == "TASK":
             if task.status not in {"QUEUED", "PREPARING"} or task.plan_revision != 0:
@@ -401,7 +401,7 @@ class AutoTaskService:
             )
             ctx.session.add(self._input_row(ctx, task, payload))
             # An admitted SCAN2 can still own work and release while the plan is at revision 0.
-            return Accepted({"task_id": task.task_id, "status": task.status})
+            return Accepted()
         if payload.cancel_scope != "PLAN_MEMBERS":
             raise Rejected("INVALID_DATA")
         members = []
@@ -420,8 +420,6 @@ class AutoTaskService:
                     selected = await self._members(
                         ctx, task.task_id, selector.plan_revision, selector.rack_id, face, model
                     )
-                    if not selected:
-                        raise Conflict({"reason_code": "REFERENCE_CONFLICT"})
                     members.extend(selected)
         row = self._input_row(ctx, task, payload)
         ctx.session.add(row)
@@ -441,14 +439,7 @@ class AutoTaskService:
                 member.withdrawn_by_input_id = row.id
                 member.withdrawn_at_ms = ctx.timestamp
         await self._supply_change(ctx.session, task, row, withdrawn=tuple(withdrawn))
-        return Accepted(
-            {
-                "task_id": task.task_id,
-                "withdrawn_member_ids": [
-                    m.id for m in members if m.withdrawn_by_input_id == row.id
-                ],
-            }
-        )
+        return Accepted()
 
     async def _supply_change(self, session, task, row, *, added=(), withdrawn=()):
         if not added and not withdrawn:

@@ -82,20 +82,48 @@ class TransportTaskResult:
 
     @property
     def rack_already_in_storage(self) -> bool:
+        return (
+            self.submission_state == "AVAILABLE"
+            and self.submission_response_state == "VALID"
+            and self.matches_rack_storage_rejection(
+                self.submission_http_status,
+                self.submission_response_code,
+                self.submission_response_data,
+            )
+        )
+
+    def matches_rack_storage_rejection(
+        self, http_status: int | None, response_code: str | None, response_data: object
+    ) -> bool:
         # Earlier delivery uncertainty can coexist with a later verified location.
         return (
             self.availability == "FOUND"
-            and self.submission_state == "AVAILABLE"
-            and self.submission_response_state == "VALID"
-            and (self.submission_http_status, self.submission_response_code) == (422, "REJECTED")
+            and type(http_status) is int
+            and (http_status, response_code) == (422, "REJECTED")
             and self.has_submission_acceptance is False
             and self.outcome is None
             and self.position_observation is None
             and not self.has_pending_outcome
             and not self.member_facts
-            and is_ctu03_storage_rejection(
-                self.frozen or {}, (self.submission_response_data or {}).get("reason_code")
-            )
+            and isinstance(response_data, dict)
+            and response_data.get("transport_task_id") == self.transport_task_id
+            and is_ctu03_storage_rejection(self.frozen or {}, response_data.get("reason_code"))
+        )
+
+    @property
+    def submission_proven_unsent(self) -> bool:
+        return (
+            self.availability == "FOUND"
+            and self.submission_state == "AVAILABLE"
+            and self.submission_delivery_status in ("ABANDONED", "EXPIRED", "FAILED")
+            and self.submission_dispatch_started is False
+            and self.submission_delivery_uncertain is False
+            and self.submission_response_state == "NONE"
+            and self.has_submission_acceptance is False
+            and self.outcome is None
+            and self.position_observation is None
+            and not self.has_pending_outcome
+            and not self.member_facts
         )
 
 

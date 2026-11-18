@@ -43,6 +43,7 @@ from app.reliable.store import AttemptOutcome, MessageStore
 from app.reliable.types import MessageStatus
 from app.services.http_exchange_diagnostics import diagnostics
 from tests.helpers import EcsMove, run_alembic, seed_transport_task
+from tests.migration_helpers import set_reliable_runtime_test_columns
 
 RESULTED = "transport.task.resulted@v1"
 POSITION = "transport.task.member_position_changed@v1"
@@ -278,6 +279,7 @@ async def test_upgrade_requires_fenced_cutover_and_reconciles_messages_added_bet
     ],
 )
 async def test_runtime_reconciliation_blocks_activation(state_migration, damage, monkeypatch):
+    await set_reliable_runtime_test_columns(state_migration.engine, present=True)
     factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
     if damage == "receipt":
         raw = wire("unknown.test@v1", str(uuid7()), {})
@@ -422,6 +424,7 @@ async def test_runtime_reconciliation_blocks_activation(state_migration, damage,
             "transport_applied_missing": "Transport applied evidence missing",
             "transport_payload": "Transport pending result source payload conflict",
         }[damage]
+    await set_reliable_runtime_test_columns(state_migration.engine, present=False)
     failed = await run_alembic(
         state_migration.engine.url.render_as_string(hide_password=False),
         "-x",
@@ -444,6 +447,7 @@ async def test_runtime_reconciliation_blocks_activation(state_migration, damage,
     indirect=True,
 )
 async def test_replay_and_recovery_with_generic_history_inaccessible(state_migration, monkeypatch):
+    await set_reliable_runtime_test_columns(state_migration.engine, present=True)
     factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
     service, store, adapter, targets = ecs(factory)
     command, claim = await command_at_gate(factory, service, store, adapter, targets, "live")
@@ -531,6 +535,7 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
             ),
         )
 
+    await set_reliable_runtime_test_columns(state_migration.engine, present=False)
     migration = await run_alembic(
         state_migration.engine.url.render_as_string(hide_password=False),
         "-x",
@@ -687,6 +692,7 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
 async def test_ecs_ack_cutover_checks_original_provenance(state_migration, shape, invalid):
     from app.models import EcsCommand, EcsSendEvidence
 
+    await set_reliable_runtime_test_columns(state_migration.engine, present=True)
     factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
     service, store, adapter, targets = ecs(factory)
     command, claim = await command_at_gate(factory, service, store, adapter, targets, "ack")
@@ -779,6 +785,7 @@ async def test_ecs_ack_cutover_checks_original_provenance(state_migration, shape
                 )
         original_ack = root.ack_record_id
 
+    await set_reliable_runtime_test_columns(state_migration.engine, present=False)
     url = state_migration.engine.url.render_as_string(hide_password=False)
     result = await run_alembic(url, "-x", "fence_legacy_writes=true", "upgrade", "head")
     if invalid:
@@ -833,6 +840,7 @@ async def test_ecs_result_reset_cutover_requires_unique_audited_evidence(
 ):
     from app.models import AuditLog, AuditLogArchive, EcsCommand, EcsResultEvidence
 
+    await set_reliable_runtime_test_columns(state_migration.engine, present=True)
     factory = async_sessionmaker(state_migration.engine, expire_on_commit=False)
     service, store, adapter, targets = ecs(factory)
     command, _ = await command_at_gate(factory, service, store, adapter, targets, "reset")
@@ -887,6 +895,7 @@ async def test_ecs_result_reset_cutover_requires_unique_audited_evidence(
                 response = await session.get(IntegrationRecord, receipt.current_response_record_id)
                 response.attempt_id = str(uuid7())
 
+    await set_reliable_runtime_test_columns(state_migration.engine, present=False)
     url = state_migration.engine.url.render_as_string(hide_password=False)
     result = await run_alembic(url, "-x", "fence_legacy_writes=true", "upgrade", "head")
     if proof not in {"live", "archived"}:

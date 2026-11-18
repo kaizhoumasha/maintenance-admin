@@ -10,7 +10,9 @@ from pydantic import (
     model_validator,
 )
 
-Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")]
+from .definition import IDENTIFIER_PATTERN
+
+Identifier = Annotated[str, Field(pattern=IDENTIFIER_PATTERN)]
 Text = Annotated[str, Field(pattern=r"^[^\x00]+$")]
 UUIDText = Annotated[
     str,

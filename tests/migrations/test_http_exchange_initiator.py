@@ -194,3 +194,26 @@ async def test_migration_preserves_bodies_view_semantics_and_grants(state_migrat
             async with state.engine.begin() as connection:
                 await connection.execute(text(f"DROP OWNED BY {role}"))
                 await connection.execute(text(f"DROP ROLE {role}"))
+
+
+@pytest.mark.parametrize(
+    "state_migration",
+    [
+        ("TEST_HISTORY_MIGRATION_DATABASE_URL", "postgresql", "http_exchange_runtime_expand"),
+        ("", "sqlite", "http_exchange_runtime_expand"),
+    ],
+    indirect=True,
+    ids=["postgres", "sqlite"],
+)
+async def test_runtime_rejects_reconciled_database_missing_application_migrations(
+    state_migration, monkeypatch
+):
+    await _migrate(
+        state_migration, "-x", "fence_legacy_writes=true", "upgrade", "http_exchange_initiator"
+    )
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
+    factory = async_sessionmaker(state_migration.engine)
+    with pytest.raises(RuntimeError, match="database schema revision .* does not match"):
+        await require_reconciled(factory)
+    await _migrate(state_migration, "-x", "fence_legacy_writes=true", "upgrade", "head")
+    await require_reconciled(factory)

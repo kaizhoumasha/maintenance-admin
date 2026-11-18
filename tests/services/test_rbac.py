@@ -13,6 +13,8 @@ from app.models import Base, Permission, Role, User, role_permission, user_role
 from app.schemas.user import UserUpdate
 from app.services import rbac_service, user_service
 from scripts.seed_admin import seed_admin
+from tests.conftest import application_client
+from tests.helpers import bearer
 
 
 @pytest.mark.parametrize("target", ["permissions", "roles"])
@@ -122,9 +124,7 @@ async def admin_pair(pg_sessions):
         ("disable", "disable"),
     ],
 )
-async def test_different_admin_changes_preserve_one_admin(
-    admin_pair, wait_for_lock, redis, actions
-):
+async def test_different_admin_changes_preserve_one_admin(admin_pair, wait_for_lock, actions):
     factory, users, roles = admin_pair
     reached, resume = asyncio.Event(), asyncio.Event()
     async with factory() as first, factory() as second:
@@ -145,7 +145,7 @@ async def test_different_admin_changes_preserve_one_admin(
                     await rbac_service.set_role_permissions(session, roles[index], [])
                 else:
                     await user_service.update_user(
-                        session, redis, users[1 - index], users[index], UserUpdate(is_active=False)
+                        session, users[1 - index], users[index], UserUpdate(is_active=False)
                     )
                 return "ok"
             except AppError as error:
@@ -180,7 +180,7 @@ async def test_different_admin_changes_preserve_one_admin(
         assert admins == [users[1]]
 
 
-async def test_disabling_reloads_current_user_state(admin_pair, redis):
+async def test_disabling_reloads_current_user_state(admin_pair):
     factory, users, _ = admin_pair
     async with factory() as stale, factory() as writer:
         cached = await stale.get(User, users[1])
@@ -189,15 +189,26 @@ async def test_disabling_reloads_current_user_state(admin_pair, redis):
         current.email = "changed@example.test"
         await writer.commit()
         updated = await user_service.update_user(
-            stale, redis, users[0], users[1], UserUpdate(is_active=False)
+            stale, users[0], users[1], UserUpdate(is_active=False)
         )
         assert updated.email == "changed@example.test" and not updated.is_active
 
 
-async def test_profile_edit_does_not_wait_for_admin_change(admin_pair, redis):
-    factory, users, _ = admin_pair
+async def test_delegated_profile_edit_rechecks_committed_admin_grant(
+    admin_pair, redis, wait_for_lock
+):
+    factory, users, roles = admin_pair
+    actor, target = users
+    async with factory.begin() as session:
+        role = await session.scalar(
+            select(Role).where(Role.id == roles[0]).options(selectinload(Role.permissions))
+        )
+        admin = Role(name="admin", permissions=list(role.permissions))
+        role.permissions.append(Permission(code="admin:user:update", name="update"))
+        session.add(admin)
+    admin_role_id = admin.id
     reached, resume = asyncio.Event(), asyncio.Event()
-    async with factory() as guarded, factory() as ordinary:
+    async with factory() as guarded, application_client(factory, redis) as client:
         commit = guarded.commit
 
         async def paused_commit():
@@ -206,19 +217,23 @@ async def test_profile_edit_does_not_wait_for_admin_change(admin_pair, redis):
             await commit()
 
         guarded.commit = paused_commit
-        pending = asyncio.create_task(rbac_service.set_user_roles(guarded, users[0], []))
-        try:
-            await asyncio.wait_for(reached.wait(), 5)
-            updated = await asyncio.wait_for(
-                user_service.update_user(
-                    ordinary, redis, users[0], users[1], UserUpdate(email="profile@example.test")
-                ),
-                2,
-            )
-            assert updated.email == "profile@example.test"
-        finally:
-            resume.set()
-            await asyncio.wait_for(pending, 5)
+        async with asyncio.timeout(10), asyncio.TaskGroup() as group:
+            group.create_task(rbac_service.set_user_roles(guarded, target, [admin_role_id]))
+            try:
+                await reached.wait()
+                pending = group.create_task(
+                    client.put(
+                        f"/api/v1/users/{target}",
+                        json={"email": "profile@example.test"},
+                        headers=bearer(actor),
+                    )
+                )
+                await wait_for_lock(pending)
+            finally:
+                resume.set()
+        assert pending.result().status_code == 403
+    async with factory() as session:
+        assert (await session.get(User, target)).email == "guard_1@example.test"
 
 
 async def test_role_delete_cannot_remove_a_concurrently_assigned_last_admin(

@@ -117,6 +117,26 @@ class TransportService:
             owner=self.owner_domain,
         )
 
+    async def lock_position_evidence(
+        self,
+        session: AsyncSession,
+        *,
+        transport_task_ids: tuple[str, ...],
+        original_owner: str | None = None,
+    ) -> None:
+        """Lock exact originals until transaction end. A shared point can retain a prior owner."""
+        if self.owner_domain is None:
+            return
+        await session.execute(
+            select(TransportTask.transport_task_id)
+            .where(
+                TransportTask.transport_task_id.in_(transport_task_ids),
+                TransportTask.owner_domain == (original_owner or self.owner_domain),
+            )
+            .order_by(TransportTask.transport_task_id)
+            .with_for_update(read=True)
+        )
+
     async def latest_rack_arrival_cycle(
         self,
         session: AsyncSession,

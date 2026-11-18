@@ -2,14 +2,17 @@
 
 import asyncio
 import logging
+import socket
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from typing import Protocol
 
+from anyio import CancelScope
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as DatabasePoolTimeout
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.diagnostics import log_exception
@@ -32,9 +35,29 @@ class PreDispatchTimeout(EvidencePersistenceError):
     pass
 
 
+class PreDispatchUnavailable(EvidencePersistenceError):
+    pass
+
+
 def database_failure_code(error):
     original = error.__cause__ if isinstance(error, EvidencePersistenceError) else error
     return getattr(original.orig, "sqlstate", None) if isinstance(original, DBAPIError) else None
+
+
+def pre_dispatch_unavailable(error):
+    original = error.__cause__ if isinstance(error, EvidencePersistenceError) else error
+    if isinstance(original, DatabasePoolTimeout):
+        return True
+    if not isinstance(original, DBAPIError):
+        return False
+    code = database_failure_code(original)
+    return (
+        original.connection_invalidated
+        or code in {"55P03", "57P01"}
+        or (
+            code == "57014" and str(original.orig) == "canceling statement due to statement timeout"
+        )
+    )
 
 
 class DeliveryRecords(Protocol):
@@ -45,6 +68,13 @@ class DeliveryRecords(Protocol):
     async def opened(self, session, *, claim, at): ...
     async def finished(self, session, *, claim, outcome, at, late): ...
     async def close_attempt(self, session, *, message_id, lease_id, at, reason, outcome=None): ...
+    async def record_late_not_sent(self, session, *, claim, failure_kind): ...
+    async def dispatch_attempt_summary(
+        self, session, *, claim, within_budget=False
+    ) -> tuple[int, int, int]: ...
+    async def reset_retry_budget(self, session, *, message_id) -> None: ...
+    async def legacy_dispatch_gate_count(self, session, *, claim, row) -> int | None: ...
+    async def dispatch_history_incomplete(self, session, *, claim, row, attempt_count) -> bool: ...
 
 
 @asynccontextmanager
@@ -88,6 +118,69 @@ async def transaction_limits(session, seconds=5):
         )
 
 
+@asynccontextmanager
+async def http_connection_guard(session):
+    writing = False
+
+    def has_started_writing():
+        return writing
+
+    def note_write():
+        nonlocal writing
+        writing = True
+
+    def disconnected_error():
+        if writing:
+            return EvidencePersistenceError("HTTP guard disconnected during write")
+        return PreDispatchUnavailable("HTTP guard disconnected before write")
+
+    async def before_write():
+        try:
+            await session.execute(select(1))
+        except DBAPIError as error:
+            if not writing and pre_dispatch_unavailable(error):
+                raise disconnected_error() from error
+            raise
+
+    if session.get_bind().dialect.driver != "asyncpg":
+        yield before_write, None, has_started_writing, note_write
+        return
+    connection = await session.connection()
+    raw = (await connection.get_raw_connection()).driver_connection
+    transport = raw._transport
+    if raw.is_closed() or transport is None:
+        raise disconnected_error()
+    try:
+        probe = transport.get_extra_info("socket").dup()
+    except OSError as error:
+        raise disconnected_error() from error
+
+    with probe, CancelScope() as send_scope:
+        probe.setblocking(False)
+
+        def check_wire():
+            if not raw.is_closed():
+                try:
+                    # The SQL probe has completed. Pending data or EOF cannot validate the lock.
+                    probe.recv(1, socket.MSG_PEEK)
+                except BlockingIOError:
+                    return
+                except OSError:
+                    pass
+            raise disconnected_error()
+
+        def disconnected(_connection):
+            send_scope.cancel()
+
+        raw.add_termination_listener(disconnected)
+        try:
+            yield before_write, check_wire, has_started_writing, note_write
+        finally:
+            raw.remove_termination_listener(disconnected)
+    if send_scope.cancelled_caught:
+        raise disconnected_error()
+
+
 class SnapshotTransactions:
     def __init__(self, store, lifecycles):
         self.store, self.lifecycles = store, lifecycles
@@ -98,6 +191,16 @@ class SnapshotTransactions:
         if snapshot is None:
             raise ValueError("snapshot required")
         return self.lifecycles[snapshot.protocol]
+
+    @asynccontextmanager
+    async def http_guard(self, claim, protocol=None):
+        port = self.port(claim.message) if protocol is None else self.lifecycles.get(protocol)
+        guard = getattr(port, "http_guard", None)
+        if guard is None:
+            yield None, None, None, None
+        else:
+            async with guard(self.store.session_factory, claim) as reason:
+                yield reason
 
     async def locked(self, session, claim, *, nowait=False, authorize=False):
         await transaction_limits(session)
@@ -355,7 +458,7 @@ class SnapshotTransactions:
         )
 
     async def maintain(self, limit, targets, deadline):
-        from .store import AttemptOutcome
+        from .store import FROZEN_REQUEST_INTEGRITY, AttemptOutcome
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -402,17 +505,23 @@ class SnapshotTransactions:
                             now = self.store.clock()
                             if row is None or row.status not in ("PENDING", "SENDING"):
                                 continue
+                            if (
+                                row.status == "SENDING"
+                                and self.store._time(session, row.lease_until) > now
+                            ):
+                                continue
                             reason = None
                             try:
-                                claim = await self.store._claim(session, row)
+                                claim = await self.store._claim(session, row, load_request=False)
+                                await self.store.records.frozen_requests(session, rows=(row,))
+                            except EvidenceIntegrityError:
+                                reason = FROZEN_REQUEST_INTEGRITY
                             except (TypeError, ValueError):
                                 claim = await self.store._claim(
-                                    session, row, include_snapshot=False
+                                    session, row, include_snapshot=False, load_request=False
                                 )
                                 reason = "CONFIG_DRIFT"
                             if not reason and row.status == "SENDING":
-                                if self.store._time(session, row.lease_until) > now:
-                                    continue
                                 if await self.reclaim_unstarted(session, port, context, row, claim):
                                     count += 1
                                     continue
@@ -432,10 +541,14 @@ class SnapshotTransactions:
                                 except (ValueError, TypeError):
                                     reason = "CONFIG_DRIFT"
                             if reason:
+                                uncertain = row.status == "SENDING" and (
+                                    reason != FROZEN_REQUEST_INTEGRITY
+                                    or row.lease_not_started is not True
+                                )
                                 outcome = AttemptOutcome(
                                     MessageStatus.HELD,
                                     pause_reason=reason,
-                                    delivery_uncertain=True if row.status == "SENDING" else None,
+                                    delivery_uncertain=True if uncertain else None,
                                 )
                             elif (
                                 row.expires_at is not None

@@ -40,17 +40,19 @@ def _encode(sub: str, token_type: str, ttl: timedelta, **extra) -> str:
     return jwt.encode(payload, get_settings().JWT_SECRET_KEY, algorithm=ALGORITHM)
 
 
-def create_access_token(sub: str, expires_minutes: int | None = None) -> str:
+def create_access_token(
+    sub: str, expires_minutes: int | None = None, *, session_version: int = 0
+) -> str:
     settings = get_settings()
     minutes = settings.ACCESS_TOKEN_EXPIRE_MINUTES if expires_minutes is None else expires_minutes
-    return _encode(sub, "access", timedelta(minutes=minutes))
+    return _encode(sub, "access", timedelta(minutes=minutes), sv=session_version)
 
 
-def create_refresh_token(sub: str) -> tuple[str, str]:
+def create_refresh_token(sub: str, *, session_version: int = 0) -> tuple[str, str]:
     """返回 (token, jti);调用方负责把 jti 存进 Redis。"""
     jti = uuid7().hex
     ttl = timedelta(seconds=get_settings().REFRESH_TOKEN_EXPIRE_SECONDS)
-    return _encode(sub, "refresh", ttl, jti=jti), jti
+    return _encode(sub, "refresh", ttl, jti=jti, sv=session_version), jti
 
 
 def decode_token(token: str, token_type: str = "access") -> dict:
@@ -64,4 +66,7 @@ def decode_token(token: str, token_type: str = "access") -> dict:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效") from e
     if payload.get("type") != token_type:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证类型错误")
+    version = payload.setdefault("sv", 0)  # 兼容升级前尚未撤销的令牌
+    if type(version) is not int or version < 0:
+        raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
     return payload

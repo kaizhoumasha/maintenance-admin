@@ -21,6 +21,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .base import Base
 
 
+class ReliableRetryBudget(Base):
+    __tablename__ = "reliable_retry_budget"
+
+    target: Mapped[str] = mapped_column(String(64), primary_key=True)
+    protocol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    retry_limit: Mapped[int | None] = mapped_column(Integer)
+
+
 class ReliableMessage(Base):
     __tablename__ = "reliable_message"
     __table_args__ = (
@@ -95,6 +103,12 @@ class ReliableMessage(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     not_received_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     delivery_uncertain: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    dispatch_attempt_count: Mapped[int | None] = mapped_column(Integer)
+    undispatched_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    settled_retry_budget: Mapped[int | None] = mapped_column(Integer)
+    dispatch_retry_limit: Mapped[int | None] = mapped_column(Integer)
+    budget_checked_lease_id: Mapped[str | None] = mapped_column(String(64))
+    scope_stopped_lease_id: Mapped[str | None] = mapped_column(String(64))
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_http_status: Mapped[int | None] = mapped_column(Integer)
     last_failure_kind: Mapped[str | None] = mapped_column(String(64))

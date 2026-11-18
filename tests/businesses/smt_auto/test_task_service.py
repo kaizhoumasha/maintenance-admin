@@ -148,7 +148,7 @@ async def test_cancel_task_is_transactional_and_idempotent(session):
 
 
 @pytest.mark.asyncio
-async def test_plan_member_cancel_withdraws_exact_member_and_rejects_other_scopes(session):
+async def test_plan_member_cancel_withdraws_exact_member_and_skips_missing_member(session):
     service = AutoTaskService()
     issued = Issued(
         task_id="t3",
@@ -182,18 +182,20 @@ async def test_plan_member_cancel_withdraws_exact_member_and_rejects_other_scope
         ctx(session, "sorting.task.cancel@v1", "c3", cancel), cancel
     )
     member = await session.get(AutoSupplyMember, member.id)
-    assert result.data["withdrawn_member_ids"] == [member.id]
+    assert result.data == {}
     assert member.withdrawn_by_input_id is not None
 
-    unsupported = Cancel(
+    original_withdrawal = member.withdrawn_by_input_id
+    missing = Cancel(
         task_id="t3",
         cancel_scope="PLAN_MEMBERS",
         source_racks=[{"rack_id": "R1", "plan_revision": 1}],
     )
-    with pytest.raises(Conflict):
-        await service.accept_task_cancel(
-            ctx(session, "sorting.task.cancel@v1", "c4", unsupported), unsupported
-        )
+    result = await service.accept_task_cancel(
+        ctx(session, "sorting.task.cancel@v1", "c4", missing), missing
+    )
+    assert result.data == {}
+    assert member.withdrawn_by_input_id == original_withdrawal
 
 
 @pytest.mark.asyncio
@@ -234,7 +236,7 @@ async def test_source_and_direct_member_cancel_follow_task_direction(session):
         ctx(session, "sorting.task.cancel@v1", "c4", direct), direct
     )
     member = await session.get(AutoOutboundSourceMember, member.id)
-    assert result.data["withdrawn_member_ids"] == [member.id]
+    assert result.data == {}
     assert member.withdrawn_by_input_id is not None
 
 
@@ -305,7 +307,7 @@ async def test_preparing_cancellation_preserves_original_recovery_pending(sessio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("direction", ["inbound", "outbound"])
-async def test_member_cancellation_supports_mixed_selectors_without_partial_missing_matches(
+async def test_member_cancellation_applies_mixed_selectors_and_skips_missing_matches(
     session, direction
 ):
     await issue(session, direction=direction)
@@ -328,22 +330,14 @@ async def test_member_cancellation_supports_mixed_selectors_without_partial_miss
     delta = PlanDelta(task_id="task", plan_revision=1, **resources)
     await service.accept_task_plan_delta(ctx(session, "plan", "plan", delta), delta)
     await session.flush()
-    invalid = Cancel(
-        task_id="task",
-        cancel_scope="PLAN_MEMBERS",
-        bin_source_racks=[{"rack_id": "BIN", "rack_face": ["A", "MISSING"], "plan_revision": 1}],
-    )
-    with pytest.raises(Conflict):
-        await service.accept_task_cancel(ctx(session, "cancel", "invalid", invalid), invalid)
-    assert all(m.withdrawn_at_ms is None for m in await session.scalars(select(AutoSupplyMember)))
     payload = Cancel(
         task_id="task",
         cancel_scope="PLAN_MEMBERS",
-        bin_source_racks=[{"rack_id": "BIN", "rack_face": ["A"], "plan_revision": 1}],
+        bin_source_racks=[{"rack_id": "BIN", "rack_face": ["A", "MISSING"], "plan_revision": 1}],
         **selectors,
     )
     result = await service.accept_task_cancel(ctx(session, "cancel", "mixed", payload), payload)
-    assert len(result.data["withdrawn_member_ids"]) == 2
+    assert result.data == {}
     assert (await session.scalar(select(model))).withdrawn_at_ms == 100
     faces = {
         m.rack_face: m.withdrawn_at_ms for m in await session.scalars(select(AutoSupplyMember))

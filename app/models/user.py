@@ -1,4 +1,4 @@
-from sqlalchemy import String, false
+from sqlalchemy import String, false, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -13,6 +13,7 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(255), unique=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(default=True)
+    session_version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
     # False=单点登录:新登录踢掉旧会话的 refresh;管理员由 seed_admin 置 True
     allow_multi_login: Mapped[bool] = mapped_column(default=False, server_default=false())
     roles: Mapped[list[Role]] = relationship(secondary=user_role, lazy="raise")

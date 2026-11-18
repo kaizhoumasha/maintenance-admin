@@ -44,7 +44,7 @@ async def get_current_user(
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效") from e
 
     user = await session.get(User, user_id)
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or payload["sv"] != user.session_version:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
     request.state.audit_user_id = user.id  # 供审计中间件读取
     return user

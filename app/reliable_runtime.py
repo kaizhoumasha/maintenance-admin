@@ -4,6 +4,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import get_settings
@@ -13,8 +15,9 @@ from app.http_client import AsyncHttpClient, HttpClient, HttpClientConfig
 from app.integrations import history as history_records
 from app.integrations.http_exchanges import reconcile_outbound
 from app.integrations.runtime_authority import require_reconciled
+from app.models.reliable import ReliableRetryBudget
 from app.reliable import Outbox, OutgoingMessage, ProtocolAdapter
-from app.reliable.config import ReliableConfig
+from app.reliable.config import ReliableConfig, static_retry_budgets
 from app.reliable.sender import Sender
 from app.reliable.store import AttemptOutcome, Claim, MessageStore
 
@@ -88,6 +91,18 @@ async def reliable_lifespan(
     projection = None
     try:
         await require_reconciled(factory)
+        if policies := static_retry_budgets(config):
+            table = ReliableRetryBudget.__table__
+            insert = pg_insert if engine.dialect.name == "postgresql" else sqlite_insert
+            statement = insert(table).values(policies)
+            async with factory.begin() as session:
+                await session.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=(table.c.target, table.c.protocol),
+                        set_={"retry_limit": statement.excluded.retry_limit},
+                        where=table.c.retry_limit.is_distinct_from(statement.excluded.retry_limit),
+                    )
+                )
         for name, target in config.targets.items():
             if target.address_mode == "SNAPSHOT":
                 if client_provider is None or target.protocol not in (lifecycles or {}):

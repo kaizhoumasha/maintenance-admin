@@ -15,6 +15,7 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.diagnostics import log_exception
 from app.integrations.ecs_callback import EventApplicationRef
+from app.integrations.ecs_command.contracts import PauseReason
 from app.integrations.ecs_command.service import CommandOwner
 from app.integrations.wms_request.adapter import MOCK_DECISIONS_TARGET
 from app.models import Device, WorkLine
@@ -168,11 +169,12 @@ class XrayService:
     async def _monitor_rack_job(self, session, identity):
         dispatch = self.racks.dispatch
         job = await dispatch.progress(session, job_id=identity)
-        if job is None or not job.pending:
+        if job is None:
             return
         _, _, _, point = await self._lock_line(session, job.origin.work_line_id)
         if (
-            point
+            job.pending
+            and point
             and point.latest
             and point.latest.pending
             and point.latest.point == job.origin.point
@@ -249,7 +251,12 @@ class XrayService:
         now_ms = unix_ms(self.clock())
         if prep.next_check_at_ms is None or prep.next_check_at_ms > now_ms:
             return "NOT_DUE"
-        return await self.racks.advance(session, prep, point, now_ms)
+        intent = await session.get(ReelOperation, prep.operation_id)
+        reel = await session.get(Reel, intent.reel_key) if intent else None
+        if reel is not None and not reel.conflict:
+            # This pending queue can run before the reel queue sees newly committed facts.
+            await self._read_evidence(session, reel)
+        return await self.racks.advance(session, prep, point, now_ms, intent=intent, reel=reel)
 
     async def _lock_line(self, session, line_id):
         line = await session.get(WorkLine, line_id, with_for_update=True)
@@ -325,7 +332,7 @@ class XrayService:
             )
         return reel.wait_reason
 
-    async def _progress(self, session, reel, arm, point, *, configured):
+    async def _read_evidence(self, session, reel):
         events = list(
             await session.scalars(
                 select(ReelEvent)
@@ -341,11 +348,25 @@ class XrayService:
             )
             for stage, action in actions.items()
         }
+        reel.conflict = reel.conflict or conflict or command_evidence(reel, actions, views)
+        if "ENTRY" in facts and not reel.conflict:
+            reel.conflict = fact_conflict(facts, actions, views)
+        if "ENTRY" in facts and not reel.conflict:
+            for stage in set(event_actions(facts)):
+                view = views.get(stage)
+                if view and view.delivery_status in {"EXPIRED", "FAILED", "ABANDONED"}:
+                    if await self.capabilities.ecs.is_delivery_proven_unaccepted(
+                        session, owner=OWNER, command_code=view.command_code
+                    ):
+                        reel.conflict = "EVENT_FOR_UNACCEPTED_COMMAND"
+                        break
+        return facts, requests, views
+
+    async def _progress(self, session, reel, arm, point, *, configured):
+        facts, requests, views = await self._read_evidence(session, reel)
         report = await self._latest(session, reel, "REPORT")
         if report is not None and report.response is None:
             await self._read_response(session, report)
-
-        reel.conflict = reel.conflict or conflict or command_evidence(reel, actions, views)
         reason = await self._advance_stage(
             session, reel, arm, point, configured, facts, requests, views, report
         )
@@ -363,17 +384,8 @@ class XrayService:
         actions = reel.actions
         if "ENTRY" not in facts:
             return "ENTRY_UNAVAILABLE"
-        reel.conflict = reel.conflict or fact_conflict(facts, actions, views)
         if reel.conflict:
             return reel.conflict
-        for stage in set(event_actions(facts)):
-            view = views.get(stage)
-            if view and view.delivery_status in {"EXPIRED", "FAILED", "ABANDONED"}:
-                if await self.capabilities.ecs.is_delivery_proven_unaccepted(
-                    session, owner=OWNER, command_code=view.command_code
-                ):
-                    reel.conflict = "EVENT_FOR_UNACCEPTED_COMMAND"
-                    return reel.conflict
         if await self._confirm_destination(session, reel, facts, actions, views, report):
             return reel.conflict or ("COMPLETE" if not reel.pending else "DESTINATION_CONFIRMED")
         if not configured:
@@ -601,6 +613,46 @@ class XrayService:
         )
         return "DECISION_PENDING"
 
+    def ecs_dispatch_authorizer(self, command):
+        if command.task_type != "PUT_TO_RACK":
+            return None
+        return partial(self._authorize_rack_put, command=command)
+
+    def transport_dispatch_authorizer(self, task):
+        if task.kind == "RACK_MOVE" and task.frozen.get("source", {}).get("kind") == "RACK":
+            return partial(self.racks.dispatch.authorize_queued_entry, task=task)
+        return None
+
+    async def _authorize_rack_put(self, session, *, command):
+        reel_key, _, stage = (command.call_key or "").rpartition(":")
+        if not reel_key or stage != "OUTLET":
+            return PauseReason.PRE_GATE_VALIDATION
+        reel = await session.get(Reel, reel_key)
+        outlet = (reel.actions or {}).get("OUTLET") if reel is not None else None
+        if (
+            not isinstance(outlet, dict)
+            or outlet.get("command_code") != command.command_code
+            or outlet.get("device_code") != command.device_code
+            or not isinstance(point := outlet.get("rack_point"), str)
+            or not point
+        ):
+            return PauseReason.PRE_GATE_VALIDATION
+        # The HTTP guard uses its own transaction. Keep rack progression fenced until it exits.
+        line = await session.get(WorkLine, reel.work_line_id, with_for_update={"read": True})
+        if (
+            line is None
+            or not line.is_enabled
+            or line.business_code != OWNER.domain
+            or line.position_bindings.get("RETURN_RACK") != point
+            or line.device_bindings.get(OUTPUT_ARM) != command.device_code
+        ):
+            return PauseReason.PRE_GATE_VALIDATION
+        if await self.racks.dispatch.has_position_conflict(
+            session, point=point, lock_xray_arrivals=True
+        ):
+            return PauseReason.RACK_POSITION_CONFLICT
+        return None
+
     async def _put(self, session, reel, arm, source, intent, decision, point, *, original_barcode):
         context = {}
         if decision["result"] == "ACCEPT" and decision["target_locator"]["type"] == "TRANSIT_BIN":
@@ -638,6 +690,10 @@ class XrayService:
             .limit(1)
         ):
             return "ARM_BUSY"
+        if model is PutToRack and await self.racks.dispatch.has_position_conflict(
+            session, point=context["rack_point"], lock_xray_arrivals=True
+        ):
+            return "RACK_POSITION_CONFLICT"
         if target is None:
             target = targets[choice(tuple(targets))].model_dump(mode="json")
         await self._command(

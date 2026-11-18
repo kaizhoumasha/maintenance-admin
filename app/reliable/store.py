@@ -35,6 +35,7 @@ TERMINAL = (
     MessageStatus.EXPIRED,
     MessageStatus.ABANDONED,
 )
+FROZEN_REQUEST_INTEGRITY = "FROZEN_REQUEST_INTEGRITY"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class AttemptOutcome:
     delivery_uncertain: bool | None = None
     pause_reason: str | None = None
     observation_record_id: UUID | None = field(default=None, kw_only=True)
+    retry_budget: int | None = field(default=None, kw_only=True)
 
 
 def utc_datetime(value: datetime | None, *, known_sqlite_utc: bool = False) -> datetime | None:
@@ -111,14 +113,14 @@ class MessageStore:
     def _time(self, session, value):
         return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
 
-    async def _claim(self, session, row, *, include_snapshot=True, bodies=None):
-        if bodies is None:
+    async def _claim(self, session, row, *, include_snapshot=True, bodies=None, load_request=True):
+        if bodies is None and load_request:
             bodies = await self.records.frozen_requests(session, rows=(row,))
         message = OutgoingMessage(
             row.target,
             row.operation,
             row.operation_id,
-            bodies[row.request_record_id],
+            bodies[row.request_record_id] if load_request else b"",
             row.business_key,
             row.trace_id,
             self._time(session, row.created_at),
@@ -145,6 +147,8 @@ class MessageStore:
         )
 
     async def claim(self, limit: int, targets: Mapping[str, TargetConfig]) -> tuple[Claim, ...]:
+        from .lifecycle import EvidenceIntegrityError
+
         if not targets:
             return ()
         now = utc_datetime(self.clock())
@@ -179,11 +183,39 @@ class MessageStore:
                 .with_for_update(skip_locked=True)
             )
             rows = list(rows)
-            bodies = await self.records.frozen_requests(session, rows=rows)
+            try:
+                bodies = await self.records.frozen_requests(session, rows=rows)
+            except EvidenceIntegrityError:
+                bodies = {}
+                for row in rows:
+                    try:
+                        bodies.update(await self.records.frozen_requests(session, rows=(row,)))
+                    except EvidenceIntegrityError as error:
+                        log_exception(
+                            logger,
+                            "frozen request integrity check failed",
+                            error,
+                            component="reliable",
+                            phase="claim",
+                            context={"message_id": row.id},
+                        )
+                        if row.delivery_snapshot is None:
+                            row.status = MessageStatus.HELD
+                            row.pause_reason = FROZEN_REQUEST_INTEGRITY
+                            row.next_attempt_at = None
+                            row.updated_at = now
+                        else:
+                            # Snapshot holds must also update the command under its own locks.
+                            self._skipped_claim_cursor = (
+                                self._time(session, row.next_attempt_at),
+                                row.id,
+                            )
             if not rows:
                 self._skipped_claim_cursor = None
             claims = []
             for row in rows:
+                if row.request_record_id not in bodies:
+                    continue
                 if row.delivery_snapshot is not None:
                     try:
                         snapshot = DeliverySnapshot(**row.delivery_snapshot)
@@ -221,6 +253,44 @@ class MessageStore:
             self._log(claim.message, MessageStatus.PENDING, MessageStatus.SENDING)
         return tuple(claims)
 
+    async def _restore_scoped_dispatch_evidence(self, session, row, claim=None):
+        if (
+            row.scope_owner is None
+            or row.lease_not_started is not True
+            or not row.delivery_uncertain
+            or row.dispatch_started_at is None
+            or row.last_attempt_at is None
+            or not row.attempts
+        ):
+            return
+        if claim is None:
+            from .lifecycle import EvidenceIntegrityError
+
+            try:
+                claim = await self._claim(session, row)
+            except EvidenceIntegrityError:
+                return
+        total, unsent, declined = await self.records.dispatch_attempt_summary(session, claim=claim)
+        gate_count = row.dispatch_attempt_count
+        if gate_count is None or total > gate_count:
+            gate_count = await self.records.legacy_dispatch_gate_count(
+                session, claim=claim, row=row
+            )
+        if total == gate_count:
+            row.dispatch_attempt_count = gate_count
+            if declined and total == unsent + declined:
+                if await self.records.dispatch_history_incomplete(
+                    session, claim=claim, row=row, attempt_count=total
+                ):
+                    row.dispatch_attempt_count = None
+                    return
+                # Older senders could save a late refusal without updating the message counter.
+                _, unsent, declined = await self.records.dispatch_attempt_summary(
+                    session, claim=claim, within_budget=True
+                )
+                row.not_received_count = max(row.not_received_count, unsent + declined)
+                row.delivery_uncertain = False
+
     async def before_send(self, claim, target):
         from .lifecycle import evidence_transaction
 
@@ -236,8 +306,14 @@ class MessageStore:
                 .execution_options(populate_existing=True)
             )
             now = utc_datetime(self.clock())
-            if row is None or row.status != "SENDING" or row.lease_id != claim.lease_id:
+            if (
+                row is None
+                or row.status != "SENDING"
+                or row.lease_id != claim.lease_id
+                or row.lease_not_started is False
+            ):
                 return None
+            await self._restore_scoped_dispatch_evidence(session, row, claim)
             if (
                 row.pause_reason == REPLACEMENT_PENDING
                 and not row.delivery_uncertain
@@ -260,8 +336,38 @@ class MessageStore:
                 claim.message.expires_at is not None and claim.message.expires_at <= now
             ):
                 return None
+            budget = target.max_not_received_attempts
+            if (
+                row.scope_owner is not None
+                and row.lease_not_started is True
+                and not row.delivery_uncertain
+                and budget is not None
+                and row.not_received_count >= budget
+            ):
+                row.status = MessageStatus.STALLED
+                row.lease_id = row.lease_until = row.next_attempt_at = None
+                row.updated_at = now
+                self._log(
+                    claim.message,
+                    MessageStatus.SENDING,
+                    MessageStatus.STALLED,
+                    attempts=row.attempts,
+                    not_received_attempts=row.not_received_count,
+                )
+                return None
             row.lease_not_started = False
+            row.budget_checked_lease_id = claim.lease_id
             if row.scope_owner is not None:
+                row.dispatch_retry_limit = budget
+                row.settled_retry_budget = None
+                if row.dispatch_attempt_count is not None:
+                    row.dispatch_attempt_count += 1
+                elif row.dispatch_started_at is None and not row.delivery_uncertain:
+                    total, unsent, declined = await self.records.dispatch_attempt_summary(
+                        session, claim=claim
+                    )
+                    if total == unsent + declined:
+                        row.dispatch_attempt_count = total + 1
                 row.dispatch_started_at = row.dispatch_started_at or now
             until = now + timedelta(seconds=target.timeout_ms / 1000 + self.lease_margin_s)
             row.lease_until = until
@@ -300,6 +406,7 @@ class MessageStore:
             raise ValueError("stalled message has no schedule")
         now = utc_datetime(self.clock())
         result, verdict = outcome.result, outcome.verdict
+        retry_budget = outcome.retry_budget
         if outcome.status == MessageStatus.DONE and (
             verdict is None or verdict.kind != VerdictKind.DELIVERED
         ):
@@ -327,7 +434,7 @@ class MessageStore:
         ):
             raise ValueError("peer failure requires matching verdict")
         if outcome.status == MessageStatus.EXPIRED and (
-            result is not None
+            (result is not None and result.delivery_state != DeliveryState.NOT_SENT)
             or verdict is not None
             or claim.message.expires_at is None
             or claim.message.expires_at > now
@@ -353,10 +460,13 @@ class MessageStore:
             values["next_attempt_at"] = utc_datetime(outcome.next_attempt_at)
         if outcome.status == MessageStatus.STALLED:
             values["next_attempt_at"] = None
+            if outcome.pause_reason is not None:
+                values["pause_reason"] = outcome.pause_reason
         if outcome.not_received_count is not None:
             values["not_received_count"] = outcome.not_received_count
         if outcome.delivery_uncertain is not None:
             values["delivery_uncertain"] = outcome.delivery_uncertain
+        stalled_count = None
         async with evidence_transaction(self.session_factory) as session:
             row = await session.scalar(
                 select(ReliableMessage)
@@ -365,6 +475,19 @@ class MessageStore:
                 .execution_options(populate_existing=True)
             )
             active = row is not None and row.lease_id == claim.lease_id and row.status == "SENDING"
+            scoped = row is not None and row.scope_owner is not None
+            was_uncertain = scoped and row.delivery_uncertain
+            scoped_not_sent = (
+                scoped and result is not None and result.delivery_state == DeliveryState.NOT_SENT
+            )
+            scoped_declined = (
+                scoped and verdict is not None and verdict.kind == VerdictKind.NOT_RECEIVED
+            )
+            prior_declines = None
+            if scoped_declined and not active and row.status in ("SENDING", "PENDING"):
+                _, _, prior_declines = await self.records.dispatch_attempt_summary(
+                    session, claim=claim, within_budget=True
+                )
             observation = await self.records.finished(
                 session, claim=claim, outcome=outcome, at=now, late=not active
             )
@@ -377,6 +500,111 @@ class MessageStore:
                     reason="FINISHED",
                     outcome=outcome,
                 )
+            elif scoped_not_sent:
+                await self.records.record_late_not_sent(
+                    session, claim=claim, failure_kind=result.failure_kind
+                )
+            complete_non_delivery = False
+            if (
+                (scoped_not_sent or scoped_declined)
+                and row.status in ("SENDING", "PENDING", "STALLED", "ABANDONED", "EXPIRED")
+                and (
+                    prior_declines is not None
+                    or (
+                        row.dispatch_started_at is not None
+                        and (row.dispatch_attempt_count is not None or row.status == "ABANDONED")
+                    )
+                )
+            ):
+                total, unsent, declined = await self.records.dispatch_attempt_summary(
+                    session, claim=claim
+                )
+                complete_non_delivery = (
+                    row.dispatch_attempt_count == total == unsent + declined and total > 0
+                )
+                if (
+                    row.status == "ABANDONED" or complete_non_delivery and was_uncertain
+                ) and await self.records.dispatch_history_incomplete(
+                    session, claim=claim, row=row, attempt_count=total
+                ):
+                    row.dispatch_attempt_count = None
+                    row.delivery_uncertain = True
+                    complete_non_delivery = False
+                if prior_declines is not None or (
+                    complete_non_delivery and was_uncertain and declined
+                ):
+                    _, budget_unsent, budget_declined = await self.records.dispatch_attempt_summary(
+                        session, claim=claim, within_budget=True
+                    )
+                if prior_declines is not None and budget_declined > prior_declines:
+                    # Only the first durable refusal contributes, even when the lease was recovered.
+                    row.not_received_count += 1
+                    row.updated_at = now
+                # All committed gates must be accounted for before removing uncertainty.
+                if complete_non_delivery:
+                    if active:
+                        values["delivery_uncertain"] = False
+                        if total == unsent:
+                            values["dispatch_started_at"] = None
+                    else:
+                        if total == unsent:
+                            row.dispatch_started_at = None
+                        row.delivery_uncertain = False
+                        row.updated_at = now
+            if (
+                active
+                and scoped
+                and outcome.status == MessageStatus.PENDING
+                and outcome.not_received_count is not None
+            ):
+                # A late refusal can advance the current count after this lease was claimed.
+                values["not_received_count"] = row.not_received_count + int(
+                    scoped_not_sent or scoped_declined
+                )
+            if complete_non_delivery and was_uncertain and declined:
+                budget_count = budget_unsent + budget_declined
+                if active:
+                    values["not_received_count"] = max(
+                        values.get("not_received_count", row.not_received_count), budget_count
+                    )
+                else:
+                    row.not_received_count = max(row.not_received_count, budget_count)
+            if not active and complete_non_delivery:
+                budget = row.settled_retry_budget
+                # A later settled send sets the policy; the stale reply cannot replace it.
+                if (
+                    budget is not None
+                    and row.not_received_count >= budget
+                    and (
+                        row.status == "PENDING"
+                        or row.status == "SENDING"
+                        and row.lease_not_started is True
+                    )
+                ):
+                    row.status = MessageStatus.STALLED
+                    row.lease_id = row.lease_until = row.next_attempt_at = None
+                self._notify_terminal(session, claim.message, row.status)
+            if active and scoped:
+                if row.lease_not_started is True and outcome.status != MessageStatus.EXPIRED:
+                    values["undispatched_attempts"] = row.undispatched_attempts + 1
+                if scoped_not_sent or scoped_declined:
+                    values["settled_retry_budget"] = retry_budget
+            if (
+                active
+                and (scoped_not_sent or scoped_declined)
+                and outcome.status == MessageStatus.PENDING
+            ):
+                uncertain = (
+                    row.delivery_uncertain or values.get("delivery_uncertain", False)
+                ) and not complete_non_delivery
+                values["delivery_uncertain"] = uncertain
+                if (
+                    not uncertain
+                    and retry_budget is not None
+                    and values.get("not_received_count", 0) >= retry_budget
+                ):
+                    values.update(status=MessageStatus.STALLED, next_attempt_at=None)
+                    stalled_count = values["not_received_count"]
             values["last_response_record_id"] = None if keeps_final_response else observation
             values["last_response_wire"] = (
                 result.body if result and not keeps_final_response else None
@@ -400,14 +628,22 @@ class MessageStore:
                 if outcome.status == MessageStatus.DONE and self.on_delivered is not None:
                     handled = await self.on_delivered(session, claim.message)
                 if not handled:
-                    self._notify_terminal(session, claim.message, outcome.status)
+                    self._notify_terminal(session, claim.message, values["status"])
         if changed is not None:
             self._log(
                 claim.message,
                 MessageStatus.SENDING,
-                outcome.status,
+                values["status"],
                 reason=outcome.fail_reason,
                 attempts=claim.attempt_no,
+            )
+        if stalled_count is not None:
+            logger.warning(
+                "reliable stalled target=%r operation=%r operation_id=%r not_received_attempts=%d",
+                claim.message.target,
+                claim.message.operation,
+                claim.message.operation_id,
+                stalled_count,
             )
         return changed is not None
 
@@ -436,14 +672,15 @@ class MessageStore:
                     .with_for_update(skip_locked=True)
                 )
             )
-            bodies = await self.records.frozen_requests(session, rows=rows)
-            claims = [await self._claim(session, row, bodies=bodies) for row in rows]
-            if claims:
+            claims = []
+            for row in rows:
+                # Preserve the verified gate count before charging an unstarted lease to attempts.
+                await self._restore_scoped_dispatch_evidence(session, row)
+                claims.append(await self._claim(session, row, load_request=False))
+            recoveries = [(claim, self._recovery_values(claim, now, targets)) for claim in claims]
+            if recoveries:
                 # 行已被 FOR UPDATE 锁定,无需再带租约条件;一次批量执行代替逐行往返。
                 table = ReliableMessage.__table__
-                recoveries = [
-                    (claim, self._recovery_values(claim, now, targets)) for claim in claims
-                ]
                 for claim in claims:
                     await self.records.close_attempt(
                         session,
@@ -458,15 +695,17 @@ class MessageStore:
                         {
                             "row_id": claim.message_id,
                             "attempts": claim.attempt_no,
+                            "undispatched_attempts": row.undispatched_attempts
+                            + (claim.message.scope is not None and claim.lease_not_started is True),
                             **values,
                         }
-                        for claim, values in recoveries
+                        for row, (claim, values) in zip(rows, recoveries, strict=True)
                     ],
                 )
                 for claim, values in recoveries:
                     self._notify_terminal(session, claim.message, values["status"])
-        for claim in claims:
-            self._recovery_log(claim, now, targets)
+        for claim, values in recoveries:
+            self._recovery_log(claim, values["status"], targets)
         return len(rows)
 
     async def release(self, claim: Claim, targets: Mapping[str, TargetConfig]) -> bool:
@@ -474,17 +713,13 @@ class MessageStore:
             return await self.snapshots.release(claim)
         now = utc_datetime(self.clock())
         async with self.session_factory() as session, session.begin():
-            changed = await self._recover(session, claim, now, targets)
-        if changed:
-            self._recovery_log(claim, now, targets)
-        return changed
+            status = await self._recover(session, claim, now, targets)
+        if status is None:
+            return False
+        self._recovery_log(claim, status, targets)
+        return True
 
-    def _recovery_log(self, claim, now, targets):
-        status = (
-            MessageStatus.EXPIRED
-            if claim.message.expires_at is not None and claim.message.expires_at <= now
-            else MessageStatus.PENDING
-        )
+    def _recovery_log(self, claim, status, targets):
         self._log(
             claim.message,
             MessageStatus.SENDING,
@@ -511,6 +746,13 @@ class MessageStore:
         if target is None:
             target = TargetConfig("missing", "http://invalid.test", "missing")
         expired = claim.message.expires_at is not None and claim.message.expires_at <= now
+        # A gate on an older lease does not make this unstarted lease uncertain.
+        uncertain = (
+            claim.delivery_uncertain
+            or claim.lease_not_started is not True
+            or claim.message.scope is None
+        )
+        # A recovery worker can have a different budget from the next sender.
         return dict(
             status=MessageStatus.EXPIRED if expired else MessageStatus.PENDING,
             updated_at=now,
@@ -521,11 +763,7 @@ class MessageStore:
             last_verdict=None,
             last_response_record_id=None,
             last_response_wire=None,
-            # 租约中断后请求可能已送达:一旦未知,预算不再适用(合同 §4.3)。
-            delivery_uncertain=claim.delivery_uncertain
-            or claim.lease_not_started is not True
-            or claim.dispatch_started_at is not None
-            or claim.message.scope is None,
+            delivery_uncertain=uncertain,
             next_attempt_at=now
             + timedelta(seconds=retry_delay_s(claim.attempt_no, target, None, self.uniform)),
         )
@@ -536,35 +774,36 @@ class MessageStore:
             ReliableMessage.lease_id == claim.lease_id,
             ReliableMessage.status == MessageStatus.SENDING,
         )
-        identity = await session.scalar(select(ReliableMessage.id).where(*active).with_for_update())
-        if identity is None:
-            return False
+        row = await session.scalar(
+            select(ReliableMessage)
+            .where(*active)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if row is None:
+            return None
+        await self._restore_scoped_dispatch_evidence(session, row)
         await self.records.close_attempt(
             session,
-            message_id=identity,
+            message_id=row.id,
             lease_id=claim.lease_id,
             at=now,
             reason="LEASE_RELEASED",
         )
-        values = self._recovery_values(claim, now, targets)
-        values["delivery_uncertain"] = or_(
-            ReliableMessage.delivery_uncertain,
-            ReliableMessage.lease_not_started.is_not(True),
-            ReliableMessage.dispatch_started_at.is_not(None),
-            ReliableMessage.scope_owner.is_(None),
-        )
-        changed = await session.scalar(
+        current = await self._claim(session, row, load_request=False)
+        values = self._recovery_values(current, now, targets)
+        await session.execute(
             update(ReliableMessage)
             .where(*active)
             .values(
                 attempts=ReliableMessage.attempts + 1,
+                undispatched_attempts=row.undispatched_attempts
+                + (current.message.scope is not None and current.lease_not_started is True),
                 **values,
             )
-            .returning(ReliableMessage.id)
         )
-        if changed is not None:
-            self._notify_terminal(session, claim.message, values["status"])
-        return changed is not None
+        self._notify_terminal(session, current.message, values["status"])
+        return values["status"]
 
     async def expire_pending(self, limit: int) -> int:
         now = utc_datetime(self.clock())

@@ -41,6 +41,8 @@ from app.integrations.ecs_command.runtime import configure_ecs, ecs_runtime_conf
 from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
 from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
 from app.integrations.wms_transport.acceptance import submission_observer
+from app.integrations.wms_transport.dispatch import TransportDispatch
+from app.integrations.wms_transport.protocol import PROTOCOL as WMS_TRANSPORT_PROTOCOL
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
 from app.services.device_bindings import resolve_binding
@@ -52,6 +54,21 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    async def assembly_unavailable(_session):
+        return "ASSEMBLY_UNAVAILABLE"
+
+    def authorize_dispatch(command):
+        runtime = getattr(application.state, "business_runtime", None)
+        if not isinstance(runtime, BusinessRuntime):
+            return assembly_unavailable
+        return runtime.ecs_dispatch_authorizer(command)
+
+    def authorize_transport(task):
+        runtime = getattr(application.state, "business_runtime", None)
+        if not isinstance(runtime, BusinessRuntime):
+            return assembly_unavailable
+        return runtime.transport_dispatch_authorizer(task)
+
     owns_business_runtime = False
     try:
         ecs_commands = getattr(application.state, "ecs_commands", None)
@@ -63,6 +80,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     routes=DeviceRoutes(command_bindings, annexes=command_annexes),
                     annexes=command_annexes,
                     authorize_new=authorize_new_command,
+                    authorize_dispatch=authorize_dispatch,
                 )
             elif command_bindings or command_annexes:
                 ecs_commands = configure_ecs(
@@ -70,6 +88,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     routes=DeviceRoutes(command_bindings, annexes=command_annexes),
                     annexes=command_annexes,
                     authorize_new=authorize_new_command,
+                    authorize_dispatch=authorize_dispatch,
                 )
         application.state.device_status = DeviceStatusService(session_factory, get_redis())
         application.state.business_event_committed = (
@@ -85,7 +104,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         async with reliable_lifespan(
             config,
             getattr(application.state, "reliable_adapters", {}),
-            lifecycles=getattr(application.state, "reliable_lifecycles", {}),
+            lifecycles={
+                **getattr(application.state, "reliable_lifecycles", {}),
+                WMS_TRANSPORT_PROTOCOL: TransportDispatch(authorize_transport),
+            },
             client_provider=getattr(application.state, "reliable_client_provider", None),
             on_result=wms_result_committed,
             on_delivered=wms_delivery_committed,

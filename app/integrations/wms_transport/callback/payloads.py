@@ -6,7 +6,14 @@
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.integrations.wms_callback import CallbackPayload
 
@@ -23,6 +30,15 @@ def _no_nul(value: str) -> str:
 Text = Annotated[str, Field(min_length=1), AfterValidator(_no_nul)]
 TaskId = Annotated[Text, Field(max_length=256)]
 Face = Annotated[str, Field(min_length=1, max_length=10), AfterValidator(_no_nul)]
+
+
+def _require_true(value):
+    if value is not True:
+        raise ValueError("position_unknown must be JSON true")
+    return value
+
+
+PositionUnknown = Annotated[Literal[True], BeforeValidator(_require_true)]
 FailureCode = Literal[
     "RCS_TASK_REJECTED", "RCS_EXECUTION_FAILED", "POSITION_UNKNOWN", "MANUAL_ABORTED"
 ]
@@ -92,7 +108,7 @@ class BinResult(CallbackPayload):
     container_id: Text
     status: Literal["SUCCEEDED", "FAILED"]
     final_position: BinPosition | None = None
-    position_unknown: Literal[True] | None = None
+    position_unknown: PositionUnknown | None = None
     failure_code: FailureCode | None = None
 
     @model_validator(mode="after")
@@ -131,7 +147,7 @@ class Resulted(CallbackPayload):
     rack_id: Text | None = None
     status: Literal["SUCCEEDED", "FAILED", "CANCELLED"] | None = None
     final_position: RackPositionRef | None = None
-    position_unknown: Literal[True] | None = None
+    position_unknown: PositionUnknown | None = None
     failure_code: FailureCode | None = None
     arrival_face: Face | None = None
     results: list[BinResult] | None = Field(default=None, min_length=1, max_length=4)

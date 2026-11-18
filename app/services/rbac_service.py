@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core import AppError, ErrorCode
+from app.core.deps import user_is_admin
 from app.models import Permission, Role, User, role_permission, user_role
 
 # 系统里至少要有一个活跃用户能设置角色权限,否则没人能再恢复权限
@@ -29,6 +30,11 @@ async def ensure_admin_remains(session: AsyncSession) -> None:
         .join(Permission, Permission.id == role_permission.c.permission_id)
         .where(User.is_active.is_(True), Permission.code == ADMIN_GUARD_PERMISSION)
     )
+    builtin = await session.scalar(select(Role.id).where(Role.name == "admin"))
+    if builtin is not None:
+        # Delegated setters cannot recover the built-in role or assign it to a new admin.
+        members = select(user_role.c.user_id).where(user_role.c.role_id == builtin)
+        stmt = stmt.where(User.id.in_(members))
     if not await session.scalar(stmt):
         raise AppError(ErrorCode.CONFLICT, "至少需要保留一个可设置角色权限的活跃用户")
 
@@ -57,6 +63,51 @@ async def get_user_permission_codes(session: AsyncSession, user_id: int) -> list
         .order_by(Permission.code)
     )
     return list(await session.scalars(stmt))
+
+
+async def authorize_management(
+    session: AsyncSession,
+    actor: User,
+    permission: str,
+    *,
+    user_id: int | None = None,
+    role_ids: Iterable[int] = (),
+    codes: Iterable[str] = (),
+    reserved_role: bool = False,
+) -> None:
+    await lock_admin_changes(session)
+    # The actor or their permissions can have changed while waiting for the write lock.
+    version = await session.scalar(
+        select(User.session_version).where(User.id == actor.id, User.is_active.is_(True))
+    )
+    if version != actor.session_version:
+        raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
+    available = set(await get_user_permission_codes(session, actor.id))
+    if permission not in available:
+        raise AppError(ErrorCode.FORBIDDEN, "没有访问权限", detail=permission)
+    if await user_is_admin(session, actor.id):
+        return
+
+    roles = set(role_ids)
+    if user_id is not None:
+        roles.update(
+            await session.scalars(select(user_role.c.role_id).where(user_role.c.user_id == user_id))
+        )
+    requested = set(codes)
+    if roles:
+        grants = await session.execute(
+            select(Role.name, Permission.code)
+            .select_from(Role)
+            .outerjoin(role_permission, role_permission.c.role_id == Role.id)
+            .outerjoin(Permission, Permission.id == role_permission.c.permission_id)
+            .where(Role.id.in_(roles))
+        )
+        for name, code in grants:
+            reserved_role |= name == "admin"
+            if code is not None:
+                requested.add(code)
+    if reserved_role or not requested <= available:
+        raise AppError(ErrorCode.FORBIDDEN, "超出授权管理范围")
 
 
 async def list_permissions(session: AsyncSession) -> list[Permission]:

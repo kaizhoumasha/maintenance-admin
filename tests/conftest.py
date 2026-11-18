@@ -23,16 +23,21 @@ from sqlalchemy import delete, exists, func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app.core.config import Settings  # noqa: E402
+
+# The test process must not inherit app settings from a developer's .env.
+Settings.model_config["env_file"] = None
+
 from app.businesses.catalog import load_business_models  # noqa: E402
 from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
-from app.core.identifiers import uuid7
+from app.core.identifiers import uuid7  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
 from app.database import SCHEMA  # noqa: E402
 from app.database import create_database_engine as create_async_engine  # noqa: E402
 from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (
+from app.models import (  # noqa: E402
     AuditLog,
     AuditLogArchive,
     Base,

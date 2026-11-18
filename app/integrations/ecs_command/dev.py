@@ -180,6 +180,7 @@ def configure_local_ecs(
     routes=None,
     annexes=None,
     authorize_new=None,
+    authorize_dispatch=None,
 ):
     if environment != "local":
         if (
@@ -213,4 +214,5 @@ def configure_local_ecs(
         annexes=merged,
         client_factory=client_factory,
         authorize_new=authorize_new,
+        authorize_dispatch=authorize_dispatch,
     )

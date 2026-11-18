@@ -209,3 +209,68 @@ async def test_role_update_delete_need_permission(client, admin):
     assert r.status_code == 403 and r.json()["detail"] == "admin:role:update"
     r = await client.delete("/api/v1/roles/1", headers=h)
     assert r.status_code == 403 and r.json()["detail"] == "admin:role:delete"
+
+
+@pytest.mark.parametrize(
+    ("permission", "method", "path", "body"),
+    [
+        ("admin:user:assign_role", "PUT", "/users/{user}/roles", {"role_ids": [1]}),
+        ("admin:user:assign_role", "PUT", "/users/1/roles", {"role_ids": []}),
+        (
+            "admin:user:reset_password",
+            "POST",
+            "/users/1/reset-password",
+            {"new_password": "reset-pass1"},
+        ),
+        ("admin:user:update", "PUT", "/users/1", {"is_active": False}),
+        (
+            "admin:role:set_permissions",
+            "PUT",
+            "/roles/2/permissions",
+            {"permissions": ["admin:user:list"]},
+        ),
+        (
+            "admin:role:create",
+            "POST",
+            "/roles",
+            {"name": "privileged", "permissions": ["admin:user:list"]},
+        ),
+    ],
+)
+async def test_delegated_permission_cannot_escalate(client, admin, permission, method, path, body):
+    user_id = await _make_user_with_perms(client, admin, [permission])
+    response = await client.request(
+        method, f"/api/v1{path.format(user=user_id)}", json=body, headers=_bearer(user_id)
+    )
+    assert response.status_code == 403
+
+
+async def test_delegated_role_assignment_can_grant_held_permissions(client, admin):
+    user_id = await _make_user_with_perms(
+        client, admin, ["admin:user:assign_role", "admin:user:read"]
+    )
+    role_id = await _role(client, admin, "reader", ["admin:user:read"])
+    target_id = (
+        await client.post(
+            "/api/v1/users",
+            json={**PAYLOAD, "username": "viewer", "email": "viewer@example.com"},
+            headers=admin,
+        )
+    ).json()["id"]
+    response = await client.put(
+        f"/api/v1/users/{target_id}/roles", json={"role_ids": [role_id]}, headers=_bearer(user_id)
+    )
+    assert response.status_code == 204
+    assert (await client.get("/api/v1/users/1", headers=_bearer(target_id))).status_code == 200
+
+
+@pytest.mark.parametrize("operation", ["assignment", "permissions"])
+async def test_delegated_setter_cannot_replace_last_builtin_admin(client, admin, operation):
+    await _make_user_with_perms(client, admin, ["admin:role:set_permissions"])
+    if operation == "assignment":
+        response = await client.put("/api/v1/users/1/roles", json={"role_ids": [2]}, headers=admin)
+    else:
+        response = await client.put(
+            "/api/v1/roles/1/permissions", json={"permissions": []}, headers=admin
+        )
+    assert response.status_code == 409

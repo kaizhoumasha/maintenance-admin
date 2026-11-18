@@ -2,8 +2,12 @@
 
 import logging
 
+from sqlalchemy import select
+
+from app.database import create_database_engine
 from app.integrations.wms_transport import ADAPTERS, PROTOCOL
 from app.main import app
+from app.models.reliable import ReliableRetryBudget
 from app.reliable.config import ReliableConfig, TargetConfig
 from app.reliable_runtime import reliable_lifespan
 
@@ -15,7 +19,7 @@ def test_the_application_registers_the_transport_adapter_for_the_sender():
 
 
 async def test_a_configured_wms_target_gets_an_http_client_and_no_startup_warning(
-    monkeypatch, caplog
+    monkeypatch, caplog, tmp_path, sqlite_tables
 ):
     import app.reliable_runtime as runtime
 
@@ -35,12 +39,27 @@ async def test_a_configured_wms_target_gets_an_http_client_and_no_startup_warnin
     clients = []
     caplog.set_level(logging.WARNING)
     target = TargetConfig("wms-transport", WMS, PROTOCOL, max_not_received_attempts=3)
-    async with reliable_lifespan(
-        ReliableConfig({"wms-transport": target}),
-        app.state.reliable_adapters,
-        database_url="sqlite+aiosqlite://",
-        client_factory=lambda config: clients.append(config.base_url) or object(),
-    ) as outbox:
-        assert outbox is not None and set(outbox.targets) == {"wms-transport"}
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}"
+    engine = create_database_engine(database_url)
+    try:
+        await sqlite_tables(engine)
+        async with reliable_lifespan(
+            ReliableConfig({"wms-transport": target}),
+            app.state.reliable_adapters,
+            database_url=database_url,
+            client_factory=lambda config: clients.append(config.base_url) or object(),
+        ) as outbox:
+            assert outbox is not None and set(outbox.targets) == {"wms-transport"}
+            async with engine.connect() as connection:
+                budget = await connection.execute(
+                    select(
+                        ReliableRetryBudget.target,
+                        ReliableRetryBudget.protocol,
+                        ReliableRetryBudget.retry_limit,
+                    )
+                )
+                assert budget.one() == ("wms-transport", PROTOCOL, 3)
+    finally:
+        await engine.dispose()
     assert clients == [WMS]
     assert "no registered adapter" not in caplog.text

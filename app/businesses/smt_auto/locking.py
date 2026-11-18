@@ -24,7 +24,7 @@ from .models import (
 
 
 async def lock_line(
-    session, dispatch, work_line_id, *, include_job_ids=(), roller=None, timing=None
+    session, dispatch, work_line_id, *, include_job_ids=(), roller=None, timing=None, task_id=None
 ):
     started = perf_counter() if timing is not None else 0.0
     try:
@@ -60,14 +60,10 @@ async def lock_line(
     )
     if tuple(sorted(job.id for job in current)) != original:
         raise RackLockSetChanged("original AUTO dispatch jobs changed during lock acquisition")
-    tasks = tuple(
-        await session.scalars(
-            select(AutoTask.task_id)
-            .where(AutoTask.work_line_id == work_line_id)
-            .order_by(AutoTask.task_id)
-            .with_for_update()
-        )
-    )
+    task_scope = select(AutoTask.task_id).where(AutoTask.work_line_id == work_line_id)
+    if task_id is not None:
+        task_scope = task_scope.where(AutoTask.task_id == task_id)
+    tasks = tuple(await session.scalars(task_scope.order_by(AutoTask.task_id).with_for_update()))
     for model in (
         AutoTaskInput,
         AutoSupplyMember,
@@ -80,9 +76,11 @@ async def lock_line(
         AutoOutboundDecisionRound,
         AutoTaskRequest,
     ):
-        condition = (
-            model.work_line_id == work_line_id if model is AutoBinWork else model.task_id.in_(tasks)
-        )
+        condition = model.task_id.in_(tasks)
+        if model is AutoBinWork:
+            condition = model.work_line_id == work_line_id
+            if task_id is not None:
+                condition &= model.task_id.in_(tasks)
         await session.execute(
             select(model.id).where(condition).order_by(model.id).with_for_update()
         )

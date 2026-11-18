@@ -3,6 +3,7 @@
 import math
 import re
 import ssl
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -43,6 +44,16 @@ class HttpRequest:
     query: tuple[tuple[str, str], ...] = ()
     headers: tuple[tuple[str, str], ...] = ()
     body: bytes = b""
+    # A guard may also provide the remaining time, in seconds, for the write.
+    before_write: Callable[[], Awaitable[float | None]] | None = field(
+        default=None, compare=False, repr=False
+    )
+    check_wire: Callable[[], None] | None = field(default=None, compare=False, repr=False)
+    # The socket writer revalidates before continuing a short or blocked write.
+    recheck_wire: Callable[[], Awaitable[None]] | None = field(
+        default=None, compare=False, repr=False
+    )
+    on_wire_write: Callable[[], None] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)

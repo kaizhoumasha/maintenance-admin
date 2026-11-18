@@ -246,6 +246,34 @@ async def test_unknown_result_converges_to_a_later_determined_result(
     assert (row.outcome_status, row.applied_outcome_revision) == ("SUCCEEDED", 2)
 
 
+@pytest.mark.parametrize("reported", [1, 1.0])
+@pytest.mark.parametrize("family", ["rack", "bin"])
+async def test_position_unknown_requires_json_true(
+    callback_client, callback_store, family, reported
+):
+    if family == "rack":
+        identity = await add_task(callback_store, rack_data())
+        result = rack_result(identity, 1, status="FAILED", failure_code="POSITION_UNKNOWN")
+        result.update(final_position=None, position_unknown=reported)
+    else:
+        identity = await add_task(callback_store, bin_data())
+        result = bin_result(
+            identity,
+            1,
+            [
+                {
+                    "container_id": container,
+                    "status": "FAILED",
+                    "failure_code": "POSITION_UNKNOWN",
+                    "position_unknown": reported,
+                }
+                for container in ("C1", "C2")
+            ],
+        )
+    assert (await send(callback_client, RESULTED, result)).status_code == 422
+    assert (await task_row(callback_store, identity)).outcome_status is None
+
+
 async def test_versions_never_roll_back_and_terminal_results_are_not_rewritten(
     callback_client, callback_store
 ):

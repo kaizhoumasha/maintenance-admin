@@ -2,16 +2,22 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    DDL,
     JSON,
     BigInteger,
     CheckConstraint,
+    Column,
     DateTime,
+    ForeignKey,
     Index,
     LargeBinary,
     SmallInteger,
+    Table,
     Text,
     Uuid,
+    event,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -52,9 +58,37 @@ class ReliableDeliveryAttempt(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     close_reason: Mapped[str | None] = mapped_column(Text)
     attempt_state: Mapped[str] = mapped_column(Text, default="OPEN")
+    counts_toward_retry_budget: Mapped[bool] = mapped_column(default=True, server_default=true())
     failure_kind: Mapped[str | None] = mapped_column(Text)
     late: Mapped[bool] = mapped_column(default=False)
     revision: Mapped[int] = mapped_column(default=1)
+
+
+http_projection_pending = Table(
+    "http_projection_pending",
+    Base.metadata,
+    Column(
+        "attempt_id",
+        Uuid,
+        ForeignKey("reliable_delivery_attempt.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+for action, suffix in (("INSERT", "insert"), ("UPDATE OF revision", "update")):
+    event.listen(
+        http_projection_pending,
+        "after_create",
+        DDL(f"""
+            CREATE TRIGGER http_projection_enqueue_{suffix}
+            AFTER {action} ON reliable_delivery_attempt
+            WHEN NEW.endpoint_path <> '' AND NEW.protocol IN
+                 ('wms-decisions', 'wms-facts', 'wms-transport', 'ecs-command')
+            BEGIN
+                INSERT INTO http_projection_pending (attempt_id) VALUES (NEW.id)
+                ON CONFLICT (attempt_id) DO NOTHING;
+            END
+            """).execute_if(dialect="sqlite"),
+    )
 
 
 class HttpExchange:

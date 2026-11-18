@@ -1,18 +1,20 @@
 import json
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import func, select
 
 from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.core.identifiers import uuid7
+from app.http_client import DeliveryState, HttpResult
 from app.integrations import history as history_records
 from app.models import ReliableMessage
-from app.reliable import ScopeRef
-from app.reliable.store import MessageStore
+from app.reliable import MessageStatus, ScopeRef
+from app.reliable.store import AttemptOutcome, MessageStore
 from tests.helpers import set_message_bodies
 
 
-@pytest.mark.parametrize("stage", ["decision", "queued", "gated", "accepted"])
+@pytest.mark.parametrize("stage", ["decision", "queued", "gated", "late_not_sent", "accepted"])
 async def test_task_close_stops_only_its_execution_and_keeps_independent_return(
     roller_current, stage
 ):
@@ -57,13 +59,15 @@ async def test_task_close_stops_only_its_execution_and_keeps_independent_return(
             if stage != "decision"
             else None
         )
-    if stage == "gated":
+    if stage in ("gated", "late_not_sent"):
         store = MessageStore(
             flow.factory, lifecycles=flow.ecs.outbox.lifecycles, records=history_records
         )
         claims = await store.claim(100, flow.ecs.outbox.targets)
         claim = next(c for c in claims if c.message_id == view.submission_message_id)
-        assert await store.before_send(claim, flow.ecs.outbox.targets[claim.message.target])
+        target = flow.ecs.outbox.targets[claim.message.target]
+        request = flow.ecs.outbox.adapters[target.protocol].build_request(claim.message, target)
+        assert await store.before_send(replace(claim, request=request), target)
     elif stage == "accepted":
         import json
 
@@ -107,6 +111,28 @@ async def test_task_close_stops_only_its_execution_and_keeps_independent_return(
         assert (
             await flow.roller.rack_dispatch.progress(session, job_id=face["rack_job_id"])
         ).state == "CLOSED_BY_SCOPE"
+    if stage == "late_not_sent":
+        await store.finish(
+            claim,
+            AttemptOutcome(
+                MessageStatus.PENDING,
+                result=HttpResult(DeliveryState.NOT_SENT, None, None, (), None),
+                next_attempt_at=store.clock(),
+            ),
+        )
+        for row in rows:
+            await flow.advance_current("RETURN", row["id"])
+        returned = await flow.current_rows("bin_return")
+        assert all(
+            r["return_state"] == "READY" and r["transport_task_id"] is None for r in returned
+        )
+        async with flow.factory() as session:
+            message = await session.get(ReliableMessage, view.submission_message_id)
+            assert message.status == "ABANDONED"
+            assert (
+                await session.scalar(select(func.count()).select_from(ReliableMessage))
+                == before_count
+            )
     if stage in ("gated", "accepted"):
         await flow.complete_transport(face["current_transport_task_id"])
         for row in rows:

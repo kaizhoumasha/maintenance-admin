@@ -75,9 +75,36 @@ async def ecs(request, sqlite_tables, tmp_path):
         if request.param == "postgres":
             from sqlalchemy import delete
 
-            from app.models import IntegrationExchange, ReliableMessage
+            from app.models import (
+                CallbackReceipt,
+                EcsCommand,
+                EcsResultEvidence,
+                EcsSendEvidence,
+                IntegrationExchange,
+                ReliableMessage,
+            )
 
             async with factory.begin() as session:
+                codes = list(
+                    await session.scalars(
+                        select(EcsCommand.command_code)
+                        .join(ReliableMessage, ReliableMessage.exchange_id == EcsCommand.id)
+                        .where(ReliableMessage.target == target.name)
+                    )
+                )
+                if codes:
+                    receipts = list(
+                        await session.scalars(
+                            select(EcsResultEvidence.receipt_id).where(
+                                EcsResultEvidence.command_code.in_(codes)
+                            )
+                        )
+                    )
+                    for model in (EcsResultEvidence, EcsSendEvidence, EcsCommand):
+                        await session.execute(delete(model).where(model.command_code.in_(codes)))
+                    await session.execute(
+                        delete(CallbackReceipt).where(CallbackReceipt.receipt_id.in_(receipts))
+                    )
                 await session.execute(
                     delete(ReliableMessage).where(
                         ReliableMessage.target.in_(("ecs", "old-static", "ecs-local"))
@@ -419,15 +446,12 @@ def ecs_simulators(monkeypatch, loopback_server):
             factory = simulator_client_factory(origins)
             configure = main.configure_local_ecs
 
-            def assemble(application, *, environment, routes, annexes=None, authorize_new=None):
+            def assemble(application, **kwargs):
                 return configure(
                     application,
-                    environment=environment,
                     history_annexes=history_annexes,
                     client_factory=factory,
-                    routes=routes,
-                    authorize_new=authorize_new,
-                    annexes=annexes,
+                    **kwargs,
                 )
 
             with monkeypatch.context() as patch:

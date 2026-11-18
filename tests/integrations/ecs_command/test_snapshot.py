@@ -325,8 +325,9 @@ async def test_pool_unavailable_keeps_original_retry_without_failure_log(
 
 
 @pytest.mark.parametrize("gate_first", [False, True])
+@pytest.mark.parametrize("corrupt", [False, True])
 async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evidence(
-    ecs, gate_first
+    ecs, gate_first, corrupt
 ):
     from app.integrations.ecs_command.lifecycle import EcsLifecycle
     from app.integrations.ecs_command.protocol import PROTOCOL
@@ -351,6 +352,10 @@ async def test_scope_stop_fences_snapshot_and_preserves_original_execution_evide
     (claim,) = await store.claim(1, ecs.targets)
     if gate_first:
         assert await store.before_send(claim, ecs.targets["ecs"])
+    if corrupt:
+        async with ecs.factory.begin() as session:
+            message = await session.get(ReliableMessage, claim.message_id)
+            message.frozen_request_wire = b"damaged transport copy"
     async with ecs.factory.begin() as session:
         (stopped,) = await ecs.outbox.stop_scope(session, scope, reason="TASK_COMPLETED")
         assert stopped.dispatch == ("MAY_HAVE_DISPATCHED" if gate_first else "NEVER_DISPATCHED")

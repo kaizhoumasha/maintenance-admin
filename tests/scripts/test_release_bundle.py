@@ -126,11 +126,22 @@ def test_site_override_mounts_external_configuration_read_only(tmp_path, site_ex
 def test_restore_completion_requires_selecting_release_instead_of_development_start(tmp_path):
     backup = tmp_path / "backup.dump"
     backup.touch()
+    pg_exec = tmp_path / "pg-exec"
+    pg_exec.write_text(
+        """#!/bin/sh
+case "$(cat)" in
+  *'CREATE SCHEMA'*) printf '10|_restore_test|20\\n' ;;
+  *'CREATE DATABASE'*) printf '30\\n' ;;
+  *'target.oid'*) printf 'true app_old_test\\n' ;;
+esac
+"""
+    )
+    pg_exec.chmod(0o755)
     result = subprocess.run(
         ["bash", str(SCRIPT.with_name("restore_pg.sh")), str(backup)],
         env={
             **os.environ,
-            "PG_EXEC": "true",
+            "PG_EXEC": str(pg_exec),
             "REDIS_EXEC": "true",
             "CONFIRM": "yes",
             "JWT_ROTATED": "yes",
@@ -574,3 +585,50 @@ def test_prepare_rejects_unsafe_source_or_unpinned_infrastructure(
         release_bundle.prepare("app:0.2.0-test", destination, allow_dirty=False)
     assert not destination.exists()
     assert bool(builds) is (failure in {"source-drift", "heads", "digest"})
+
+
+@pytest.mark.parametrize("source", [None, "127.0.0.1", "192.0.2.10"])
+def test_gateway_restricts_callback_sources(tmp_path, source):
+    nginx = (SCRIPT.parents[1] / "deploy/nginx/default.conf").read_text()
+    nginx = nginx.replace("http://api:8000", "http://127.0.0.1:8000")
+    if source is not None:
+        nginx = nginx.replace("deny all;", f"allow {source}; deny all;")
+    config = tmp_path / "default.conf"
+    config.write_text(nginx + "\nserver { listen 8000; return 204; }\n")
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "-v",
+            f"{config}:/etc/nginx/conf.d/default.conf:ro",
+            "nginx:1.27-alpine",
+            "sh",
+            "-ec",
+            r"""
+            nginx
+            for path do
+                wget -S -O /dev/null --post-data "{}" \
+                    --header "X-Forwarded-For: 192.0.2.10" "http://127.0.0.1$path" 2>&1 |
+                    awk '/HTTP\// { print $2 }'
+            done
+            """,
+            "check",
+            "/api/v1/auth/login",
+            "/api/v1/wms/events",
+            "/api/v1/callback/event",
+            "/api/v1/callback/result",
+            "/api/v1/callback/%72esult",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    callback_status = "204" if source == "127.0.0.1" else "403"
+    assert [line for line in result.stdout.splitlines() if line.isdigit()] == [
+        "204",
+        *([callback_status] * 4),
+    ]

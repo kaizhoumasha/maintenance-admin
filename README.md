@@ -106,12 +106,14 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 
 用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。并发保护、会话索引寿命及权限复用的稳定边界见[后台加固合同](docs/superpowers/specs/2026-10-26-repository-review-hardening-design.md)。
 
+具有管理权限的非 `admin` 角色成员，在更新用户、重置密码、分配角色和设置角色权限时，只能操作其权限范围内的用户或角色。创建角色和变更授权也只能授出本人已有权限。范围检查与资料或授权写入使用同一数据库事务锁。`admin` 角色的成员和该角色的授权由持有对应操作权限的 `admin` 成员管理。存在内置 `admin` 角色时，至少保留一位持有 `admin:role:set_permissions` 的活跃成员。
+
 ### 6. 认证
 
 - `POST /api/v1/auth/login`（JSON，每 IP 每分钟 5 次）返回 `access_token`；refresh token 放在 HttpOnly cookie `refresh_token`（路径 `/api/v1/auth`，`SameSite=Strict`，非 local 环境带 `Secure`），前端读不到。因为是 `Strict`，前后端必须同站（同域或开发代理）；跨站部署需改 `samesite` 并补 CSRF 防护。
 - `POST /auth/refresh` 凭 cookie 换新的 token 对，旧 refresh 立即作废；`/auth/logout` 撤销当前设备，`/auth/logout-all` 撤销该用户全部设备。
 - 用户有 `allow_multi_login`：默认 `False`（单点登录，新登录会顶掉旧会话），admin 为 `True`。
-- access token 无状态、不进黑名单，登出后最长 `ACCESS_TOKEN_EXPIRE_MINUTES` 内仍可用；用户被停用则立即失效（每次请求都校验 `is_active`）。
+- access token 不进黑名单，登出后最长 `ACCESS_TOKEN_EXPIRE_MINUTES` 内仍可用。停用账号时更新数据库中的会话版本，两种旧令牌在事务提交后失效。Redis 中的旧刷新凭据可留到原有效期结束，重新启用后需要重新登录。
 
 ### 7. 菜单（前端动态路由）
 

@@ -11,6 +11,65 @@ from tests.helpers import add_bound_device, workline_definition_lookup
 ACTOR = AssetActor(1, "business-test", None, None)
 
 
+async def test_xray_workline_code_must_fit_the_wms_contract(db):
+    from app.businesses import catalog
+
+    with pytest.raises(AppError, match="工作线编码"):
+        await service.create_workline(
+            db,
+            WorkLineCreate(line_code="X 射线 01", line_name="Line", business_code="xray"),
+            actor=ACTOR,
+            definition_lookup=catalog.effective_definition,
+        )
+
+
+async def test_existing_xray_line_with_invalid_code_reports_configuration_error(db):
+    from app.businesses import catalog
+    from app.services.device_bindings import resolve_binding
+
+    line, _, _ = await add_bound_device(db, "D1", "http://127.0.0.1:1", role="XRAY")
+    line.business_code = "xray"
+    line.line_code = "X 射线 01"
+    await db.commit()
+    binding = await resolve_binding(db, "D1")
+    assert (
+        await service.business_configuration_issue(
+            db,
+            binding,
+            "xray",
+            definition_lookup=catalog.effective_definition,
+            required_device_roles=("XRAY",),
+        )
+        == "WORKLINE_CODE_INVALID"
+    )
+
+
+@pytest.mark.parametrize("line_code", ["XRAY-01", "X 射线 01"])
+async def test_selecting_xray_validates_existing_code_before_changing_configuration(db, line_code):
+    from app.businesses import catalog
+
+    line, _, _ = await add_bound_device(db, "D1", "http://127.0.0.1:1", line_code=line_code)
+    line.device_bindings = {}
+    line.position_bindings = {}
+    await db.commit()
+    line_id = line.id
+    data = WorkLineUpdate(line_name="X-Ray", version=1, business_code="xray")
+    if line_code == "XRAY-01":
+        changed = await service.update_workline(
+            db, line_id, data, actor=ACTOR, definition_lookup=catalog.effective_definition
+        )
+        assert changed.business_code == "xray" and changed.version == 2
+    else:
+        with pytest.raises(AppError, match="工作线编码"):
+            await service.update_workline(
+                db, line_id, data, actor=ACTOR, definition_lookup=catalog.effective_definition
+            )
+        unchanged = await service.read_workline(db, line_id)
+        assert unchanged.business_code is None and unchanged.version == 1
+        assert unchanged.line_name == "Test line"
+        assert await db.scalar(select(AuditLog.id)) is None
+
+
 async def test_workline_enable_state_defaults_and_updates_are_audited(db):
     created = await service.create_workline(
         db,

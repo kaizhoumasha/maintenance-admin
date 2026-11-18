@@ -146,15 +146,15 @@ def _run(connection) -> None:
             from app.integrations.runtime_authority import (
                 PREVIOUS_QUERY_REVISION,
                 QUERY_REVISION,
-                QUERY_REVISIONS,
                 check_reconciled,
+                query_revisions,
             )
 
             revision = context.get_context().get_current_revision()
             if (
                 not use_runtime
                 and revision != PREVIOUS_QUERY_REVISION
-                and revision not in QUERY_REVISIONS
+                and revision not in query_revisions()
             ):
                 return
             try:

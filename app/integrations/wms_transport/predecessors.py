@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .acceptance import get_submission_acceptance
 from .results import project, read_rows
 from .types import TransportCaller, require_uuid7, validate_text
 
@@ -72,6 +73,7 @@ async def list_unclosed_predecessors(
         members, matches = (), False
         reason = result.closure_reason
         closure = result.closure
+        basis = deepcopy(result.closure_basis)
         if task and result.availability == "FOUND":
             frozen = task["frozen"]
             if "moves" in frozen:
@@ -95,7 +97,21 @@ async def list_unclosed_predecessors(
                     "UNDETERMINED" if any(r["position_unknown"] for r in selected) else "CLOSED"
                 )
                 reason = "UNKNOWN_POSITION" if closure == "UNDETERMINED" else "APPLIED_RESULT"
-        basis = deepcopy(result.closure_basis)
+            elif result.submission_proven_unsent:
+                acceptance = await get_submission_acceptance(
+                    session,
+                    transport_task_id=task_id,
+                    client_request_id=result.client_request_id,
+                    caller=caller,
+                    owner=result.owner_domain,
+                )
+                if acceptance.state == "MISSING":
+                    closure, reason = "CLOSED", "SUBMIT_NEVER_DISPATCHED"
+                    basis = dict(
+                        transport_task_id=task_id,
+                        submission_message_id=result.submission_message_id,
+                        operation_id=result.operation_id,
+                    )
         if basis is not None:
             basis.update(rack_id=rack_id, container_id=container_id, member_ids=members)
         items.append(

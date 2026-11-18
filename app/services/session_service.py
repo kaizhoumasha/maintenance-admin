@@ -48,7 +48,8 @@ async def issue_tokens(redis: Redis, user: User, refresh_jti: str | None = None)
     """原子签发/轮换会话,与全部撤销互斥;沿用现有 SET 索引并清理过期成员。"""
     sub = str(user.id)
     ttl = get_settings().REFRESH_TOKEN_EXPIRE_SECONDS
-    refresh, jti = create_refresh_token(sub)
+    version = user.session_version or 0
+    refresh, jti = create_refresh_token(sub, session_version=version)
     issued = await redis.eval(
         _ISSUE_TOKENS,
         2,
@@ -62,7 +63,7 @@ async def issue_tokens(redis: Redis, user: User, refresh_jti: str | None = None)
     )
     if not issued:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
-    return create_access_token(sub), refresh
+    return create_access_token(sub, session_version=version), refresh
 
 
 async def revoke_refresh(redis: Redis, payload: dict) -> None:

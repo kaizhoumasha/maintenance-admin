@@ -58,7 +58,7 @@ async def refresh(
     payload = _refresh_payload(request)
     # 先校验用户再消费旧 jti:停用用户不会白白烧掉 token;sub 来自已验签的 payload
     user = await user_service.lock_user(session, int(payload["sub"]))
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or payload["sv"] != user.session_version:
         raise AppError(ErrorCode.UNAUTHORIZED, "凭证无效")
     return _token_out(response, *await session_service.issue_tokens(redis, user, payload["jti"]))
 
