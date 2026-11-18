@@ -56,9 +56,11 @@ async def test_users_list_requires_list_permission(client, admin):
 @pytest.mark.parametrize(
     ("params", "status"),
     [
-        ({"page": 9223372036854775808, "page_size": 1}, 200),
+        ({"page": 1001, "page_size": 100}, 200),
+        ({"page": 1002, "page_size": 100}, 400),
+        ({"page": 9223372036854775808, "page_size": 1}, 400),
         ({"page": 9223372036854775809, "page_size": 1}, 400),
-        ({"page": 92233720368547759, "page_size": 100}, 200),
+        ({"page": 92233720368547759, "page_size": 100}, 400),
         ({"page": 92233720368547760, "page_size": 100}, 400),
         ({"page": 10**30, "page_size": 20}, 400),
     ],

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 NO_AUDIT = {"audit": False}
 DatabaseId = Annotated[int, Field(ge=1, le=2147483647)]
+MAX_OFFSET = 100_000
 
 
 class PageParams(BaseModel):
@@ -16,6 +17,8 @@ class PageParams(BaseModel):
 
     @model_validator(mode="after")
     def check_offset(self) -> Self:
+        if self.offset > MAX_OFFSET:
+            raise ValueError("分页 OFFSET 超出允许范围")
         if self.offset > 2**63 - 1:
             raise ValueError("分页 OFFSET 超出数据库范围")
         return self
