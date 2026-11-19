@@ -3,7 +3,9 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
+from app.schemas.base import PageParams
 from tests.helpers import PAYLOAD
 from tests.helpers import bearer as _bearer
 from tests.helpers import make_user_with_perms as _make_user_with_perms
@@ -56,9 +58,11 @@ async def test_users_list_requires_list_permission(client, admin):
 @pytest.mark.parametrize(
     ("params", "status"),
     [
-        ({"page": 9223372036854775808, "page_size": 1}, 200),
+        ({"page": 1001, "page_size": 100}, 200),
+        ({"page": 1002, "page_size": 100}, 400),
+        ({"page": 9223372036854775808, "page_size": 1}, 400),
         ({"page": 9223372036854775809, "page_size": 1}, 400),
-        ({"page": 92233720368547759, "page_size": 100}, 200),
+        ({"page": 92233720368547759, "page_size": 100}, 400),
         ({"page": 92233720368547760, "page_size": 100}, 400),
         ({"page": 10**30, "page_size": 20}, 400),
     ],
@@ -70,6 +74,11 @@ async def test_pagination_offset_bounds(client, admin, params, status):
         assert response.json()["code"] == "INVALID_REQUEST"
     else:
         assert response.json()["items"] == []
+
+
+def test_page_params_preserves_int64_overflow_validation():
+    with pytest.raises(ValidationError, match="分页 OFFSET 超出数据库范围"):
+        PageParams(page=9223372036854775809, page_size=1)
 
 
 @pytest.mark.parametrize("path", [USERS, AUDIT, f"{AUDIT}/archive"])

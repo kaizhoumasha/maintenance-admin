@@ -7,6 +7,11 @@ from sqlalchemy import or_, select, text
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
 from app.businesses._components.bin_roller.service import ROLLER_SOURCES, BinRoller
+from app.businesses._components.pending_snapshot import (
+    PendingSnapshot,
+    capture_pages,
+    capture_query,
+)
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses._components.sorting_task.service import SortingTask
 from app.core.clock import unix_ms
@@ -204,43 +209,43 @@ class SmtAutoService(AutoTaskService):
         sweep_started = perf_counter()
         preceding_ms = 0.0
         queries = self._pending(now_ms)
-        async with self.capabilities.session_factory() as snapshot, snapshot.begin():
-            if snapshot.get_bind().dialect.name == "postgresql":
-                await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-                await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            upper = {}
-            for kind, query in queries.items():
-                column = query.selected_columns[0]
-                upper[kind] = await snapshot.scalar(query.order_by(column.desc()).limit(1))
-            upper["RACK"] = await self.dispatch.pending_upper_id(
-                snapshot, source_kinds=RACK_SOURCES
-            )
-            for kind in ROLLER_KINDS:
-                upper[kind] = await self.roller.get_pending_upper_id(snapshot, kind=kind)
-            cursors = {kind: None for kind, last in upper.items() if last is not None}
+        with PendingSnapshot() as pending:
+            async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                if snapshot.get_bind().dialect.name == "postgresql":
+                    await snapshot.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    await snapshot.execute(text("SET TRANSACTION READ ONLY"))
+                for kind, query in queries.items():
+                    column = query.selected_columns[0]
+                    await capture_query(snapshot, query, column, pending, kind)
+                await capture_pages(
+                    pending,
+                    "RACK",
+                    lambda after_id, batch_size: self.dispatch.pending_snapshot_ids(
+                        snapshot,
+                        source_kinds=RACK_SOURCES,
+                        after_id=after_id,
+                        limit=batch_size,
+                    ),
+                )
+                for kind in ROLLER_KINDS:
+                    await capture_pages(
+                        pending,
+                        kind,
+                        lambda after_id, batch_size, kind=kind: self.roller.pending_snapshot_ids(
+                            snapshot,
+                            kind=kind,
+                            after_id=after_id,
+                            limit=batch_size,
+                        ),
+                    )
+            pending.rewind()
+            cursors = {kind: True for kind in pending.kinds()}
             total = 0
             while cursors:
-                for kind, after in tuple(cursors.items()):
-                    if kind == "RACK":
-                        ids = await self.dispatch.pending_ids(
-                            snapshot,
-                            source_kinds=RACK_SOURCES,
-                            after_id=after,
-                            upper_id=upper[kind],
-                            limit=limit,
-                        )
-                    elif kind in ROLLER_KINDS:
-                        page = await self.roller.list_pending(
-                            snapshot, kind=kind, after_id=after, upper_id=upper[kind], limit=limit
-                        )
-                        ids = tuple(record.record_id for record in page)
-                    else:
-                        query = queries[kind]
-                        column = query.selected_columns[0]
-                        query = query.where(column <= upper[kind])
-                        if after is not None:
-                            query = query.where(column > after)
-                        ids = tuple(await snapshot.scalars(query.order_by(column).limit(limit)))
+                for kind in tuple(cursors):
+                    ids = pending.read_batch(kind, limit)
                     if not ids:
                         del cursors[kind]
                         continue
@@ -274,7 +279,6 @@ class SmtAutoService(AutoTaskService):
                             )
                         total += 1
                         preceding_ms += (perf_counter() - started) * 1000
-                    cursors[kind] = ids[-1]
             return total
 
     async def advance_original(

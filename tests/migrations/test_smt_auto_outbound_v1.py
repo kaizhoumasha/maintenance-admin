@@ -106,7 +106,22 @@ async def test_outbound_v1_migration_refuses_old_work_and_preserves_other_tasks(
     assert {"grant_parent_plate_id", "next_source_action"}.isdisjoint(
         item["name"] for item in after["smt_auto_outbound_plate"]["columns"]
     )
-    assert after["smt_auto_inbound_plate"] == before["smt_auto_inbound_plate"]
+    inbound_before = before["smt_auto_inbound_plate"]
+    inbound_after = after["smt_auto_inbound_plate"]
+    expected_indexes = {
+        "smt_auto_inbound_plate_pending_idx",
+        "smt_auto_inbound_plate_report_idx",
+    }
+    after_indexes = {item["name"]: item for item in inbound_after["indexes"]}
+    before_indexes = {item["name"]: item for item in inbound_before["indexes"]}
+    assert expected_indexes <= after_indexes.keys()
+    assert {
+        name: item for name, item in after_indexes.items() if name not in expected_indexes
+    } == before_indexes
+    assert all(after_indexes[name]["column_names"] == ["id"] for name in expected_indexes)
+    assert {key: value for key, value in inbound_after.items() if key != "indexes"} == {
+        key: value for key, value in inbound_before.items() if key != "indexes"
+    }
     async with store.engine.begin() as connection:
         assert await connection.scalar(text("SELECT COUNT(*) FROM sorting_task")) == 3
         assert (

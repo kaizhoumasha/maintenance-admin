@@ -51,6 +51,15 @@ class ManualBinFlow:
             select(identity).where(pending).order_by(identity.desc()).limit(1)
         )
 
+    async def pending_snapshot_ids(
+        self, session: AsyncSession, *, kind: str, after_id: str | None = None, limit: int = 1000
+    ) -> tuple[str, ...]:
+        identity, pending = self._pending(kind)
+        query = select(identity).where(pending)
+        if after_id is not None:
+            query = query.where(identity > after_id)
+        return tuple(await session.scalars(query.order_by(identity).limit(limit)))
+
     async def list_pending(
         self,
         session: AsyncSession,

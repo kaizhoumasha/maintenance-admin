@@ -432,6 +432,9 @@ async def test_schema_downgrade_preserves_accepted_scan(configured_scan):
     job_migration = runpy.run_path(
         str(SCAN_MIGRATION.with_name("2026-11-06_coarse_sorting_job.py"))
     )
+    pending_indexes_migration = runpy.run_path(
+        str(SCAN_MIGRATION.with_name("2026-11-18_pending_scan_indexes.py"))
+    )
     migration = runpy.run_path(str(SCAN_MIGRATION))
 
     ng_migration = runpy.run_path(str(SCAN_MIGRATION.with_name("2026-11-06_coarse_sorting_ng.py")))
@@ -441,6 +444,7 @@ async def test_schema_downgrade_preserves_accepted_scan(configured_scan):
 
     def downgrade(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            pending_indexes_migration["downgrade"]()
             rack_migration["downgrade"]()
             ng_migration["downgrade"]()
             job_migration["downgrade"]()

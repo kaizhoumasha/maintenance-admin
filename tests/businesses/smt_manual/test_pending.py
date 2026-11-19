@@ -1,10 +1,40 @@
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import Boolean, Column, MetaData, String, Table, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.businesses.runtime import Capabilities
 from app.businesses.smt_manual.service import KINDS, SmtManualService
+
+
+class _TrackingFactory:
+    def __init__(self, factory):
+        self.factory = factory
+        self.active = 0
+
+    def __call__(self, *args, **kwargs):
+        context = self.factory(*args, **kwargs)
+        tracker = self
+
+        class Context:
+            async def __aenter__(self):
+                try:
+                    session = await context.__aenter__()
+                except Exception:
+                    raise
+                tracker.active += 1
+                return session
+
+            async def __aexit__(self, *exc_info):
+                try:
+                    return await context.__aexit__(*exc_info)
+                finally:
+                    tracker.active -= 1
+
+        return Context()
 
 
 @pytest.mark.parametrize("later_task_id", ["T9", "T15"])
@@ -12,6 +42,10 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
     manual_host, monkeypatch, later_task_id
 ):
     flow = manual_host
+    from dataclasses import replace
+
+    tracker = _TrackingFactory(flow.factory)
+    flow.host.capabilities = replace(flow.host.capabilities, session_factory=tracker)
     for i in range(3):
         await flow.issue(f"T{i}")
     async with flow.factory.begin() as session:
@@ -141,9 +175,11 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
                 )
             )
     visited = []
+    active_at_advance = []
 
     async def waiting(kind, record_id):
         visited.append((kind, record_id))
+        active_at_advance.append(tracker.active)
         if len(visited) == 1:
             await flow.issue(later_task_id)
             raise RuntimeError("one original item failed")
@@ -151,6 +187,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
 
     monkeypatch.setattr(flow.host, "advance", waiting)
     assert await flow.host.scan_pending(limit=1) == len(KINDS) * 3
+    assert set(active_at_advance) == {0}
     assert [k for k, _ in visited[: len(KINDS)]] == list(KINDS)
     assert all(sum(k == kind for k, _ in visited) == 3 for kind in KINDS)
     assert [rid for kind, rid in visited if kind == "SCAN2_RELEASE"] == [
@@ -161,6 +198,7 @@ async def test_pending_pages_cover_production_and_all_roller_kinds(
     assert ("TASK", later_task_id) not in visited
     visited.clear()
     assert await flow.host.scan_pending(limit=2) == len(KINDS) * 3 + 1
+    assert set(active_at_advance) == {0}
     assert ("TASK", later_task_id) in visited
 
 
@@ -232,3 +270,100 @@ async def test_unknown_work_kind_opens_no_transaction():
     with pytest.raises(ValueError, match="unsupported manual work kind"):
         await service.advance("UNSUPPORTED", "original")
     factory.assert_not_called()
+
+
+async def test_pending_scan_excludes_lexicographically_earlier_insert():
+    metadata = MetaData()
+    table = Table(
+        "test_smt_manual_pending_scan",
+        metadata,
+        Column("task_id", String, primary_key=True),
+        Column("pending", Boolean, nullable=False),
+    )
+    engine = create_async_engine("sqlite+aiosqlite://")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with factory.begin() as session:
+        await session.execute(
+            table.insert(),
+            [{"task_id": task_id, "pending": True} for task_id in ("T0", "T1", "T2")],
+        )
+
+    service = SmtManualService.__new__(SmtManualService)
+    service.capabilities = SimpleNamespace(session_factory=factory)
+    service.repository = SimpleNamespace(tables={"task": table, "input": table, "request": table})
+    service._pending_tasks = lambda: select(table.c.task_id).where(table.c.pending.is_(True))
+
+    async def no_upper(*args, **kwargs):
+        return None
+
+    owner = SimpleNamespace(pending_snapshot_ids=no_upper)
+    service._pending_owner = lambda kind: owner
+    visited = []
+
+    async def advance(kind, record_id):
+        visited.append(record_id)
+        if record_id == "T0":
+            async with factory.begin() as session:
+                await session.execute(table.insert().values(task_id="T15", pending=True))
+
+    service.advance = advance
+    try:
+        assert await service.scan_pending(limit=1) == 3
+        assert visited == ["T0", "T1", "T2"]
+    finally:
+        await engine.dispose()
+
+
+async def test_pending_scan_reads_candidates_in_bounded_pages():
+    metadata = MetaData()
+    table = Table(
+        "test_smt_manual_bounded_pending_scan",
+        metadata,
+        Column("task_id", String, primary_key=True),
+        Column("pending", Boolean, nullable=False),
+    )
+    engine = create_async_engine("sqlite+aiosqlite://")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    task_ids = tuple(f"T{i:04}" for i in range(2505))
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with factory.begin() as session:
+        await session.execute(
+            table.insert(), [{"task_id": task_id, "pending": True} for task_id in task_ids]
+        )
+
+    service = SmtManualService.__new__(SmtManualService)
+    service.capabilities = SimpleNamespace(session_factory=factory)
+    service.repository = SimpleNamespace(tables={"task": table, "input": table, "request": table})
+    service._pending_tasks = lambda: select(table.c.task_id).where(table.c.pending.is_(True))
+    calls = []
+
+    async def pending_snapshot_ids(session, *, kind, after_id, limit):
+        calls.append((kind, after_id, limit))
+        if kind != "MANUAL_BIN":
+            return ()
+        start = task_ids.index(after_id) + 1 if after_id is not None else 0
+        return task_ids[start : start + limit]
+
+    owner = SimpleNamespace(pending_snapshot_ids=pending_snapshot_ids)
+    service._pending_owner = lambda kind: owner
+    visited = []
+
+    async def advance(kind, record_id):
+        visited.append((kind, record_id))
+
+    service.advance = advance
+    try:
+        assert await service.scan_pending(limit=100) == len(task_ids) * 2
+        assert [record_id for kind, record_id in visited if kind == "TASK"] == list(task_ids)
+        assert [record_id for kind, record_id in visited if kind == "MANUAL_BIN"] == list(task_ids)
+        assert calls and all(limit == 1000 for _, _, limit in calls)
+        assert [after_id for _, after_id, _ in calls if after_id is not None] == [
+            "T0999",
+            "T1999",
+            "T2504",
+        ]
+    finally:
+        await engine.dispose()

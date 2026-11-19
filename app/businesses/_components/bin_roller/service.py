@@ -229,6 +229,21 @@ class BinRoller:
         pending = self.pending_query(kind).subquery()
         return await session.scalar(select(func.max(pending.c.id)))
 
+    async def pending_snapshot_ids(self, session, *, kind, after_id=None, limit=1000):
+        if kind == "RACK_CYCLE":
+            return await self.rack_dispatch.pending_snapshot_ids(
+                session,
+                source_kinds=ROLLER_SOURCES,
+                after_id=after_id,
+                limit=limit,
+            )
+        pending = self.pending_query(kind).subquery()
+        query = select(pending.c.id)
+        if after_id is not None:
+            query = query.where(pending.c.id > after_id)
+        ids = await session.scalars(query.order_by(pending.c.id).limit(limit))
+        return tuple(ids)
+
     async def list_pending(self, session, *, kind, after_id, upper_id, limit):
         if not 1 <= limit <= 1000:
             raise ValueError("invalid pending page size")

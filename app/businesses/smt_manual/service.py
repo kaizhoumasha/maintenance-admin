@@ -11,6 +11,11 @@ from app.businesses._components.bin_roller.service import (
     BinRoller,
     RackLockSetChanged,
 )
+from app.businesses._components.pending_snapshot import (
+    PendingSnapshot,
+    capture_pages,
+    capture_query,
+)
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses._components.sorting_task.service import SortingTask
 from app.businesses.runtime import Capabilities
@@ -110,38 +115,35 @@ class SmtManualService(SmtManualTaskFlow):
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         task_id = self.repository.tables["task"].c.task_id
-        async with self.capabilities.session_factory() as snapshot, snapshot.begin():
-            if snapshot.get_bind().dialect.name == "postgresql":
-                # Peer task/operation IDs need not increase with local acceptance time.
-                await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-                await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            upper = {
-                "TASK": await snapshot.scalar(
-                    self._pending_tasks().order_by(task_id.desc()).limit(1)
-                )
-            }
-            for kind in KINDS[1:]:
-                upper[kind] = await self._pending_owner(kind).get_pending_upper_id(
-                    snapshot, kind=kind
-                )
-            cursors = {kind: None for kind in KINDS if upper[kind] is not None}
+        with PendingSnapshot() as pending:
+            async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                if snapshot.get_bind().dialect.name == "postgresql":
+                    # Peer task/operation IDs need not increase with local acceptance time.
+                    await snapshot.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    await snapshot.execute(text("SET TRANSACTION READ ONLY"))
+                await capture_query(snapshot, self._pending_tasks(), task_id, pending, "TASK")
+                for kind in KINDS[1:]:
+                    owner = self._pending_owner(kind)
+                    await capture_pages(
+                        pending,
+                        kind,
+                        lambda after_id, batch_size, owner=owner, kind=kind: (
+                            owner.pending_snapshot_ids(
+                                snapshot,
+                                kind=kind,
+                                after_id=after_id,
+                                limit=batch_size,
+                            )
+                        ),
+                    )
+            pending.rewind()
+            cursors = {kind: True for kind in pending.kinds()}
             total = 0
             while cursors:
                 for kind in tuple(cursors):
-                    if kind == "TASK":
-                        query = self._pending_tasks().where(task_id <= upper[kind])
-                        if cursors[kind] is not None:
-                            query = query.where(task_id > cursors[kind])
-                        ids = tuple(await snapshot.scalars(query.order_by(task_id).limit(limit)))
-                    else:
-                        page = await self._pending_owner(kind).list_pending(
-                            snapshot,
-                            kind=kind,
-                            after_id=cursors[kind],
-                            upper_id=upper[kind],
-                            limit=limit,
-                        )
-                        ids = tuple(w.record_id for w in page) if kind in ROLLER_KINDS else page
+                    ids = pending.read_batch(kind, limit)
                     if not ids:
                         del cursors[kind]
                         continue
@@ -158,7 +160,6 @@ class SmtManualService(SmtManualTaskFlow):
                                 context={"request_id": record_id},
                             )
                         total += 1
-                    cursors[kind] = ids[-1]
             return total
 
     async def advance(self, kind: str, record_id: str) -> str:

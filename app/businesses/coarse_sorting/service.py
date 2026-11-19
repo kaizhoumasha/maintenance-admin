@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
-from sqlalchemy import Table, or_, select
+from sqlalchemy import Table, and_, or_, select
 from sqlalchemy.exc import DBAPIError
 
 from app.businesses._components.rack_dispatch.service import RackDispatch
@@ -2093,7 +2093,29 @@ class CoarseSortingService:
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         table = self.scan_table
-        pending = select(table.c.id).where(table.c.pending.is_(True))
+        now = self.clock()
+        due = or_(table.c.next_check_at.is_(None), table.c.next_check_at <= now)
+        if self.preparation_table is not None:
+            action = self.action_table.alias("pending_allocation")
+            preparation = self.preparation_table.alias("pending_preparation")
+            due = or_(
+                due,
+                select(1)
+                .select_from(preparation)
+                .join(action, action.c.id == table.c.current_action_id)
+                .where(
+                    and_(
+                        preparation.c.work_line_id == table.c.work_line_id,
+                        preparation.c.rack_position_code == table.c.rack_position_code,
+                        preparation.c.generation_no > action.c.rack_generation_no,
+                    )
+                )
+                .exists(),
+            )
+        pending = select(table.c.id).where(
+            table.c.pending.is_(True),
+            due,
+        )
         if self.ng_locations is None:
             pending = pending.where(
                 table.c.state != "AWAITING_NG",
