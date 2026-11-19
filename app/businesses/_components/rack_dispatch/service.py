@@ -628,9 +628,17 @@ class RackDispatch:
         return await session.scalar(query.order_by(RackJob.id.desc()).limit(1))
 
     async def pending_snapshot_ids(
-        self, session: AsyncSession, *, source_kinds: tuple[str, ...]
+        self,
+        session: AsyncSession,
+        *,
+        source_kinds: tuple[str, ...],
+        after_id: str | None = None,
+        limit: int = 1000,
     ) -> tuple[str, ...]:
         query = (await self._pending_ids(session, source_kinds)).order_by(RackJob.id)
+        if after_id is not None:
+            query = query.where(RackJob.id > after_id)
+        query = query.limit(limit)
         return tuple(await session.scalars(query))
 
     async def pending_ids(

@@ -11,6 +11,11 @@ from app.businesses._components.bin_roller.service import (
     BinRoller,
     RackLockSetChanged,
 )
+from app.businesses._components.pending_snapshot import (
+    PendingSnapshot,
+    capture_pages,
+    capture_query,
+)
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses._components.sorting_task.service import SortingTask
 from app.businesses.runtime import Capabilities
@@ -110,42 +115,52 @@ class SmtManualService(SmtManualTaskFlow):
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         task_id = self.repository.tables["task"].c.task_id
-        pending_ids = {}
-        async with self.capabilities.session_factory() as snapshot, snapshot.begin():
-            if snapshot.get_bind().dialect.name == "postgresql":
-                # Peer task/operation IDs need not increase with local acceptance time.
-                await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-                await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            pending_ids["TASK"] = tuple(
-                await snapshot.scalars(self._pending_tasks().order_by(task_id))
-            )
-            for kind in KINDS[1:]:
-                pending_ids[kind] = await self._pending_owner(kind).pending_snapshot_ids(
-                    snapshot, kind=kind
-                )
-        cursors = {kind: 0 for kind, ids in pending_ids.items() if ids}
-        total = 0
-        while cursors:
-            for kind, start in tuple(cursors.items()):
-                ids = pending_ids[kind][start : start + limit]
-                if not ids:
-                    del cursors[kind]
-                    continue
-                for record_id in ids:
-                    try:
-                        await self.advance(kind, record_id)
-                    except Exception as error:
-                        log_exception(
-                            logger,
-                            "SMT manual advance failed",
-                            error,
-                            component="smt_manual",
-                            phase="advance",
-                            context={"request_id": record_id},
-                        )
-                    total += 1
-                cursors[kind] = start + len(ids)
-        return total
+        with PendingSnapshot() as pending:
+            async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                if snapshot.get_bind().dialect.name == "postgresql":
+                    # Peer task/operation IDs need not increase with local acceptance time.
+                    await snapshot.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    await snapshot.execute(text("SET TRANSACTION READ ONLY"))
+                await capture_query(snapshot, self._pending_tasks(), task_id, pending, "TASK")
+                for kind in KINDS[1:]:
+                    owner = self._pending_owner(kind)
+                    await capture_pages(
+                        pending,
+                        kind,
+                        lambda after_id, batch_size, owner=owner, kind=kind: (
+                            owner.pending_snapshot_ids(
+                                snapshot,
+                                kind=kind,
+                                after_id=after_id,
+                                limit=batch_size,
+                            )
+                        ),
+                    )
+            pending.rewind()
+            cursors = {kind: True for kind in pending.kinds()}
+            total = 0
+            while cursors:
+                for kind in tuple(cursors):
+                    ids = pending.read_batch(kind, limit)
+                    if not ids:
+                        del cursors[kind]
+                        continue
+                    for record_id in ids:
+                        try:
+                            await self.advance(kind, record_id)
+                        except Exception as error:
+                            log_exception(
+                                logger,
+                                "SMT manual advance failed",
+                                error,
+                                component="smt_manual",
+                                phase="advance",
+                                context={"request_id": record_id},
+                            )
+                        total += 1
+            return total
 
     async def advance(self, kind: str, record_id: str) -> str:
         if kind not in KINDS:

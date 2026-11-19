@@ -314,3 +314,56 @@ async def test_pending_scan_excludes_lexicographically_earlier_insert():
         assert visited == ["T0", "T1", "T2"]
     finally:
         await engine.dispose()
+
+
+async def test_pending_scan_reads_candidates_in_bounded_pages():
+    metadata = MetaData()
+    table = Table(
+        "test_smt_manual_bounded_pending_scan",
+        metadata,
+        Column("task_id", String, primary_key=True),
+        Column("pending", Boolean, nullable=False),
+    )
+    engine = create_async_engine("sqlite+aiosqlite://")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    task_ids = tuple(f"T{i:04}" for i in range(2505))
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with factory.begin() as session:
+        await session.execute(
+            table.insert(), [{"task_id": task_id, "pending": True} for task_id in task_ids]
+        )
+
+    service = SmtManualService.__new__(SmtManualService)
+    service.capabilities = SimpleNamespace(session_factory=factory)
+    service.repository = SimpleNamespace(tables={"task": table, "input": table, "request": table})
+    service._pending_tasks = lambda: select(table.c.task_id).where(table.c.pending.is_(True))
+    calls = []
+
+    async def pending_snapshot_ids(session, *, kind, after_id, limit):
+        calls.append((kind, after_id, limit))
+        if kind != "MANUAL_BIN":
+            return ()
+        start = task_ids.index(after_id) + 1 if after_id is not None else 0
+        return task_ids[start : start + limit]
+
+    owner = SimpleNamespace(pending_snapshot_ids=pending_snapshot_ids)
+    service._pending_owner = lambda kind: owner
+    visited = []
+
+    async def advance(kind, record_id):
+        visited.append((kind, record_id))
+
+    service.advance = advance
+    try:
+        assert await service.scan_pending(limit=100) == len(task_ids) * 2
+        assert [record_id for kind, record_id in visited if kind == "TASK"] == list(task_ids)
+        assert [record_id for kind, record_id in visited if kind == "MANUAL_BIN"] == list(task_ids)
+        assert calls and all(limit == 1000 for _, _, limit in calls)
+        assert [after_id for _, after_id, _ in calls if after_id is not None] == [
+            "T0999",
+            "T1999",
+            "T2504",
+        ]
+    finally:
+        await engine.dispose()

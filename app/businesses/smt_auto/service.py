@@ -7,6 +7,11 @@ from sqlalchemy import or_, select, text
 
 from app.businesses._components.bin_roller.ports import RollerWorkRef
 from app.businesses._components.bin_roller.service import ROLLER_SOURCES, BinRoller
+from app.businesses._components.pending_snapshot import (
+    PendingSnapshot,
+    capture_pages,
+    capture_query,
+)
 from app.businesses._components.rack_dispatch.service import RackDispatch
 from app.businesses._components.sorting_task.service import SortingTask
 from app.core.clock import unix_ms
@@ -204,59 +209,77 @@ class SmtAutoService(AutoTaskService):
         sweep_started = perf_counter()
         preceding_ms = 0.0
         queries = self._pending(now_ms)
-        pending_ids = {}
-        async with self.capabilities.session_factory() as snapshot, snapshot.begin():
-            if snapshot.get_bind().dialect.name == "postgresql":
-                await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-                await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            for kind, query in queries.items():
-                column = query.selected_columns[0]
-                pending_ids[kind] = tuple(await snapshot.scalars(query.order_by(column)))
-            pending_ids["RACK"] = await self.dispatch.pending_snapshot_ids(
-                snapshot, source_kinds=RACK_SOURCES
-            )
-            for kind in ROLLER_KINDS:
-                pending_ids[kind] = await self.roller.pending_snapshot_ids(snapshot, kind=kind)
-        cursors = {kind: 0 for kind, ids in pending_ids.items() if ids}
-        total = 0
-        while cursors:
-            for kind, start in tuple(cursors.items()):
-                ids = pending_ids[kind][start : start + limit]
-                if not ids:
-                    del cursors[kind]
-                    continue
-                for record_id in ids:
-                    started = perf_counter()
-                    try:
-                        if kind == "OUTBOUND_PLATE":
-                            await self.advance(
-                                kind,
-                                record_id,
-                                now_ms=now_ms,
-                                timing={
-                                    "trigger": "sweep",
-                                    "plate_id": record_id,
-                                    "preceding_count": total,
-                                    "preceding_ms": preceding_ms,
-                                    "sweep_scan_ms": (started - sweep_started) * 1000
-                                    - preceding_ms,
-                                },
+        with PendingSnapshot() as pending:
+            async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                if snapshot.get_bind().dialect.name == "postgresql":
+                    await snapshot.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    await snapshot.execute(text("SET TRANSACTION READ ONLY"))
+                for kind, query in queries.items():
+                    column = query.selected_columns[0]
+                    await capture_query(snapshot, query, column, pending, kind)
+                await capture_pages(
+                    pending,
+                    "RACK",
+                    lambda after_id, batch_size: self.dispatch.pending_snapshot_ids(
+                        snapshot,
+                        source_kinds=RACK_SOURCES,
+                        after_id=after_id,
+                        limit=batch_size,
+                    ),
+                )
+                for kind in ROLLER_KINDS:
+                    await capture_pages(
+                        pending,
+                        kind,
+                        lambda after_id, batch_size, kind=kind: self.roller.pending_snapshot_ids(
+                            snapshot,
+                            kind=kind,
+                            after_id=after_id,
+                            limit=batch_size,
+                        ),
+                    )
+            pending.rewind()
+            cursors = {kind: True for kind in pending.kinds()}
+            total = 0
+            while cursors:
+                for kind in tuple(cursors):
+                    ids = pending.read_batch(kind, limit)
+                    if not ids:
+                        del cursors[kind]
+                        continue
+                    for record_id in ids:
+                        started = perf_counter()
+                        try:
+                            if kind == "OUTBOUND_PLATE":
+                                await self.advance(
+                                    kind,
+                                    record_id,
+                                    now_ms=now_ms,
+                                    timing={
+                                        "trigger": "sweep",
+                                        "plate_id": record_id,
+                                        "preceding_count": total,
+                                        "preceding_ms": preceding_ms,
+                                        "sweep_scan_ms": (started - sweep_started) * 1000
+                                        - preceding_ms,
+                                    },
+                                )
+                            else:
+                                await self.advance(kind, record_id, now_ms=now_ms)
+                        except Exception as error:
+                            log_exception(
+                                logger,
+                                "SMT AUTO advance failed",
+                                error,
+                                component="smt_auto",
+                                phase="advance",
+                                context={"request_id": str(record_id)},
                             )
-                        else:
-                            await self.advance(kind, record_id, now_ms=now_ms)
-                    except Exception as error:
-                        log_exception(
-                            logger,
-                            "SMT AUTO advance failed",
-                            error,
-                            component="smt_auto",
-                            phase="advance",
-                            context={"request_id": str(record_id)},
-                        )
-                    total += 1
-                    preceding_ms += (perf_counter() - started) * 1000
-                cursors[kind] = start + len(ids)
-        return total
+                        total += 1
+                        preceding_ms += (perf_counter() - started) * 1000
+            return total
 
     async def advance_original(
         self, session, kind, record_id, *, now_ms, operation=None, timing=None
