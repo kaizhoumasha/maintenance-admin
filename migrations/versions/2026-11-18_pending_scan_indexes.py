@@ -66,7 +66,7 @@ INDEXES = (
         "coarse_sorting_job",
         "coarse_sorting_job_pending_due_idx",
         ("next_check_at", "id"),
-        "pending = 1",
+        "pending IS 1",
         "pending",
     ),
 )

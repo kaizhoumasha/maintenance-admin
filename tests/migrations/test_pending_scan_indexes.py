@@ -38,5 +38,17 @@ async def test_pending_scan_indexes_exist(state_migration):
 
         actual = await connection.run_sync(names)
 
+        def coarse_index(sync):
+            schema = "enterprise_backend" if sync.dialect.name == "postgresql" else None
+            return next(
+                item
+                for item in inspect(sync).get_indexes("coarse_sorting_job", schema=schema)
+                if item["name"] == "coarse_sorting_job_pending_due_idx"
+            )
+
+        coarse = await connection.run_sync(coarse_index)
+
     for table, expected in INDEXES.items():
         assert expected <= actual[table]
+    if state_migration.engine.dialect.name == "sqlite":
+        assert str(coarse["dialect_options"]["sqlite_where"]).strip() == "pending IS 1"

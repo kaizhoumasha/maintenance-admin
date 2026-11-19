@@ -1,6 +1,9 @@
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import Boolean, Column, MetaData, String, Table, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.businesses._components.rack_dispatch.contracts import JobOrigin
 from app.businesses.runtime import Capabilities
@@ -267,3 +270,47 @@ async def test_unknown_work_kind_opens_no_transaction():
     with pytest.raises(ValueError, match="unsupported manual work kind"):
         await service.advance("UNSUPPORTED", "original")
     factory.assert_not_called()
+
+
+async def test_pending_scan_excludes_lexicographically_earlier_insert():
+    metadata = MetaData()
+    table = Table(
+        "test_smt_manual_pending_scan",
+        metadata,
+        Column("task_id", String, primary_key=True),
+        Column("pending", Boolean, nullable=False),
+    )
+    engine = create_async_engine("sqlite+aiosqlite://")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with factory.begin() as session:
+        await session.execute(
+            table.insert(),
+            [{"task_id": task_id, "pending": True} for task_id in ("T0", "T1", "T2")],
+        )
+
+    service = SmtManualService.__new__(SmtManualService)
+    service.capabilities = SimpleNamespace(session_factory=factory)
+    service.repository = SimpleNamespace(tables={"task": table, "input": table, "request": table})
+    service._pending_tasks = lambda: select(table.c.task_id).where(table.c.pending.is_(True))
+
+    async def no_upper(*args, **kwargs):
+        return None
+
+    owner = SimpleNamespace(pending_snapshot_ids=no_upper)
+    service._pending_owner = lambda kind: owner
+    visited = []
+
+    async def advance(kind, record_id):
+        visited.append(record_id)
+        if record_id == "T0":
+            async with factory.begin() as session:
+                await session.execute(table.insert().values(task_id="T15", pending=True))
+
+    service.advance = advance
+    try:
+        assert await service.scan_pending(limit=1) == 3
+        assert visited == ["T0", "T1", "T2"]
+    finally:
+        await engine.dispose()

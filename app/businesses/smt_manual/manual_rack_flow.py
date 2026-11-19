@@ -446,6 +446,12 @@ class ManualRackFlow:
             q.order_by(self.tables["request"].c.operation_id.desc()).limit(1)
         )
 
+    async def pending_snapshot_ids(self, session, *, kind="MANUAL_RACK"):
+        if kind == "MANUAL_RACK":
+            return await self.dispatch.pending_snapshot_ids(session, source_kinds=MANUAL_SOURCES)
+        identity = self.tables["request"].c.operation_id
+        return tuple(await session.scalars(self._report_candidates().order_by(identity)))
+
     def _report_candidates(self):
         r = self.tables["request"]
         return select(r.c.operation_id).where(

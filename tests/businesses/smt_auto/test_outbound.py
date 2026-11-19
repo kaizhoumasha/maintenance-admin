@@ -1063,7 +1063,9 @@ async def test_pending_scan_closes_snapshot_before_advance(outbound_host, monkey
         return None
 
     monkeypatch.setattr(service.dispatch, "pending_upper_id", no_upper)
+    monkeypatch.setattr(service.dispatch, "pending_snapshot_ids", no_upper)
     monkeypatch.setattr(service.roller, "get_pending_upper_id", no_upper)
+    monkeypatch.setattr(service.roller, "pending_snapshot_ids", no_upper)
     tracker = _TrackingFactory(host.factory)
     service.capabilities = replace(service.capabilities, session_factory=tracker)
     visited = []
@@ -1075,7 +1077,7 @@ async def test_pending_scan_closes_snapshot_before_advance(outbound_host, monkey
         async with host.factory.begin() as session:
             session.add(
                 AutoTask(
-                    task_id="zz-late",
+                    task_id="a-late",
                     task_type="AUTO",
                     business_type="outbound",
                     work_line_id=1,

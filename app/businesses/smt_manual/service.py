@@ -110,43 +110,24 @@ class SmtManualService(SmtManualTaskFlow):
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         task_id = self.repository.tables["task"].c.task_id
-        upper = {}
+        pending_ids = {}
         async with self.capabilities.session_factory() as snapshot, snapshot.begin():
             if snapshot.get_bind().dialect.name == "postgresql":
                 # Peer task/operation IDs need not increase with local acceptance time.
                 await snapshot.connection(execution_options={"isolation_level": "REPEATABLE READ"})
                 await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-            upper["TASK"] = await snapshot.scalar(
-                self._pending_tasks().order_by(task_id.desc()).limit(1)
+            pending_ids["TASK"] = tuple(
+                await snapshot.scalars(self._pending_tasks().order_by(task_id))
             )
             for kind in KINDS[1:]:
-                upper[kind] = await self._pending_owner(kind).get_pending_upper_id(
+                pending_ids[kind] = await self._pending_owner(kind).pending_snapshot_ids(
                     snapshot, kind=kind
                 )
-        cursors = {kind: None for kind in KINDS if upper[kind] is not None}
+        cursors = {kind: 0 for kind, ids in pending_ids.items() if ids}
         total = 0
         while cursors:
-            for kind in tuple(cursors):
-                async with self.capabilities.session_factory() as snapshot, snapshot.begin():
-                    if snapshot.get_bind().dialect.name == "postgresql":
-                        await snapshot.connection(
-                            execution_options={"isolation_level": "REPEATABLE READ"}
-                        )
-                        await snapshot.execute(text("SET TRANSACTION READ ONLY"))
-                    if kind == "TASK":
-                        query = self._pending_tasks().where(task_id <= upper[kind])
-                        if cursors[kind] is not None:
-                            query = query.where(task_id > cursors[kind])
-                        ids = tuple(await snapshot.scalars(query.order_by(task_id).limit(limit)))
-                    else:
-                        page = await self._pending_owner(kind).list_pending(
-                            snapshot,
-                            kind=kind,
-                            after_id=cursors[kind],
-                            upper_id=upper[kind],
-                            limit=limit,
-                        )
-                        ids = tuple(w.record_id for w in page) if kind in ROLLER_KINDS else page
+            for kind, start in tuple(cursors.items()):
+                ids = pending_ids[kind][start : start + limit]
                 if not ids:
                     del cursors[kind]
                     continue
@@ -163,7 +144,7 @@ class SmtManualService(SmtManualTaskFlow):
                             context={"request_id": record_id},
                         )
                     total += 1
-                cursors[kind] = ids[-1]
+                cursors[kind] = start + len(ids)
         return total
 
     async def advance(self, kind: str, record_id: str) -> str:

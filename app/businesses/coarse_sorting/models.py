@@ -75,7 +75,7 @@ class CoarseSortingJob(Base):
             "next_check_at",
             "id",
             postgresql_where=text("pending"),
-            sqlite_where=text("pending = 1"),
+            sqlite_where=text("pending IS 1"),
         ),
     )
 
