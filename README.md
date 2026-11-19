@@ -311,7 +311,7 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 
 字符串不能含 NUL,pattern 不能以奇数个反斜杠结尾。
 
-**兼容变化**:用户仍返回 `{items,total,page,page_size}`,参数为 `page/page_size/filter`。审计与归档改为 `{items,next_cursor}`,删除 `total/page/page_size`;参数为 `limit`（默认 20,1–100）、`cursor`、`filter`,旧的 `page/page_size` 返回 400。三个列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
+**兼容变化**:用户仍返回 `{items,total,page,page_size}`,参数为 `page/page_size/filter`；旧式页码分页的 `page * page_size` 最大为 `100_000`,超过后返回 400 `INVALID_REQUEST`。审计与归档改为 `{items,next_cursor}`,删除 `total/page/page_size`;参数为 `limit`（默认 20,1–100）、`cursor`、`filter`,旧的 `page/page_size` 返回 400。三个列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
 
 审计响应示例:`{"items":[{"id":42,"user_id":1,"action":"admin:user:create","resource":"users","resource_id":7,"detail":null,"ip":null,"created_at":"2026-10-17T12:00:00Z"}],"next_cursor":"eyJpZCI6IDQyfQ"}`。归档条目另有 `archived_at`。`next_cursor=null` 表示末页;按 `id desc` 向后翻页,不能随机跳页。改变筛选条件时丢弃旧游标。翻页期间新记录不会重复进入后续页,记录被归档后会从热表后续页消失;较小 ID 的并发事务晚提交时可能漏过本轮遍历,重新查询可见。
 
