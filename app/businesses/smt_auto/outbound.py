@@ -82,7 +82,7 @@ class Outbound:
             or view.device_code != device_code
             or view.task_type != "PICK_AND_PUT"
             or view.hold_reason
-            or view.needs_reconciliation
+            or (view.needs_reconciliation and (phase != "pick" or empty))
             or view.result is None
         ):
             return None
