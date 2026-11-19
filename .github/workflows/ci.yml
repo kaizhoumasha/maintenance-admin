@@ -154,6 +154,7 @@ jobs:
         env:
           LINT_RESULT: ${{ needs.lint.result }}
           PYTEST_RESULT: ${{ needs.pytest.result }}
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           import os
           from pathlib import Path
