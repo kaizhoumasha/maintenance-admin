@@ -46,7 +46,7 @@ Services own business logic. Register routers in `app/main.py`; export models fr
 - `uv run celery -A app.tasks.celery_app worker -l info`: start workers.
 - `uv run celery -A app.tasks.celery_app beat -l info`: start the scheduler (run exactly one).
 - `uv run pytest`: run tests.
-- CI runs all collected tests across six independent stores with `--test-lane=N/T`; each file stays in one lane, and default pytest remains the full suite. Every lane needs separate runtime PostgreSQL, history/Transport migration databases and Redis. See [test lanes](docs/testing/test-lanes.md).
+- CI runs all collected tests across ten independent lanes with `--test-lane=N/T`; each file stays in one lane, and default pytest remains the full suite. Every lane needs separate runtime PostgreSQL, history, Transport, and SMT AUTO migration databases and Redis. See [test lanes](docs/testing/test-lanes.md).
 - `scripts/lint.sh`: fix/format with Ruff; review its diff. Check without edits using `uv run ruff check .` and `uv run ruff format --check .`.
 
 ## Coding Style & Naming Conventions
