@@ -148,6 +148,22 @@ def test_junit_durations_roundtrip_by_file(tmp_path, monkeypatch):
         load_durations(path)
 
 
+def test_junit_durations_fall_back_to_module_classname(tmp_path, monkeypatch):
+    from tests.lane_partition import durations_from_junit
+
+    monkeypatch.chdir(tmp_path)
+    module = tmp_path / "tests" / "businesses"
+    module.mkdir(parents=True)
+    (module / "test_slow.py").write_text("", encoding="utf-8")
+    report = tmp_path / "results.xml"
+    report.write_text(
+        '<testsuite><testcase classname="tests.businesses.test_slow" '
+        'name="test_case" time="3.5"/></testsuite>',
+        encoding="utf-8",
+    )
+    assert durations_from_junit([report]) == {"tests/businesses/test_slow.py": 3.5}
+
+
 def test_complete_durations_match_fixture_partition_and_cover_files(tmp_path):
     from tests.lane_partition import assignment_from_durations, partition_files, test_files
 

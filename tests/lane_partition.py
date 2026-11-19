@@ -51,7 +51,7 @@ def durations_from_junit(reports: Iterable[Path]) -> dict[str, float]:
     totals = defaultdict(float)
     for report in reports:
         for case in ElementTree.parse(report).getroot().iter("testcase"):
-            file = _junit_file(case.get("file"))
+            file = _junit_file(case.get("file"), case.get("classname"))
             if file is not None:
                 totals[file] += float(case.get("time", "0"))
     return dict(totals)
@@ -124,7 +124,7 @@ def duplicate_junit_ids(reports: Iterable[Path]) -> list[str]:
     for report in reports:
         for case in ElementTree.parse(report).getroot().iter("testcase"):
             identity = (
-                _junit_file(case.get("file")) or "",
+                _junit_file(case.get("file"), case.get("classname")) or "",
                 case.get("classname") or "",
                 case.get("name") or "",
             )
@@ -153,9 +153,14 @@ def _assign(costs: Mapping[str, float], total: int) -> dict[str, int]:
     return assigned
 
 
-def _junit_file(file: str | None) -> str | None:
+def _junit_file(file: str | None, classname: str | None = None) -> str | None:
     if not file:
-        return None
+        if not classname:
+            return None
+        candidate = Path(classname.replace(".", "/") + ".py")
+        if not (Path.cwd() / candidate).is_file():
+            return None
+        return candidate.as_posix()
     path = Path(file)
     if path.is_absolute():
         try:
