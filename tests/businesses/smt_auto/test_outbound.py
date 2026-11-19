@@ -1099,6 +1099,69 @@ async def test_pending_scan_closes_snapshot_before_advance(outbound_host, monkey
     assert active_at_advance == [0]
 
 
+async def test_pending_scan_reads_candidates_in_bounded_pages():
+    from datetime import UTC, datetime
+
+    from sqlalchemy import Boolean, Column, MetaData, String, Table, event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.businesses.smt_auto.service import SmtAutoService
+
+    metadata = MetaData()
+    table = Table(
+        "test_smt_auto_bounded_pending_scan",
+        metadata,
+        Column("task_id", String, primary_key=True),
+        Column("pending", Boolean, nullable=False),
+    )
+    engine = create_async_engine("sqlite+aiosqlite://")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    task_ids = tuple(f"T{i:04}" for i in range(2505))
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    async with factory.begin() as session:
+        await session.execute(
+            table.insert(), [{"task_id": task_id, "pending": True} for task_id in task_ids]
+        )
+
+    service = SmtAutoService.__new__(SmtAutoService)
+    service.wms = SimpleNamespace(clock=lambda: datetime.now(UTC))
+    service.capabilities = SimpleNamespace(session_factory=factory)
+    service._pending = lambda _: {"TASK": select(table.c.task_id).where(table.c.pending.is_(True))}
+    empty = SimpleNamespace(
+        pending_snapshot_ids=lambda *args, **kwargs: _empty_pending_page(),
+    )
+    service.dispatch = empty
+    service.roller = empty
+    visited = []
+
+    async def advance(kind, record_id, **kwargs):
+        visited.append(record_id)
+
+    service.advance = advance
+    statements = []
+
+    def record_sql(*args):
+        statements.append(args[2])
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        assert await service.scan_pending(limit=100) == len(task_ids)
+        assert visited == list(task_ids)
+        selects = [
+            statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+        ]
+        assert len(selects) == 4
+        assert all("LIMIT" in statement.upper() for statement in selects)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+        await engine.dispose()
+
+
+async def _empty_pending_page():
+    return ()
+
+
 @pytest.mark.parametrize(
     "decided_outbound",
     ["PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-197"],
