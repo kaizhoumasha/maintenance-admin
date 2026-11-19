@@ -652,6 +652,42 @@ async def return_face(host, *, ready=True, consume=True):
         return racks, member_id, plate.id if plate else None
 
 
+async def test_applied_pick_reconciliation_remains_readable_for_material_flow():
+    from app.businesses.smt_auto.outbound import Outbound
+
+    result = {
+        "command_code": "pick",
+        "device_code": "ARM03",
+        "result": "SUCCESS",
+        "finish_time": 1,
+        "data": {"actual_qty": 1, "pick_and_put_result": "PUT_FINISHED"},
+    }
+
+    class Ecs:
+        async def get_by_call(self, session, *, owner, call_key):
+            return SimpleNamespace(
+                command_code="pick",
+                status="SUCCEEDED",
+                device_code="ARM03",
+                task_type="PICK_AND_PUT",
+                hold_reason=None,
+                needs_reconciliation=True,
+                result=result,
+            )
+
+    outbound = Outbound.__new__(Outbound)
+    outbound.ecs = Ecs()
+    assert await outbound._arm_result(
+        None, key="pick-key", code="pick", device_code="ARM03", phase="pick"
+    )
+    assert (
+        await outbound._arm_result(
+            None, key="pick-key", code="pick", device_code="ARM03", phase="put"
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize("runtime_authority", [False, True])
 @pytest.mark.parametrize("correction", ["recorded", "missing", "different_slot", "valid_old"])
 async def test_return_face_pick_requires_recorded_correction_of_invalid_ready(
