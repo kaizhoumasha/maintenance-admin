@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import RackPreparation
-from app.models import IntegrationExchange
+from app.models import IntegrationExchange, WorkLine
 from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import (
     allocated,
@@ -91,6 +91,49 @@ async def test_replenish_requires_original_applied_arrival(rack):
     assert len(actions) == 2
     assert actions[1]["operation_id"] != actions[0]["operation_id"]
     assert actions[1]["input_preparation_id"] == prep
+
+
+async def test_pending_sweep_rechecks_new_preparation_before_future_wait(rack):
+    flow = rack
+    flow.peer.allocate = {"result": "WAIT", "workline_code": flow.workline}
+    row = await reach_allocate(flow)
+    assert await flow.service.advance(row["id"]) == "NO_AVAILABLE_RACK"
+    action = next(
+        action
+        for action in await flow.action_rows(row["id"])
+        if action["kind"] == "ALLOCATE_STORAGE"
+    )
+    enable_racks(flow)
+    preparation_id = "prep-new"
+    async with flow.factory.begin() as session:
+        line = await session.get(WorkLine, row["work_line_id"])
+        await session.execute(
+            RackPreparation.__table__.insert().values(
+                id=preparation_id,
+                work_line_id=row["work_line_id"],
+                workline_code=row["workline_code"],
+                rack_position_code=line.position_bindings["OUTPUT_RACK"],
+                rack_binding_version=line.version,
+                generation_no=1,
+                mode="REPLENISH",
+                old_rack_id=None,
+                incoming_rack_id="NEW",
+                incoming_target_face="90",
+                source_allocation_action_id=action["id"],
+                predecessor_action_ids=[],
+                state="READY",
+                wait_reason=None,
+                next_check_at=None,
+                current_action_id=None,
+                created_at=flow.now,
+                updated_at=flow.now,
+                ready_at=flow.now,
+            )
+        )
+    assert await flow.service.scan_pending() == 1
+    updated = (await flow.rows())[0]
+    assert updated["next_check_at"] is None
+    assert updated["rack_preparation_id"] == preparation_id
 
 
 async def prepare(flow, mode="REPLENISH_REQUIRED"):
