@@ -8,6 +8,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --no-install-project
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
   pytest:
     name: pytest (lane ${{ matrix.lane }}/${{ strategy.job-total }})
     runs-on: ubuntu-24.04
@@ -25,14 +36,14 @@ jobs:
           POSTGRES_DB: enterprise_backend_test
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U admin" --health-interval 5s --health-timeout 5s
-          --health-retries 10
+          --health-cmd "pg_isready -U admin" --health-interval 2s --health-timeout 5s
+          --health-retries 30
       redis:
         image: redis:8-alpine
         ports: ["6379:6379"]
         options: >-
-          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s
-          --health-retries 10
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s
+          --health-retries 30
     env:
       # 集成测试库/实例是一次性的,不要指向业务数据
       TEST_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/enterprise_backend_test
@@ -40,28 +51,41 @@ jobs:
       TEST_HISTORY_MIGRATION_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/history_migration_test
       TRANSPORT_OWNER_MIGRATION_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/transport_owner_migration_test
       SMT_AUTO_MIGRATION_DATABASE_URL: postgresql+asyncpg://admin:admin123@localhost:5432/smt_auto_migration_test
+      LANE_DURATIONS_FILE: ${{ github.workspace }}/.ci/lane-durations.json
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/cache/restore@v4
+        with:
+          path: .ci/lane-durations.json
+          key: lane-durations-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: lane-durations-
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - run: uv sync --frozen
-      - name: Run Ruff checks once
-        if: matrix.lane == 1
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
-      - name: Quiesce background maintenance in the disposable PostgreSQL service
+      - run: uv sync --frozen --no-install-project
+      - name: Tune the disposable PostgreSQL service
         env:
           TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
+          # 仅这一次性服务放宽崩溃恢复刷盘。事务隔离、提交后的可见性和生产配置不变。
+          start=$(date +%s)
           docker exec "$TEST_POSTGRES_CONTAINER" psql -X -U admin -d enterprise_backend_test \
-            -v ON_ERROR_STOP=1 -c 'ALTER SYSTEM SET autovacuum = off' \
-            -c "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" -c 'SELECT pg_reload_conf()'
+            -v ON_ERROR_STOP=1 \
+            -c 'ALTER SYSTEM SET autovacuum = off' \
+            -c "ALTER SYSTEM SET timescaledb.telemetry_level = 'off'" \
+            -c 'ALTER SYSTEM SET fsync = off' \
+            -c 'ALTER SYSTEM SET synchronous_commit = off' \
+            -c 'ALTER SYSTEM SET full_page_writes = off' \
+            -c 'ALTER SYSTEM SET jit = off' \
+            -c "ALTER SYSTEM SET checkpoint_timeout = '30min'" \
+            -c "ALTER SYSTEM SET max_wal_size = '4GB'" \
+            -c 'SELECT pg_reload_conf()'
+          expected=off:off:off:off:off:off
           for attempt in {1..10}; do
-            if test "$(docker exec "$TEST_POSTGRES_CONTAINER" psql -XAt -U admin \
-              -d enterprise_backend_test \
-            -c "SELECT current_setting('autovacuum') || ':' || current_setting('timescaledb.telemetry_level')")" = off:off; then
+            actual="$(docker exec "$TEST_POSTGRES_CONTAINER" psql -XAt -U admin \
+              -d enterprise_backend_test -c "SELECT current_setting('autovacuum') || ':' || current_setting('timescaledb.telemetry_level') || ':' || current_setting('fsync') || ':' || current_setting('synchronous_commit') || ':' || current_setting('full_page_writes') || ':' || current_setting('jit')")"
+            if test "$actual" = "$expected"; then
+              echo "postgres_tune_seconds=$(( $(date +%s) - start ))" >> ci-timing.txt
               exit 0
             fi
             sleep 1
@@ -69,31 +93,142 @@ jobs:
           exit 1
       - name: Prepare isolated migration stores
         run: |
+          start=$(date +%s)
           uv run python - <<'PY'
           import asyncio
           import os
           from sqlalchemy.engine import make_url
           from tests.migration_helpers import migration_database_ddl
 
+          async def create(key):
+              database = make_url(os.environ[key]).database
+              await migration_database_ddl(os.environ["TEST_DATABASE_URL"], database, create=True)
+
           async def prepare():
-              for key in (
+              keys = (
                   "TEST_HISTORY_MIGRATION_DATABASE_URL",
                   "TRANSPORT_OWNER_MIGRATION_DATABASE_URL",
                   "SMT_AUTO_MIGRATION_DATABASE_URL",
-              ):
-                  database = make_url(os.environ[key]).database
-                  await migration_database_ddl(os.environ["TEST_DATABASE_URL"], database, create=True)
+              )
+              await asyncio.gather(*(create(key) for key in keys))
 
           asyncio.run(prepare())
           PY
+          echo "migration_stores_seconds=$(( $(date +%s) - start ))" >> ci-timing.txt
+      - name: Start pytest timer
+        run: date +%s > ci-timing-start.txt
       - run: uv run pytest --test-lane=${{ matrix.lane }}/${{ strategy.job-total }} -ra --durations=30 --junitxml=test-results.xml
+      - name: Record pytest elapsed seconds
+        if: ${{ always() }}
+        run: |
+          if [[ -f ci-timing-start.txt ]]; then
+            start=$(<ci-timing-start.txt)
+            end=$(date +%s)
+            printf 'pytest_seconds=%s\n' "$((end - start))" >> ci-timing.txt
+          fi
+      - name: Upload pytest results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-lane-${{ matrix.lane }}
+          path: |
+            test-results.xml
+            ci-timing.txt
+          if-no-files-found: warn
+
+  test-summary:
+    runs-on: ubuntu-24.04
+    needs: [lint, pytest]
+    if: ${{ always() }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        if: ${{ needs.pytest.result != 'skipped' }}
+        with:
+          pattern: pytest-results-*
+          path: pytest-results
+          merge-multiple: false
+      - name: Summarize pytest results
+        if: ${{ always() }}
+        shell: python
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          PYTEST_RESULT: ${{ needs.pytest.result }}
+        run: |
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          from tests.lane_partition import duplicate_junit_ids, durations_from_junit, write_durations
+
+          lint_result = os.environ["LINT_RESULT"]
+          result = os.environ["PYTEST_RESULT"]
+          totals = dict.fromkeys(("tests", "skipped", "failures", "errors"), 0)
+          lines = ["## Pytest summary", "", f"Lint result: {lint_result}", f"Matrix result: {result}", ""]
+          artifacts = Path("pytest-results")
+          reports = list(artifacts.glob("pytest-results-*/test-results.xml"))
+          for report in reports:
+              root = ElementTree.parse(report).getroot()
+              suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+              for suite in suites:
+                  for key in totals:
+                      totals[key] += int(suite.get(key, "0"))
+          lines.extend(f"- {key}: {value}" for key, value in totals.items())
+          lines.extend(["", "### Lane timings (seconds)", ""])
+          measured = []
+          for artifact in sorted(artifacts.glob("pytest-results-*")):
+              lane = artifact.name.removeprefix("pytest-results-lane-")
+              timing = artifact / "ci-timing.txt"
+              elapsed = (
+                  timing.read_text().strip().replace("\n", ", ")
+                  if timing.is_file()
+                  else "unavailable"
+              )
+              for part in elapsed.split(", "):
+                  value = part.removeprefix("pytest_seconds=")
+                  if part.startswith("pytest_seconds=") and value.isdecimal():
+                      measured.append(int(value))
+              lines.append(f"- Lane {lane}: {elapsed}")
+          if measured:
+              low, high = min(measured), max(measured)
+              lines.extend(["", f"- pytest lane spread: min {low}, max {high}, gap {high - low}"])
+          duplicates = duplicate_junit_ids(reports)
+          if duplicates:
+              lines.extend(["", "### Duplicate collected tests", ""])
+              lines.extend(f"- {item}" for item in duplicates[:20])
+          if reports and result == "success" and not duplicates:
+              write_durations(Path(".ci/lane-durations.json"), durations_from_junit(reports))
+
+          summary = "\n".join(lines) + "\n"
+          print(summary, end="")
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(summary)
+          raise SystemExit(0 if lint_result == result == "success" and not duplicates else 1)
+      - id: durations
+        if: always() && needs.pytest.result == 'success'
+        run: |
+          if [[ -f .ci/lane-durations.json ]]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.durations.outputs.present == 'true'
+        with:
+          name: lane-durations
+          path: .ci/lane-durations.json
+          if-no-files-found: warn
+      - uses: actions/cache/save@v4
+        if: always() && steps.durations.outputs.present == 'true'
+        with:
+          path: .ci/lane-durations.json
+          key: lane-durations-${{ github.run_id }}-${{ github.run_attempt }}
 
   test:
     runs-on: ubuntu-24.04
-    needs: pytest
+    needs: test-summary
     if: ${{ always() }}
     steps:
       - name: Require every test group to pass
         env:
-          PYTEST_RESULT: ${{ needs.pytest.result }}
-        run: test "$PYTEST_RESULT" = success
+          SUMMARY_RESULT: ${{ needs.test-summary.result }}
+        run: test "$SUMMARY_RESULT" = success

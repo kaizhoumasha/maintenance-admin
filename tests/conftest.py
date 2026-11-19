@@ -600,6 +600,12 @@ async def formal_manual(pg_sessions, monkeypatch, request):
         yield state
 
 
+def pytest_sessionfinish(session, exitstatus):
+    from tests.migration_helpers import drop_migration_templates
+
+    drop_migration_templates()
+
+
 def pytest_addoption(parser):
     from tests.lane_partition import parse_lane
 
@@ -611,17 +617,74 @@ def pytest_addoption(parser):
     )
 
 
+_LANE_ASSIGNMENT: pytest.StashKey[dict[str, int] | None] = pytest.StashKey()
+
+
+def _collection_starts(config):
+    starts = []
+    for arg in config.args:
+        raw = arg.split("::", 1)[0]
+        path = Path(raw)
+        starts.append(path if path.is_absolute() else config.rootpath / path)
+    return starts
+
+
+def _lane_assignment(config):
+    if _LANE_ASSIGNMENT in config.stash:
+        return config.stash[_LANE_ASSIGNMENT]
+    selected = config.getoption("test_lane")
+    if selected is None:
+        config.stash[_LANE_ASSIGNMENT] = None
+        return None
+    from tests.lane_partition import assignment_from_durations, load_durations, test_files
+
+    _lane, total = selected
+    paths = test_files(
+        config.rootpath,
+        _collection_starts(config),
+        config.getini("python_files"),
+        config.getini("norecursedirs"),
+    )
+    assigned = assignment_from_durations(paths, load_durations(), total)
+    config.stash[_LANE_ASSIGNMENT] = assigned
+    return assigned
+
+
+def pytest_ignore_collect(collection_path, config):
+    if not collection_path.is_file():
+        return None
+    assigned = _lane_assignment(config)
+    if not assigned:
+        return None
+    try:
+        relative = collection_path.relative_to(config.rootpath).as_posix()
+    except ValueError:
+        return None
+    lane = assigned.get(relative)
+    if lane is None or lane == config.getoption("test_lane")[0]:
+        return None
+    return True
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     selected = config.getoption("test_lane")
     if selected is None:
         return
-    from tests.lane_partition import partition_files
+    from tests.lane_partition import load_durations, partition_files
 
-    lane, total = selected
-    assigned = partition_files(
-        ((item.nodeid.split("::", 1)[0], item.fixturenames) for item in items), total
-    )
+    lane, _total = selected
+    assigned = _lane_assignment(config)
+    paths = {item.nodeid.split("::", 1)[0] for item in items}
+    if assigned is None:
+        assigned = partition_files(
+            ((item.nodeid.split("::", 1)[0], item.fixturenames) for item in items),
+            selected[1],
+            load_durations(),
+        )
+    elif not paths <= assigned.keys():
+        missing = ", ".join(sorted(paths - assigned.keys()))
+        raise pytest.UsageError(f"lane assignment did not cover collected files: {missing}")
     kept, deselected = [], []
     for item in items:
         target = kept if assigned[item.nodeid.split("::", 1)[0]] == lane else deselected
