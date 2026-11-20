@@ -317,6 +317,8 @@ async def accept_ecs_request(
                 device_code=envelope.device_code,
                 digest=identity,
             )
+        if binding is None or not _binding_matches_snapshot(binding, existing.event_context or {}):
+            raise RequestHandlerIncomplete("deferred request binding changed after acceptance")
         deferred_data = (existing.event_context or {}).get("deferred_request")
         deferred = DeferredRequest(**deferred_data) if deferred_data else None
         return await _run_handler(
