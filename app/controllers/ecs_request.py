@@ -204,10 +204,13 @@ async def wait_for_request(
 def include_ecs_request(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
     if requests() and getattr(app.state, "ecs_event_binding_resolver", None) is None:
         raise ValueError("Formal ECS request handlers require a binding resolver")
-    if any(
-        not item.registration_source.local_only
-        and item.registration_source.module.startswith("app.businesses._components.")
-        for item in requests().values()
-    ) and getattr(app.state, "ecs_event_input_target", None) is None:
+    if (
+        any(
+            not item.registration_source.local_only
+            and item.registration_source.module.startswith("app.businesses._components.")
+            for item in requests().values()
+        )
+        and getattr(app.state, "ecs_event_input_target", None) is None
+    ):
         raise ValueError("Shared ECS requests require an input target resolver")
     app.include_router(router, prefix=prefix)
