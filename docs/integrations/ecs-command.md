@@ -28,7 +28,7 @@ Swagger联调已采用内置通用协议合同并自动装配，直接提供ecs_
 
 configure_ecs统一装配协议适配器、EcsLifecycle、DynamicClients及app.state.ecs_commands，保留原WMS映射并拒绝重复/冲突装配。主应用lifespan将统一ECS逻辑通道加入原有Sender配置，并关联同一个outbox；启动完成前不可调用create，不再启动第二个Sender。local Swagger由框架自动调用联调装配；可信启动模块可按[角色接入](ecs-roles.md)一次组合正式角色与调试路由，不重复装配服务。低层EcsCommands(outbox, target, routes, annexes)仍供独立运行时/测试注入使用，不是主应用的手工配置步骤。
 
-自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。正式 X-Ray 命令冻结为 RETRY_ACK_TIMEOUT，其余命令沿用原快照的 HOLD，快照 RETRY 仍拒绝；STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
+自动通道使用SNAPSHOT和空base_url；每条消息的origin来自设备路由或通过新登记权限/合同校验的请求并冻结。单次HTTP等资源预算沿用现有RELIABLE默认值，WMS配置不变。应用不接受手工ECS目标，启动报错会提示从RELIABLE_TARGETS删除对应条目；内部稳定标识只用于保持原消息身份，不是配置入口。正式 X-Ray 命令仍冻结为 RETRY_ACK_TIMEOUT，其余命令保留原快照策略标记；但所有带有效 `retry_window` 的 ECS 业务在交付未知或窗口到期后都沿原命令身份回队列等待 ACK/Result，配置暂停和无续期窗口仍保持原 HOLD/EXPIRED 语义。STATIC 保持原 RETRY 行为、三参数和 base_url 规则。正式ECS仍无默认路由或附录，结果入口在未装配时返回 503，不会 ACK 掉无法处理的结果。
 
 实际接入时按[真实ECS接入清单](ecs-acceptance-checklist.md)确认参数合同、错误矩阵、跨重启去重及保留期、窗口、路由授权和回调来源控制。本文不提供真实地址或开箱即用的设备命令。
 
@@ -47,7 +47,7 @@ owner 来自受信任业务装配，不能由外部请求任意选择；没有�
 
 调用方重复创建使用稳定身份：Swagger的client_request_id映射到现有call_key，不进入ECS wire，也不要求同时提交两个字段。请求URL版在调试模块额外比较最终命令的冻结origin：同键同输入同规范化URL返回原命令，换址409；不把URL拼进调用键。命令登记后的内部重试由可靠Sender沿用原持久记录，业务方不重新生成ID或调用create。通用 Status 查询已实现，所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，详见[通用 Status](ecs-status.md)；online/IDLE不证明执行许可或请求未接纳，不触发已接纳命令的重发或HELD解封。
 
-粗分业务（`coarse_sorting`）的输送、转 NG、入箱指令在每次发送前，向指令路由上的 ECS 查询该设备的实时 Status。仅收到对应设备的 `IDLE` 才进入原发送校验。设备未空闲、查询失败或响应缺少对应设备时，原指令继续待发，5 秒后复查（如对端提供更长的 `Retry-After`，按对端时间）。等待不产生指令发送记录或消耗发送尝试次数，仍受原 300 秒有效期限制。
+粗分业务（`coarse_sorting`）的输送、转 NG、入箱指令在每次发送前，向指令路由上的 ECS 查询该设备的实时 Status。仅收到对应设备的 `IDLE` 才进入原发送校验。设备未空闲、查询失败或响应缺少对应设备时，原指令继续待发，5 秒后复查（如对端提供更长的 `Retry-After`，按对端时间）。等待不产生指令发送记录或消耗发送尝试次数；在尚未产生 `dispatch_started_at` 前，等待会沿原命令的 `retry_window` 续期，真正放行派发时才开始本轮投递窗口。
 
 ## 模型声明与显式编译
 
