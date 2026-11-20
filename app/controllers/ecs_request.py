@@ -8,6 +8,7 @@ from functools import partial
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import Response
+from sqlalchemy import update
 
 from app.core import get_settings
 from app.core.database import session_factory
@@ -15,9 +16,12 @@ from app.core.identifiers import uuid7
 from app.core.ratelimit import RateLimit
 from app.core.request_body import read_body_capped
 from app.diagnostics import log_exception
+from app.integrations.callback_diagnostics import queue_diagnostics
+from app.integrations.callback_receipts import active_receipt, find_receipt_state, receipt_model
 from app.integrations.ecs_request.receiver import (
     MAX_BODY_BYTES,
     EcsRequestResponse,
+    RequestHandlerIncomplete,
     accept_ecs_request,
     continue_ecs_request,
 )
@@ -40,6 +44,25 @@ router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None)
         413: {"description": "PAYLOAD_TOO_LARGE"},
         503: {"description": "TEMPORARILY_UNAVAILABLE"},
     },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["device_code", "request_type", "timestamp"],
+                        "properties": {
+                            "device_code": {"type": "string"},
+                            "request_type": {"type": "string"},
+                            "timestamp": {"type": "integer", "minimum": 0},
+                            "data": {"type": "object"},
+                        },
+                    }
+                }
+            },
+        }
+    },
 )
 async def request_callback(request: Request, background_tasks: BackgroundTasks) -> Response:
     result = await receive_request(request)
@@ -55,56 +78,90 @@ async def receive_request(request: Request) -> EcsRequestResponse:
     received_at = datetime.now(UTC)
     exchange_id = uuid7()
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
-    raw = await read_body_capped(request, MAX_BODY_BYTES)
-    if len(raw) > MAX_BODY_BYTES:
-        result = EcsRequestResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
-        await _capture_request(factory, request, received_at, exchange_id, raw, result)
-        return result
-    authorize = getattr(request.app.state, "ecs_event_authorizer", None)
-    if authorize is not None:
-        authorize = partial(
-            authorize,
-            source_ip=request.client.host if request.client else "",
-            real_callback=True,
-        )
+    raw = None
+    commit_pending = False
+    transaction_failed = False
     try:
-        async with factory() as session, session.begin():
-            result = await accept_ecs_request(
-                session,
-                raw,
-                resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
-                authorize_request=authorize,
-                runtime=getattr(request.app.state, "business_runtime", None),
-                on_committed=getattr(request.app.state, "business_event_committed", None),
-                on_business_committed=getattr(request.app.state, "business_committed", None),
-                resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
-                attempt_id=str(exchange_id),
+        raw = await read_body_capped(request, MAX_BODY_BYTES)
+        if len(raw) > MAX_BODY_BYTES:
+            result = EcsRequestResponse(
+                413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large"
             )
+        else:
+            authorize = getattr(request.app.state, "ecs_event_authorizer", None)
+            if authorize is not None:
+                authorize = partial(
+                    authorize,
+                    source_ip=request.client.host if request.client else "",
+                    real_callback=True,
+                )
+            async with factory() as session, session.begin():
+                result = await accept_ecs_request(
+                    session,
+                    raw,
+                    resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
+                    authorize_request=authorize,
+                    runtime=getattr(request.app.state, "business_runtime", None),
+                    on_committed=getattr(request.app.state, "business_event_committed", None),
+                    on_business_committed=getattr(request.app.state, "business_committed", None),
+                    resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
+                    attempt_id=str(exchange_id),
+                )
+                commit_pending = True
     except Exception as error:
+        transaction_failed = True
         log_exception(
             logger, "ecs request receive failed", error, component="http", phase="ecs_request"
         )
         result = EcsRequestResponse(
             503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
         )
-        await _capture_request(factory, request, received_at, exchange_id, raw, result)
-        return result
     if not result.deferred:
+        await _capture_request(
+            factory,
+            request,
+            received_at,
+            exchange_id,
+            raw,
+            result,
+            commit_unknown=commit_pending and result.status_code == 503 and transaction_failed,
+        )
+        return result
+    try:
+        deferred = await _read_deferred(factory, result.receipt_id)
+    except Exception as error:
+        log_exception(
+            logger, "ecs request wait failed", error, component="http", phase="ecs_request"
+        )
+        result = EcsRequestResponse(
+            503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
+        )
         await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
-    deferred = await _read_deferred(factory, result.receipt_id)
     if deferred is None:
         await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
-    terminal = await wait_for_request(
-        factory,
-        result.digest,
-        deferred,
-        budget_ms=await request_budget_ms(factory, deferred.message_id),
-    )
+    try:
+        terminal = await wait_for_request(
+            factory,
+            result.digest,
+            deferred,
+            budget_ms=await request_budget_ms(factory, deferred.message_id),
+        )
+    except Exception as error:
+        log_exception(
+            logger, "ecs request wait failed", error, component="http", phase="ecs_request"
+        )
+        result = EcsRequestResponse(
+            503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
+        )
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
+        return result
     if terminal is None:
         await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
+    continue_commit_pending = False
+    continue_transaction_failed = False
     try:
         async with factory() as session, session.begin():
             result = await continue_ecs_request(
@@ -115,18 +172,66 @@ async def receive_request(request: Request) -> EcsRequestResponse:
                 runtime=getattr(request.app.state, "business_runtime", None),
                 resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
             )
+            continue_commit_pending = True
+    except RequestHandlerIncomplete:
+        try:
+            await _persist_diagnostic(factory, result.digest, "REQUEST_HANDLER_INCOMPLETE")
+        except Exception as error:
+            log_exception(
+                logger,
+                "ecs request diagnostic failed",
+                error,
+                component="http",
+                phase="ecs_request",
+            )
+        result = EcsRequestResponse(
+            503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
+        )
     except Exception as error:
+        continue_transaction_failed = True
         log_exception(
             logger, "ecs request continue failed", error, component="http", phase="ecs_request"
         )
         result = EcsRequestResponse(
             503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
         )
-    await _capture_request(factory, request, received_at, exchange_id, raw, result)
+    await _capture_request(
+        factory,
+        request,
+        received_at,
+        exchange_id,
+        raw,
+        result,
+        commit_unknown=(
+            continue_commit_pending and continue_transaction_failed and result.status_code == 503
+        ),
+    )
     return result
 
 
-async def _capture_request(factory, request, received_at, exchange_id, raw, result):
+async def _persist_diagnostic(factory, identity, reason_code):
+    if identity is None:
+        return
+    table = receipt_model()
+    async with factory() as session, session.begin():
+        state = await find_receipt_state(session, "ecs.request", identity, for_update=True)
+        if state is None:
+            return
+        diagnostic = [{"reason_code": reason_code}]
+        await session.execute(
+            update(table)
+            .where(active_receipt(table), table.receipt_id == state.id)
+            .values(diagnostic=diagnostic)
+        )
+        queue_diagnostics(
+            session,
+            [{"operation": "ecs.request", "operation_id": identity, "diagnostic": diagnostic[0]}],
+        )
+
+
+async def _capture_request(
+    factory, request, received_at, exchange_id, raw, result, *, commit_unknown=False
+):
     await capture_callback(
         factory,
         identity=exchange_id,
@@ -136,6 +241,7 @@ async def _capture_request(factory, request, received_at, exchange_id, raw, resu
         raw=raw,
         limit=MAX_BODY_BYTES,
         result=result,
+        commit_unknown=commit_unknown,
     )
 
 
@@ -191,12 +297,12 @@ async def wait_for_request(
                 operation=deferred.operation,
                 operation_id=deferred.operation_id,
             )
-            if result.delivery_uncertain or (
-                result.response_state == "NONE" and not result.delivery_terminal
-            ):
+            if result.delivery_uncertain:
                 pass
-            else:
+            elif result.response_state in {"VALID", "INVALID"} or result.delivery_terminal is True:
                 return result
+            else:
+                pass
         await asyncio.sleep(0.2)
     return None
 

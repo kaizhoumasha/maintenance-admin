@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -46,6 +46,7 @@ class EcsRequestContext:
     business_code: str | None = None
     component_key: str | None = None
     _response: BaseModel | None = None
+    _deferred_this_call: bool = field(default=False, init=False, repr=False)
 
     @property
     def device_role(self) -> str | None:
@@ -60,7 +61,7 @@ class EcsRequestContext:
         return self._response
 
     def respond(self, payload: BaseModel) -> None:
-        if self._response is not None or self.deferred is not None:
+        if self._response is not None or self._deferred_this_call:
             raise ValueError("request context already has a result")
         if not isinstance(payload, self.response_model):
             raise ValueError("response payload does not match the registered response model")
@@ -72,8 +73,11 @@ class EcsRequestContext:
             raise ValueError("request context already has a result")
         if self.deferred is None:
             self.deferred = candidate
+            self._deferred_this_call = True
         elif self.deferred != candidate:
             raise ValueError("request context has a different deferred request")
+        else:
+            self._deferred_this_call = True
 
 
 @dataclass(frozen=True, slots=True)

@@ -94,6 +94,34 @@ def test_context_enforces_one_final_result_and_allows_same_defer():
     with pytest.raises(ValueError, match="already has a result"):
         waiting.respond(Decision(result="ALLOW"))
 
+    resumed = EcsRequestContext(
+        session=None,
+        receipt_id=1,
+        digest="digest",
+        device_code="D1",
+        request_type="DUP",
+        timestamp=1,
+        binding=None,
+        response_model=Decision,
+        deferred=DeferredRequest(message_id=1, operation="wms-facts", operation_id="op-1"),
+    )
+    resumed.respond(Decision(result="ALLOW"))
+    assert resumed.response == Decision(result="ALLOW")
+    mixed = EcsRequestContext(
+        session=None,
+        receipt_id=1,
+        digest="digest",
+        device_code="D1",
+        request_type="DUP",
+        timestamp=1,
+        binding=None,
+        response_model=Decision,
+        deferred=DeferredRequest(message_id=1, operation="wms-facts", operation_id="op-1"),
+    )
+    mixed.defer(1, "wms-facts", "op-1")
+    with pytest.raises(ValueError, match="already has a result"):
+        mixed.respond(Decision(result="REJECT"))
+
 
 def test_envelope_defaults_data_and_ignores_extra_fields():
     envelope = EcsRequestEnvelope.model_validate(

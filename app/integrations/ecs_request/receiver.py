@@ -15,6 +15,7 @@ from app.core.clock import unix_ms
 from app.core.identifiers import uuid7
 from app.core.strict_json import canonical_digest, json_object
 from app.integrations import history
+from app.integrations.callback_diagnostics import queue_diagnostics
 from app.integrations.callback_receipts import (
     active_receipt,
     find_receipt_state,
@@ -80,7 +81,7 @@ def _snapshot(binding: DeviceBinding) -> dict:
 
 
 def _binding_matches_snapshot(binding: DeviceBinding, snapshot: dict) -> bool:
-    return all(
+    return binding.business_code == snapshot.get("owner_domain") and all(
         getattr(binding, field) == snapshot.get(field)
         for field in (
             "device_id",
@@ -138,6 +139,23 @@ async def _persist_decision(
         raise RuntimeError("request receipt disappeared before decision")
     if current.prepared_body is not None:
         if current.prepared_body != prepared:
+            diagnostic = [{"reason_code": "REQUEST_DECISION_CONFLICT"}]
+            table = receipt_model()
+            await session.execute(
+                update(table)
+                .where(active_receipt(table), table.receipt_id == current.id)
+                .values(diagnostic=diagnostic)
+            )
+            queue_diagnostics(
+                session,
+                [
+                    {
+                        "operation": OPERATION,
+                        "operation_id": operation_id,
+                        "diagnostic": diagnostic[0],
+                    }
+                ],
+            )
             return EcsRequestResponse(
                 current.status_code,
                 current.body,
@@ -317,6 +335,10 @@ async def accept_ecs_request(
                 device_code=envelope.device_code,
                 digest=identity,
             )
+        try:
+            registered.data_model.model_validate(envelope.data)
+        except ValidationError as error:
+            return _invalid(issues_from(error, model=registered.data_model, prefix="data"))
         if binding is None or not _binding_matches_snapshot(binding, existing.event_context or {}):
             raise RequestHandlerIncomplete("deferred request binding changed after acceptance")
         deferred_data = (existing.event_context or {}).get("deferred_request")
@@ -332,6 +354,10 @@ async def accept_ecs_request(
             deferred=deferred,
             component_key=(existing.event_context or {}).get("component_key"),
         )
+    try:
+        registered.data_model.model_validate(envelope.data)
+    except ValidationError as error:
+        return _invalid(issues_from(error, model=registered.data_model, prefix="data"))
     receipt_id = await insert_receipt(
         session,
         operation=OPERATION,
@@ -438,6 +464,8 @@ async def continue_ecs_request(
     )
     if registered is None:
         raise RequestHandlerIncomplete("deferred request handler is no longer registered")
+    if component_key != (state.event_context or {}).get("component_key"):
+        raise RequestHandlerIncomplete("deferred request component changed after acceptance")
     response = await _run_handler(
         session,
         registered=registered,

@@ -54,6 +54,23 @@ async def test_unknown_request_is_rejected_without_receipt(callback_client, call
         assert await read_receipts(session) == []
 
 
+async def test_invalid_request_data_is_rejected_without_receipt(callback_client, callback_store):
+    class RequiredPayload(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        required: str
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=RequiredPayload, response=Decision)
+    async def handler(ctx, data):
+        ctx.respond(Decision(result="ALLOW"))
+
+    response = await callback_client.post(PATH, json=body(data={}))
+
+    assert response.status_code == 400
+    assert response.json()["message"] == "INVALID_ENVELOPE"
+    async with callback_store() as session:
+        assert await read_receipts(session) == []
+
+
 async def test_handler_without_decision_returns_503_without_receipt(
     callback_client, callback_store
 ):
@@ -76,6 +93,7 @@ async def test_request_capture_uses_ecs_request_projection(callback_client, monk
         ctx.respond(Decision(result="ALLOW"))
 
     async def capture(*args, **kwargs):
+        captured["args"] = args
         captured.update(kwargs)
 
     monkeypatch.setattr(ecs_request_controller, "capture_callback", capture)
@@ -117,3 +135,51 @@ async def test_wait_budget_uses_message_target_timeout(monkeypatch):
     budget = await ecs_request_controller.request_budget_ms(Factory(), 7)
 
     assert budget == 3000
+
+
+async def test_request_body_read_failure_returns_503_and_captures(monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(callback_session_factory=lambda: None),
+        ),
+        client=None,
+    )
+
+    async def read_body(*args):
+        raise OSError("disconnect")
+
+    async def capture(*args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ecs_request_controller, "read_body_capped", read_body)
+    monkeypatch.setattr(ecs_request_controller, "_capture_request", capture)
+
+    result = await ecs_request_controller.receive_request(request)
+
+    assert result.status_code == 503
+    assert captured["args"][4] is None
+    assert captured["commit_unknown"] is False
+
+
+async def test_capture_request_propagates_commit_uncertainty(monkeypatch):
+    captured = {}
+
+    async def capture(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ecs_request_controller, "capture_callback", capture)
+    await ecs_request_controller._capture_request(
+        None,
+        object(),
+        None,
+        "exchange",
+        b"{}",
+        SimpleNamespace(status_code=503),
+        commit_unknown=True,
+    )
+
+    assert captured["commit_unknown"] is True

@@ -63,7 +63,7 @@ def create_http_views(bind, *, initiator=False, replace=False):
         UNION ALL SELECT {base}, 'ECS', NULL,
             CASE WHEN h.interaction_kind='COMMAND' THEN 'ecs.command'
                  WHEN h.interaction_kind='EVENT' THEN 'ecs.event'
-                 WHEN h.interaction_kind='REQUEST' THEN 'ecs-request'
+                 WHEN h.interaction_kind='REQUEST' THEN 'ecs.request'
                  WHEN h.interaction_kind='RESULT' THEN 'ecs.result' ELSE 'ecs.status' END,
             h.command_code, h.device_code, COALESCE(h.task_type,h.event_type), NULL, NULL, NULL
         FROM {p}ecs_http_exchange h
