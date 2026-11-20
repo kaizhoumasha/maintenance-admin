@@ -122,6 +122,15 @@ async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_pee
         response = await decide("count", barcode, operation_id=operation_id, **count_data)
         replay = await decide("count", barcode, operation_id=operation_id, **count_data)
         assert replay.json() == response.json()
+        conflict = await decide(
+            "count",
+            barcode,
+            operation_id=operation_id,
+            actual_qty=qty + 1,
+            template_id="XX123456789",
+            observed_at=1000,
+        )
+        assert conflict.status_code == 409
         label = response.json()["data"]["label_variables"]
         assert label["QQTYPC"] == str(qty)
         assert label["PHHPN"] == barcode.split(",")[0][1:]
@@ -131,7 +140,7 @@ async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_pee
             barcode,
             scanned_at=1,
             scan_status="OK",
-            expected_spkg=label["SPKG"],
+            actual_qty=qty,
             new_barcode=label["SPKG"],
         )
         assert verified.json()["data"] == {"result": "OK"}
@@ -139,23 +148,98 @@ async def test_count_and_ccd_use_measured_quantity_and_this_reels_label(mock_pee
     unread = await decide(
         "verify",
         barcode,
-        expected_spkg=labels[0],
+        actual_qty=0,
         scanned_at=1,
         scan_status="NG",
         reason_code="NO_READ",
         reason_message="unreadable",
     )
     assert unread.json()["data"]["result"] == "NG"
-    for expected_spkg, other_label in (labels, labels[::-1]):
+    for actual_qty, other_label in ((0, labels[1]), (612, labels[0])):
         response = await decide(
             "verify",
             barcode,
-            expected_spkg=expected_spkg,
+            actual_qty=actual_qty,
             scanned_at=1,
             scan_status="OK",
             new_barcode=other_label,
         )
         assert response.json()["data"]["result"] == "NG"
+
+    stale = []
+    for _ in range(2):
+        response = await decide(
+            "count", barcode, actual_qty=10, template_id="XX123456789", observed_at=1
+        )
+        stale.append(response.json()["data"]["label_variables"]["SPKG"])
+    old_label = await decide(
+        "verify",
+        barcode,
+        actual_qty=10,
+        scanned_at=1,
+        scan_status="OK",
+        new_barcode=stale[0],
+    )
+    current_label = await decide(
+        "verify",
+        barcode,
+        actual_qty=10,
+        scanned_at=1,
+        scan_status="OK",
+        new_barcode=stale[1],
+    )
+    assert old_label.json()["data"]["result"] == "NG"
+    assert current_label.json()["data"] == {"result": "OK"}
+    verify_operation_id = str(uuid7())
+    first, duplicate = await asyncio.gather(
+        *(
+            decide(
+                "verify",
+                barcode,
+                operation_id=verify_operation_id,
+                actual_qty=10,
+                scanned_at=1,
+                scan_status="OK",
+                new_barcode=stale[1],
+            )
+            for _ in range(2)
+        )
+    )
+    assert first.json() == duplicate.json()
+
+    other_quantity = await decide(
+        "count", barcode, actual_qty=11, template_id="XX123456789", observed_at=1
+    )
+    other_label = other_quantity.json()["data"]["label_variables"]["SPKG"]
+    changed_quantity = await decide(
+        "verify",
+        barcode,
+        actual_qty=10,
+        scanned_at=1,
+        scan_status="OK",
+        new_barcode=other_label,
+    )
+    assert changed_quantity.json()["data"]["result"] == "NG"
+
+    other_material = await decide(
+        "verify",
+        BARCODES[1],
+        actual_qty=10,
+        scanned_at=1,
+        scan_status="OK",
+        new_barcode=stale[1],
+    )
+    other_line = await decide(
+        "verify",
+        barcode,
+        workline_code="OTHER",
+        actual_qty=10,
+        scanned_at=1,
+        scan_status="OK",
+        new_barcode=stale[1],
+    )
+    assert other_material.json()["data"]["result"] == "NG"
+    assert other_line.json()["data"] == {}
 
 
 async def test_only_exact_barcodes_count_and_valid_others_go_to_transit(mock_peer):
@@ -352,6 +436,50 @@ async def test_random_only_accepts_labels_for_the_original_reel_and_line(random_
         make_peer(), "count", original, actual_qty=1, template_id="XX123456789", observed_at=1
     )
     label = counted.json()["data"]["label_variables"]["SPKG"]
+    counted_again = await decide(
+        make_peer(), "count", original, actual_qty=1, template_id="XX123456789", observed_at=2
+    )
+    current_label = counted_again.json()["data"]["label_variables"]["SPKG"]
+    stale = await decide(
+        make_peer(),
+        "verify",
+        original,
+        workline_code="XRAY",
+        scan_status="OK",
+        scanned_at=2,
+        actual_qty=1,
+        new_barcode=label,
+    )
+    current = await decide(
+        make_peer(),
+        "verify",
+        original,
+        workline_code="XRAY",
+        scan_status="OK",
+        scanned_at=2,
+        actual_qty=1,
+        new_barcode=current_label,
+    )
+    assert stale.json()["data"]["result"] == "NG"
+    assert current.json()["data"] == {"result": "OK"}
+    verify_operation_id = str(uuid7())
+    first, duplicate = await asyncio.gather(
+        *(
+            decide(
+                make_peer(),
+                "verify",
+                original,
+                operation_id=verify_operation_id,
+                workline_code="XRAY",
+                scan_status="OK",
+                scanned_at=2,
+                actual_qty=1,
+                new_barcode=current_label,
+            )
+            for _ in range(2)
+        )
+    )
+    assert first.json() == duplicate.json()
     peer = make_peer()
     for barcode, spkg, workline in (
         ("OTHER-REEL", label, "XRAY"),
@@ -365,7 +493,7 @@ async def test_random_only_accepts_labels_for_the_original_reel_and_line(random_
             workline_code=workline,
             scan_status="OK",
             scanned_at=1,
-            expected_spkg=spkg,
+            actual_qty=1,
             new_barcode=spkg,
         )
         assert verified.status_code == 200
@@ -381,6 +509,27 @@ async def test_random_only_accepts_labels_for_the_original_reel_and_line(random_
             new_barcode=spkg,
         )
         assert outlet.status_code == 422
+
+
+async def test_verify_requires_measured_quantity_and_rejects_legacy_label_field(mock_peer):
+    decide, _ = mock_peer
+    missing = await decide(
+        "verify",
+        BARCODES[0],
+        scanned_at=1,
+        scan_status="OK",
+        expected_spkg="LEGACY-LABEL",
+        new_barcode="NEW-LABEL",
+    )
+    negative = await decide(
+        "verify",
+        BARCODES[0],
+        scanned_at=1,
+        scan_status="OK",
+        actual_qty=-1,
+        new_barcode="NEW-LABEL",
+    )
+    assert missing.status_code == negative.status_code == 422
 
 
 def test_xray_mock_rejects_the_example_signing_key():

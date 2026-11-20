@@ -231,10 +231,15 @@ async def test_unconfirmed_move_never_emits_report_or_replacement_command(mock_c
             position="WRONG" if mode == "wrong_position" else None,
         )
         assert reply.status_code == 200
-    assert await service.advance(identity) == "blocked"
-    assert await mock_cycle.rebuild().services["seam_a"].advance(identity) == "blocked"
+    expected = "waiting" if mode == "invalid" else "blocked"
+    assert await service.advance(identity) == expected
+    assert await mock_cycle.rebuild().services["seam_a"].advance(identity) == expected
     row = (await mock_cycle.rows())[0]
-    assert row["next_intent"]["command"] == original and row["next_intent"]["reason"]
+    assert row["next_intent"]["command"] == original
+    if mode == "invalid":
+        assert "reason" not in row["next_intent"]
+    else:
+        assert row["next_intent"]["reason"]
     assert "report" not in row["next_intent"] and not row["done"]
     assert [name for name, _ in mock_cycle.peer.received] == ["decisions", "command"]
 
@@ -301,7 +306,7 @@ async def test_typed_reentry_reuses_original_messages_and_rejects_changed_input(
             )
 
 
-async def test_protocol_expiry_without_dispatch_keeps_original_command_pending_for_resolution(
+async def test_protocol_expiry_requeues_original_command_for_resolution(
     mock_cycle,
 ):
     identity = await accept(mock_cycle)
@@ -312,14 +317,15 @@ async def test_protocol_expiry_without_dispatch_keeps_original_command_pending_f
     mock_cycle.store.clock = lambda: (
         datetime.now(UTC) + PROTOCOL_RETRY_WINDOW + timedelta(seconds=1)
     )
-    assert await mock_cycle.sender.tick() == 0
-    assert await service.advance(identity) == "blocked"
+    assert await mock_cycle.sender.tick() == 1
+    await asyncio.gather(*mock_cycle.sender.inflight)
+    assert await service.advance(identity) == "waiting"
     row = (await mock_cycle.rows())[0]
     assert row["pending"] and not row["done"]
     assert row["next_intent"]["command"] == original
-    assert row["next_intent"]["reason"] == "EXPIRED"
+    assert "reason" not in row["next_intent"]
     assert "report" not in row["next_intent"]
-    assert [name for name, _ in mock_cycle.peer.received] == ["decisions"]
+    assert [name for name, _ in mock_cycle.peer.received] == ["decisions", "command"]
 
 
 @pytest.mark.parametrize("phase", ["decision", "command", "report", "done"])

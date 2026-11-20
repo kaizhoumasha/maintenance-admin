@@ -88,6 +88,7 @@ class XrayWmsMock:
         # shortcut: single-worker memory; use durable reservations if runs must survive restart.
         self._replies = {}
         self._issued_labels = {}
+        self._issued_labels_by_material = {}
         self._reserved = {}
         self._lock = asyncio.Lock()
 
@@ -168,22 +169,34 @@ class XrayWmsMock:
             return self._count_reply(payload, operation_id)
         if isinstance(payload, outlet.PutTargetDecide) and payload.mode == "BYPASS":
             return TRANSIT
-        spkg = (
-            payload.barcode
-            if isinstance(payload, outlet.PutTargetDecide)
-            else payload.expected_spkg
-        )
-        original_barcode = await session.scalar(
-            select(MockDecision.original_barcode).where(
-                MockDecision.workline_code == payload.workline_code,
-                MockDecision.issued_spkg == spkg,
-            )
-        )
         if isinstance(payload, outlet.PutTargetDecide):
+            original_barcode = await session.scalar(
+                select(MockDecision.original_barcode).where(
+                    MockDecision.workline_code == payload.workline_code,
+                    MockDecision.issued_spkg == payload.barcode,
+                )
+            )
             if original_barcode is None:
                 raise ValueError("outlet barcode was not issued for this workline")
             return TRANSIT
-        return self._verify_reply(payload, original_barcode == payload.barcode)
+        candidates = await session.scalars(
+            select(MockDecision)
+            .where(
+                MockDecision.workline_code == payload.workline_code,
+                MockDecision.original_barcode == payload.barcode,
+            )
+            .order_by(MockDecision.timestamp.desc(), MockDecision.operation_id.desc())
+        )
+        original = next(
+            (
+                item
+                for item in candidates
+                if item.data.get("label_variables", {}).get("QQTYPC") == str(payload.actual_qty)
+            ),
+            None,
+        )
+        label_matches = original is not None and original.issued_spkg == payload.new_barcode
+        return self._verify_reply(payload, label_matches)
 
     async def _decide(self, app, session, payload, operation_id):
         counted = payload.barcode in self.targets[payload.workline_code]
@@ -207,12 +220,17 @@ class XrayWmsMock:
         material = (payload.workline_code, payload.barcode)
         if isinstance(payload, count.CountDecide):
             response = self._count_reply(payload, operation_id)
-            self._issued_labels[response["label_variables"]["SPKG"]] = material
+            spkg = response["label_variables"]["SPKG"]
+            self._issued_labels[spkg] = material
+            self._issued_labels_by_material[
+                (payload.workline_code, payload.barcode, payload.actual_qty)
+            ] = spkg
             return response
         if isinstance(payload, verify.VerifyDecide):
-            return self._verify_reply(
-                payload, self._issued_labels.get(payload.expected_spkg) == material
+            label = self._issued_labels_by_material.get(
+                (payload.workline_code, payload.barcode, payload.actual_qty)
             )
+            return self._verify_reply(payload, payload.new_barcode == label)
 
     @staticmethod
     def _count_reply(payload, operation_id):
@@ -239,11 +257,7 @@ class XrayWmsMock:
 
     @staticmethod
     def _verify_reply(payload, label_matches):
-        if (
-            label_matches
-            and payload.scan_status == "OK"
-            and payload.new_barcode == payload.expected_spkg
-        ):
+        if label_matches and payload.scan_status == "OK":
             return {"result": "OK"}
         return {
             "result": "NG",

@@ -559,7 +559,8 @@ async def test_normal_reel_and_transit_bin_resume_on_original_result(xray, count
             new_barcode=LABEL["SPKG"],
         )
         await x.drain()
-        assert x.requests[2]["data"]["expected_spkg"] == LABEL["SPKG"]
+        assert x.requests[2]["data"]["actual_qty"] == 0
+        assert "expected_spkg" not in x.requests[2]["data"]
         await x.result(x.commands[1], decision="OK", label_status="APPLIED")
     mode = "COUNTED" if counted else "BYPASS"
     outlet = x.commands[-1]
@@ -665,13 +666,49 @@ async def test_wms_ok_cannot_release_a_reel_with_a_mismatched_ccd_label(xray):
         new_barcode="other-reel-label",
     )
     await x.drain()
-    assert x.requests[-1]["data"]["expected_spkg"] == LABEL["SPKG"]
+    assert x.requests[-1]["data"]["actual_qty"] == 0
+    assert "expected_spkg" not in x.requests[-1]["data"]
     assert x.requests[-1]["data"]["new_barcode"] == "other-reel-label"
     assert [cmd["task_type"] for cmd in x.commands] == [
         "APPLY_PKG_DECISION",
         "APPLY_COUNT_DECISION",
     ]
     assert not x.facts
+
+
+async def test_verify_request_preserves_nonzero_count_quantity_after_wait(xray):
+    x = xray
+    x.decisions.update(
+        pkg_decide={"result": "COUNT_REQUIRED", "reel_thickness": 8.1},
+        count_decide={"result": "OK", "label_variables": LABEL},
+        verify_decide={"result": "WAIT", "retry_after_ms": 1000},
+    )
+    await x.entry()
+    await x.drain()
+    entry = x.commands[0]
+    await x.result(entry, decision="COUNT_REQUIRED", qty=612)
+    await x.event(
+        "XRAY_COUNT_COMPLETED",
+        barcode=x.barcode,
+        template_id=TEMPLATE,
+        count_status="OK",
+        qty=612,
+    )
+    await x.drain()
+    assert x.requests[1]["data"]["actual_qty"] == 612
+    count = x.commands[1]
+    await x.result(count, decision="OK", label_status="APPLIED")
+    await x.event(
+        "SCAN_COMPLETED",
+        scan_stage="VERIFY",
+        scan_status="OK",
+        barcode=x.barcode,
+        old_barcode=x.barcode,
+        new_barcode=LABEL["SPKG"],
+    )
+    await x.drain()
+    assert x.requests[2]["data"]["actual_qty"] == 612
+    assert "expected_spkg" not in x.requests[2]["data"]
 
 
 @pytest.mark.parametrize("wait", [False, True])
