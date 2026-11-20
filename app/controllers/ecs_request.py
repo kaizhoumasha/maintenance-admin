@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 from functools import partial
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import Response
 
+from app.core import get_settings
 from app.core.database import session_factory
 from app.core.identifiers import uuid7
 from app.core.ratelimit import RateLimit
@@ -20,7 +22,10 @@ from app.integrations.ecs_request.receiver import (
     continue_ecs_request,
 )
 from app.integrations.ecs_request.registry import requests
+from app.integrations.http_exchanges import capture_callback
 from app.integrations.wms_request.results import get_result
+from app.models import ReliableMessage
+from app.reliable.config import parse_reliable_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ECS callbacks"], dependencies=[Depends(RateLimit(None))])
@@ -47,11 +52,14 @@ async def request_callback(request: Request, background_tasks: BackgroundTasks) 
 
 
 async def receive_request(request: Request) -> EcsRequestResponse:
+    received_at = datetime.now(UTC)
     exchange_id = uuid7()
     factory = getattr(request.app.state, "callback_session_factory", session_factory)
     raw = await read_body_capped(request, MAX_BODY_BYTES)
     if len(raw) > MAX_BODY_BYTES:
-        return EcsRequestResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
+        result = EcsRequestResponse(413, {"code": 413, "message": "PAYLOAD_TOO_LARGE"}, "too_large")
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
+        return result
     authorize = getattr(request.app.state, "ecs_event_authorizer", None)
     if authorize is not None:
         authorize = partial(
@@ -69,20 +77,33 @@ async def receive_request(request: Request) -> EcsRequestResponse:
                 runtime=getattr(request.app.state, "business_runtime", None),
                 on_committed=getattr(request.app.state, "business_event_committed", None),
                 on_business_committed=getattr(request.app.state, "business_committed", None),
+                resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
                 attempt_id=str(exchange_id),
             )
     except Exception as error:
         log_exception(
             logger, "ecs request receive failed", error, component="http", phase="ecs_request"
         )
-        return EcsRequestResponse(503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error")
+        result = EcsRequestResponse(
+            503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
+        )
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
+        return result
     if not result.deferred:
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
     deferred = await _read_deferred(factory, result.receipt_id)
     if deferred is None:
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
-    terminal = await wait_for_request(factory, result.digest, deferred)
+    terminal = await wait_for_request(
+        factory,
+        result.digest,
+        deferred,
+        budget_ms=await request_budget_ms(factory, deferred.message_id),
+    )
     if terminal is None:
+        await _capture_request(factory, request, received_at, exchange_id, raw, result)
         return result
     try:
         async with factory() as session, session.begin():
@@ -92,12 +113,41 @@ async def receive_request(request: Request) -> EcsRequestResponse:
                 deferred=deferred,
                 resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
                 runtime=getattr(request.app.state, "business_runtime", None),
+                resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
             )
     except Exception as error:
         log_exception(
             logger, "ecs request continue failed", error, component="http", phase="ecs_request"
         )
-        return EcsRequestResponse(503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error")
+        result = EcsRequestResponse(
+            503, {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}, "error"
+        )
+    await _capture_request(factory, request, received_at, exchange_id, raw, result)
+    return result
+
+
+async def _capture_request(factory, request, received_at, exchange_id, raw, result):
+    await capture_callback(
+        factory,
+        identity=exchange_id,
+        source="ecs_request",
+        request=request,
+        started_at=received_at,
+        raw=raw,
+        limit=MAX_BODY_BYTES,
+        result=result,
+    )
+
+
+async def request_budget_ms(factory, message_id: int) -> float:
+    try:
+        async with factory() as session:
+            message = await session.get(ReliableMessage, message_id)
+        config = parse_reliable_config(get_settings())
+        target = config.targets.get(message.target) if message is not None else None
+        return (target.timeout_ms if target is not None else 10000) + config.poll_interval_s * 1000
+    except Exception:
+        return 11000
 
 
 async def _read_deferred(factory, receipt_id):

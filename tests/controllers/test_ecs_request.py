@@ -1,6 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from app.controllers import ecs_request as ecs_request_controller
 from app.integrations.ecs_request import CallbackPayload, ecs_request, registry
 from app.main import app
 from tests.helpers import ecs_binding, read_receipts
@@ -63,3 +66,54 @@ async def test_handler_without_decision_returns_503_without_receipt(
     assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
     async with callback_store() as session:
         assert await read_receipts(session) == []
+
+
+async def test_request_capture_uses_ecs_request_projection(callback_client, monkeypatch):
+    captured = {}
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        ctx.respond(Decision(result="ALLOW"))
+
+    async def capture(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(ecs_request_controller, "capture_callback", capture)
+    response = await callback_client.post(PATH, json=body())
+
+    assert response.status_code == 200
+    assert captured["source"] == "ecs_request"
+    assert captured["result"].status_code == 200
+
+
+async def test_wait_budget_uses_message_target_timeout(monkeypatch):
+    class Factory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, message_id):
+            return SimpleNamespace(target="wms")
+
+    monkeypatch.setattr(
+        ecs_request_controller,
+        "get_settings",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        ecs_request_controller,
+        "parse_reliable_config",
+        lambda settings: SimpleNamespace(
+            poll_interval_s=0.25,
+            targets={"wms": SimpleNamespace(timeout_ms=2750)},
+        ),
+    )
+
+    budget = await ecs_request_controller.request_budget_ms(Factory(), 7)
+
+    assert budget == 3000

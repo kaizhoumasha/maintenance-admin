@@ -97,8 +97,7 @@ ECS 有少数交互必须在同一次 HTTP 响应里拿到已经落盘的业务�
     data=CartonScan,
     response=CartonDecision,
 )
-async def carton_validate(ctx: EcsRequestContext, data: CartonScan) -> None:
-    ...
+async def carton_validate(ctx: EcsRequestContext, data: CartonScan) -> None: ...
 ```
 
 上面的名称只说明形状。本文不注册它。
@@ -134,9 +133,7 @@ result = await capabilities.wms.get_result(
     operation=ctx.deferred.operation,
     operation_id=ctx.deferred.operation_id,
 )
-if result.delivery_uncertain or (
-    result.response_state == "NONE" and not result.delivery_terminal
-):
+if result.delivery_uncertain or (result.response_state == "NONE" and not result.delivery_terminal):
     ctx.defer(ctx.deferred.message_id, ctx.deferred.operation, ctx.deferred.operation_id)
     return
 ctx.respond(decision_from(result))
@@ -250,7 +247,7 @@ ECS HTTP 投影增加 `REQUEST`。`EcsHttpExchange.interaction_kind` 的检查�
 - `app/controllers/ecs_request.py`：路由和两段会话。
 - `migrations/versions/` 下一条迁移，只放宽 ECS HTTP 投影的 `interaction_kind`。
 - `tests/integrations/ecs_request/test_registry.py`
-- `tests/integrations/ecs_request/test_receiver.py`
+- `tests/integrations/ecs_request/test_ecs_request_receiver.py`
 - `tests/controllers/test_ecs_request.py`
 
 修改：
@@ -611,30 +608,37 @@ No new TODO. Existing ECS event replay and replay-window items remain unchanged.
 
 ### Implementation Tasks
 
+### Task 1 — 建立 `ecs_request` registry、envelope、context — 实现 `(device_role, request_type)` 唯一键、严格 response model、respond/defer 互斥和入口目录守卫。
 - [ ] **T1 (P1, human: ~4h / CC: ~25min)** — 建立 `ecs_request` registry、envelope、context — 实现 `(device_role, request_type)` 唯一键、严格 response model、respond/defer 互斥和入口目录守卫。
   - Surfaced by: 规格第 5 节；与 `ecs_event` 平行但不复用 WMS `request` registry。
   - Files: `app/integrations/ecs_request/{__init__,registry,envelope}.py`、`tests/integrations/ecs_request/test_registry.py`
   - Verify: `uv run pytest tests/integrations/ecs_request/test_registry.py`
+### Task 2 — 实现两段接收事务 — accept 写收据/绑定快照，提交后 wait，最后 continue；等待期间不持锁、不 send 第二次，保留 503 占位。
 - [ ] **T2 (P1, human: ~6h / CC: ~35min)** — 实现两段接收事务 — accept 写收据/绑定快照，提交后 wait，最后 continue；等待期间不持锁、不 send 第二次，保留 503 占位。
   - Surfaced by: 规格第 6 节与 R1–R4。
-  - Files: `app/integrations/ecs_request/receiver.py`、`app/controllers/ecs_request.py`、`app/main.py`、`tests/integrations/ecs_request/test_receiver.py`、`tests/controllers/test_ecs_request.py`
-  - Verify: `uv run pytest tests/integrations/ecs_request/test_receiver.py tests/controllers/test_ecs_request.py`
+  - Files: `app/integrations/ecs_request/receiver.py`、`app/controllers/ecs_request.py`、`app/main.py`、`tests/integrations/ecs_request/test_ecs_request_receiver.py`、`tests/controllers/test_ecs_request.py`
+  - Verify: `uv run pytest tests/integrations/ecs_request/test_ecs_request_receiver.py tests/controllers/test_ecs_request.py`
+### Task 3 — 增加 pending receipt 读路径 — 允许 `reply_wire=NULL` 返回“等待中”，对已完成回复继续执行 sha256/json 完整性校验；runtime authority 与 legacy 都覆盖。
 - [ ] **T3 (P1, human: ~2h / CC: ~15min)** — 增加 pending receipt 读路径 — 允许 `reply_wire=NULL` 返回“等待中”，对已完成回复继续执行 sha256/json 完整性校验；runtime authority 与 legacy 都覆盖。
   - Surfaced by: `app/integrations/callback_receipts.py:287-320` 的现有异常路径。
-  - Files: `app/integrations/callback_receipts.py`、`tests/integrations/ecs_request/test_receiver.py`、`tests/integrations/wms_callback/test_task_contract_extensions.py` 或同等公共 receipt 测试
-  - Verify: `uv run pytest tests/integrations/ecs_request/test_receiver.py tests/integrations/wms_callback/test_task_contract_extensions.py`
+  - Files: `app/integrations/callback_receipts.py`、`tests/integrations/ecs_request/test_ecs_request_receiver.py`、`tests/integrations/wms_callback/test_task_contract_extensions.py` 或同等公共 receipt 测试
+  - Verify: `uv run pytest tests/integrations/ecs_request/test_ecs_request_receiver.py tests/integrations/wms_callback/test_task_contract_extensions.py`
+### Task 4 — 接入 formal/local catalog — 把 `ecs_request` 加入 registration/discovery/catalog 的 registrations、consumers、targets、owner checks，并在 `main.py` 挂载路由。
 - [ ] **T4 (P1, human: ~3h / CC: ~20min)** — 接入 formal/local catalog — 把 `ecs_request` 加入 registration/discovery/catalog 的 registrations、consumers、targets、owner checks，并在 `main.py` 挂载路由。
   - Surfaced by: `app/businesses/catalog.py:328-331,443-451` 的三类硬编码。
   - Files: `app/integrations/registration.py`、`app/integrations/discovery.py`、`app/businesses/catalog.py`、`app/main.py`、`tests/integrations/test_registration_bootstrap.py`、`tests/integrations/test_registration_discovery.py`
   - Verify: `uv run pytest tests/integrations/test_registration_bootstrap.py tests/integrations/test_registration_discovery.py`
+### Task 5 — 补齐投影与历史 — 写 `identity_kind=EVENT_DIGEST`、增加 `REQUEST` check constraint/迁移、映射 `ecs_request` 的 `request_type` 到现有 `event_type` 列。
 - [ ] **T5 (P2, human: ~2h / CC: ~15min)** — 补齐投影与历史 — 写 `identity_kind=EVENT_DIGEST`、增加 `REQUEST` check constraint/迁移、映射 `ecs_request` 的 `request_type` 到现有 `event_type` 列。
   - Surfaced by: 规格第 7 节与 R5。
   - Files: `app/integrations/callback_receipts.py`、`app/models/http_exchange.py`、`app/integrations/http_exchanges.py`、`migrations/versions/`、`tests/migrations/`、`tests/controllers/test_ecs_callback.py`
   - Verify: `uv run pytest tests/migrations tests/controllers/test_ecs_callback.py`
+### Task 6 — 更新工具与 local registry — 静态合同检查、dev registry schema/output、架构分层守卫都识别 `ecs_request`。
 - [ ] **T6 (P2, human: ~2h / CC: ~15min)** — 更新工具与 local registry — 静态合同检查、dev registry schema/output、架构分层守卫都识别 `ecs_request`。
   - Surfaced by: `scripts/check_integration_contracts.py:24-43`、`app/controllers/dev_registry.py:25-29`、`app/schemas/dev_console.py:46-49`、`tests/architecture/test_layering.py:107-109`。
   - Files: `scripts/check_integration_contracts.py`、`app/controllers/dev_registry.py`、`app/schemas/dev_console.py`、`tests/scripts/test_check_integration_contracts.py`、`tests/controllers/test_dev_registry.py`、`tests/architecture/test_layering.py`
   - Verify: `uv run pytest tests/scripts/test_check_integration_contracts.py tests/controllers/test_dev_registry.py tests/architecture/test_layering.py`
+### Task 7 — 更新接入文档与全量验证 — 把第四类注册、local 输出和历史约束写入文档，执行 lint、迁移和全量测试。
 - [ ] **T7 (P2, human: ~1h / CC: ~10min)** — 更新接入文档与全量验证 — 把第四类注册、local 输出和历史约束写入文档，执行 lint、迁移和全量测试。
   - Surfaced by: 发现与启动/工具边界的文档一致性要求。
   - Files: `docs/integrations/registration.md`、`docs/integrations/business-packages.md`、`app/integrations/__init__.py`

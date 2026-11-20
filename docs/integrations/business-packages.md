@@ -236,6 +236,25 @@ async def scanned(ctx, payload):
 ```
 
 ECS 在受理事务提交后 ACK，诊断与受理依据同事务保存，不从 ACK 推断业务推进；WMS 回调处理器返回原 Accepted/Rejected/Conflict。
+
+需要同步决定的 ECS 交互使用独立的 `ecs_request` 入口：
+
+```python
+from pydantic import BaseModel, ConfigDict
+from app.integrations.ecs_request import CallbackPayload, EcsRequestContext, ecs_request
+
+
+class Decision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    result: str
+
+
+@ecs_request("CARTON_VALIDATE", device_role=SCAN.role_key, data=CallbackPayload, response=Decision)
+async def carton_validate(ctx: EcsRequestContext, payload):
+    ctx.respond(Decision(result="ALLOW"))
+```
+
+`ecs_request` 的同步响应与 `ecs_event` 的 `ACK` 分开：需要 WMS 时先提交 Outbox、释放锁再等待，预算用尽返回 503 并保留原等待身份。WMS 出站的 `request/` 目录仍只表示 WES → WMS，不承载 ECS 同步请求。
 两种上下文都由控制器可信注入同一 BusinessRuntime。入口不自行创建运行时，不从请求选择服务对象。
 同名 ECS 事件可由不同角色使用各自严格 Payload。包式入口按事件小写名/operation 规范化名分文件；
 完整规则见[注册指南](registration.md)。

@@ -5,6 +5,7 @@ import pytest
 
 from app import businesses
 from app.integrations.ecs_callback import registry as ecs
+from app.integrations.ecs_request import registry as ecs_requests
 from app.integrations.registration import import_registration_module, local_registration
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_request import operation as requests
@@ -17,7 +18,7 @@ def isolated_registries(monkeypatch):
     # These isolated imports exercise the initial discovery phase, before final validation.
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(catalog, "_registration_guard_enabled", False)
-    for registry in (ecs, callbacks, requests):
+    for registry in (ecs, ecs_requests, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
     from app.integrations import discovery
 

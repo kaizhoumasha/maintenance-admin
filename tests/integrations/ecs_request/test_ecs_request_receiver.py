@@ -5,6 +5,8 @@ import pytest
 from app.core.identifiers import uuid7
 from app.integrations import callback_receipts, history
 from app.integrations.callback_receipts import find_receipt, find_receipt_state, insert_receipt
+from app.integrations.ecs_request.receiver import _binding_matches_snapshot
+from tests.helpers import ecs_binding
 
 
 @pytest.mark.parametrize("runtime", [False, True])
@@ -39,3 +41,20 @@ async def test_pending_receipt_state_is_readable_without_reply_wire(
         assert state.body is None and state.prepared_body is None
         with pytest.raises(history.EvidenceIntegrityError):
             await find_receipt(session, "ecs.request", operation_id)
+
+
+async def test_continue_binding_must_match_the_acceptance_snapshot():
+    binding = await ecs_binding(None, "D1")
+    snapshot = {
+        "device_id": binding.device_id,
+        "device_version": binding.device_version,
+        "work_line_id": binding.work_line_id,
+        "work_line_version": binding.work_line_version,
+        "device_role": binding.device_role,
+    }
+
+    assert _binding_matches_snapshot(binding, snapshot)
+    assert not _binding_matches_snapshot(
+        binding,
+        {**snapshot, "device_version": binding.device_version + 1},
+    )

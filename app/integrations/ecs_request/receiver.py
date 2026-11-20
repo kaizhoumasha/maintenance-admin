@@ -79,6 +79,49 @@ def _snapshot(binding: DeviceBinding) -> dict:
     }
 
 
+def _binding_matches_snapshot(binding: DeviceBinding, snapshot: dict) -> bool:
+    return all(
+        getattr(binding, field) == snapshot.get(field)
+        for field in (
+            "device_id",
+            "device_version",
+            "work_line_id",
+            "work_line_version",
+            "device_role",
+        )
+    )
+
+
+def _resolve_registered(binding, request_type, resolve_input_target):
+    registered = lookup(binding.device_role, request_type) if binding else None
+    business_code = binding.business_code if binding is not None else None
+    component_key = None
+    shared = bool(
+        registered
+        and not registered.registration_source.local_only
+        and registered.registration_source.module.startswith("app.businesses._components.")
+    )
+    if registered is not None and (
+        shared
+        or (
+            resolve_input_target is not None
+            and business_code is not None
+            and registered.registration_source.module.startswith("app.businesses.")
+            and not registered.registration_source.local_only
+        )
+    ):
+        if resolve_input_target is None:
+            raise RuntimeError("Shared ECS requests require a trusted input target resolver")
+        target = resolve_input_target(
+            business_code, ("ecs_request", request_type, binding.device_role)
+        )
+        if target is None or target.source != registered.registration_source:
+            registered = None
+        else:
+            component_key = target.component_key
+    return registered, business_code, component_key
+
+
 async def _persist_decision(
     session: AsyncSession,
     *,
@@ -230,6 +273,7 @@ async def accept_ecs_request(
     ]
     | None = None,
     runtime: object | None = None,
+    resolve_input_target=None,
     on_committed=None,
     on_business_committed=None,
     attempt_id: str | None = None,
@@ -254,7 +298,9 @@ async def accept_ecs_request(
         raise RuntimeError("ECS binding does not match request device")
     if authorize_request is not None and not await authorize_request(session, envelope, binding):
         return EcsRequestResponse(403, {"code": 403, "message": "FORBIDDEN_SOURCE"}, "forbidden")
-    registered = lookup(binding.device_role, envelope.request_type) if binding else None
+    registered, business_code, component_key = _resolve_registered(
+        binding, envelope.request_type, resolve_input_target
+    )
     if registered is None:
         return EcsRequestResponse(400, {"code": 400, "message": "UNKNOWN_REQUEST"}, "unknown")
     existing = await find_receipt_state(session, OPERATION, identity)
@@ -327,7 +373,7 @@ async def accept_ecs_request(
             binding=binding,
             runtime=runtime,
             deferred=deferred,
-            component_key=None,
+            component_key=component_key,
         )
     table = receipt_model()
     await session.execute(
@@ -335,8 +381,8 @@ async def accept_ecs_request(
         .where(active_receipt(table), table.receipt_id == receipt_id)
         .values(
             event_envelope=_request(envelope),
-            event_context=_snapshot(binding),
-            owner_domain=binding.business_code,
+            event_context={**_snapshot(binding), "component_key": component_key},
+            owner_domain=business_code,
         )
     )
     response = await _run_handler(
@@ -348,7 +394,7 @@ async def accept_ecs_request(
         binding=binding,
         runtime=runtime,
         deferred=None,
-        component_key=None,
+        component_key=component_key,
     )
     if (
         registered.registration_source.module.startswith("app.businesses._components.")
@@ -367,6 +413,7 @@ async def continue_ecs_request(
     deferred: DeferredRequest,
     resolve_binding: BindingResolver | None = None,
     runtime: object | None = None,
+    resolve_input_target=None,
 ) -> EcsRequestResponse:
     state = await find_receipt_state(session, OPERATION, identity, for_update=True)
     if state is None or state.prepared_body is not None:
@@ -382,7 +429,11 @@ async def continue_ecs_request(
         )
     envelope = EcsRequestEnvelope.model_validate(state.event_envelope)
     binding = await resolve_binding(session, envelope.device_code) if resolve_binding else None
-    registered = lookup(binding.device_role, envelope.request_type) if binding else None
+    if binding is None or not _binding_matches_snapshot(binding, state.event_context or {}):
+        raise RequestHandlerIncomplete("deferred request binding changed after acceptance")
+    registered, _, component_key = _resolve_registered(
+        binding, envelope.request_type, resolve_input_target
+    )
     if registered is None:
         raise RequestHandlerIncomplete("deferred request handler is no longer registered")
     response = await _run_handler(
@@ -394,7 +445,7 @@ async def continue_ecs_request(
         binding=binding,
         runtime=runtime,
         deferred=deferred,
-        component_key=(state.event_context or {}).get("component_key"),
+        component_key=component_key,
     )
     if response.deferred:
         return response
