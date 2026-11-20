@@ -334,9 +334,7 @@ async def _find_receipt(
     root, reply_attempt_id = row
     bodies = await history.read_bodies(session, record_ids=(root.current_response_record_id,))
     stored = bodies.get(root.current_response_record_id)
-    if root.current_response_record_id is not None and (
-        stored is None or stored.raw_body is None
-    ):
+    if root.current_response_record_id is not None and (stored is None or stored.raw_body is None):
         raise history.EvidenceIntegrityError("original receipt reply unavailable")
     return _receipt_view(
         root,

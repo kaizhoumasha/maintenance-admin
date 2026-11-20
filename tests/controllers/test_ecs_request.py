@@ -214,9 +214,7 @@ async def test_unknown_delivery_state_does_not_continue_to_handler(monkeypatch):
 
     monkeypatch.setattr(ecs_request_controller, "get_result", unknown_result)
     monkeypatch.setattr(ecs_request_controller.asyncio, "sleep", stop)
-    monkeypatch.setattr(
-        "app.integrations.callback_receipts.find_receipt_state", no_receipt
-    )
+    monkeypatch.setattr("app.integrations.callback_receipts.find_receipt_state", no_receipt)
 
     with pytest.raises(StopPolling):
         await ecs_request_controller.wait_for_request(
