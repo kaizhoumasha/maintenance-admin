@@ -63,6 +63,7 @@ def create_http_views(bind, *, initiator=False, replace=False):
         UNION ALL SELECT {base}, 'ECS', NULL,
             CASE WHEN h.interaction_kind='COMMAND' THEN 'ecs.command'
                  WHEN h.interaction_kind='EVENT' THEN 'ecs.event'
+                 WHEN h.interaction_kind='REQUEST' THEN 'ecs-request'
                  WHEN h.interaction_kind='RESULT' THEN 'ecs.result' ELSE 'ecs.status' END,
             h.command_code, h.device_code, COALESCE(h.task_type,h.event_type), NULL, NULL, NULL
         FROM {p}ecs_http_exchange h
@@ -91,20 +92,21 @@ def create_http_views(bind, *, initiator=False, replace=False):
             CASE h.interaction_kind
                 WHEN 'DECISION' THEN 'wms-decisions' WHEN 'FACT' THEN 'wms-facts'
                 WHEN 'CALLBACK' THEN 'wms-callback' WHEN 'COMMAND' THEN 'ecs-command'
-                WHEN 'EVENT' THEN 'ecs-event' WHEN 'RESULT' THEN 'ecs-result'
+                WHEN 'EVENT' THEN 'ecs-event' WHEN 'REQUEST' THEN 'ecs-request'
+                WHEN 'RESULT' THEN 'ecs-result'
                 WHEN 'STATUS' THEN 'ecs-status' ELSE 'wms-transport' END AS protocol,
             h.{column}, h.interaction_kind, h.operation_name AS operation,
             COALESCE(h.wms_id,r.operation_id) AS operation_id, h.message_type,
             CASE WHEN h.peer='TRANSPORT' AND h.transport_task_id IS NOT NULL
                     THEN 'TRANSPORT_TASK_ID'
                  WHEN h.command_code IS NOT NULL THEN 'COMMAND_CODE'
-                 WHEN h.interaction_kind='EVENT' AND r.receipt_id IS NOT NULL
+                 WHEN h.interaction_kind IN ('EVENT','REQUEST') AND r.receipt_id IS NOT NULL
                     THEN 'EVENT_DIGEST'
                  WHEN h.wms_id IS NOT NULL THEN 'OPERATION_ID'
                  WHEN h.device_code IS NOT NULL THEN 'DEVICE_CODE' ELSE 'REQUEST_ID'
             END AS identity_kind,
             COALESCE(h.transport_task_id,h.command_code,h.wms_id,
-                CASE WHEN h.interaction_kind='EVENT' THEN r.operation_id END,
+                CASE WHEN h.interaction_kind IN ('EVENT','REQUEST') THEN r.operation_id END,
                 h.device_code,CAST(h.id AS text)) AS identity_value,
             COALESCE(c.owner_domain,t.owner_domain,r.owner_domain,m.scope_owner) AS owner_domain,
             h.device_code, h.started_at AS created_at, h.started_at AS recorded_at,

@@ -220,7 +220,7 @@ async def insert_receipt(
             )
             .returning(CallbackReceipt.receipt_id)
         )
-    identity_kind = "EVENT_DIGEST" if protocol == "ecs-event" else "OPERATION_ID"
+    identity_kind = "EVENT_DIGEST" if protocol in {"ecs-event", "ecs-request"} else "OPERATION_ID"
     exchange_id = await session.scalar(
         insert(IntegrationExchange)
         .values(
