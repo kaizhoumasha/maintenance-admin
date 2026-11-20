@@ -26,6 +26,7 @@ from app.integrations.callback_receipts import (
 from app.integrations.ecs_callback.binding import BindingResolver, DeviceBinding
 from app.integrations.ecs_callback.envelope import issues_from
 from app.integrations.wms_callback.receiver import CallbackResponse
+from app.integrations.wms_request.results import get_result
 from app.models import ReliableMessage
 from app.transactions import after_commit
 
@@ -266,7 +267,7 @@ async def _run_handler(
             attempt_id=str(uuid7()),
             received_at=datetime.now(UTC),
         )
-    if ctx.deferred is not None:
+    if ctx._deferred_this_call:
         await _persist_deferred(session, receipt_id=receipt_id, deferred=ctx.deferred)
         return EcsRequestResponse(
             503,
@@ -478,5 +479,14 @@ async def continue_ecs_request(
         component_key=component_key,
     )
     if response.deferred:
-        return response
+        result = await get_result(
+            session,
+            message_id=deferred.message_id,
+            operation=deferred.operation,
+            operation_id=deferred.operation_id,
+        )
+        if not result.delivery_uncertain and (
+            result.response_state in {"VALID", "INVALID"} or result.delivery_terminal is True
+        ):
+            raise RequestHandlerIncomplete("request handler deferred after terminal result")
     return response
