@@ -5,10 +5,13 @@ from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
+from pydantic import BaseModel, ConfigDict
 
 from app.controllers.dev import include_dev_routers
 from app.integrations.ecs_callback import CallbackPayload
 from app.integrations.ecs_callback import registry as ecs
+from app.integrations.ecs_request import ecs_request
+from app.integrations.ecs_request import registry as ecs_requests
 from app.integrations.ecs_status import query
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_request import operation as requests
@@ -17,15 +20,27 @@ from app.main import app
 PATH = "/api/v1/dev/integrations/registry"
 
 
+class RegistryDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    result: str
+
+
 async def test_registry_requires_login(client):
     assert (await client.get(PATH)).status_code == 401
 
 
 async def test_registry_lists_all_three_actual_registries(client, admin, monkeypatch):
     monkeypatch.setattr(ecs, "_registry", {})
+    monkeypatch.setattr(ecs_requests, "_registry", {})
 
     @ecs.ecs_event("REGISTRY_PROBE", data=CallbackPayload, device_role="SCAN1")
     async def probe(ctx, payload):
+        pass
+
+    @ecs_request(
+        "REGISTRY_REQUEST", device_role="SCAN1", data=CallbackPayload, response=RegistryDecision
+    )
+    async def request_probe(ctx, payload):
         pass
 
     response = await client.get(PATH, headers=admin)
@@ -33,12 +48,15 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
     rows = {
         (
             row["kind"],
-            (row["device_role"], row["name"]) if row["kind"] == "ecs_event" else row["name"],
+            (row["device_role"], row["name"])
+            if row["kind"] in {"ecs_event", "ecs_request"}
+            else row["name"],
         ): row
         for row in response.json()
     }
     expected = (
         {("ecs_event", name) for name in ecs.events()}
+        | {("ecs_request", name) for name in ecs_requests.requests()}
         | {("wms_callback", name) for name in callbacks.operations()}
         | {("wms_request", name) for name in requests.operations()}
     )
@@ -66,6 +84,9 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
             registered = requests.lookup(key[1])
             assert row["endpoint"] == registered.endpoint.value
             assert row["payload_schema"] == registered.data_model.model_json_schema()
+        if key[0] == "ecs_request":
+            assert row["device_role"] == "SCAN1"
+            assert row["name"] == "REGISTRY_REQUEST"
     for kind, name in [
         ("wms_callback", "example.echo@v1"),
         ("wms_request", "example.fact.demo@v1"),
@@ -75,7 +96,7 @@ async def test_registry_lists_all_three_actual_registries(client, admin, monkeyp
 
 
 async def test_builtin_remains_when_business_registries_are_empty(client, admin, monkeypatch):
-    for registry in (ecs, callbacks, requests):
+    for registry in (ecs, ecs_requests, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
     rows = (await client.get(PATH, headers=admin)).json()
     assert [(row["kind"], row["entry_type"]) for row in rows] == [

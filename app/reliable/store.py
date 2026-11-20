@@ -67,6 +67,7 @@ class AttemptOutcome:
     pause_reason: str | None = None
     observation_record_id: UUID | None = field(default=None, kw_only=True)
     retry_budget: int | None = field(default=None, kw_only=True)
+    next_expires_at: datetime | None = field(default=None, kw_only=True)
 
 
 def utc_datetime(value: datetime | None, *, known_sqlite_utc: bool = False) -> datetime | None:

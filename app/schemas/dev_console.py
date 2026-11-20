@@ -44,7 +44,7 @@ class DevOperationOut(BaseModel):
 
 
 # 注册清单的 kind 标签单一来源;控制器按此输出,超出集合会被响应校验拒绝
-REGISTRATION_KINDS = ("ecs_event", "wms_callback", "wms_request")
+REGISTRATION_KINDS = ("ecs_event", "ecs_request", "wms_callback", "wms_request")
 INTEGRATION_KINDS = (*REGISTRATION_KINDS, "ecs_status", "ecs_command")
 
 

@@ -184,15 +184,29 @@ def get_definition(code: str) -> BusinessDefinition:
 
 
 def entry_modules(
-    kind: Literal["ecs_event", "callback", "request"], *, environment: str
+    kind: Literal["ecs_event", "ecs_request", "callback", "request"], *, environment: str
 ) -> tuple[str, ...]:
     """Return trusted fixed entry paths without importing handlers or services."""
     suffixes = {kind}
     if environment == "local":
         suffixes.add(
-            {"ecs_event": "dev_ecs_event", "callback": "dev_callback", "request": "dev"}[kind]
+            {
+                "ecs_event": "dev_ecs_event",
+                "ecs_request": "dev_ecs_request",
+                "callback": "dev_callback",
+                "request": "dev",
+            }[kind]
         )
-    supported = {"ecs_event", "callback", "request", "dev_ecs_event", "dev_callback", "dev"}
+    supported = {
+        "ecs_event",
+        "ecs_request",
+        "callback",
+        "request",
+        "dev_ecs_event",
+        "dev_ecs_request",
+        "dev_callback",
+        "dev",
+    }
     selected = []
     for entry in entries():
         for _, prefix, _, modules, _, _ in _providers(entry):
@@ -279,7 +293,7 @@ def validate_registration_owners(
         return
     formal_modules = tuple(
         name
-        for kind in ("ecs_event", "callback", "request")
+        for kind in ("ecs_event", "ecs_request", "callback", "request")
         for name in entry_modules(kind, environment="production")
     )
     for source in sources:
@@ -313,6 +327,7 @@ def validate_business_contracts() -> tuple[
     from app.integrations.ecs_callback.registry import events
     from app.integrations.ecs_command import compile_commands
     from app.integrations.ecs_command.contracts import merge_annexes
+    from app.integrations.ecs_request.registry import requests as ecs_requests
     from app.integrations.registration import DEV_MODULES
     from app.integrations.wms_callback.registry import operations
     from app.integrations.wms_request.operation import operations as request_operations
@@ -322,11 +337,15 @@ def validate_business_contracts() -> tuple[
     current = entries()
     all_roles = {role.role_key for definition in definitions() for role in definition.device_roles}
     commands, annexes, owners, annex_sources = [], {}, {}, {}
-    registered_events, callbacks = events(), operations()
+    registered_events, registered_ecs_requests, callbacks = events(), ecs_requests(), operations()
     compiled_by_key = {}
     consumers, targets = {}, {}
     registrations = [
         *(("ecs_event", name, role, item) for (role, name), item in registered_events.items()),
+        *(
+            ("ecs_request", name, role, item)
+            for (role, name), item in registered_ecs_requests.items()
+        ),
         *(("wms_callback", name, None, item) for name, item in callbacks.items()),
     ]
     for entry in current:
@@ -338,8 +357,8 @@ def validate_business_contracts() -> tuple[
                     continue
                 if source.module.removeprefix(prefix + ".").split(".")[0] in DEV_MODULES:
                     continue
-                if kind == "ecs_event" and role not in roles:
-                    raise ValueError(f"{entry.DEFINITION.code}: undeclared event role {role!r}")
+                if kind in {"ecs_event", "ecs_request"} and role not in roles:
+                    raise ValueError(f"{entry.DEFINITION.code}: undeclared {kind} role {role!r}")
                 key = (kind, name, role)
                 consumers.setdefault(key, set()).add(entry.DEFINITION.code)
                 route = (entry.DEFINITION.code, key)
@@ -445,6 +464,7 @@ def validate_business_contracts() -> tuple[
             item.registration_source
             for item in (
                 *registered_events.values(),
+                *registered_ecs_requests.values(),
                 *callbacks.values(),
                 *request_operations().values(),
             )

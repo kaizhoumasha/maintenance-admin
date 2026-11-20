@@ -10,7 +10,7 @@
 | ack_received=true | ECS已按协议接纳；尚无执行结果 |
 | 合法Result的SUCCESS/FAILED | 设备报告终态；业务是否推进仍须安全消费 |
 
-UNKNOWN表示可能已经交付；HELD保持暂停，不换命令号、改址或普通resume重发。HTTP超时、执行timeout_ms、投递窗口W与等待Result是不同时间边界；等待太久不自动变成失败。
+UNKNOWN表示可能已经交付。带冻结 `retry_window` 的 ECS 路由会沿原命令号回队列，继续等待 ACK 或 Result；没有可续期窗口、配置不合规或明确需要核对时才保持 HELD。不会换命令号、改址或用普通 resume 重发。HTTP超时、执行timeout_ms、投递窗口W与等待Result是不同时间边界；等待太久不自动变成失败。
 
 ## 2. 无设备表：直接用Swagger调试
 
@@ -114,4 +114,4 @@ service 已完成 lifespan 装配；MoveTo 为已列入 COMMANDS 的精确模型
 
 开发回归使用[已有pytest测试](../testing/ecs-command-verification.md)，Mock及测试库保护由夹具负责，不要求执行额外的隔离操作流程。调试前核对目标地址，真实ECS接入另行安排。
 
-通用 Status 已实现：所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，见[通用 Status](ecs-status.md)；设备预览和手动刷新见[设备管理](device-management.md)。online/IDLE不能授权动作，也不能解封UNKNOWN/HELD。
+通用 Status 已实现：所有环境提供正式 `GET /api/v1/ecs/status`，要求登录和独立的 `ecs:status:query` 权限，见[通用 Status](ecs-status.md)；设备预览和手动刷新见[设备管理](device-management.md)。online/IDLE不能授权动作，也不会替换原命令身份；状态门禁只决定派发前等待，恢复 `IDLE` 后才允许原尝试继续。
