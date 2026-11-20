@@ -24,6 +24,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from app.businesses import catalog
         from app.integrations.discovery import load_formal_modules, load_local_modules
         from app.integrations.ecs_callback.registry import events
+        from app.integrations.ecs_request.registry import requests as ecs_requests
         from app.integrations.wms_callback.registry import operations as callbacks
         from app.integrations.wms_request.operation import operations as requests
 
@@ -38,11 +39,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         entries = []
         for kind, items in (
             ("ecs_event", events()),
+            ("ecs_request", ecs_requests()),
             ("wms_callback", callbacks()),
             ("wms_request", requests()),
         ):
             for key, item in items.items():
-                role, name = key if kind == "ecs_event" else (None, key)
+                role, name = key if kind in {"ecs_event", "ecs_request"} else (None, key)
                 entries.append(
                     {
                         "kind": kind,
@@ -67,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
         checked = [
-            "Discovered and imported formal declarations in the existing three registries",
+            "Discovered and imported formal declarations in the existing four registries",
             "Formal businesses from explicit catalog.entries() only",
             "Existing registration and validate_business_contracts rules only",
         ]

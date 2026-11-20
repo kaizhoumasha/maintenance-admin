@@ -170,8 +170,15 @@ class EcsLifecycle:
 
     @staticmethod
     def _retry_expiry(command, now):
-        window = command.route.get("retry_window")
-        return None if window is None else now + timedelta(seconds=float(window))
+        retry_window = (command.route or {}).get("retry_window")
+        if retry_window is None:
+            expires_at = command.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at is not None and expires_at > now:
+                return expires_at
+            return now + timedelta(seconds=300)
+        return now + timedelta(seconds=float(retry_window))
 
     def pre_dispatch_expires_at(self, command, now):
         return self._retry_expiry(command, now)

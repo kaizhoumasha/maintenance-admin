@@ -1,4 +1,4 @@
-"""本进程的三类业务注册项及内置协议能力，仅由 local dev 控制台挂载。"""
+"""本进程的业务注册项及内置协议能力，仅由 local dev 控制台挂载。"""
 
 from dataclasses import asdict
 
@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from app.core import get_current_user
 from app.core.routing import new_router
 from app.integrations.ecs_callback.registry import events
+from app.integrations.ecs_request.registry import requests as ecs_requests
 from app.integrations.wms_callback.registry import operations as callbacks
 from app.integrations.wms_request.operation import operations as requests
 from app.schemas.dev_console import DevRegistrationOut
@@ -24,11 +25,12 @@ async def list_registrations(request: Request) -> list[dict]:
     rows = []
     for kind, items in (
         ("ecs_event", events()),
+        ("ecs_request", ecs_requests()),
         ("wms_callback", callbacks()),
         ("wms_request", requests()),
     ):
         for key, item in items.items():
-            role, name = key if kind == "ecs_event" else (None, key)
+            role, name = key if kind in {"ecs_event", "ecs_request"} else (None, key)
             model = item.data_model
             endpoint = getattr(item, "endpoint", None)
             rows.append(
@@ -40,6 +42,11 @@ async def list_registrations(request: Request) -> list[dict]:
                     **asdict(item.registration_source),
                     "endpoint": endpoint.value if endpoint is not None else None,
                     "payload_schema": model.model_json_schema() if model is not None else None,
+                    "response_schema": (
+                        item.response_model.model_json_schema()
+                        if hasattr(item, "response_model")
+                        else None
+                    ),
                 }
             )
     rows.extend(getattr(request.app.state, "integration_capabilities", ()))

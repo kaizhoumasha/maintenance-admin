@@ -191,7 +191,10 @@ class WmsHttpExchange(HttpExchange, Base):
 class EcsHttpExchange(HttpExchange, Base):
     __tablename__ = "ecs_http_exchange"
     __table_args__ = _constraints(
-        __tablename__, "('COMMAND', 'RESULT', 'EVENT', 'STATUS')", "command_code", "device_code"
+        __tablename__,
+        "('COMMAND', 'RESULT', 'EVENT', 'STATUS', 'REQUEST')",
+        "command_code",
+        "device_code",
     )
     command_code: Mapped[str | None] = mapped_column(Text)
     device_code: Mapped[str | None] = mapped_column(Text)

@@ -563,6 +563,7 @@ def shared_wms_contract(monkeypatch):
     from app.businesses import catalog
     from app.businesses.components import ComponentDefinition
     from app.integrations.ecs_callback import registry as events
+    from app.integrations.ecs_request import registry as ecs_requests
     from app.integrations.wms_callback import registry as callbacks
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
     from app.integrations.wms_request import operation as requests
@@ -578,6 +579,7 @@ def shared_wms_contract(monkeypatch):
     monkeypatch.setattr(catalog, "entries", lambda: (first, second, unrelated))
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(ecs_requests, "_registry", {})
     monkeypatch.setattr(callbacks, "_registry", {})
     monkeypatch.setattr(requests, "_registry", {})
 

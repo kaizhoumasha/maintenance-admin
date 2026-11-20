@@ -450,7 +450,7 @@ async def test_known_not_received_conflicts_but_new_inflight_attempt_accepts(ecs
 
 
 @pytest.mark.parametrize("owner", ["test", "coarse_sorting"])
-async def test_definite_nonacceptance_result_is_persistently_conflicting(ecs, owner):
+async def test_result_after_definite_nonacceptance_follows_owner_contract(ecs, owner):
     from app.integrations.ecs_command.result import receive_ecs_result
     from app.integrations.ecs_command.service import CommandOwner
     from app.reliable.store import AttemptOutcome
@@ -472,12 +472,14 @@ async def test_definite_nonacceptance_result_is_persistently_conflicting(ecs, ow
     )
     async with ecs.factory.begin() as session:
         first = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
-        assert first.status_code == 409
+        assert first.status_code == (200 if owner == "coarse_sorting" else 409)
     async with ecs.factory.begin() as session:
         assert (
             await receive_ecs_result(session, result_body(command.command_code), ecs.service)
         ).body == first.body
-        assert (await session.scalar(select(ReliableMessage))).status == "HELD"
+        assert (await session.scalar(select(ReliableMessage))).status == (
+            "DONE" if owner == "coarse_sorting" else "HELD"
+        )
 
 
 async def test_result_and_late_rejection_keep_result_and_evidence(ecs):
