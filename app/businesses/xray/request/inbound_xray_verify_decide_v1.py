@@ -16,7 +16,7 @@ OPERATION = "inbound.xray.verify_decide@v1"
 class VerifyDecide(OmitAbsent, WorklineRequest):
     scan_status: Literal["OK", "NG"]
     barcode: Text
-    expected_spkg: Text
+    actual_qty: NonnegativeInt
     new_barcode: Text | None = None
     reason_code: Text | None = None
     reason_message: Text | None = None
