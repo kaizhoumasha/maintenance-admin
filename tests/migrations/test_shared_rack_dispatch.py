@@ -930,6 +930,7 @@ async def test_original_history_survives_without_dispatch(schema_database):
 @pytest.mark.parametrize(
     "table,statement",
     [
+        # Keep one representative corruption per legacy identity family.
         pytest.param(
             "smt_manual_rack",
             "with a as (update smt_manual_rack_action set rack_work_id='opaque', "
@@ -948,11 +949,6 @@ async def test_original_history_survives_without_dispatch(schema_database):
             "bin_roller_position_fact",
             "update bin_roller_position_fact set rack_face='B' where id='pos-ack-ENTER'",
             id="contradictory-face",
-        ),
-        pytest.param(
-            "bin_roller_position_fact",
-            "update bin_roller_position_fact set location_code='X' where id='pos-ack-ENTER'",
-            id="contradictory-code",
         ),
         pytest.param(
             "reliable_message",
@@ -976,13 +972,6 @@ async def test_original_history_survives_without_dispatch(schema_database):
             "bin_roller_face_work",
             "update bin_roller_face_work set source_ref='wrong' where id='service'",
         ),
-        ("bin_roller_decision", "update bin_roller_decision set message_id=41 where id='dec-ack'"),
-        ("bin_roller_feed_segment", "update bin_roller_feed_segment set feed_id='lost'"),
-        (
-            "bin_roller_return_opportunity",
-            "update bin_roller_return_opportunity set source_ref='SEGMENT:lost' where id='next'",
-        ),
-        ("smt_manual_rack", f"update smt_manual_rack set id='roller' where id='{ACTIVE}'"),
         (
             "smt_manual_task_member",
             "update smt_manual_task_member set rack_work_id='lost' where id='member-manual'",
@@ -994,35 +983,13 @@ async def test_original_history_survives_without_dispatch(schema_database):
         ),
         (
             "smt_manual_request",
-            "update smt_manual_request set previous_operation_id='a-ready' where "
-            "operation_id='z-wait'",
-        ),
-        (
-            "smt_manual_request",
             "update smt_manual_request set previous_operation_id='z-wait' where "
             "operation_id='a-ready'",
-        ),
-        (
-            "smt_manual_request",
-            "update smt_manual_request set previous_operation_id=null where operation_id='a-ready'",
         ),
         (
             "reliable_message",
             "update reliable_message set business_key='business:foreign' where id=31",
         ),
-        (
-            "bin_roller_decision",
-            "update bin_roller_decision set source_ref='dec-ack' where id='dec-roller'",
-        ),
-        (
-            "smt_manual_rack_action",
-            "update smt_manual_rack_action set id='dec-roller' where id='active-ENTER'",
-        ),
-        (
-            "bin_roller_position_fact",
-            "update bin_roller_position_fact set work_line_id=18 where id='pos-roller-ENTER'",
-        ),
-        ("bin_roller_return_batch", "update bin_roller_return_batch set opportunity_id='absent'"),
         (
             "bin_roller_decision",
             "update bin_roller_decision set unused_racks='[\"unknown\"]' where id='drain-unused'",

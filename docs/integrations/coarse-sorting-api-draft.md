@@ -852,8 +852,8 @@ WES 收据受理响应（HTTP 202）：
 | 输送线入口                                        | `STATION_PIPELINE1_INPUT1`  | `STATION_PIPELINE2_INPUT1`  |
 | 输送线出口                                        | `STATION_PIPELINE1_OUTPUT1` | `STATION_PIPELINE2_OUTPUT1` |
 | 出料位置                                          | `STATION_OUTPUT1`           | `STATION_OUTPUT2`           |
-| `PUT_TO_BIN` 成功回报 `data.location`              | `STATION_PIPELINE1_OUTPUT1` | `STATION_OUTPUT2`           |
-| NG 平台                                           | `STATION_NG_PLATFORM1`      | `STATION_NG_PLATFORM2`      |
+| `PUT_TO_BIN` 成功回报 `data.location`              | `STATION_PIPELINE1_OUTPUT1` | `STATION_PIPELINE2_OUTPUT1`           |
+| NG 平台                                           | `STATION_PIPELINE1_OUTPUT1`      | `STATION_PIPELINE2_OUTPUT1`      |
 
 <a id="ecs-scan-completed"></a>
 

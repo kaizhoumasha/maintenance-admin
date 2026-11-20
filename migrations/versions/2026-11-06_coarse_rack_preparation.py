@@ -196,7 +196,8 @@ def upgrade():
             (
                 "source_kind IN ('MANUAL_RETURN','MANUAL_TRANSFER','ROLLER_ORDINA"
                 "RY','ROLLER_DRAIN','AUTO_INBOUND_SOURCE','AUTO_OUTBOUND_RETURN',"
-                "'AUTO_OUTBOUND_TARGET','COARSE_INCOMING','COARSE_WMS_PRESENT')"
+                "'AUTO_OUTBOUND_TARGET','COARSE_INCOMING','COARSE_WMS_PRESENT',"
+                "'XRAY_RETURN')"
             ),
         )
 

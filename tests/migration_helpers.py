@@ -1,4 +1,7 @@
+import asyncio
+import hashlib
 import os
+import re
 import shutil
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
@@ -94,6 +97,7 @@ def sqlite_migration_start(tmp_path_factory):
 @pytest.fixture
 async def state_migration(request, tmp_path, sqlite_migration_start):
     key, backend, *initial = request.param
+    revision = initial[0] if initial else "head"
     if backend == "sqlite":
         url = f"sqlite+aiosqlite:///{tmp_path / 'state.db'}"
     else:
@@ -107,7 +111,9 @@ async def state_migration(request, tmp_path, sqlite_migration_start):
     async with AsyncExitStack() as databases:
         if backend != "sqlite":
             # Keep prior cases' catalog maintenance out of this source's writer-drain proof.
-            url, _ = await databases.enter_async_context(isolated_schema_database(url))
+            url = await databases.enter_async_context(
+                cloned_revision_database(url, revision, downgrade_base=bool(initial))
+            )
         engine = create_database_engine(url)
 
         async def migrate(direction, revision):
@@ -167,15 +173,121 @@ async def state_migration(request, tmp_path, sqlite_migration_start):
         try:
             if backend == "sqlite" and initial:
                 await sqlite_migration_start(initial[0], tmp_path / "state.db")
-            else:
-                if initial:
-                    await migrate("downgrade", "base")
-                await migrate("upgrade", initial[0] if initial else "head")
+            elif backend == "sqlite":
+                await migrate("upgrade", "head")
             yield SimpleNamespace(
                 engine=engine, migrate=migrate, backend=backend, schema_snapshot=schema_snapshot
             )
         finally:
             await engine.dispose()
+
+
+_TEMPLATE_NAME = re.compile(r"^[a-z0-9_]+$")
+_templates: dict[tuple, tuple[str, str]] = {}
+
+
+def _quote_ident(name):
+    if not _TEMPLATE_NAME.fullmatch(name):
+        raise ValueError(f"unsafe database name: {name}")
+    return f'"{name}"'
+
+
+def _server_identity(pg_url):
+    parsed = make_url(pg_url)
+    return (parsed.host, parsed.port, parsed.username)
+
+
+async def _autocommit(pg_url, statement, parameters=None):
+    admin = create_async_engine(pg_url, isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as connection:
+            await connection.execute(text(statement), parameters or {})
+    finally:
+        await admin.dispose()
+
+
+async def _freeze_template(pg_url, database):
+    await _autocommit(
+        pg_url,
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        "WHERE datname = :name AND pid <> pg_backend_pid()",
+        {"name": database},
+    )
+    await _autocommit(
+        pg_url,
+        f"ALTER DATABASE {_quote_ident(database)} WITH ALLOW_CONNECTIONS false",
+    )
+
+
+async def _create_from_template(pg_url, database, template):
+    statement = f"CREATE DATABASE {_quote_ident(database)} TEMPLATE {_quote_ident(template)}"
+    error = None
+    for _attempt in range(5):
+        try:
+            await _autocommit(pg_url, statement)
+            return
+        except Exception as exc:
+            error = exc
+            if "other users" not in str(exc):
+                raise
+            await _freeze_template(pg_url, template)
+    raise error
+
+
+async def _build_revision_template(pg_url, name, revision, *, downgrade_base):
+    await migration_database_ddl(pg_url, name, create=True)
+    url = make_url(pg_url).set(database=name).render_as_string(hide_password=False)
+    try:
+        if downgrade_base:
+            result = await run_alembic(url, "downgrade", "base")
+            assert result.returncode == 0, result.stdout + result.stderr
+        result = await run_alembic(url, "upgrade", revision)
+        assert result.returncode == 0, result.stdout + result.stderr
+        await _freeze_template(pg_url, name)
+    except Exception:
+        await migration_database_ddl(pg_url, name, create=False)
+        raise
+
+
+async def ensure_revision_template(pg_url, revision, *, downgrade_base):
+    key = (*_server_identity(pg_url), revision, downgrade_base)
+    cached = _templates.get(key)
+    if cached:
+        return cached[1]
+    digest = hashlib.sha256(f"{revision}:{downgrade_base}".encode()).hexdigest()[:16]
+    name = f"mig_template_{os.getpid()}_{digest}"
+    await _build_revision_template(pg_url, name, revision, downgrade_base=downgrade_base)
+    current = _templates.get(key)
+    if current:
+        await migration_database_ddl(pg_url, name, create=False)
+        return current[1]
+    _templates[key] = (pg_url, name)
+    return name
+
+
+@asynccontextmanager
+async def cloned_revision_database(pg_url, revision, *, downgrade_base):
+    template = await ensure_revision_template(pg_url, revision, downgrade_base=downgrade_base)
+    database = "schema_test_" + uuid4().hex
+    await _create_from_template(pg_url, database, template)
+    url = make_url(pg_url).set(database=database).render_as_string(hide_password=False)
+    try:
+        yield url
+    finally:
+        await migration_database_ddl(pg_url, database, create=False)
+
+
+async def drop_migration_templates_async():
+    templates = list(_templates.values())
+    _templates.clear()
+    for url, name in templates:
+        await migration_database_ddl(url, name, create=False)
+
+
+def drop_migration_templates():
+    if not _templates:
+        return
+    asyncio.run(drop_migration_templates_async())
 
 
 async def migration_database_ddl(pg_url, database, *, create):

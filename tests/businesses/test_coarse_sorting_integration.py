@@ -9,8 +9,8 @@ import sys
 from fastapi import FastAPI, Request
 from pytest import mark
 
-from tests.helpers import ecs_status_document, loopback_app, run_alembic
-from tests.migration_helpers import schema_database  # noqa: F401
+from tests.helpers import ecs_status_document, loopback_app
+from tests.migration_helpers import cloned_revision_database
 
 VALIDATE = "inbound.coarse_sorting.validate_bind@v1"
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
@@ -24,11 +24,9 @@ async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp
     await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'first-and-tail.db'}")
 
 
-async def test_postgres_integration_resumes_original_work_across_processes(schema_database):  # noqa: F811
-    url, _ = schema_database
-    result = await run_alembic(url, "upgrade", "head")
-    assert result.returncode == 0, result.stdout + result.stderr
-    await exercise_integration(url)
+async def test_postgres_integration_resumes_original_work_across_processes(pg_url):
+    async with cloned_revision_database(pg_url, "head", downgrade_base=False) as url:
+        await exercise_integration(url)
 
 
 @mark.parametrize("mode", ["fixed", "dual"])
@@ -38,11 +36,9 @@ async def test_configured_mock_line_completes_normal_and_ng_through_the_original
     await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'mock.db'}", mock=mode)
 
 
-async def test_postgres_mock_round_with_real_outbox_transactions(schema_database):  # noqa: F811
-    url, _ = schema_database
-    result = await run_alembic(url, "upgrade", "head")
-    assert result.returncode == 0, result.stdout + result.stderr
-    await exercise_integration(url, mock="random")
+async def test_postgres_mock_round_with_real_outbox_transactions(pg_url):
+    async with cloned_revision_database(pg_url, "head", downgrade_base=False) as url:
+        await exercise_integration(url, mock="random")
 
 
 async def exercise_integration(integration_database, *, mock=None):
@@ -132,24 +128,44 @@ async def exercise_integration(integration_database, *, mock=None):
         }
 
     async def run(phase, *, tail=False, **locations):
-        targets = {
-            protocol: {"protocol": protocol, "base_url": origin}
-            for protocol in ("wms-decisions", "wms-facts", "wms-transport")
-        }
         if phase == "mock":
+            targets = {
+                protocol: {"protocol": protocol, "base_url": origin}
+                for protocol in ("wms-decisions", "wms-facts", "wms-transport")
+            }
             targets.update(
                 {
-                    f"coarse-sorting-mock-wms-{endpoint}": {
-                        "protocol": f"wms-{endpoint}",
+                    "coarse-sorting-mock-wms-decisions": {
+                        "protocol": "wms-decisions",
                         "base_url": origin,
                         "explicit_only": True,
-                    }
-                    for endpoint in ("decisions", "facts")
+                    },
+                    "coarse-sorting-mock-wms-facts": {
+                        "protocol": "wms-facts",
+                        "base_url": origin,
+                        "explicit_only": True,
+                    },
                 }
             )
+        else:
+            targets = {
+                protocol: {"protocol": protocol, "base_url": origin}
+                for protocol in ("wms-decisions", "wms-facts", "wms-transport")
+            }
         result = await asyncio.to_thread(
             subprocess.run,
-            [sys.executable, "-m", __name__, phase, origin],
+            [
+                sys.executable,
+                "-c",
+                "from app.core.config import Settings; "
+                "Settings.model_config['env_file'] = None; "
+                "import runpy, sys; "
+                "sys.argv = ['tests.businesses.test_coarse_sorting_integration', *sys.argv[1:]]; "
+                "runpy.run_module('tests.businesses.test_coarse_sorting_integration', "
+                "run_name='__main__')",
+                phase,
+                origin,
+            ],
             env={
                 **os.environ,
                 "ENVIRONMENT": "local",

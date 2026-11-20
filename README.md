@@ -49,7 +49,7 @@ scripts/lint.sh      # ruff check --fix + format
 
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
 
-CI 将完整套件分为六道，每道拥有独立 PostgreSQL、两个专项迁移库和 Redis；六道全部通过才算完整验证。可选 `--test-lane=N/T` 的用法、隔离要求及本机实测见[并行测试分道](docs/testing/test-lanes.md)；默认 `uv run pytest` 保持完整运行。
+CI 将完整套件分为十道，每道拥有独立 PostgreSQL、三个专项迁移库和 Redis；十道全部通过才算完整验证。可选 `--test-lane=N/T` 的用法、隔离要求及本机实测见[并行测试分道](docs/testing/test-lanes.md)；默认 `uv run pytest` 保持完整运行。
 
 项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。schema 搬迁仅接受完整 `a023a20261024` 旧基线，原地移动其 12 张项目表及版本表，其他系统表不动；更早的旧库先用旧代码升级到该基线。后续历史统一仍须按上面的 A / B 维护窗口分别交付。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
 

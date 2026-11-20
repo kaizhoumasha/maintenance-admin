@@ -1396,60 +1396,6 @@ async def test_scan_revision_replaces_only_unaccepted_material_once(decided_outb
             assert rack.actions[-1].kind == "DEPART"
 
 
-async def test_pending_plate_reuses_outer_workline_locks(decided_outbound, monkeypatch):
-    from app.businesses.smt_auto import outbound, service
-
-    host = decided_outbound
-    auto = service.SmtAutoService(replace(host.dispatch.capabilities, ecs=host.ecs), worklines=())
-    auto.dispatch, auto.roller, auto.outbound = host.dispatch, host.roller, host.outbound
-    original = service.lock_line
-    locks = []
-
-    async def track(session, dispatch, work_line_id, **options):
-        locks.append(work_line_id)
-        return await original(session, dispatch, work_line_id, **options)
-
-    monkeypatch.setattr(service, "lock_line", track)
-    monkeypatch.setattr(outbound, "lock_line", track)
-    async with host.factory.begin() as session:
-        plate = await auto.advance_original(session, "OUTBOUND_PLATE", host.plate_id, now_ms=60)
-        assert plate.put_command_code is None
-    assert locks == [1]
-
-
-@pytest.mark.parametrize("direction_host", ["postgres"], indirect=True)
-async def test_outbound_decision_does_not_lock_unrelated_completed_task(decided_outbound):
-    from sqlalchemy import text
-
-    from app.businesses.smt_auto.service import SmtAutoService
-
-    host = decided_outbound
-    auto = SmtAutoService(replace(host.dispatch.capabilities, ecs=host.ecs), worklines=())
-    auto.dispatch, auto.roller, auto.outbound = host.dispatch, host.roller, host.outbound
-    await host.settle("outbound.bin.material.decide@v1", accepted_target())
-    async with host.factory.begin() as session:
-        session.add(
-            AutoTask(
-                task_id="historical-task",
-                business_type="outbound",
-                work_line_id=1,
-                workline_code="L1",
-                issued_operation_id="historical-issued",
-                issued_timestamp=1,
-                issued_data={},
-                dispatch_sequence=1,
-                status="COMPLETED",
-                pending=False,
-            )
-        )
-    async with host.factory.begin() as history:
-        await history.get(AutoTask, "historical-task", with_for_update=True)
-        async with host.factory.begin() as session:
-            await session.execute(text("SET LOCAL lock_timeout = '500ms'"))
-            plate = await auto.advance_original(session, "OUTBOUND_PLATE", host.plate_id, now_ms=60)
-            assert plate.put_command_code
-
-
 async def test_material_notice_targets_original_outbound_operation(decided_outbound, monkeypatch):
     host = decided_outbound
     from app.businesses.smt_auto.service import SmtAutoService

@@ -1,7 +1,6 @@
 """The deployed catalog uses the same coarse scan entry in every environment."""
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -276,10 +275,11 @@ async def test_debug_and_public_callback_share_configured_scan_and_projection(co
     assert other_state["business"]["id"] != original["id"]
 
 
-async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monkeypatch):
+async def test_main_lifespan_enables_committed_scan_wakeup(
+    configured_scan, monkeypatch, real_redis
+):
     from contextlib import asynccontextmanager
 
-    from redis.asyncio import Redis
     from sqlalchemy import select
 
     import app.main as main
@@ -299,7 +299,7 @@ async def test_main_lifespan_enables_committed_scan_wakeup(configured_scan, monk
         async with original_lifespan(*args, **kwargs, database_url=database_url) as outbox:
             yield outbox
 
-    redis_client = Redis.from_url(os.environ["TEST_REDIS_URL"])
+    redis_client = real_redis
 
     def redis_factory():
         return redis_client

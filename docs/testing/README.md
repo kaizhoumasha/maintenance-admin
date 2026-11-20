@@ -18,7 +18,7 @@ uv run ruff format --check .
 
 普通测试走脚本化 HTTP 客户端、MockTransport 或测试自身持有的回环服务，不向真实 ECS/WMS 发送任务。需要使用真实地址的调试应另按接入合同授权；测试出口保护不变成生产地址白名单。
 
-CI 使用[六道完整测试](test-lanes.md)，每道独立运行 PostgreSQL、历史迁移库、Transport 迁移库及 Redis。默认命令仍跑完整套件；本地使用 `--test-lane=N/T` 时必须合并全部道的结果并逐项核对收集、跳过和重复身份。
+CI 使用[十道完整测试](test-lanes.md)，每道独立运行 PostgreSQL、历史、Transport 和 SMT AUTO 迁移库及 Redis。默认命令仍跑完整套件；本地使用 `--test-lane=N/T` 时必须合并全部道的结果并逐项核对收集、跳过和重复身份。
 
 ## 按行为选择已有回归
 
