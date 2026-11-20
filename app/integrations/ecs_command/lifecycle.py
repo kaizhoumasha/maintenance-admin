@@ -189,8 +189,7 @@ class EcsLifecycle:
     @staticmethod
     def retry_expired(command):
         return (
-            command.owner_domain == "coarse_sorting"
-            and not command.blocked
+            not command.blocked
             and not command.needs_reconciliation
             and command.ack_record_id is None
             and command.applied_result_id is None

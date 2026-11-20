@@ -235,11 +235,16 @@ class SnapshotTransactions:
             await self.finish(claim, outcome)
         return False
 
-    async def should_retry_expired(self, claim):
+    async def retry_expires_at(self, claim, now):
         async with evidence_transaction(self.store.session_factory) as session:
             port, context, row, _ = await self.locked(session, claim)
             retry = getattr(port, "retry_expired", None)
-            return bool(row is not None and retry is not None and retry(context))
+            renew = getattr(port, "dispatch_expires_at", None)
+            if row is None or retry is None or renew is None or not retry(context):
+                return None
+            if claim.message.expires_at is not None and claim.message.expires_at > now:
+                return claim.message.expires_at
+            return renew(context, now)
 
     @staticmethod
     def unstarted(row, claim):
@@ -270,8 +275,11 @@ class SnapshotTransactions:
         if claim.message.expires_at is not None and claim.message.expires_at <= now:
             renew = getattr(port, "pre_dispatch_expires_at", None)
             if renew is not None and row.dispatch_started_at is None:
-                self.defer(row, now, "PRE_DISPATCH_WAIT", expires_at=renew(context, now))
-            else:
+                expires_at = renew(context, now)
+                if expires_at is not None:
+                    self.defer(row, now, "PRE_DISPATCH_WAIT", expires_at=expires_at)
+                    return True
+            if row.status == "SENDING" and row.lease_id == claim.lease_id:
                 from .store import AttemptOutcome
 
                 await self.apply(
@@ -306,11 +314,15 @@ class SnapshotTransactions:
 
             if claim.message.expires_at is not None and claim.message.expires_at <= now:
                 retry = getattr(port, "retry_expired", None)
-                if retry is not None and retry(context):
+                renew = getattr(port, "dispatch_expires_at", None)
+                next_expires_at = (
+                    renew(context, now) if retry and renew and retry(context) else None
+                )
+                if next_expires_at is not None:
                     outcome = AttemptOutcome(
                         MessageStatus.PENDING,
                         next_attempt_at=now + timedelta(seconds=5),
-                        next_expires_at=now + timedelta(seconds=300),
+                        next_expires_at=next_expires_at,
                     )
                 else:
                     outcome = AttemptOutcome(MessageStatus.EXPIRED)
@@ -329,7 +341,9 @@ class SnapshotTransactions:
                         return None
                     dispatch_expiry = getattr(port, "dispatch_expires_at", None)
                     if dispatch_expiry is not None:
-                        row.expires_at = dispatch_expiry(context, now)
+                        expires_at = dispatch_expiry(context, now)
+                        if expires_at is not None:
+                            row.expires_at = expires_at
                     until = now + timedelta(
                         seconds=target.timeout_ms / 1000 + self.store.lease_margin_s
                     )
@@ -590,9 +604,24 @@ class SnapshotTransactions:
                                     and row.dispatch_started_at is None
                                     and port.may_reclaim_unstarted(context)
                                 ):
-                                    row.expires_at = renew(context, now)
+                                    expires_at = renew(context, now)
+                                    if expires_at is not None:
+                                        row.expires_at = expires_at
+                                        row.next_attempt_at = now
+                                        row.pause_reason = "PRE_DISPATCH_WAIT"
+                                        row.updated_at = now
+                                        continue
+                                retry = getattr(port, "retry_expired", None)
+                                renew = getattr(port, "dispatch_expires_at", None)
+                                next_expires_at = (
+                                    renew(context, now)
+                                    if retry and renew and retry(context)
+                                    else None
+                                )
+                                if next_expires_at is not None:
+                                    row.expires_at = next_expires_at
                                     row.next_attempt_at = now
-                                    row.pause_reason = "PRE_DISPATCH_WAIT"
+                                    row.pause_reason = None
                                     row.updated_at = now
                                     continue
                                 outcome = AttemptOutcome(MessageStatus.EXPIRED)

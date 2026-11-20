@@ -312,15 +312,15 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         elif verdict and verdict.kind == VerdictKind.PEER_TERMINAL:
             outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)
         elif verdict and verdict.kind == VerdictKind.HOLD:
-            retry_expired = await store.snapshots.should_retry_expired(claim)
-            if verdict.pause_reason == "DELIVERY_UNKNOWN" and retry_expired:
-                now = utc_datetime(clock())
+            now = utc_datetime(clock())
+            next_expires_at = await store.snapshots.retry_expires_at(claim, now)
+            if verdict.pause_reason == "DELIVERY_UNKNOWN" and next_expires_at is not None:
                 outcome = AttemptOutcome(
                     MessageStatus.PENDING,
                     result=result,
                     verdict=verdict,
                     next_attempt_at=now + timedelta(seconds=5),
-                    next_expires_at=now + timedelta(seconds=300),
+                    next_expires_at=next_expires_at,
                     delivery_uncertain=True,
                 )
             else:
@@ -344,13 +344,14 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                     pause_reason="CONTRACT_NON_COMPLIANT",
                 )
             elif claim.message.expires_at is not None and claim.message.expires_at <= now:
-                if await store.snapshots.should_retry_expired(claim):
+                next_expires_at = await store.snapshots.retry_expires_at(claim, now)
+                if next_expires_at is not None:
                     outcome = AttemptOutcome(
                         MessageStatus.PENDING,
                         result=result,
                         verdict=verdict,
                         next_attempt_at=now + timedelta(seconds=5),
-                        next_expires_at=now + timedelta(seconds=300),
+                        next_expires_at=next_expires_at,
                         delivery_uncertain=result.delivery_state != DeliveryState.NOT_SENT,
                     )
                 else:
@@ -381,14 +382,15 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                 delivery_uncertain=True,
             )
         else:
-            if await store.snapshots.should_retry_expired(claim):
-                now = utc_datetime(clock())
+            now = utc_datetime(clock())
+            next_expires_at = await store.snapshots.retry_expires_at(claim, now)
+            if next_expires_at is not None:
                 outcome = AttemptOutcome(
                     MessageStatus.PENDING,
                     result=result,
                     verdict=verdict,
                     next_attempt_at=now + timedelta(seconds=5),
-                    next_expires_at=now + timedelta(seconds=300),
+                    next_expires_at=next_expires_at,
                     delivery_uncertain=True,
                 )
             else:
