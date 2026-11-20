@@ -104,7 +104,16 @@ def violations(root: Path) -> list[str]:
         business = ".".join(("app", *parts[:2]))
         layer = parts[2].removesuffix(".py") if len(parts) > 2 else ""
         banned = ["app.controllers", "app.tasks"]
-        entries = ("ecs_event", "callback", "request", "dev", "dev_callback", "dev_ecs_event")
+        entries = (
+            "ecs_event",
+            "ecs_request",
+            "callback",
+            "request",
+            "dev",
+            "dev_callback",
+            "dev_ecs_event",
+            "dev_ecs_request",
+        )
         if layer in {"service", "services", "models"}:
             banned += [f"{business}.{entry}" for entry in (*entries, "composition")]
         if layer == "models":
