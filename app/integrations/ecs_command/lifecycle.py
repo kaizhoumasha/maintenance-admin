@@ -168,6 +168,34 @@ class EcsLifecycle:
             and command.task_type == "PUT_TO_RACK"
         )
 
+    @staticmethod
+    def _retry_expiry(command, now):
+        retry_window = (command.route or {}).get("retry_window")
+        if retry_window is None:
+            expires_at = command.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            if expires_at is not None and expires_at > now:
+                return expires_at
+            return now + timedelta(seconds=300)
+        return now + timedelta(seconds=float(retry_window))
+
+    def pre_dispatch_expires_at(self, command, now):
+        return self._retry_expiry(command, now)
+
+    def dispatch_expires_at(self, command, now):
+        return self._retry_expiry(command, now)
+
+    @staticmethod
+    def retry_expired(command):
+        return (
+            command.owner_domain == "coarse_sorting"
+            and not command.blocked
+            and not command.needs_reconciliation
+            and command.ack_record_id is None
+            and command.applied_result_id is None
+        )
+
     async def check_dispatch(self, factory, claim, clock):
         model = EcsCommand if enabled() else IntegrationExchange
         async with evidence_transaction(factory) as session:
@@ -202,13 +230,15 @@ class EcsLifecycle:
             if result.devices and result.devices[0].state.status == "IDLE":
                 return None
             reason = "DEVICE_NOT_IDLE" if result.devices else "DEVICE_STATUS_UNAVAILABLE"
-        next_check = clock() + timedelta(seconds=5)
+        now = clock()
+        next_check = now + timedelta(seconds=5)
         if retry_after is not None:
             next_check = max(next_check, retry_after)
         return AttemptOutcome(
             MessageStatus.PENDING,
             pause_reason=reason,
-            next_attempt_at=min(next_check, claim.message.expires_at or next_check),
+            next_attempt_at=next_check,
+            next_expires_at=self.pre_dispatch_expires_at(command, now),
         )
 
     async def before_send(self, session, command, claim, now):

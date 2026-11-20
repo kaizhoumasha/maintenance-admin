@@ -312,15 +312,27 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
         elif verdict and verdict.kind == VerdictKind.PEER_TERMINAL:
             outcome = AttemptOutcome(MessageStatus.FAILED, verdict.reason, result, verdict)
         elif verdict and verdict.kind == VerdictKind.HOLD:
-            outcome = AttemptOutcome(
-                MessageStatus.HELD,
-                result=result,
-                verdict=verdict,
-                pause_reason=verdict.pause_reason,
-                delivery_uncertain=True
-                if verdict.pause_reason != "CONTRACT_NON_COMPLIANT"
-                else None,
-            )
+            retry_expired = await store.snapshots.should_retry_expired(claim)
+            if verdict.pause_reason == "DELIVERY_UNKNOWN" and retry_expired:
+                now = utc_datetime(clock())
+                outcome = AttemptOutcome(
+                    MessageStatus.PENDING,
+                    result=result,
+                    verdict=verdict,
+                    next_attempt_at=now + timedelta(seconds=5),
+                    next_expires_at=now + timedelta(seconds=300),
+                    delivery_uncertain=True,
+                )
+            else:
+                outcome = AttemptOutcome(
+                    MessageStatus.HELD,
+                    result=result,
+                    verdict=verdict,
+                    pause_reason=verdict.pause_reason,
+                    delivery_uncertain=True
+                    if verdict.pause_reason != "CONTRACT_NON_COMPLIANT"
+                    else None,
+                )
         elif definite and (gated or not claim.delivery_uncertain):
             hint = verdict.retry_after_ms if verdict else None
             now = utc_datetime(clock())
@@ -332,7 +344,17 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                     pause_reason="CONTRACT_NON_COMPLIANT",
                 )
             elif claim.message.expires_at is not None and claim.message.expires_at <= now:
-                outcome = AttemptOutcome(MessageStatus.EXPIRED, result=result, verdict=verdict)
+                if await store.snapshots.should_retry_expired(claim):
+                    outcome = AttemptOutcome(
+                        MessageStatus.PENDING,
+                        result=result,
+                        verdict=verdict,
+                        next_attempt_at=now + timedelta(seconds=5),
+                        next_expires_at=now + timedelta(seconds=300),
+                        delivery_uncertain=result.delivery_state != DeliveryState.NOT_SENT,
+                    )
+                else:
+                    outcome = AttemptOutcome(MessageStatus.EXPIRED, result=result, verdict=verdict)
             else:
                 delay = retry_delay_s(claim.attempt_no, target, None, uniform)
                 delay = max(delay, (hint or 0) / 1000)
@@ -359,13 +381,24 @@ async def send_snapshot(claim, *, store, targets, adapters, provider, clock, uni
                 delivery_uncertain=True,
             )
         else:
-            outcome = AttemptOutcome(
-                MessageStatus.HELD,
-                result=result,
-                verdict=verdict,
-                pause_reason="DELIVERY_UNKNOWN",
-                delivery_uncertain=True,
-            )
+            if await store.snapshots.should_retry_expired(claim):
+                now = utc_datetime(clock())
+                outcome = AttemptOutcome(
+                    MessageStatus.PENDING,
+                    result=result,
+                    verdict=verdict,
+                    next_attempt_at=now + timedelta(seconds=5),
+                    next_expires_at=now + timedelta(seconds=300),
+                    delivery_uncertain=True,
+                )
+            else:
+                outcome = AttemptOutcome(
+                    MessageStatus.HELD,
+                    result=result,
+                    verdict=verdict,
+                    pause_reason="DELIVERY_UNKNOWN",
+                    delivery_uncertain=True,
+                )
     except EvidencePersistenceError:
         raise
     except PoolUnavailable:

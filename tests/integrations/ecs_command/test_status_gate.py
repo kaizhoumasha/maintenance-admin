@@ -75,6 +75,110 @@ async def test_coarse_command_waits_for_fresh_idle_and_sends_original(ecs, owner
             assert item.attempts == 1
 
 
+async def test_coarse_status_gate_renews_expiry_before_dispatch(ecs):
+    peer = FastAPI()
+
+    @peer.get("/api/v1/device/status")
+    async def status(device_code: str):
+        return ecs_status_document(device_code, status="RUNNING")
+
+    async with loopback_app(peer) as origin:
+        ecs.routes.origin = origin
+        now = datetime.now(UTC)
+        ecs.service.clock = ecs.outbox.clock = lambda: now
+        async with ecs.factory.begin() as session:
+            original = await ecs.service.create(
+                session,
+                owner=CommandOwner("coarse_sorting"),
+                call_key=str(uuid7()),
+                device_code="D1",
+                timeout_ms=30000,
+                command=EcsMove(qty=1),
+            )
+
+        async with simulator_sender(ecs, (origin,)) as sender:
+            sender.clock = sender.store.clock = lambda: now
+            assert await sender.tick(maintain=False) == 1
+            await asyncio.gather(*sender.inflight)
+            async with ecs.factory() as session:
+                first = await session.get(ReliableMessage, original.message_id)
+                first_expiry = first.expires_at.replace(tzinfo=UTC)
+
+            now += timedelta(seconds=301)
+            assert await sender.tick() == 1
+            await asyncio.gather(*sender.inflight)
+            async with ecs.factory() as session:
+                renewed = await session.get(ReliableMessage, original.message_id)
+                assert renewed.status == "PENDING"
+                assert renewed.expires_at.replace(tzinfo=UTC) > first_expiry
+                assert renewed.dispatch_started_at is None
+
+
+async def test_coarse_expired_delivery_requeues_original(ecs):
+    from app.http_client import DeliveryState, HttpResult
+    from app.integrations import history as history_records
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.reliable.delivery import send_one
+    from app.reliable.store import MessageStore
+    from app.reliable.testing import FakeClock
+
+    clock = FakeClock()
+    ecs.service.clock = ecs.outbox.clock = clock
+    async with ecs.factory.begin() as session:
+        original = await ecs.service.create(
+            session,
+            owner=CommandOwner("coarse_sorting"),
+            call_key=str(uuid7()),
+            device_code="D1",
+            timeout_ms=30000,
+            command=EcsMove(qty=1),
+        )
+    store = MessageStore(
+        ecs.factory,
+        lifecycles={"ecs-command": EcsLifecycle(ecs.service)},
+        records=history_records,
+        clock=clock,
+    )
+    (claim,) = await store.claim(1, ecs.targets)
+
+    class Client:
+        async def send(self, request):
+            clock.advance(seconds=301)
+            return HttpResult(
+                DeliveryState.HTTP_RESPONSE_COMPLETE,
+                None,
+                503,
+                (("content-type", "application/json"),),
+                b'{"code":503,"message":"TEMPORARILY_UNAVAILABLE"}',
+            )
+
+        async def aclose(self):
+            pass
+
+    provider = DynamicClients(factory=lambda _: Client())
+    await send_one(
+        claim,
+        store=store,
+        targets=ecs.targets,
+        adapters=ecs.adapters,
+        clients={},
+        provider=provider,
+        clock=clock,
+        uniform=lambda low, high: high,
+    )
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, original.message_id)
+        assert message.status == "PENDING"
+        assert message.operation_id == original.command_code
+        assert message.expires_at.replace(tzinfo=UTC) > clock()
+        view = await ecs.service.get_command(
+            session, owner=CommandOwner("coarse_sorting"), command_code=original.command_code
+        )
+        assert view.status == "QUEUED"
+    await provider.aclose()
+
+
 @pytest.mark.parametrize("interruption", ["release", "expired", "deadline"])
 async def test_unstarted_coarse_command_recovers_without_false_delivery(ecs, interruption):
     ecs.routes.origin = "http://127.0.0.1:9999"
@@ -99,10 +203,13 @@ async def test_unstarted_coarse_command_recovers_without_false_delivery(ecs, int
             now += timedelta(seconds=301 if interruption == "deadline" else 30)
             assert await sender.store.maintain_snapshots(10, ecs.targets, time.monotonic() + 3)
         if interruption == "deadline":
-            assert not await sender.store.claim(1, ecs.targets)
             async with ecs.factory() as session:
                 message = await session.get(ReliableMessage, original.message_id)
-                assert message.status == "EXPIRED" and not message.delivery_uncertain
+                assert message.status == "PENDING"
+                assert message.expires_at.replace(tzinfo=UTC) > now
+                assert not message.delivery_uncertain
+            (retry,) = await sender.store.claim(1, ecs.targets)
+            assert retry.message_id == original.message_id
         else:
             (retry,) = await sender.store.claim(1, ecs.targets)
             assert retry.message_id == original.message_id

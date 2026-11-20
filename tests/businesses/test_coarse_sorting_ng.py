@@ -427,7 +427,7 @@ async def test_same_barcode_full_station_and_unknown_delivery_keep_separate_orig
     first = await accept_and_validate(ng)
     ng.peer.command = "invalid"
     first_wire = await dispatch_ng(ng)
-    assert await ng.service.advance(first["id"]) == "NG_RECONCILIATION_REQUIRED"
+    assert await ng.service.advance(first["id"]) == "AWAITING_NG_RESULT"
     second = await accept_and_validate(ng, timestamp=1793206799001)
     ng.peer.command = "full"
     second_wire = await dispatch_ng(ng)
