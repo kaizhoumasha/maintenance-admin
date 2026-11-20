@@ -107,7 +107,7 @@ async def receive_request(request: Request) -> EcsRequestResponse:
         return result
     try:
         async with factory() as session, session.begin():
-            return await continue_ecs_request(
+            result = await continue_ecs_request(
                 session,
                 identity=result.digest,
                 deferred=deferred,
