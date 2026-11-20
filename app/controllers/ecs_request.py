@@ -169,6 +169,9 @@ async def receive_request(request: Request) -> EcsRequestResponse:
                 identity=result.digest,
                 deferred=deferred,
                 resolve_binding=getattr(request.app.state, "ecs_event_binding_resolver", None),
+                resolve_binding_snapshot=getattr(
+                    request.app.state, "ecs_request_binding_snapshot_resolver", None
+                ),
                 runtime=getattr(request.app.state, "business_runtime", None),
                 resolve_input_target=getattr(request.app.state, "ecs_event_input_target", None),
             )
@@ -307,9 +310,19 @@ async def wait_for_request(
     return None
 
 
-def include_ecs_request(app: FastAPI, *, environment: str, prefix: str = "/api/v1") -> None:
+def include_ecs_request(
+    app: FastAPI,
+    *,
+    environment: str,
+    prefix: str = "/api/v1",
+    resolve_binding_snapshot=None,
+) -> None:
     if requests() and getattr(app.state, "ecs_event_binding_resolver", None) is None:
         raise ValueError("Formal ECS request handlers require a binding resolver")
+    if any(not item.registration_source.local_only for item in requests().values()) and (
+        resolve_binding_snapshot is None
+    ):
+        raise ValueError("Formal ECS request handlers require a snapshot binding resolver")
     if (
         any(
             not item.registration_source.local_only
@@ -319,4 +332,5 @@ def include_ecs_request(app: FastAPI, *, environment: str, prefix: str = "/api/v
         and getattr(app.state, "ecs_event_input_target", None) is None
     ):
         raise ValueError("Shared ECS requests require an input target resolver")
+    app.state.ecs_request_binding_snapshot_resolver = resolve_binding_snapshot
     app.include_router(router, prefix=prefix)

@@ -56,6 +56,48 @@ async def resolve_binding(session, device_code: str) -> DeviceBinding | None:
     )
 
 
+async def resolve_binding_snapshot(
+    session, device_code: str, snapshot: dict
+) -> DeviceBinding | None:
+    """Lock and resolve the binding captured when an ECS request was accepted."""
+    line = await session.scalar(
+        select(WorkLine)
+        .where(WorkLine.id == snapshot.get("work_line_id"))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if line is None:
+        raise AppError(ErrorCode.CONFLICT, "设备绑定已变化，请重试")
+    device = await session.scalar(
+        select(Device)
+        .where(Device.id == snapshot.get("device_id"))
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        device is None
+        or device.device_code != device_code
+        or device.work_line_id != line.id
+        or device.version != snapshot.get("device_version")
+        or line.version != snapshot.get("work_line_version")
+    ):
+        raise AppError(ErrorCode.CONFLICT, "设备绑定已变化，请重试")
+    roles = [role for role, code in line.device_bindings.items() if code == device_code]
+    if len(roles) != 1:
+        return None
+    return DeviceBinding(
+        device_id=device.id,
+        device_code=device.device_code,
+        device_version=device.version,
+        work_line_id=line.id,
+        work_line_version=line.version,
+        device_role=roles[0],
+        device_bindings=dict(line.device_bindings),
+        position_bindings=dict(line.position_bindings),
+        business_code=line.business_code,
+    )
+
+
 async def resolve_role(session, work_line_id: int, device_role: str) -> DeviceBinding:
     line = await session.get(WorkLine, work_line_id, populate_existing=True)
     code = line.device_bindings.get(device_role) if line else None

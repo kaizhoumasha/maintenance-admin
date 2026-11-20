@@ -1,11 +1,19 @@
+import asyncio
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import func, select
 
 from app.controllers import ecs_request as ecs_request_controller
+from app.core.identifiers import uuid7
+from app.integrations.callback_receipts import find_receipt_state
 from app.integrations.ecs_request import CallbackPayload, ecs_request, registry
+from app.integrations.ecs_request.envelope import EcsRequestEnvelope
+from app.integrations.ecs_request.receiver import OPERATION, request_identity
 from app.main import app
+from app.models import ReliableMessage
 from tests.helpers import ecs_binding, read_receipts
 
 PATH = "/api/v1/callback/request"
@@ -20,6 +28,7 @@ class Decision(BaseModel):
 def isolated(monkeypatch):
     monkeypatch.setattr(registry, "_registry", {})
     monkeypatch.setattr(app.state, "ecs_event_binding_resolver", ecs_binding)
+    monkeypatch.setattr(app.state, "ecs_request_binding_snapshot_resolver", None)
 
 
 def body(**changes):
@@ -220,3 +229,150 @@ async def test_unknown_delivery_state_does_not_continue_to_handler(monkeypatch):
         await ecs_request_controller.wait_for_request(
             Factory(), "digest", SimpleNamespace(message_id=1, operation="wms", operation_id="op")
         )
+
+
+async def enqueue(ctx, operation_id):
+    now = datetime.now(UTC)
+    message = ReliableMessage(
+        target="wms",
+        operation="wms.decide@v1",
+        operation_id=operation_id,
+        status="PENDING",
+        exchange_id=uuid7(),
+        request_record_id=uuid7(),
+        created_at=now,
+        updated_at=now,
+        next_attempt_at=now,
+    )
+    ctx.session.add(message)
+    await ctx.session.flush()
+    return message
+
+
+def terminal_delivery(response_state, delivery_status):
+    async def result(*_args, **_kwargs):
+        return SimpleNamespace(
+            delivery_uncertain=False,
+            response_state=response_state,
+            delivery_terminal=True,
+            delivery_status=delivery_status,
+        )
+
+    return result
+
+
+async def saved_request(store, payload):
+    envelope = EcsRequestEnvelope.model_validate(payload)
+    async with store() as session:
+        state = await find_receipt_state(session, OPERATION, request_identity(envelope))
+        messages = await session.scalar(select(func.count()).select_from(ReliableMessage))
+    return state, messages
+
+
+@pytest.mark.parametrize(
+    ("response_state", "delivery_status"),
+    [("VALID", "DONE"), ("NONE", "EXPIRED"), ("NONE", "ABANDONED")],
+)
+async def test_terminal_result_continues_once(
+    callback_client, callback_store, monkeypatch, response_state, delivery_status
+):
+    calls = []
+
+    @ecs_request("WAIT_DECIDE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        calls.append(ctx.deferred)
+        if ctx.deferred is None:
+            message = await enqueue(ctx, f"{response_state}-{delivery_status}")
+            ctx.defer(message.id, message.operation, message.operation_id)
+            return
+        ctx.respond(Decision(result="ALLOW"))
+
+    monkeypatch.setattr(
+        ecs_request_controller,
+        "get_result",
+        terminal_delivery(response_state, delivery_status),
+    )
+    payload = body(request_type="WAIT_DECIDE", timestamp=2)
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"code": 200, "message": "DECIDED", "data": {"result": "ALLOW"}}
+    assert len(calls) == 2
+    state, messages = await saved_request(callback_store, payload)
+    assert state.status_code == 200
+    assert state.body["data"]["result"] == "ALLOW"
+    assert messages == 1
+
+
+async def test_wait_budget_keeps_pending_receipt(callback_client, callback_store, monkeypatch):
+    calls = []
+
+    @ecs_request("WAIT_BUDGET", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        calls.append(ctx.receipt_id)
+        message = await enqueue(ctx, "budget")
+        ctx.defer(message.id, message.operation, message.operation_id)
+
+    async def pending(*_args, **_kwargs):
+        return SimpleNamespace(
+            delivery_uncertain=False,
+            response_state="NONE",
+            delivery_terminal=False,
+            delivery_status="PENDING",
+        )
+
+    original_sleep = asyncio.sleep
+
+    async def step(_delay):
+        await original_sleep(0.05)
+
+    async def tiny_budget(*_args, **_kwargs):
+        return 20
+
+    monkeypatch.setattr(ecs_request_controller, "get_result", pending)
+    monkeypatch.setattr(ecs_request_controller.asyncio, "sleep", step)
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", tiny_budget)
+    payload = body(request_type="WAIT_BUDGET", timestamp=3)
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+    assert len(calls) == 1
+    state, messages = await saved_request(callback_store, payload)
+    assert state.status_code == 503
+    assert state.body is None
+    assert state.prepared_body is None
+    assert state.diagnostic is None
+    assert state.event_context["deferred_request"]["operation_id"] == "budget"
+    assert messages == 1
+
+
+@pytest.mark.parametrize("repeat", ["same", "silent"])
+async def test_terminal_defer_rolls_back_with_diagnostic(
+    callback_client, callback_store, monkeypatch, repeat
+):
+    queued = {}
+
+    @ecs_request("WAIT_INCOMPLETE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        if ctx.deferred is None:
+            message = await enqueue(ctx, repeat)
+            queued["id"] = message.id
+            ctx.defer(message.id, message.operation, message.operation_id)
+            return
+        if repeat == "same":
+            ctx.defer(ctx.deferred.message_id, ctx.deferred.operation, ctx.deferred.operation_id)
+
+    monkeypatch.setattr(ecs_request_controller, "get_result", terminal_delivery("VALID", "DONE"))
+    payload = body(request_type="WAIT_INCOMPLETE", timestamp=4)
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+    state, messages = await saved_request(callback_store, payload)
+    assert state.status_code == 503
+    assert state.body is None
+    assert state.prepared_body is None
+    assert state.diagnostic == [{"reason_code": "REQUEST_HANDLER_INCOMPLETE"}]
+    assert state.event_context["deferred_request"]["message_id"] == queued["id"]
+    assert messages == 1
