@@ -560,11 +560,11 @@ async def test_held_put_retains_original_target_until_late_result(direct):
     flow.peer.command = "invalid"
     put = await dispatch_put(flow, row)
     original = (await flow.rows())[0]
-    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
     flow.rebuild()
     flow.peer.command = "ack"
     flow.now += timedelta(hours=1)
-    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
     assert await flow.dispatch() == 0
     retained = (await flow.rows())[0]
     assert retained["current_action_id"] == original["current_action_id"]

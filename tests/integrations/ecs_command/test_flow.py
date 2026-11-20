@@ -326,7 +326,7 @@ async def test_early_result_revokes_claim_before_network(ecs):
     assert not await store.before_send(claim, ecs.targets["ecs"])
 
 
-async def test_unknown_delivery_is_held_and_restart_does_not_retry(ecs):
+async def test_unknown_delivery_retries_original_command(ecs):
     from app.integrations.ecs_command.clients import DynamicClients
     from app.reliable.delivery import send_one
 
@@ -354,11 +354,11 @@ async def test_unknown_delivery_is_held_and_restart_does_not_retry(ecs):
     )
     async with ecs.factory() as session:
         row = await session.scalar(select(ReliableMessage))
-        assert row.status == "HELD" and row.delivery_uncertain
+        assert row.status == "PENDING" and row.delivery_uncertain
         view = await ecs.service.get_command(
             session, owner=ecs.owner, command_code=command.command_code
         )
-        assert view.status == "RECONCILING"
+        assert view.status == "QUEUED"
     assert await store.claim(1, ecs.targets) == ()
     await clients.aclose()
 
@@ -371,7 +371,7 @@ async def test_unknown_delivery_is_held_and_restart_does_not_retry(ecs):
         (409, "IDEMPOTENCY_CONFLICT", "HELD"),
         (429, "CAPACITY_EXCEEDED", "HELD"),
         (503, "TEMPORARILY_UNAVAILABLE", "PENDING"),
-        (500, "TEMPORARILY_UNAVAILABLE", "HELD"),
+        (500, "TEMPORARILY_UNAVAILABLE", "PENDING"),
     ],
 )
 async def test_sender_matrix_and_command_projection(ecs, code, message, expected):
@@ -449,11 +449,14 @@ async def test_known_not_received_conflicts_but_new_inflight_attempt_accepts(ecs
         ).status_code == 200
 
 
-async def test_definite_nonacceptance_result_is_persistently_conflicting(ecs):
+@pytest.mark.parametrize("owner", ["test", "coarse_sorting"])
+async def test_definite_nonacceptance_result_is_persistently_conflicting(ecs, owner):
     from app.integrations.ecs_command.result import receive_ecs_result
+    from app.integrations.ecs_command.service import CommandOwner
     from app.reliable.store import AttemptOutcome
     from app.reliable.types import MessageStatus, Verdict, VerdictKind
 
+    ecs.owner = CommandOwner(owner)
     command = await prepare(ecs)
     store = await make_store(ecs)
     claim = (await store.claim(1, ecs.targets))[0]
@@ -731,8 +734,8 @@ async def test_revoked_old_origin_does_not_block_new_independent_command(ecs):
     "code,message,expected",
     [
         (200, "ACK", "DONE"),
-        (503, "TEMPORARILY_UNAVAILABLE", "EXPIRED"),
-        (500, "TEMPORARILY_UNAVAILABLE", "HELD"),
+        (503, "TEMPORARILY_UNAVAILABLE", "PENDING"),
+        (500, "TEMPORARILY_UNAVAILABLE", "PENDING"),
     ],
 )
 async def test_response_after_sending_deadline_is_not_discarded(ecs, code, message, expected):
@@ -773,10 +776,7 @@ async def test_response_after_sending_deadline_is_not_discarded(ecs, code, messa
         view = await ecs.service.get_command(
             session, owner=ecs.owner, command_code=command.command_code
         )
-        assert (
-            view.status
-            == {"DONE": "WAITING_RESULT", "EXPIRED": "EXPIRED", "HELD": "RECONCILING"}[expected]
-        )
+        assert view.status == {"DONE": "WAITING_RESULT", "PENDING": "QUEUED"}[expected]
     await provider.aclose()
 
 

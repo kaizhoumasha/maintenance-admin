@@ -1,6 +1,7 @@
 """Original scan, decision and movement evidence survive retries and process restarts."""
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -295,15 +296,28 @@ async def test_result_before_ack_and_receipt_cleanup_keep_original_move(coarse_f
     assert len(flow.peer.requests) == len(flow.peer.commands) == 1
 
 
-async def test_unknown_ecs_delivery_keeps_original_command(coarse_forward):
+async def test_unknown_ecs_delivery_retries_original_command(coarse_forward):
     flow = coarse_forward
     row = await flow.prepare_command()
     flow.peer.command = "invalid"
     await flow.dispatch()
-    assert await flow.service.advance(row["id"]) == "MOVE_RECONCILIATION_REQUIRED"
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
     flow.rebuild()
-    assert await flow.service.advance(row["id"]) == "MOVE_RECONCILIATION_REQUIRED"
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
     assert (await flow.rows())[0]["command_code"] == row["command_code"]
+    flow.store.clock = lambda: datetime.now(UTC) + timedelta(seconds=6)
+    assert await flow.dispatch() == 1
+    assert len(flow.peer.commands) == 2
+
+
+async def test_coarse_result_settles_without_ack(coarse_forward):
+    flow = coarse_forward
+    row = await flow.prepare_command()
+    flow.peer.command = "invalid"
+    await flow.dispatch()
+    assert await flow.service.advance(row["id"]) == "AWAITING_MOVE_RESULT"
+    assert (await flow.result(row)).status_code == 200
+    assert await flow.service.advance(row["id"]) == "AWAITING_ALLOCATION_STAGE"
     assert await flow.dispatch() == 0
 
 

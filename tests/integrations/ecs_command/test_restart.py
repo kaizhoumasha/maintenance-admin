@@ -135,6 +135,15 @@ async def wait_for_expiry(ecs, sender):
     assert status == "EXPIRED"
 
 
+async def retry_after_expiry(sender):
+    count = await sender.tick()
+    if count == 0:
+        count = await sender.tick()
+    assert count == 1
+    async with asyncio.timeout(5):
+        await asyncio.gather(*sender.inflight)
+
+
 async def state(ecs):
     async with ecs.factory() as session:
         command = await session.scalar(
@@ -224,7 +233,7 @@ async def assert_safe_restart(ecs, restart, stage, expired):
     if expired:
         remaining = (saved["frozen"]["expires_at"].replace(tzinfo=UTC) - clock()).total_seconds()
         clock.advance(seconds=max(remaining, 0) + 1)
-        await wait_for_expiry(ecs, second)
+        await retry_after_expiry(second)
     else:
         if has_attempt:
             assert await second.tick() == 0
@@ -235,10 +244,10 @@ async def assert_safe_restart(ecs, restart, stage, expired):
     assert current["frozen"] == saved["frozen"]
     assert current["evidence"][: len(saved["evidence"])] == saved["evidence"]
     assert current["not_received"] == saved["not_received"]
-    assert current["status"] == ("EXPIRED" if expired else "DONE")
+    assert current["status"] == "DONE"
     # The existing lifecycle counts terminal expiry as a transition too.
     assert current["attempts"] == saved["attempts"] + 1
-    assert len(second_client.requests) == (not expired)
+    assert len(second_client.requests) == 1
     if not expired:
         assert second_client.requests[0].body == saved["frozen"]["request_raw"]
     assert await first.tick() == 0
@@ -263,7 +272,10 @@ async def test_xray_ack_timeout_retries_frozen_command_and_accepts_late_result(
     await first.aclose()
 
     message = "TEMPORARILY_UNAVAILABLE" if rejection == 503 else "ANNEX_VALIDATION_FAILED"
-    second_client = ScriptedHttpClient(reply(rejection, message))
+    responses = [reply(rejection, message)]
+    if rejection == 503:
+        responses.append(reply(rejection, message))
+    second_client = ScriptedHttpClient(*responses)
     second = start(second_client)
     assert await second.tick() == 0
     clock.advance((pending["next"] - clock()).total_seconds())
@@ -271,11 +283,14 @@ async def test_xray_ack_timeout_retries_frozen_command_and_accepts_late_result(
     assert second_client.requests == first_client.requests
 
     clock.advance(300)
-    assert await second.tick() == 0
+    if rejection == 503:
+        await retry_after_expiry(second)
+    else:
+        assert await second.tick() == 0
     stopped = await state(ecs)
-    assert stopped["status"] == "HELD"
+    assert stopped["status"] == ("PENDING" if rejection == 503 else "HELD")
     assert stopped["frozen"] == pending["frozen"]
-    assert len(second_client.requests) == 1
+    assert len(second_client.requests) == (2 if rejection == 503 else 1)
     code = pending["frozen"]["command_code"]
     async with ecs.factory.begin() as session:
         assert not await ecs.service.is_delivery_proven_unaccepted(
@@ -307,13 +322,15 @@ async def test_xray_ack_timeout_retries_frozen_command_and_accepts_late_result(
     ],
     indirect=["restart"],
 )
-async def test_other_unknown_delivery_stays_held(ecs, restart, failure_kind, http_status):
+async def test_other_unknown_delivery_retries_original_command(
+    ecs, restart, failure_kind, http_status
+):
     _, start = restart
     client = ScriptedHttpClient(
         HttpResult(DeliveryState.DELIVERY_UNKNOWN, failure_kind, http_status, (), None)
     )
     await dispatch_one(start(client))
-    assert (await state(ecs))["status"] == "HELD"
+    assert (await state(ecs))["status"] == "PENDING"
 
 
 @pytest.mark.parametrize("restart", ["xray"], indirect=True)
@@ -331,8 +348,8 @@ async def test_delivery_proof_requires_closed_original_and_all_attempts_unaccept
 
     assert not await proven(ecs.owner)
     clock.advance(301)
-    await wait_for_expiry(ecs, sender)
-    assert await proven(ecs.owner)
+    await retry_after_expiry(sender)
+    assert not await proven(ecs.owner)
     assert not await proven(CommandOwner("other"))
 
 
@@ -366,23 +383,24 @@ async def test_expiry_survives_maintenance_timeout(ecs, restart, restart_sender,
         async with asyncio.timeout(5):
             assert await sender.store.maintain_snapshots(1, ecs.targets, time.monotonic() + 30) == 0
 
-    assert interrupted.is_set()
-    assert await state(ecs) == saved
+    assert not interrupted.is_set()
+    current = await state(ecs)
+    assert current["status"] == "PENDING"
+    assert current["frozen"] == saved["frozen"]
+    assert current["next"] == clock()
     assert not client.requests
     if restart_sender:
         await sender.aclose()
         sender = start(client)
-    await wait_for_expiry(ecs, sender)
+    await retry_after_expiry(sender)
     current = await state(ecs)
     assert current["frozen"] == saved["frozen"]
-    assert current["status"] == "EXPIRED"
+    assert current["status"] == "DONE"
     assert current["attempts"] == saved["attempts"] + 1
-    assert current["evidence"] == saved["evidence"]
-    assert current["command_status"] == current["delivery_status"] == "EXPIRED"
+    assert current["command_status"] == "WAITING_RESULT"
+    assert current["delivery_status"] == "DONE"
     assert current["not_received"] == saved["not_received"]
-    assert not client.requests
-    assert await start(client).tick() == 0
-    assert await state(ecs) == current
+    assert client.requests
 
 
 @pytest.mark.parametrize(
@@ -395,19 +413,24 @@ async def test_expiry_survives_maintenance_timeout(ecs, restart, restart_sender,
     ],
     ids=["missing-retry-after", "invalid-retry-after", "excess-retry-after", "unknown"],
 )
-async def test_restart_never_unholds_uncertain_or_contract_paused_command(ecs, restart, outcome):
+async def test_restart_retries_unknown_but_keeps_contract_paused_command(ecs, restart, outcome):
     clock, start = restart
     first = start(ScriptedHttpClient(outcome))
     await dispatch_one(first)
     saved = await state(ecs)
-    assert saved["status"] == "HELD"
+    expected = "PENDING" if outcome.delivery_state == DeliveryState.DELIVERY_UNKNOWN else "HELD"
+    assert saved["status"] == expected
     await first.aclose()
     client = ScriptedHttpClient(reply())
     second = start(client)
     clock.advance(seconds=301)
-    assert await second.tick() == 0
-    assert not client.requests
-    assert await state(ecs) == saved
+    if expected == "HELD":
+        assert await second.tick() == 0
+        assert not client.requests
+        assert await state(ecs) == saved
+    else:
+        await retry_after_expiry(second)
+        assert client.requests
 
 
 async def test_stopping_one_sender_leaves_another_instance_able_to_dispatch(ecs, restart):

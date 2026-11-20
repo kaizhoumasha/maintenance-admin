@@ -124,7 +124,9 @@ ecs_url必填且沿用HTTP(S) IP origin规范化、固定路径、无凭据/quer
 
 history_annexes仅来自可信启动模块的版本化原DeviceAnnex模型；装配前复制/校验，并与ecs.dev.protocol/1一次合并到同一个service.annexes。历史键须为非空字符串二元组、值为DeviceAnnex，内置保留键冲突必须拒绝，不能覆盖内置模型或启动后补字典。通用调试v3只选内置合同，其余键仅供该调试路径的历史Result精确校验；组合装配的正式角色仍使用各自严格附录；不恢复actions/annexes旧参数别名、动作登记或v2发送。实际启动须分别验证无历史输入的自动路径、有历史输入时合法原结果及严格拒绝、缺输入时首次Result 503/已有重复证据返回原响应；详见[设计§10.3.1–10.3.2及§10.7](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。这些依赖不是Swagger/.env选项，已通过实际主lifespan回归。
 
-enterprise_admin已批准统一最低合同：W=300秒，从本方首次创建命令起算并冻结expires_at；D=对端ECS持久确认确定终态后至少24小时（86400秒），活动/未决命令去重依据不按TTL清理。W不是执行timeout或结果截止，重启不重算；原退避/Retry-After、原next_attempt_at前零发送/到期且窗口有效才重试、超期停止新尝试及合法迟到结果规则不变。数值是本项目规范选择，不是测试值推导或供应商既有证明，完整依据见[设计§10.4](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。在contracts.py定义共享PROTOCOL_RETRY_WINDOW=timedelta(seconds=300)，不新增请求/.env/逐动作窗口参数，已完成隔离验证。
+enterprise_admin已批准统一最低合同：W=300秒，从本方首次创建命令起算并冻结命令记录expires_at；D=对端ECS持久确认确定终态后至少24小时（86400秒），活动/未决命令去重依据不按TTL清理。W不是执行timeout或结果截止，重启不重算；原退避/Retry-After、原next_attempt_at和发送证据保持不变，可靠消息窗口到期后沿冻结路由的retry_window滚动等待 ACK 或 Result。数值是本项目规范选择，不是测试值推导或供应商既有证明，完整依据见[设计§10.4](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。在contracts.py定义共享PROTOCOL_RETRY_WINDOW=timedelta(seconds=300)，不新增请求/.env/逐动作窗口参数，已完成隔离验证。
+
+设备状态门禁属于派发前等待，不应消耗这段投递窗口。ECS 命令在尚未产生 `dispatch_started_at` 且设备未恢复 `IDLE` 时按原命令身份续期并继续检查；真正放行派发时，可靠消息的窗口重新从派发时刻起算。命令记录本身仍保留创建时冻结的 `expires_at` 作为原始证据，不用它判定派发前的状态等待。所有 ECS 业务的投递窗口到期或交付未知时，可靠消息继续以原命令身份回队列，并沿冻结路由的 `retry_window` 滚动等待，直到收到 ACK 或 Result；明确未接纳且没有未知在途证据的 Result 仍按冲突处理。
 
 W=300秒同时约束调试及正式新命令，唯一来源迁至contracts.py并从ECS包导出PROTOCOL_RETRY_WINDOW，dev.py/正式DeviceRouteProvider/service.py共同引用。共享规范化核心先查原调用：同键同规范输入只读返回原身份且保持原冻结期限，查询/响应字段不变，异输入仍冲突；仅新调用在路由解析后、生成/写入命令与outbox前检查retry_window为timedelta且精确300秒。不一致按既有AppError/HTTP 503机制拒绝，message/detail提示路由提供方引用共享常量，零新义务/HTTP；不以400业务参数错误解释，不宣称数据库连接故障，不新增错误码/协议字段。不取整、截短或放大路由值，也不豁免正式路径。 路由快照构造也将缺失、错误类型及非正窗口识别为配置503，避免在共享创建检查前误报400/500；发送时遇到损坏快照仍保守围栏，不套用当前300秒改写旧期限。
 
@@ -138,7 +140,7 @@ Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久
 
 新旧owner同键同输入同规范化地址只读找回原身份，异输入/换址409；并发唯一赢家返回后、提交前比较持久origin，输家零发送。编号、字节、合同、窗口及deadline冻结，命令/outbox/快照仍同事务，URL/策略版本不进入调用键或wire。历史Result继续依赖原附录和发送证据，不以通用合同宽松解释旧严格结果；尚无持久结果证据且缺原附录时503、零副作用；已有持久重复结果沿用原响应。不承诺未发送/已围栏命令的Result可应用。
 
-专用权限只管新登记，撤权不暂停既有可识别v3命令。停止后续发送须停止全部相关Sender并防止自动拉起；ECS/WMS共享主应用lifespan，停宿主影响两者出站及HTTP/Result。有界关闭、在途可能交付、shutdown unconfirmed、租约中断及合法迟到结果规则不变。恢复覆盖首次未发送、NOT_SENT、合法503/有效429判定NOT_RECEIVED，以及符合下文条件的 X-Ray ACK 读取超时后的PENDING，保留原退避、Retry-After、next_attempt_at、计数/证据和deadline；到期前不发，超期按原TTL，不重算或延长。UNKNOWN/HELD与无效/超限Retry-After不因重启、换址/换键或Status恢复而解封。
+专用权限只管新登记，撤权不暂停既有可识别v3命令。停止后续发送须停止全部相关Sender并防止自动拉起；ECS/WMS共享主应用lifespan，停宿主影响两者出站及HTTP/Result。有界关闭、在途可能交付、shutdown unconfirmed、租约中断及合法迟到结果规则不变。恢复覆盖首次未发送、NOT_SENT、合法503/有效429判定NOT_RECEIVED，以及 ACK 读取超时后的PENDING，保留原退避、Retry-After、next_attempt_at、计数/证据和冻结路由；窗口到期后仍沿原命令和原 `retry_window` 等待 ACK 或 Result。UNKNOWN/HELD与无效/超限Retry-After不因重启、换址/换键或Status恢复而解封。
 
 自动化测试通过现有夹具保护测试库和网络出口，直接断言非用例目标TCP零调用；这些不是Swagger或业务接入配置。新命令仍使用W=300秒，两条许可、两个P2、P3及消费竞争覆盖保留，测试通过不证明供应商D或跨重启保证。
 
@@ -150,13 +152,13 @@ Task 17仅关闭设计决策；真实接入验收供应商版本/配置、持久
 
 同business_key取消/换绑/终态后，原动作同输入重入仍返回原命令；未重新取得当前有效许可或请求设备不符时，新动作按当前事实拒绝；当前版本从1变2且明确获准时，新动作冻结2，原动作保留原命令与冻结1。两条当前许可回归见[现有测试的回归映射](../testing/ecs-command-verification.md)，不能给新行预置READY或更换business_key来弱化断言。不同业务的独立有效意图不因同设备历史失败永久受阻，UNKNOWN也不能借新id重发。
 
-取消、换绑、版本变化与消费锁同一动作行或采用已证明等价的条件更新；变更先提交旧结果不推进，消费先提交终态不被覆盖。业务状态与框架投递、DEVICE Status分开；UNKNOWN/HELD不自动变成业务FAILED，不因换键、改址或设备空闲解封。详见[教程登记与安全消费](ecs-command-tutorial.md)和[设计§11](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
+取消、换绑、版本变化与消费锁同一动作行或采用已证明等价的条件更新；变更先提交旧结果不推进，消费先提交终态不被覆盖。业务状态与框架投递、DEVICE Status分开；UNKNOWN/HELD不自动变成业务FAILED，不因换键、改址或设备空闲解封。所有 ECS 业务的交付未知按原命令回队列重试，直到 ACK 或 Result。详见[教程登记与安全消费](ecs-command-tutorial.md)和[设计§11](../superpowers/specs/2026-10-25-ecs-minimal-business-tutorial-design.md)。
 
 单表仅适用于一动作一命令、一个消费者及同库业务副作用；多命令、多消费者或外部副作用另按需求设计。框架命令/outbox/发送证据/结果证据表保持不变。Reference及调用测试统一使用单表，被替代的调用/消费表及旧接口已删除；两个P2、P3及原子登记、消费、回滚和竞争保持回归覆盖。Swagger本地Mock继续不创建业务表。
 
 ## 发送与结果
 
-POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已接纳；合法 503、有效 429 和可证明 NOT_SENT 可按原身份退避。收到 409 身份冲突、租约中断或出现未知交付时，通常进入 HELD。冻结为 RETRY_ACK_TIMEOUT 的正式 X-Ray 命令，在请求发出后等待读取 ACK 超时且未收到状态码或仅收到 200 时，在原 300 秒窗口内沿用原命令号、原报文字节和原地址退避重发。后续明确未接纳的响应不覆盖较早的未知尝试。窗口到期或后续响应要求停止发送时，保留原命令，等待可应用的原 Result；HELD 不支持普通 resume，不由 TTL 或终态保留清理。快照公共 hold/settle 必须注入原冻结协议的生命周期；ECS 裸 settle 在没有可应用的持久结果时被拒绝，不能凭基础设施 API 伪造接纳。STATIC 的空配置 settle 保持原行为。ECS Retry-After 不截短，超本地等待范围暂停；WMS 保留原截短与重试规则。
+POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已接纳；合法 503、有效 429 和可证明 NOT_SENT 可按原身份退避。收到 409 身份冲突、租约中断或出现未知交付时，通常进入 HELD；所有 ECS 业务的交付未知和投递窗口到期会沿原命令回队列，并按冻结路由的 `retry_window` 滚动等待。后续明确未接纳的响应不覆盖较早的未知尝试。窗口到期或后续响应要求停止发送时，保留原命令，等待可应用的原 Result；HELD 不支持普通 resume，不由 TTL 或终态保留清理。快照公共 hold/settle 必须注入原冻结协议的生命周期；ECS 裸 settle 在没有可应用的持久结果时被拒绝，不能凭基础设施 API 伪造接纳。STATIC 的空配置 settle 保持原行为。ECS Retry-After 不截短，超本地等待范围暂停；WMS 保留原截短与重试规则。
 
 
 门禁提交当前尝试依据后才发 HTTP；首次或后续尝试仍可能交付时，Result 可先于 ACK 应用。历次均明确未接纳且没有新在途尝试的结果只保存冲突。提前 Result 封锁并撤销租约；封锁不由迟到结果解除。迟到响应只保存证据与必要的对账标记，不降级已应用结果。
