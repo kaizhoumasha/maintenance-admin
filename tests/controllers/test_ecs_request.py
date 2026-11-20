@@ -183,3 +183,42 @@ async def test_capture_request_propagates_commit_uncertainty(monkeypatch):
     )
 
     assert captured["commit_unknown"] is True
+
+
+async def test_unknown_delivery_state_does_not_continue_to_handler(monkeypatch):
+    class Factory:
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class StopPolling(Exception):
+        pass
+
+    async def stop(_):
+        raise StopPolling
+
+    async def unknown_result(*args, **kwargs):
+        return SimpleNamespace(
+            delivery_uncertain=False,
+            response_state="UNAVAILABLE",
+            delivery_terminal=None,
+        )
+
+    async def no_receipt(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(ecs_request_controller, "get_result", unknown_result)
+    monkeypatch.setattr(ecs_request_controller.asyncio, "sleep", stop)
+    monkeypatch.setattr(
+        "app.integrations.callback_receipts.find_receipt_state", no_receipt
+    )
+
+    with pytest.raises(StopPolling):
+        await ecs_request_controller.wait_for_request(
+            Factory(), "digest", SimpleNamespace(message_id=1, operation="wms", operation_id="op")
+        )
