@@ -423,7 +423,7 @@ class XrayService:
 
         intent = await self._latest(session, reel, stage)
         if intent is None:
-            return await self._request_decision(session, reel, stage, source, intent, point)
+            return await self._request_decision(session, reel, stage, source, intent, point, facts)
         if intent.source_event_id != source.event_id:
             reel.conflict = "DECISION_SOURCE_CONFLICT"
             return reel.conflict
@@ -436,7 +436,9 @@ class XrayService:
         if outcome == "WAIT":
             if intent.retry_at is not None:
                 if intent.retry_at <= unix_ms(self.clock()):
-                    return await self._request_decision(session, reel, stage, source, intent, point)
+                    return await self._request_decision(
+                        session, reel, stage, source, intent, point, facts
+                    )
                 if not await self._awaiting_command_results(session, views):
                     reel.next_check_at_ms = intent.retry_at
             return "OUTLET_WAIT" if stage == "OUTLET" else "BUSINESS_WAIT"
@@ -597,7 +599,7 @@ class XrayService:
                 return True
         return False
 
-    async def _request_decision(self, session, reel, stage, source, intent, point):
+    async def _request_decision(self, session, reel, stage, source, intent, point, facts=None):
         if intent and intent.source_event_id != source.event_id:
             reel.conflict = "DECISION_SOURCE_CONFLICT"
             return reel.conflict
@@ -606,7 +608,7 @@ class XrayService:
             reel,
             stage,
             self.requests[stage][0],
-            self._decision_request(reel, stage, source),
+            self._decision_request(reel, stage, source, facts),
             source,
             intent,
             rack_basis=point.request_basis if stage == "OUTLET" and point else None,
@@ -847,7 +849,7 @@ class XrayService:
             intent.retry_at = received_at + decision.retry_after_ms
         intent.response = decision.model_dump(mode="json")
 
-    def _decision_request(self, reel, stage, event):
+    def _decision_request(self, reel, stage, event, facts):
         model = self.requests[stage][1]
         data = event.payload
         base = dict(
@@ -867,7 +869,7 @@ class XrayService:
             return model(
                 **base,
                 scan_status=data["scan_status"],
-                expected_spkg=reel.actions["COUNT"]["params"]["label"]["variables"]["SPKG"],
+                actual_qty=facts["COUNT"].payload["qty"],
                 new_barcode=data.get("new_barcode"),
                 reason_code=data.get("reason_code"),
                 reason_message=data.get("reason_message"),

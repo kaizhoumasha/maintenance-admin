@@ -166,8 +166,7 @@ WMS 与 ECS 的接口字段统一使用下划线分隔（`snake_case`），涵�
 | WMS 业务字段 | ECS 字段 | 映射要求 |
 | --- | --- | --- |
 | barcode / new_barcode | barcode / new_barcode | 同名字段原值传递。复核阶段保留双码，COUNTED 到料及选位的两个字段都使用已复核的实读新码。 |
-| expected_spkg | 原贴标命令的 label.variables.SPKG | 仅用于复核请求，由 WES 取本盘原 WMS 标签决定中冻结的 SPKG。 |
-| actual_qty | qty | 清点实测 PCS。取放 Result 的 actual_qty 单位为盘。 |
+| actual_qty | qty | 清点实测 PCS；复核请求一并提交原清点事实的数量。取放 Result 的 actual_qty 单位为盘。 |
 | template_id / label_variables | template_id / label.variables | 保留模板关联和原十变量。 |
 | target_locator | target | RACK_SLOT 映射为 location_type=RETURN_RACK，location_code 映射到已配置 ECS location_id，尺寸放入 target。TRANSIT_BIN 按 2.11 由 WES 随机选箱位并读取原 ECS 目标映射。 |
 | to_locator | actual_target | 五层架从实际 location_id、location_type、架、面和储位核对后转换。通箱核对 PUT_TO_BIN 的完整 actual_target 后映射为 TRANSIT_BIN。 |
@@ -664,7 +663,7 @@ SUCCESS 的 `data` 包含原 `reel_id`、`barcode`、`decision=OK` 和 `label_st
 <a id="xray-label-evidence"></a>
 #### 2.6.1 贴标与 CCD 证据核对
 
-WES 按原设备、`reel_id` 和 `scan_stage=VERIFY` 找到本次进机保存的贴标动作（APPLY_COUNT_DECISION、decision=OK），核对 `barcode` 与入口实读原码一致，并从该动作冻结的原标签变量取 `expected_spkg`。
+WES 按原设备、`reel_id` 和 `scan_stage=VERIFY` 找到本次进机保存的贴标动作（APPLY_COUNT_DECISION、decision=OK），核对 `barcode` 与入口实读原码一致，并从本盘已保存的清点事实取得 `actual_qty`。
 
 | 证据 | 推进 |
 | --- | --- |
@@ -676,6 +675,8 @@ WES 按原设备、`reel_id` 和 `scan_stage=VERIFY` 找到本次进机保存的
 ### 2.7 复核决定及出料
 
 WMS 复核本盘 CCD 实读双码，WES 按有效决定登记出料或排料。免清点不经过本节。
+
+本次 `verify_decide@v1` 字段替换按已协调的硬切换执行：切换前须停止旧发送方并清空旧格式的待发送、重试及在途请求，旧的 `expected_spkg` 请求不再兼容。
 
 | 项目 | 值 |
 | --- | --- |
@@ -692,7 +693,7 @@ WMS 复核本盘 CCD 实读双码，WES 按有效决定登记出料或排料。�
     "workline_code": "XRAY-LINE-01",
     "scan_status": "OK",
     "barcode": "PKG-OLD-A",
-    "expected_spkg": "SXCN0031482261000009NVD",
+    "actual_qty": 4000,
     "new_barcode": "SXCN0031482261000009NVD",
     "scanned_at": 1793413814000
   }
@@ -717,7 +718,7 @@ WMS 复核本盘 CCD 实读双码，WES 按有效决定登记出料或排料。�
 | workline_code | Identifier / 是 | 原事实所属的工作线。 |
 | scan_status | enum / 是 | `OK / NG`，ECS 的读码结果。 |
 | barcode | Barcode / 是 | 同盘的实际旧码。 |
-| expected_spkg | Barcode / 是 | 本盘原贴标动作冻结的 `label_variables.SPKG`，读码 NG 时同样必填。 |
+| actual_qty | integer / 是 | 本盘清点事实中的实测 PCS 数量，复核时原值传递。 |
 | new_barcode | Barcode / OK 必填，NG 且有实际读码时可带 | CCD 实际读到的新码。未读出时省略。 |
 | reason_code / reason_message | 原因字段 / NG 必填，OK 省略 | ECS 上报的实际读码异常。 |
 | scanned_at | 毫秒整数 / 是 | 原 CCD 事件发生时间。 |
@@ -728,7 +729,7 @@ WMS 复核本盘 CCD 实读双码，WES 按有效决定登记出料或排料。�
 | 200 / DECIDED | `{"result":"NG","reason_code":"VERIFY_MISMATCH","reason_message":"WMS 复核未通过"}` | 沿原决定登记排 NG。 |
 | 200 / DECIDED | `{"result":"WAIT","retry_after_ms":1000}` | 按公共 WAIT 规则保持本盘。 |
 
-WMS 按 `expected_spkg` 找到原发标记录，核对工作线及原码，并将实际 `new_barcode` 与该记录的 SPKG 比对。只有读码 OK 且原码和新码均匹配才返回 OK。若 WMS 返回 OK 但原证据未满足此条件，WES 留证待核对。
+WMS 按 `barcode`、`new_barcode` 和 `actual_qty` 核对本盘物料及清点结果。只有读码 OK 且原码、新码和数量均匹配才返回 OK。若 WMS 返回 OK 但原证据未满足 WES 的内部标签关联校验，WES 留证待核对。
 
 <a id="xray-ecs-route"></a>
 #### 2.7.1 正常出料判定命令
@@ -1674,7 +1675,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 | 范围 | 开发要求 |
 | --- | --- |
 | X-Ray 子包 | 六个 WMS Operation 和五种 ECS Event 分别按注册项分文件，ENTRY／VERIFY 共用 SCAN_COMPLETED 入口。声明五种 Command，以一个业务服务推进原盘和本线架准备待办。 |
-| WMS 请求 DTO 与装配 | 四个决定和两个事实 DTO 移除 `reel_id`，四个决定 DTO 同时移除 `source_event_id`。请求组装仅在复核时增加 `expected_spkg`，取本盘已冻结的原贴标变量；WES 的进机、原事件、Operation 和报告关联继续持久化。 |
+| WMS 请求 DTO 与装配 | 四个决定和两个事实 DTO 移除 `reel_id`，四个决定 DTO 同时移除 `source_event_id`。复核请求提交入口原码、CCD 实读新码和原清点事实的 `actual_qty`；WES 的进机、原事件、Operation 和内部标签关联继续持久化。 |
 | 公共货架调度 | 通过 RackDispatch／Transport 接入 X-Ray 作业来源、动作映射和数据库约束；业务接入见 [2.10](#xray-rack)，组件见 [调度服务](../../app/businesses/_components/rack_dispatch/service.py)。 |
 | 公共 ECS 投递 | 由公共 Sender 按 [3.3](#xray-recovery) 对 X-Ray 的原 ACK 读取超时执行同号重发，并通过公开读口提供原尝试结论和 Result。 |
 
@@ -1758,7 +1759,7 @@ ECS 对已接纳命令提供跨重启的接纳及结果恢复保证。同号同�
 }
 ```
 
-专用决策端校验 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。Mock 清点按 `operation_id` 生成测试 `SPKG`，并保存其与工作线和进料原码的关联。CCD 根据 `expected_spkg` 核对原发标记录、进料原码及实际 `new_barcode`。清点盘出口按实读新码查找原发标记录。
+专用决策端校验 WES 对原请求正文的签名，联调环境使用至少 32 字符的随机 `JWT_SECRET_KEY`。Mock 清点按 `operation_id` 生成测试 `SPKG`，并保存其与工作线、进料原码及清点数量的关联。CCD 复核使用 `barcode`、`new_barcode` 和 `actual_qty` 核对原发标记录。清点盘出口按实读新码查找原发标记录。
 
 - 固定模式的原决定、发标和测试架位占用保存在进程内，联调 API 使用单 worker。清点出料会标记已授权的测试架位。重复上料前先清空并核对两个架位，再重启 Mock 进程开启下一轮。
 - 随机模式保存首次决定、签名请求原正文的摘要和发标记录。相同 `operation_id`、相同原正文字节的已签名请求跨进程或重启后返回首次响应。同号改正文返回 `409 CONFLICT`。重启后以原发标记录继续核对 CCD 和出料。
