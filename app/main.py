@@ -19,6 +19,7 @@ from app.controllers.auth import router as auth_router
 from app.controllers.businesses import router as businesses_router
 from app.controllers.devices import router as devices_router
 from app.controllers.ecs_callback import include_ecs_callback
+from app.controllers.ecs_request import include_ecs_request
 from app.controllers.ecs_result import router as ecs_result_router
 from app.controllers.ecs_status import router as ecs_status_router
 from app.controllers.ecs_status import status_capability
@@ -199,6 +200,7 @@ include_ecs_callback(
     resolve_binding=resolve_binding,
     resolve_input_target=catalog.input_target,
 )
+include_ecs_request(app, environment=settings.ENVIRONMENT)
 include_dev_routers(
     app,
     environment=settings.ENVIRONMENT,
