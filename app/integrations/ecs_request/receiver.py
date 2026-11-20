@@ -440,6 +440,7 @@ async def continue_ecs_request(
     identity: str,
     deferred: DeferredRequest,
     resolve_binding: BindingResolver | None = None,
+    resolve_binding_snapshot=None,
     runtime: object | None = None,
     resolve_input_target=None,
 ) -> EcsRequestResponse:
@@ -456,7 +457,12 @@ async def continue_ecs_request(
             exchange_id=state.exchange_id,
         )
     envelope = EcsRequestEnvelope.model_validate(state.event_envelope)
-    binding = await resolve_binding(session, envelope.device_code) if resolve_binding else None
+    if resolve_binding_snapshot is not None:
+        binding = await resolve_binding_snapshot(
+            session, envelope.device_code, state.event_context or {}
+        )
+    else:
+        binding = await resolve_binding(session, envelope.device_code) if resolve_binding else None
     if binding is None or not _binding_matches_snapshot(binding, state.event_context or {}):
         raise RequestHandlerIncomplete("deferred request binding changed after acceptance")
     registered, _, component_key = _resolve_registered(
@@ -478,5 +484,5 @@ async def continue_ecs_request(
         component_key=component_key,
     )
     if response.deferred:
-        return response
+        raise RequestHandlerIncomplete("request handler deferred after a terminal result")
     return response

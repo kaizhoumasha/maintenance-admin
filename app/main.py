@@ -46,7 +46,7 @@ from app.integrations.wms_transport.dispatch import TransportDispatch
 from app.integrations.wms_transport.protocol import PROTOCOL as WMS_TRANSPORT_PROTOCOL
 from app.middlewares import AuditMiddleware, trace_id_middleware
 from app.reliable_runtime import reliable_lifespan
-from app.services.device_bindings import resolve_binding
+from app.services.device_bindings import resolve_binding, resolve_binding_snapshot
 from app.services.device_routes import DeviceRoutes, authorize_new_command
 from app.services.device_status_service import DeviceStatusService
 
@@ -157,7 +157,7 @@ app = FastAPI(
         "通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，"
         "提供第三方与内部 API 对接基础能力"
     ),
-    version="0.3.1",
+    version="0.3.2",
     # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
     dependencies=[Depends(RateLimit(100))],
     # 刷新页面后保留已填的 token
@@ -200,7 +200,11 @@ include_ecs_callback(
     resolve_binding=resolve_binding,
     resolve_input_target=catalog.input_target,
 )
-include_ecs_request(app, environment=settings.ENVIRONMENT)
+include_ecs_request(
+    app,
+    environment=settings.ENVIRONMENT,
+    resolve_binding_snapshot=resolve_binding_snapshot,
+)
 include_dev_routers(
     app,
     environment=settings.ENVIRONMENT,

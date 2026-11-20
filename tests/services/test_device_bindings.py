@@ -64,6 +64,59 @@ async def test_role_and_positions_are_resolved_from_workline_bindings(db):
     assert await resolve_binding(db, "MISSING") is None
 
 
+async def test_snapshot_binding_locks_original_rows_before_rejecting_rebind():
+    from types import SimpleNamespace
+
+    from app.services.device_bindings import resolve_binding_snapshot
+
+    original_line = SimpleNamespace(
+        id=11,
+        version=4,
+        business_code="test_sorting",
+        device_bindings={"SCAN1": "SCAN13"},
+        position_bindings={"INLET": "CNV0401"},
+    )
+    rebound_device = SimpleNamespace(
+        id=22,
+        device_code="SCAN13",
+        work_line_id=12,
+        version=5,
+    )
+
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        async def scalar(self, statement):
+            self.statements.append(statement)
+            return original_line if len(self.statements) == 1 else rebound_device
+
+    session = RecordingSession()
+    with pytest.raises(AppError) as conflict:
+        await resolve_binding_snapshot(
+            session,
+            "SCAN13",
+            {
+                "work_line_id": 11,
+                "device_id": 22,
+                "device_version": 4,
+                "work_line_version": 4,
+            },
+        )
+
+    assert conflict.value.code == "CONFLICT"
+    assert len(session.statements) == 2
+    assert all(
+        getattr(statement, "_for_update_arg", None) is not None for statement in session.statements
+    )
+    assert "work_lines.id = 11" in str(
+        session.statements[0].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "devices.id = 22" in str(
+        session.statements[1].compile(compile_kwargs={"literal_binds": True})
+    )
+
+
 async def test_bound_device_requires_unbinding_before_removal(db):
     line, device = await line_device(db)
     line = await bind(db, line, {"SCAN1": device.device_code})
