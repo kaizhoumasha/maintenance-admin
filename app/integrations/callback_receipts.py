@@ -33,8 +33,8 @@ class ReceiptView:
     effective_digest: str | None
     compare_mode: str
     status_code: int
-    body: dict
-    prepared_body: bytes
+    body: dict | None
+    prepared_body: bytes | None
     resp_timestamp: int
     created_at: datetime
     event_envelope: dict | None
@@ -271,6 +271,26 @@ async def insert_receipt(
 async def find_receipt(
     session: AsyncSession, operation: str, operation_id: str, *, for_update: bool = False
 ) -> ReceiptView | None:
+    return await _find_receipt(session, operation, operation_id, for_update=for_update)
+
+
+async def find_receipt_state(
+    session: AsyncSession, operation: str, operation_id: str, *, for_update: bool = False
+) -> ReceiptView | None:
+    """Read a receipt while allowing the response to remain pending."""
+    return await _find_receipt(
+        session, operation, operation_id, for_update=for_update, allow_pending=True
+    )
+
+
+async def _find_receipt(
+    session: AsyncSession,
+    operation: str,
+    operation_id: str,
+    *,
+    for_update: bool = False,
+    allow_pending: bool = False,
+) -> ReceiptView | None:
     if enabled():
         statement = select(CallbackReceipt).where(
             CallbackReceipt.active.is_(True),
@@ -285,9 +305,12 @@ async def find_receipt(
         if receipt is None:
             return None
         wire = receipt.reply_wire
-        if wire is None or sha256(wire).hexdigest() != receipt.reply_sha256:
+        if wire is None and allow_pending:
+            if receipt.reply_sha256 is not None or receipt.reply_attempt_id is not None:
+                raise history.EvidenceIntegrityError("pending receipt reply metadata mismatch")
+        elif wire is None or sha256(wire).hexdigest() != receipt.reply_sha256:
             raise history.EvidenceIntegrityError("original receipt reply integrity mismatch")
-        return _receipt_view(receipt, wire, receipt.reply_attempt_id)
+        return _receipt_view(receipt, wire, receipt.reply_attempt_id, allow_pending=allow_pending)
     reply = aliased(IntegrationRecord)
     statement = (
         select(IntegrationExchange, reply.attempt_id)
@@ -311,12 +334,17 @@ async def find_receipt(
     root, reply_attempt_id = row
     bodies = await history.read_bodies(session, record_ids=(root.current_response_record_id,))
     stored = bodies.get(root.current_response_record_id)
-    return _receipt_view(root, stored.raw_body if stored else None, reply_attempt_id)
+    return _receipt_view(
+        root,
+        stored.raw_body if stored else None,
+        reply_attempt_id,
+        allow_pending=allow_pending,
+    )
 
 
-def _receipt_view(root, wire, reply_attempt_id):
+def _receipt_view(root, wire, reply_attempt_id, *, allow_pending: bool = False):
     body = json_object(wire) if wire is not None else None
-    if body is None:
+    if body is None and not allow_pending:
         raise history.EvidenceIntegrityError("original receipt reply unavailable")
     return ReceiptView(
         root.receipt_id,
