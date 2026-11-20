@@ -13,16 +13,26 @@ from app.operation_names import is_operation_name
 
 _local_only = ContextVar("integration_local_only", default=False)
 _root = Path(__file__).resolve().parents[2]
-_entrypoints = {"ecs_event", "callback", "request", "dev_ecs_event", "dev_callback"}
+_entrypoints = {
+    "ecs_event",
+    "callback",
+    "request",
+    "ecs_request",
+    "dev_ecs_event",
+    "dev_callback",
+    "dev_ecs_request",
+}
 # 仅 local 导入的模块名尾段;发现器与联调控制台据此标记 local_only
-DEV_MODULES = frozenset({"dev", "dev_callback", "dev_ecs_event"})
+DEV_MODULES = frozenset({"dev", "dev_callback", "dev_ecs_event", "dev_ecs_request"})
 PLATFORM_FORMAL_MODULES = {
     "ecs_event": (),
+    "ecs_request": (),
     "callback": ("app.integrations.wms_transport.callback",),
     "request": (),
 }
 PLATFORM_LOCAL_MODULES = {
     "ecs_event": ("app.integrations.ecs_callback.dev_ecs_event",),
+    "ecs_request": (),
     "callback": ("app.integrations.wms_callback.dev_callback",),
     "request": ("app.integrations.wms_request.dev", "app.integrations.wms_transport.dev"),
 }

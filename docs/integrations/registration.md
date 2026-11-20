@@ -3,19 +3,20 @@
 新业务先按[快速开始](business-development-quickstart.md)确认合同与文件顺序；
 处理器的受理、独立推进与恢复用[事务配方](business-transaction-recipes.md)，本页只说明现行注册规则。
 
-三类接入都遵循：选目录 → 新建文件 → 用装饰器声明名称与 Payload → 接收入口再写处理函数。
+四类接入都遵循：选目录 → 新建文件 → 用装饰器声明名称与 Payload → 接收入口再写处理函数。
 WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器或 `main.py`。ECS 首次接入需由应用注入运行时绑定解析器；角色静态声明不查设备或工作线。WMS 请求是发送数据声明，没有接收处理函数。
 
-[通用 ECS Status](ecs-status.md) 是内置查询能力，可独立调用、不落库，纳入同一接入目录及来源追踪，**不属于第四类业务注册表**，无需添加装饰器或逐 ECS/设备声明。
+[通用 ECS Status](ecs-status.md) 是内置查询能力，可独立调用、不落库，纳入同一接入目录及来源追踪，**不属于业务注册表**，无需添加装饰器或逐 ECS/设备声明。
 正式查询接口 `GET /api/v1/ecs/status` 在所有环境可用，要求登录和 `ecs:status:query`；只有这里的接入目录仍限local挂载，二者不能混为一谈。
 
 | 场景 | 目录 | 声明 | 数据约束 |
 |---|---|---|---|
 | ECS → 本项目 | `app/businesses/<业务>/ecs_event/` | `@ecs_event(name, device_role=ROLE, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
+| ECS → 本项目同步决定 | `app/businesses/<业务>/ecs_request/` | `@ecs_request(request_type, device_role=ROLE, data=Model, response=Decision)` + async 函数 | 请求模型沿用 `CallbackPayload`；响应模型必须 `extra="forbid"`，由处理器 `respond` 或 `defer` |
 | WMS → 本项目 | `app/businesses/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
 | 本项目 → WMS | `app/businesses/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
 
-业务 composition 可通过 COMPONENTS 显式引用 `app/businesses/_components/<key>/` 内相同的三类目录；
+业务 composition 可通过 COMPONENTS 显式引用 `app/businesses/_components/<key>/` 内相同的四类目录；
 共享能力没有独立注册表、业务身份或任务。共享入口仍受下文文件名、formal/local、显式模块及迟注册规则约束；
 共享模块按路径去重导入，第二次真正声明同键仍失败。各业务仅消费自己显式引用的模块和角色，不能因另一个业务
 导入同命名空间就取得权限。当前生产清单没有 BIN_Roller/SMT 占位包。
@@ -37,10 +38,10 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 唯一共享加载器位于 `app.integrations.discovery`，把 catalog 入口与 `app.integrations.registration` 的
 `PLATFORM_FORMAL_MODULES/PLATFORM_LOCAL_MODULES` 固定平台清单合并。业务不往平台清单添加领域入口。
 正式平台清单只有 `wms_transport.callback`（两个操作）；local 保留 ECS/WMS 演示、WMS 请求演示及
-`wms_transport.dev` 的六个 Transport 场景。三类旧 discovery 包装模块已删除。
+`wms_transport.dev` 的六个 Transport 场景。旧 discovery 包装模块已删除。
 实际 `app.*` 注册来源只允许所属业务子模块或固定平台入口树，普通 import 同样执行来源校验。
 
-正式合同校验会反查三类实际注册项：业务来源必须属于当前 catalog 中显式声明的正式
+正式合同校验会反查四类实际注册项：业务来源必须属于当前 catalog 中显式声明的正式
 `ENTRY_MODULES` 模块或其包内子模块。依赖 import 的注册副作用也受此约束；未列业务和同业务
 未声明入口均会阻止启动。共享合同须由每个消费业务在自有 ENTRY_MODULES 或 COMPONENTS 中显式列出入口，不能靠被其他业务 import 启用。
 API/worker 在 local 入口和运行设施前校验，静态检查失败不返回部分成功目录。
@@ -85,6 +86,15 @@ async def scan_completed(ctx: EcsEventContext, payload: ScanCompleted) -> None:
 
 正式共享 WMS 回调由薄入口通过原业务关联记录确定归属，再调用 bind_callback_business，重复同归属允许，
 未绑定、矛盾或消费者不匹配拒绝且不通知。payload 不能直接指定 owner。WMS 出站和 Transport 的本地原归属/提交后通知已由阶段二实现；不增加注册表或 wire 字段，见[分阶段计划](../superpowers/plans/2026-10-30-business-components-bin-roller.md)。
+
+
+### ECS 同步请求
+
+需要在同一次 HTTP 响应中拿到已落盘决定时，使用 `POST /api/v1/callback/request` 和 `@ecs_request`。请求身份是 `device_code`、`request_type`、`timestamp`、`data` 的规范化摘要，收据使用 `ecs.request`/`ecs-request`；事件入口 `/callback/event` 仍只返回 `ACK`。
+
+处理器在第一段事务内可以直接 `ctx.respond(ResponseModel(...))`，也可以登记 WMS 出站消息后 `ctx.defer(message_id, operation, operation_id)`。平台提交后才等待，等待期间释放工作线/设备锁；超时返回 503 并保留原等待身份，重报不会再次发送同一 WMS 请求。终局结果包括 `VALID`、`INVALID`、`EXPIRED`、`ABANDONED`，业务决定字段由具体响应模型解释。
+
+`ecs_request` 与 WMS 出站的 `request` 是两个目录和两个注册表，不能交叉放置。正式入口必须列入 composition 的 `ENTRY_MODULES`；本地注册清单和静态合同检查会同时列出 `ecs_request`。
 
 ## WMS 回调：相同的函数声明，保留业务结果
 
@@ -175,18 +185,18 @@ rtk uv run --frozen --no-sync python -m scripts.check_integration_contracts --en
 源码位置及固定修复指引，不回显原异常、配置或 Payload，不输出部分成功清单。参数错误退出 `2`；
 `--help` 退出 `0`。参数处理先于应用导入。
 
-JSON 包含 `environment`、排序的业务 code 数组 `businesses`、三类原来源元数据 `entries`、
+JSON 包含 `environment`、排序的业务 code 数组 `businesses`、四类原来源元数据 `entries`、
 catalog 从 COMMANDS 编译并校验的 `command_contracts` 和 `scope.checked/excluded`。
 仅检查共享加载器已加载的显式声明，正式业务来自 catalog；当前粗分扫码、验证请求、首个 MOVE_FORWARD 合同与 Transport 正式回调均纳入校验。
-不扫描任意源码；历史 Result 附录不授予新命令权限。local 只列原 dev 三类入口，
+不扫描任意源码；历史 Result 附录不授予新命令权限。local 列出四类入口；同步请求没有内置演示模块，
 通用 v3 调试命令、Status runtime、模型资源，以及路由、迁移、网络、许可和物理/业务完成均不在范围。
 字段与排序约定见[快速开始](business-development-quickstart.md#启动应用前检查声明)。
 
 仅 `ENVIRONMENT=local`，登录 Swagger 后打开 `GET /api/v1/dev/integrations/registry`。
-每项包含 `kind`、`entry_type`、`name`、`device_role`、`module`、`source_file`、`symbol`、`local_only`、`endpoint`、`payload_schema`；命令合同另含 `response_schema`。三类业务项为 `business_registration`，角色命令合同为 `command_contract`，目录读取同一份可信声明，不新增业务注册器。
+每项包含 `kind`、`entry_type`、`name`、`device_role`、`module`、`source_file`、`symbol`、`local_only`、`endpoint`、`payload_schema`；命令合同另含 `response_schema`。四类业务项为 `business_registration`，角色命令合同为 `command_contract`，目录读取同一份可信声明，不新增业务注册器。
 来源是原函数/原模型/原类，而不是适配器；清单按类型、角色和名称排序；未装配额外能力且无注册项时返回空列表。目录不依赖 Status，不做外部查询。
-`local_only` 来自发现入口的加载作用域：`dev_ecs_event`、`dev_callback`、通用 `dev.py` 仅本地加载。
-三类可运行的本地示例分别见：
+`local_only` 来自发现入口的加载作用域：`dev_ecs_event`、`dev_callback`、`dev_ecs_request`、通用 `dev.py` 仅本地加载。
+现有三类可运行的本地示例分别见；`ecs_request` 由业务显式声明后加载：
 
 - `app/integrations/ecs_callback/dev_ecs_event.py`：EXAMPLE_SCAN，显式 local 设备编码为 `LOCAL_EXAMPLE_SCAN`；
 - `app/integrations/wms_callback/dev_callback.py`：example.echo@v1；
@@ -205,7 +215,7 @@ catalog 从 COMMANDS 编译并校验的 `command_contracts` 和 `scope.checked/e
    不会再次运行函数。修复处理器不会改写已持久化的历史结果。
 
 清单无法在应用启动失败时提供 HTTP 服务，导入期错误必须靠启动日志自救。它不扫描未加载的源码，
-也不执行未知事件回放。完整应用启动统一加载三类正式入口并交叉校验业务合同，然后才加载 local
+也不执行未知事件回放。完整应用启动统一加载四类正式入口并交叉校验业务合同，然后才加载 local
 入口和装配运行时；独立请求注册表读取仍可触发正式发现，发现作用域退出或异常后都会还原。
 
 ## 从旧类式声明迁移
@@ -218,7 +228,7 @@ title、ttl 写在装饰器上。ECS 事件还须补充业务角色常量与显�
 仓库内 Transport、开发示例、调用方和测试已迁移；仓库外接入代码须按此更新。历史设计文档中的类式
 例子只用于解释当时的设计，当前接入以本指南为准。
 
-设备管理完整应用通过app.state.integration_capabilities装配内置ECS Status能力，条目为kind=ecs_status、entry_type=builtin_capability，包含method/path/query_schema/response_schema及代码来源；运行时结果来源见[通用Status](ecs-status.md)。目录本身不导入Status，也不访问ECS；不装配该能力的独立角色应用可返回空目录，原三类业务注册身份不变。
+设备管理完整应用通过app.state.integration_capabilities装配内置ECS Status能力，条目为kind=ecs_status、entry_type=builtin_capability，包含method/path/query_schema/response_schema及代码来源；运行时结果来源见[通用Status](ecs-status.md)。目录本身不导入Status，也不访问ECS；不装配该能力的独立角色应用可返回空目录，原有业务注册身份不变。
 
 
 ## 工作线业务包入口

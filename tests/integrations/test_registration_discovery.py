@@ -5,6 +5,7 @@ import pytest
 
 from app import businesses
 from app.integrations.ecs_callback import registry as ecs
+from app.integrations.ecs_request import registry as ecs_requests
 from app.integrations.registration import import_registration_module, local_registration
 from app.integrations.wms_callback import registry as callbacks
 from app.integrations.wms_request import operation as requests
@@ -17,7 +18,7 @@ def isolated_registries(monkeypatch):
     # These isolated imports exercise the initial discovery phase, before final validation.
     monkeypatch.setattr(catalog, "_validated_entries", None)
     monkeypatch.setattr(catalog, "_registration_guard_enabled", False)
-    for registry in (ecs, callbacks, requests):
+    for registry in (ecs, ecs_requests, callbacks, requests):
         monkeypatch.setattr(registry, "_registry", {})
     from app.integrations import discovery
 
@@ -197,3 +198,41 @@ def test_application_registration_requires_an_owned_business_or_platform_source(
     with pytest.raises(ValueError, match="source.*修复"):
         exec(declaration(kind, "DONE" if kind == "ecs_event" else "example.done@v1"), namespace)
     assert not ecs.events() and not callbacks.operations() and not requests.operations()
+
+
+def test_ecs_request_kind_is_discovered_and_owned(business_modules, monkeypatch):
+    from types import ModuleType
+
+    from app.businesses import catalog
+    from app.businesses.definitions import BusinessDefinition, DeviceRole
+    from app.integrations.ecs_request import registry as ecs_requests
+
+    module = business_modules(
+        "probe.ecs_request.carton_validate",
+        """
+from pydantic import BaseModel, ConfigDict
+from app.integrations.ecs_request import CallbackPayload, ecs_request
+class Decision(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    result: str
+@ecs_request('CARTON_VALIDATE', device_role='SCAN1', data=CallbackPayload, response=Decision)
+async def handler(ctx, payload): pass
+""",
+    )
+    import_registration_module(module)
+    entry = ModuleType("app.businesses.probe.composition")
+    entry.DEFINITION = BusinessDefinition(
+        code="probe",
+        display_name="Probe",
+        device_roles=(DeviceRole(role_key="SCAN1", display_name="Scan"),),
+    )
+    entry.ENTRY_MODULES = (module,)
+    entry.MODEL_MODULES = ()
+    entry.COMMANDS = ()
+    monkeypatch.setattr(catalog, "entries", lambda: (entry,))
+
+    assert catalog.entry_modules("ecs_request", environment="production") == (module,)
+    catalog.validate_business_contracts()
+    assert ecs_requests.lookup("SCAN1", "CARTON_VALIDATE") is not None
+    target = catalog.input_target("probe", ("ecs_request", "CARTON_VALIDATE", "SCAN1"))
+    assert target is not None and target.source.module == module

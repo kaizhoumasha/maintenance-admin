@@ -560,12 +560,12 @@ async def test_held_put_retains_original_target_until_late_result(direct):
     flow.peer.command = "invalid"
     put = await dispatch_put(flow, row)
     original = (await flow.rows())[0]
-    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
     flow.rebuild()
     flow.peer.command = "ack"
-    flow.now += timedelta(hours=1)
-    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
-    assert await flow.dispatch() == 0
+    flow.store.clock = flow.sender.clock = lambda: datetime.now(UTC) + timedelta(seconds=6)
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.dispatch() == 1
     retained = (await flow.rows())[0]
     assert retained["current_action_id"] == original["current_action_id"]
     assert retained["allocation_action_id"] == original["allocation_action_id"]
@@ -574,7 +574,7 @@ async def test_held_put_retains_original_target_until_late_result(direct):
     await finish_put(flow, row, put)
     assert await flow.dispatch() == 1
     assert await flow.service.advance(row["id"]) == "COMPLETED"
-    assert len(flow.peer.commands) == 2
+    assert len(flow.peer.commands) == 3
 
 
 async def test_allocation_response_unknown_keeps_original_identity(direct):

@@ -722,13 +722,21 @@ async def capture_callback(
     reason = result.diagnostic_reason
     code = safe_text(reply.get("code") if source == "wms" else reply.get("message"))
     outcome = result.outcome
-    if source in {"ecs_event", "ecs_result"}:
+    if source in {"ecs_event", "ecs_request", "ecs_result"}:
         model = EcsHttpExchange
         details = dict(
-            interaction_kind="EVENT" if source == "ecs_event" else "RESULT",
+            interaction_kind=(
+                "EVENT"
+                if source == "ecs_event"
+                else "REQUEST"
+                if source == "ecs_request"
+                else "RESULT"
+            ),
             command_code=safe_text(parsed.get("command_code")),
             device_code=safe_text(parsed.get("device_code")),
-            event_type=safe_text(parsed.get("event_type")),
+            event_type=safe_text(
+                parsed.get("request_type") if source == "ecs_request" else parsed.get("event_type")
+            ),
             reported_result=safe_text(parsed.get("result")),
         )
     elif operation in transport:

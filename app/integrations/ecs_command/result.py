@@ -177,6 +177,13 @@ async def receive_ecs_result(
         session, exchange_id=command.id, require_open=damaged_copy
     )
     possible = any(outcome in ("OPEN_ATTEMPT", "UNKNOWN", "ACK") for outcome in attempts.values())
+    if (
+        command.owner_domain == "coarse_sorting"
+        and command.dispatch_started_at is not None
+        and message is not None
+        and message.status in ("PENDING", "SENDING", "STALLED", "HELD")
+    ):
+        possible = True
     if damaged_copy and possible:
         # The outbound copy may be damaged while the original command is still provable.
         possible = (

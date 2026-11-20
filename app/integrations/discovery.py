@@ -1,4 +1,4 @@
-"""Coordinate trusted formal and local imports using the existing three registries."""
+"""Coordinate trusted formal and local imports across integration registries."""
 
 from typing import Literal
 
@@ -12,8 +12,8 @@ from app.integrations.registration import (
     import_registration_module,
 )
 
-Kind = Literal["ecs_event", "callback", "request"]
-_kinds: tuple[Kind, ...] = ("ecs_event", "callback", "request")
+Kind = Literal["ecs_event", "ecs_request", "callback", "request"]
+_kinds: tuple[Kind, ...] = ("ecs_event", "ecs_request", "callback", "request")
 _loaded_formal: set[Kind] = set()
 _loading = False
 

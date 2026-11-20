@@ -16,7 +16,7 @@
 ## 显式入口
 
 领域业务只放在 `app/businesses/<业务>/`，由 `catalog.entries()` 返回 composition，
-其 `ENTRY_MODULES` 显式声明 callback、request、ecs_event 及 local 入口。
+其 `ENTRY_MODULES` 显式声明 callback、request、ecs_event、ecs_request 及 local 入口。
 统一加载器 `app.integrations.discovery` 合并 catalog 与固定平台清单，不扫描 integrations 根目录。
 声明的入口可以是模块或包；包内子模块仍逐个导入，一个 operation 一个文件时校验注册名对应文件名。
 

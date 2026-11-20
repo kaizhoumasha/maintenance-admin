@@ -19,6 +19,7 @@ from app.controllers.auth import router as auth_router
 from app.controllers.businesses import router as businesses_router
 from app.controllers.devices import router as devices_router
 from app.controllers.ecs_callback import include_ecs_callback
+from app.controllers.ecs_request import include_ecs_request
 from app.controllers.ecs_result import router as ecs_result_router
 from app.controllers.ecs_status import router as ecs_status_router
 from app.controllers.ecs_status import status_capability
@@ -156,7 +157,7 @@ app = FastAPI(
         "通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，"
         "提供第三方与内部 API 对接基础能力"
     ),
-    version="0.3.0",
+    version="0.3.1",
     # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
     dependencies=[Depends(RateLimit(100))],
     # 刷新页面后保留已填的 token
@@ -199,6 +200,7 @@ include_ecs_callback(
     resolve_binding=resolve_binding,
     resolve_input_target=catalog.input_target,
 )
+include_ecs_request(app, environment=settings.ENVIRONMENT)
 include_dev_routers(
     app,
     environment=settings.ENVIRONMENT,

@@ -138,6 +138,44 @@ def test_deployed_business_catalog_reports_checked_formal_scope():
     assert report["scope"]["excluded"]
 
 
+def test_contract_checker_reports_ecs_request_registry(monkeypatch, capsys):
+    from pydantic import BaseModel, ConfigDict
+
+    from app.businesses import catalog
+    from app.integrations import discovery
+    from app.integrations.ecs_callback import registry as ecs_events
+    from app.integrations.ecs_request import CallbackPayload, ecs_request
+    from app.integrations.ecs_request import registry as ecs_requests
+    from app.integrations.wms_callback import registry as callbacks
+    from app.integrations.wms_request import operation as requests
+
+    class Decision(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        result: str
+
+    monkeypatch.setattr(ecs_events, "_registry", {})
+    monkeypatch.setattr(callbacks, "_registry", {})
+    monkeypatch.setattr(requests, "_registry", {})
+    monkeypatch.setattr(ecs_requests, "_registry", {})
+    monkeypatch.setattr(discovery, "load_formal_modules", lambda **_: None)
+    monkeypatch.setattr(discovery, "load_local_modules", lambda **_: None)
+    monkeypatch.setattr(catalog, "validate_business_contracts", lambda: ((), {}))
+    monkeypatch.setattr(catalog, "definitions", lambda: ())
+
+    @ecs_request("REGISTRY_CHECK", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, payload):
+        pass
+
+    from scripts.check_integration_contracts import main
+
+    assert main(["--environment", "production"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert any(
+        row["kind"] == "ecs_request" and row["name"] == "REGISTRY_CHECK"
+        for row in report["entries"]
+    )
+
+
 @pytest.mark.parametrize("environment", ["production", "local"])
 @pytest.mark.parametrize("packaged", [False, True])
 def test_environment_selects_scope_after_formal_validation(tmp_path, environment, packaged):
