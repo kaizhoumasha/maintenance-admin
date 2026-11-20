@@ -220,3 +220,211 @@ async def test_unknown_delivery_state_does_not_continue_to_handler(monkeypatch):
         await ecs_request_controller.wait_for_request(
             Factory(), "digest", SimpleNamespace(message_id=1, operation="wms", operation_id="op")
         )
+
+
+async def _seed_outbound(callback_store, *, status, operation="demo.op@v1", operation_id=None):
+    import json
+    from datetime import UTC, datetime
+
+    from app.core.identifiers import uuid7
+    from tests.helpers import seed_reliable_message
+
+    oid = operation_id or str(uuid7())
+    now = datetime.now(UTC)
+    async with callback_store.begin() as session:
+        message = await seed_reliable_message(
+            session,
+            target="ecs-request-test",
+            operation=operation,
+            operation_id=oid,
+            request_raw=json.dumps(
+                {"operation": operation, "operation_id": oid, "data": {}},
+                separators=(",", ":"),
+            ).encode(),
+            status=status,
+            attempts=0,
+            next_attempt_at=None if status == "ABANDONED" else now,
+            created_at=now,
+            updated_at=now,
+        )
+    return message, oid
+
+
+async def _pending_state(callback_store, payload):
+    from app.integrations.callback_receipts import find_receipt_state
+    from app.integrations.ecs_request.envelope import EcsRequestEnvelope
+    from app.integrations.ecs_request.receiver import request_identity
+
+    identity = request_identity(EcsRequestEnvelope.model_validate(payload))
+    async with callback_store() as session:
+        return await find_receipt_state(session, "ecs.request", identity), identity
+
+
+async def test_wait_budget_exhaustion_keeps_deferred_receipt(
+    callback_client, callback_store, monkeypatch
+):
+    message, oid = await _seed_outbound(callback_store, status="PENDING")
+    sends = []
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        if ctx.deferred is None:
+            sends.append(ctx.receipt_id)
+            ctx.defer(message.id, message.operation, oid)
+            return
+        ctx.respond(Decision(result="ALLOW"))
+
+    async def _budget(*a, **k):
+        return 0
+
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", _budget)
+
+    async def _sleep(_):
+        return None
+
+    monkeypatch.setattr(ecs_request_controller.asyncio, "sleep", _sleep)
+
+    payload = body()
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+    assert len(sends) == 1
+    state, _ = await _pending_state(callback_store, payload)
+    assert state is not None
+    assert state.status_code == 503
+    assert state.prepared_body is None
+    assert state.event_context["deferred_request"] == {
+        "message_id": message.id,
+        "operation": message.operation,
+        "operation_id": oid,
+    }
+    async with callback_store() as session:
+        from sqlalchemy import select
+
+        from app.models import ReliableMessage
+
+        rows = list(await session.scalars(select(ReliableMessage)))
+        assert len(rows) == 1 and rows[0].id == message.id
+
+
+async def test_post_wait_valid_continues_to_decided(callback_client, callback_store, monkeypatch):
+    message, oid = await _seed_outbound(callback_store, status="PENDING")
+    sends = []
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        if ctx.deferred is None:
+            sends.append(1)
+            ctx.defer(message.id, message.operation, oid)
+            return
+        ctx.respond(Decision(result="ALLOW"))
+
+    async def valid_result(*args, **kwargs):
+        return SimpleNamespace(
+            delivery_uncertain=False,
+            response_state="VALID",
+            delivery_terminal=True,
+            response_data={"ok": True},
+        )
+
+    monkeypatch.setattr(ecs_request_controller, "get_result", valid_result)
+
+    async def _budget(*a, **k):
+        return 1000
+
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", _budget)
+
+    response = await callback_client.post(PATH, json=body())
+    replay = await callback_client.post(PATH, json=body())
+
+    assert response.status_code == replay.status_code == 200
+    assert response.json() == {"code": 200, "message": "DECIDED", "data": {"result": "ALLOW"}}
+    assert replay.content == response.content
+    assert sends == [1]
+    async with callback_store() as session:
+        rows = await read_receipts(session)
+        assert len(rows) == 1
+        assert rows[0].status_code == 200
+
+
+async def test_expired_delivery_continues_to_decided(callback_client, callback_store, monkeypatch):
+    message, oid = await _seed_outbound(callback_store, status="EXPIRED")
+    sends = []
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        if ctx.deferred is None:
+            sends.append(1)
+            ctx.defer(message.id, message.operation, oid)
+            return
+        ctx.respond(Decision(result="DENY"))
+
+    async def _budget(*a, **k):
+        return 1000
+
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", _budget)
+
+    response = await callback_client.post(PATH, json=body())
+
+    assert response.status_code == 200
+    assert response.json() == {"code": 200, "message": "DECIDED", "data": {"result": "DENY"}}
+    assert sends == [1]
+    async with callback_store() as session:
+        rows = await read_receipts(session)
+        assert len(rows) == 1 and rows[0].status_code == 200
+
+
+async def test_terminal_redefer_rolls_back_and_records_incomplete(
+    callback_client, callback_store, monkeypatch
+):
+    message, oid = await _seed_outbound(callback_store, status="EXPIRED")
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        ctx.defer(message.id, message.operation, oid)
+
+    async def _budget(*a, **k):
+        return 1000
+
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", _budget)
+
+    payload = body()
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 503
+    assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+    state, _ = await _pending_state(callback_store, payload)
+    assert state is not None
+    assert state.prepared_body is None
+    assert state.status_code == 503
+    assert state.diagnostic == [{"reason_code": "REQUEST_HANDLER_INCOMPLETE"}]
+    assert state.event_context["deferred_request"] == {
+        "message_id": message.id,
+        "operation": message.operation,
+        "operation_id": oid,
+    }
+
+
+async def test_terminal_handler_without_respond_records_incomplete(
+    callback_client, callback_store, monkeypatch
+):
+    message, oid = await _seed_outbound(callback_store, status="EXPIRED")
+
+    @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        if ctx.deferred is None:
+            ctx.defer(message.id, message.operation, oid)
+
+    async def _budget(*a, **k):
+        return 1000
+
+    monkeypatch.setattr(ecs_request_controller, "request_budget_ms", _budget)
+
+    payload = body()
+    response = await callback_client.post(PATH, json=payload)
+
+    assert response.status_code == 503
+    state, _ = await _pending_state(callback_store, payload)
+    assert state.prepared_body is None
+    assert state.diagnostic == [{"reason_code": "REQUEST_HANDLER_INCOMPLETE"}]
