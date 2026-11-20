@@ -46,6 +46,7 @@ async def test_pending_receipt_state_is_readable_without_reply_wire(
 async def test_continue_binding_must_match_the_acceptance_snapshot():
     binding = await ecs_binding(None, "D1")
     snapshot = {
+        "owner_domain": binding.business_code,
         "device_id": binding.device_id,
         "device_version": binding.device_version,
         "work_line_id": binding.work_line_id,
@@ -58,3 +59,4 @@ async def test_continue_binding_must_match_the_acceptance_snapshot():
         binding,
         {**snapshot, "device_version": binding.device_version + 1},
     )
+    assert not _binding_matches_snapshot(binding, {**snapshot, "owner_domain": "other"})
