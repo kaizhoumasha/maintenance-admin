@@ -359,6 +359,7 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             "bin_type": "TYPE-8",
             "reel_layer": 1,
             "reel_thickness": 20,
+            "size_inch": 15,
             "reel_diameter": 15,
         }
         grant_request = {"task_id": "task", "bin_code": "B", "scanned_at": 1}
@@ -427,6 +428,7 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             "rack_layer": 1,
             "rack_column": 1,
             "reel_thickness": 20,
+            "size_inch": 15,
             "reel_diameter": 15,
         }
         grant_request = {"task_id": "task", "rack_id": "source", "rack_face": "90", "arrived_at": 2}

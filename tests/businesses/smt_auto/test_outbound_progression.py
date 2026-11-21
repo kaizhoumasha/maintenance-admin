@@ -695,6 +695,7 @@ async def test_new_bin_yields_to_ready_rack_only(outbound_host, rack_ready):
             bin_type=3,
             reel_layer=1,
             reel_thickness=15.3,
+            size_inch=7,
             reel_diameter=7,
         ),
     )
@@ -1594,6 +1595,7 @@ async def test_same_transfer_rack_reenters_after_departure_without_replace(
             bin_type=3,
             reel_layer=1,
             reel_thickness=15.3,
+            size_inch=7,
             reel_diameter=7,
         ),
     )
@@ -1999,6 +2001,7 @@ async def test_original_pick_failed_wait_retry_and_source_done(outbound_host, sc
         bin_type=3,
         reel_layer=2,
         reel_thickness=15.3,
+        size_inch=7,
         reel_diameter=7,
     )
     async with host.factory.begin() as session:
@@ -2159,6 +2162,7 @@ async def test_return_slot_empty_only_for_original_pick_failure(
         rack_layer=2,
         rack_column=3,
         reel_thickness=15.3,
+        size_inch=7,
         reel_diameter=7,
     )
     await host.settle("outbound.return_rack.work_plan@v1", ready)

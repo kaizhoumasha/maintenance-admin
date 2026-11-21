@@ -12,6 +12,7 @@ def test_normal_target_keeps_empty_occupancy_and_rejects_coerced_numbers():
         cell_index=1,
         reel_layer=0,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=15,
         reel_totalthickness=0,
     )

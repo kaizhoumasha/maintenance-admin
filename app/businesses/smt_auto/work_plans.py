@@ -932,7 +932,14 @@ class WorkPlans:
         ):
             return None
         try:
-            RackReady.model_validate({**data, "reel_thickness": 0, "reel_diameter": 0})
+            RackReady.model_validate(
+                {
+                    **data,
+                    "reel_thickness": 0,
+                    "size_inch": data.get("size_inch", 0),
+                    "reel_diameter": 0,
+                }
+            )
         except ValidationError:
             return None
         return result
@@ -1073,7 +1080,13 @@ class WorkPlans:
                     },
                     source_params={
                         key: data[key]
-                        for key in ("rack_layer", "rack_column", "reel_thickness", "reel_diameter")
+                        for key in (
+                            "rack_layer",
+                            "rack_column",
+                            "reel_thickness",
+                            "size_inch",
+                            "reel_diameter",
+                        )
                     },
                     source_arrival_snapshot=round_.source_rack_bindings,
                     pick_call_key=f"auto:{member.task_id}:work-plan:{round_.id}",

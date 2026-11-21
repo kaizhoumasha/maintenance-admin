@@ -335,19 +335,14 @@ class Inbound:
                     bin_location=source["bin_location"],
                     bin_type=str(source["bin_type"]),
                     bin_cell_location=source["cell_index"],
-                    **{
-                        k: source[k]
-                        for k in (
-                            "reel_layer",
-                            "reel_thickness",
-                            "reel_diameter",
-                            "reel_totalthickness",
-                        )
-                    },
+                    reel_layer=source["reel_layer"],
+                    reel_thickness=source["reel_thickness"],
+                    reel_diameter=source["size_inch"],
+                    reel_totalthickness=source["reel_totalthickness"],
                 ),
                 target=SCAN,
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,
@@ -525,18 +520,13 @@ class Inbound:
                     location_type="BIN",
                     bin_type=str(target["bin_type"]),
                     bin_cell_location=target["cell_index"],
-                    **{
-                        k: target[k]
-                        for k in (
-                            "reel_layer",
-                            "reel_thickness",
-                            "reel_diameter",
-                            "reel_totalthickness",
-                        )
-                    },
+                    reel_layer=target["reel_layer"],
+                    reel_thickness=target["reel_thickness"],
+                    reel_diameter=target["size_inch"],
+                    reel_totalthickness=target["reel_totalthickness"],
                 ),
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,
@@ -769,7 +759,7 @@ class Inbound:
             params = dict(
                 source=SCAN, target=dict(location_id="STATION_NG", location_type="SCAN_NG")
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,

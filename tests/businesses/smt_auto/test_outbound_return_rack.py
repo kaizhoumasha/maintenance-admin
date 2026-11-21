@@ -55,6 +55,7 @@ async def test_return_face_pick_requires_recorded_correction_of_invalid_ready(
         rack_layer=2,
         rack_column=3,
         reel_thickness=20,
+        size_inch=13,
         reel_diameter=330,
     )
     # Retained original evidence and the operational projection are both populated
@@ -355,6 +356,7 @@ async def test_return_face_original_pick_and_final_target(outbound_host, next_mo
             rack_layer=1,
             rack_column=6,
             reel_thickness=22,
+            size_inch=13,
             reel_diameter=13,
         )
     await host.settle("outbound.return_rack.work_plan@v1", next_result)

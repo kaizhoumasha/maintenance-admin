@@ -30,7 +30,8 @@ class BinReady(Data):
     bin_type: BinType
     reel_layer: int
     reel_thickness: Number
-    reel_diameter: Number
+    size_inch: Number
+    reel_diameter: Number | None
 
 
 class RackReady(Data):
@@ -41,7 +42,8 @@ class RackReady(Data):
     rack_layer: int
     rack_column: int
     reel_thickness: Number
-    reel_diameter: Number
+    size_inch: Number
+    reel_diameter: Number | None
 
 
 class InboundSource(Data):
@@ -54,7 +56,8 @@ class InboundSource(Data):
     cell_index: Annotated[int, Field(ge=1, le=7)]
     reel_layer: int
     reel_thickness: Number
-    reel_diameter: Number
+    size_inch: Number
+    reel_diameter: Number | None
     reel_totalthickness: Number
 
 

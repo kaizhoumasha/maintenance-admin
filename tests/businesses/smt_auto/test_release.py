@@ -317,6 +317,7 @@ async def test_plate_physical_json_and_timestamps_cannot_prove_real_closure(s5_r
             "bin_type": 3,
             "reel_layer": 1,
             "reel_thickness": 20,
+            "size_inch": 15,
             "reel_diameter": 15,
         },
     )

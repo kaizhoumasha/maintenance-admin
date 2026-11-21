@@ -6,18 +6,9 @@ from tests.businesses.smt_auto._outbound_support import *  # noqa: F401,F403
     "wait,disabled,cancel",
     [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
 )
-@pytest.mark.parametrize("legacy_diameter", [False, True])
 async def test_original_bin_pick_put_report_survives_wait_and_disable(
-    outbound_host, wait, disabled, cancel, legacy_diameter, monkeypatch
+    outbound_host, wait, disabled, cancel
 ):
-    from app.businesses.smt_auto.ecs_command import PickAndPut
-
-    builder = PickAndPut.from_millimeters
-    if legacy_diameter:
-        # Create frozen commands using the builder used before diameter conversion.
-        monkeypatch.setattr(
-            PickAndPut, "from_millimeters", classmethod(lambda cls, **params: cls(**params))
-        )
     host = outbound_host
     async with host.factory.begin() as session:
         work = await session.get(AutoBinWork, host.work_id)
@@ -33,6 +24,7 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             bin_type=8,
             reel_layer=2,
             reel_thickness=15.3,
+            size_inch=7,
             reel_diameter=179,
         ),
     )
@@ -69,40 +61,28 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
         )
         raw = json.loads(await read_history_body(session, command.request_record_id))
         assert raw["params"]["source"]["bin_type"] == "8"
-        assert raw["params"]["source"]["reel_diameter"] == (179 if legacy_diameter else 7)
+        assert raw["params"]["source"]["reel_diameter"] == 7
         assert plate.source_params["reel_diameter"] == 179
-        if legacy_diameter:
-            snapshot = plate.source_arrival_snapshot
-            command = {
-                k: v for k, v in snapshot["pick_command"].items() if k != "platform_scanner_id"
-            }
-            plate.source_arrival_snapshot = {**snapshot, "pick_command": command}
-    if legacy_diameter and disabled:
-        # A pending command predating the split can still use its original Result's scan.
-        assert (await host.arm_result(pick_code, legacy_scan=True)).status_code == 200
+    if wait:
+        assert (await host.platform_scan(pick_code)).status_code == 200
     else:
-        if wait:
-            assert (await host.platform_scan(pick_code)).status_code == 200
-        else:
-            assert (
-                await host.arm_result(pick_code, legacy_scan=not legacy_diameter)
-            ).status_code == 200
-            wrong_pick = await host.platform_scan("wrong-pick-command")
-            assert wrong_pick.diagnostic[0]["reason_code"] == "PLATFORM_SCAN_PICK_NOT_FOUND"
-        async with host.factory.begin() as session:
-            await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=45)
-            assert not await session.scalar(
-                select(AutoOutboundDecisionRound.id).where(
-                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE"
-                )
+        assert (await host.arm_result(pick_code)).status_code == 200
+        wrong_pick = await host.platform_scan("wrong-pick-command")
+        assert wrong_pick.diagnostic[0]["reason_code"] == "PLATFORM_SCAN_PICK_NOT_FOUND"
+    async with host.factory.begin() as session:
+        await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=45)
+        assert not await session.scalar(
+            select(AutoOutboundDecisionRound.id).where(
+                AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE"
             )
-        if wait:
-            assert (await host.arm_result(pick_code)).status_code == 200
-        else:
-            assert (await host.platform_scan(pick_code)).status_code == 200
-        assert (await host.platform_scan(pick_code)).outcome == "duplicate"
-        conflict = await host.platform_scan(pick_code, barcode="different")
-        assert conflict.diagnostic[0]["reason_code"] == "PLATFORM_SCAN_CONFLICT"
+        )
+    if wait:
+        assert (await host.arm_result(pick_code)).status_code == 200
+    else:
+        assert (await host.platform_scan(pick_code)).status_code == 200
+    assert (await host.platform_scan(pick_code)).outcome == "duplicate"
+    conflict = await host.platform_scan(pick_code, barcode="different")
+    assert conflict.diagnostic[0]["reason_code"] == "PLATFORM_SCAN_CONFLICT"
     async with host.factory.begin() as session:
         await host.outbound.advance(session, work_line_id=1, plate_id=plate_id, now_ms=50)
         rounds = (
@@ -156,20 +136,10 @@ async def test_original_bin_pick_put_report_survives_wait_and_disable(
             )
         )
         raw = json.loads(await read_history_body(session, command.request_record_id))
-        assert raw["params"]["target"]["reel_diameter"] == (179 if legacy_diameter else 7)
+        assert raw["params"]["target"]["reel_diameter"] == 7
         assert raw["params"]["target"]["rack_side"] == "A"
-        if legacy_diameter:
-            snapshot = plate.source_arrival_snapshot
-            put = snapshot["put_command"]
-            legacy_target = dict(put["params"]["target"])
-            legacy_target["rack_face"] = legacy_target.pop("rack_side")
-            plate.source_arrival_snapshot = {
-                **snapshot,
-                "put_command": {**put, "params": {**put["params"], "target": legacy_target}},
-            }
         if disabled:
             (await session.get(WorkLine, 1)).is_enabled = False
-    monkeypatch.setattr(PickAndPut, "from_millimeters", builder)
     await host.settle("outbound.bin.work_plan@v1", {"result": "NO_WORK"})
     assert (await host.arm_result(put_code, location=None)).status_code == 200
     async with host.factory.begin() as session:

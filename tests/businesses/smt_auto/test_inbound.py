@@ -299,6 +299,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=381,
         reel_totalthickness=20,
     )
@@ -345,6 +346,7 @@ async def test_one_normal_plate_original_public_physical_report_chain(
         cell_index=2,
         reel_layer=0,
         reel_thickness=20,
+        size_inch=13,
         reel_diameter=330.2,
         reel_totalthickness=0,
     )
@@ -508,6 +510,7 @@ async def ready_inbound(inbound_host):
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=15,
         reel_totalthickness=20,
     )
@@ -606,6 +609,7 @@ async def decide_exhaustion(host, *, consume=True, next_source=None):
         cell_index=1,
         reel_layer=0,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=15,
         reel_totalthickness=0,
     )
@@ -670,6 +674,7 @@ async def test_late_ready_for_exhausted_original_stays_unconsumed_after_restart(
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=15,
         reel_totalthickness=20,
     )
@@ -761,6 +766,7 @@ async def test_other_rack_material_decision_uses_latest_nonexhausted_scope(ready
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
+        size_inch=15,
         reel_diameter=15,
         reel_totalthickness=20,
     )
@@ -883,6 +889,7 @@ async def test_material_wait_retries_only_at_original_due_and_preserves_pick(rea
                 cell_index=1,
                 reel_layer=0,
                 reel_thickness=20,
+                size_inch=15,
                 reel_diameter=15,
                 reel_totalthickness=0,
             ),
@@ -1051,6 +1058,7 @@ async def test_broken_material_predecessor_cannot_advance(ready_inbound, decisio
                     cell_index=1,
                     reel_layer=0,
                     reel_thickness=20,
+                    size_inch=15,
                     reel_diameter=15,
                     reel_totalthickness=0,
                 ),

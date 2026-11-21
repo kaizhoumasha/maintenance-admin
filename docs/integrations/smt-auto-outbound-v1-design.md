@@ -31,10 +31,12 @@
 
 | `data.result` | 响应字段与处理 |
 | --- | --- |
-| `READY` · BIN | `cell_id`、`cell_index`、`bin_type`、`reel_layer`、`reel_thickness`、`reel_diameter`。授权原箱内一次取盘。 |
-| `READY` · RackSlot | `rack_id`、`rack_face`、`slot_id`、`rack_layer`、`rack_column`、`reel_thickness`、`reel_diameter`。授权原架原面内一次取盘。 |
+| `READY` · BIN | `cell_id`、`cell_index`、`bin_type`、`reel_layer`、`reel_thickness`、`size_inch`、`reel_diameter`。授权原箱内一次取盘，毫米字段允许为空。 |
+| `READY` · RackSlot | `rack_id`、`rack_face`、`slot_id`、`rack_layer`、`rack_column`、`reel_thickness`、`size_inch`、`reel_diameter`。授权原架原面内一次取盘，毫米字段允许为空。 |
 | `WAIT` | `retry_after_ms` 为 1 至 60000 的整数。原箱或架面保持开放，本盘已决定的放置照常推进。 |
 | `NO_WORK` | 例如 `{"result":"NO_WORK"}`。WMS 确认本次到位的箱或架面已无后续取料作业。首问、正常续问和异常续问统一以此判定取料终局。 |
+
+WMS 返回的 `size_inch` 原值填入 ECS 原合同的 `reel_diameter` 字段。WMS 的毫米 `reel_diameter` 同时保留并允许为空，ECS 报文结构保持原合同。
 
 `READY` 的类型、单位及 ECS 参数映射沿现有合同。WES 用本次完整授权生成取盘参数，执行前复核原到位、设备和精确来源仍有效。WMS 用 `task_id`、来源和原到位时间定位作业，再根据已保存的授权、来源占用和作业进度作答。首问和续问使用同一请求结构。接口报文和单盘业务均无需前盘 ID，平台交接由原设备指令识别。 [BIN 授权](smt-auto-api.md#bin-work-plan) · [RackSlot 授权](smt-auto-api.md#rack-work-plan)
 

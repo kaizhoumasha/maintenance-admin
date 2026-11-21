@@ -1,5 +1,7 @@
 # SMT AUTO 料盘直径下发单位修正
 
+> 历史方案说明。当前合同已改为 WMS 同时返回 `size_inch` 和可空的 `reel_diameter`，ECS 原合同的 `reel_diameter` 字段直接使用 `size_inch` 的值，本文的毫米转英寸方案仅保留作历史记录。
+
 **目标：** WMS 的 reel_diameter 保存为毫米；仅在新建 ECS PICK_AND_PUT 指令时，换算为最接近的 7、13、15 英寸档位。中点取较大档位。179→7，330.2→13，381→15，254→13，355.6→15。
 
 **范围：** SMT AUTO 入库单层架取料、扫码台放入 BIN，出库 BIN/RackSlot 取料及扫码台放入转运架。粗分原有英寸字段不变。
