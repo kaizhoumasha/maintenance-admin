@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -8,9 +9,11 @@ from app.core.identifiers import uuid7
 from app.integrations import callback_receipts, history
 from app.integrations.callback_receipts import find_receipt, find_receipt_state, insert_receipt
 from app.integrations.ecs_request import CallbackPayload, ecs_request, registry
+from app.integrations.ecs_request import receiver as receiver_module
 from app.integrations.ecs_request.envelope import EcsRequestEnvelope
 from app.integrations.ecs_request.receiver import (
     DeferredRequest,
+    EcsRequestResponse,
     _binding_matches_snapshot,
     accept_ecs_request,
     continue_ecs_request,
@@ -145,3 +148,75 @@ async def test_continue_uses_the_acceptance_snapshot_binding_resolver(callback_s
 
 async def _return(_session, value):
     return value
+
+
+async def test_insert_conflict_reuses_saved_binding_context(monkeypatch):
+    monkeypatch.setattr(registry, "_registry", {})
+
+    class Decision(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+        result: str
+
+    observed = []
+    binding = await ecs_binding(None, "D1")
+
+    @ecs_request("CONFLICT_PENDING", device_role="SCAN1", data=CallbackPayload, response=Decision)
+    async def handler(ctx, data):
+        observed.append((ctx.business_code, ctx.component_key))
+        ctx.respond(Decision(result="ALLOW"))
+
+    existing = SimpleNamespace(
+        id=7,
+        prepared_body=None,
+        body=None,
+        status_code=503,
+        exchange_id=None,
+        event_context={
+            "owner_domain": binding.business_code,
+            "component_key": "accepted_component",
+            "work_line_id": binding.work_line_id,
+            "device_id": binding.device_id,
+            "device_role": binding.device_role,
+            "device_version": binding.device_version,
+            "work_line_version": binding.work_line_version,
+            "deferred_request": {
+                "message_id": 11,
+                "operation": "wms.decide@v1",
+                "operation_id": "original-operation",
+            },
+        },
+    )
+    calls = 0
+
+    async def find_state(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else existing
+
+    async def insert_conflict(*args, **kwargs):
+        return None
+
+    async def persist_decision(*args, **kwargs):
+        return EcsRequestResponse(200, {"code": 200, "message": "DECIDED"}, "decided")
+
+    monkeypatch.setattr(receiver_module, "find_receipt_state", find_state)
+    monkeypatch.setattr(receiver_module, "insert_receipt", insert_conflict)
+    monkeypatch.setattr(receiver_module, "_persist_decision", persist_decision)
+
+    raw = json.dumps(
+        {
+            "device_code": "D1",
+            "request_type": "CONFLICT_PENDING",
+            "timestamp": 1,
+            "data": {},
+        }
+    ).encode()
+
+    response = await accept_ecs_request(
+        None,
+        raw,
+        resolve_binding=lambda session, code: _return(session, binding),
+    )
+
+    assert response.status_code == 200
+    assert observed == [(binding.business_code, "accepted_component")]
