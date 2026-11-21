@@ -267,7 +267,7 @@ class WorkPlans:
             return round_
         data = result.response_data
         try:
-            DECISIONS["inbound" if inbound else "bin"].validate_python(data)
+            data = DECISIONS["inbound" if inbound else "bin"].validate_python(data).model_dump()
         except (ValidationError, TypeError):
             return round_
         if inbound and data["result"] == "READY":
@@ -1020,7 +1020,7 @@ class WorkPlans:
             return round_
         data = result.response_data
         try:
-            DECISIONS["rack"].validate_python(data)
+            data = DECISIONS["rack"].validate_python(data).model_dump()
         except (ValidationError, TypeError):
             return round_
         if (

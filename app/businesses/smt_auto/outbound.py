@@ -30,7 +30,7 @@ from .request.outbound_bin_material_decide_v1 import MaterialDecide as BinDecide
 from .request.outbound_material_movement_report_v1 import MovementReport
 from .request.outbound_rackslot_material_decide_v1 import MaterialDecide as RackDecide
 from .work_plan_contracts import DECISIONS as PLANS
-from .work_plan_contracts import Wait
+from .work_plan_contracts import Wait, size_inch_value
 from .work_plans import WorkPlans, outbound_locator_closed
 
 OWNER = CommandOwner("smt_auto")
@@ -444,9 +444,16 @@ class Outbound:
             plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(ready)
         except (ValueError, TypeError):
             return False
+        ready = plan.model_dump()
         fields = {k: ready[k] for k in type(plan).model_fields if k != "result"}
         locator = {k: v for k, v in plate.source_locator.items() if k not in ("type", "bin_code")}
-        return fields == {**locator, **plate.source_params}
+        source_params = dict(plate.source_params)
+        if "size_inch" not in source_params:
+            try:
+                source_params["size_inch"] = size_inch_value(source_params)
+            except (KeyError, TypeError, ValueError):
+                return False
+        return fields == {**locator, **source_params}
 
     async def _work_plan_pick_ready(self, session, plate, round_):
         # WAIT keeps the same exception trigger, even though each evaluation has a new ID.
@@ -744,7 +751,7 @@ class Outbound:
                     bin_cell_location=params["cell_index"],
                     reel_layer=params["reel_layer"],
                     reel_thickness=params["reel_thickness"],
-                    reel_diameter=params["size_inch"],
+                    reel_diameter=size_inch_value(params),
                     reel_totalthickness=float(
                         Decimal(str(params["reel_thickness"])) * params["reel_layer"]
                     ),
@@ -757,7 +764,7 @@ class Outbound:
                     rack_layer=str(params["rack_layer"]),
                     rack_column=str(params["rack_column"]),
                     reel_thickness=params["reel_thickness"],
-                    reel_diameter=params["size_inch"],
+                    reel_diameter=size_inch_value(params),
                 )
             command = PickAndPut(source=source, target=SCAN)
             timeout = (
@@ -959,7 +966,7 @@ class Outbound:
                         rack_layer=str(target["rack_layer"]),
                         rack_column=str(target["rack_column"]),
                         reel_thickness=plate.source_params["reel_thickness"],
-                        reel_diameter=plate.source_params["size_inch"],
+                        reel_diameter=size_inch_value(plate.source_params),
                     ),
                 )
                 timeout_ms = settings.rack_arm_timeout_ms
@@ -1431,23 +1438,25 @@ class Outbound:
                 rack_layer=str(target["rack_layer"]),
                 rack_column=str(target["rack_column"]),
                 reel_thickness=plate.source_params["reel_thickness"],
-                reel_diameter=plate.source_params["size_inch"],
+                reel_diameter=size_inch_value(plate.source_params),
             ),
         )
-        legacy_expected = {
-            **expected,
-            "target": {
-                **expected["target"],
-                "reel_diameter": plate.source_params["reel_diameter"],
-            },
-        }
-        if command not in (expected, legacy_expected):
-            try:
-                normalized = PickAndPut(**expected).model_dump()
-            except ValidationError:
-                return None
-            if command != normalized:
-                return None
+        try:
+            normalized = PickAndPut(**expected).model_dump()
+            legacy_expected = PickAndPut(
+                **{
+                    **expected,
+                    "target": {
+                        **expected["target"],
+                        "reel_diameter": plate.source_params["reel_diameter"],
+                    },
+                }
+            ).model_dump()
+        except ValidationError:
+            return None
+        if command not in (expected, normalized, legacy_expected):
+            print("DEBUG EXPECTED", command, expected, normalized, legacy_expected)
+            return None
         return dict(
             task_id=plate.task_id,
             source_locator=plate.source_locator,
