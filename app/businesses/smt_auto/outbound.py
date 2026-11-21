@@ -1455,7 +1455,6 @@ class Outbound:
         except ValidationError:
             return None
         if command not in (expected, normalized, legacy_expected):
-            print("DEBUG EXPECTED", command, expected, normalized, legacy_expected)
             return None
         return dict(
             task_id=plate.task_id,
