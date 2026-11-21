@@ -25,7 +25,7 @@ from .models import (
 from .request.putaway_material_decide_v1 import MaterialDecide
 from .request.putaway_material_movement_report_v1 import MovementReport
 from .request.putaway_source_empty_decide_v1 import EmptyDecide
-from .work_plan_contracts import DECISIONS, InboundSource, Wait
+from .work_plan_contracts import DECISIONS, InboundSource, Wait, size_inch_value
 from .work_plans import WorkPlans
 
 OWNER = CommandOwner("smt_auto")
@@ -318,13 +318,19 @@ class Inbound:
                 ):
                     return plate
                 expected = {**parent.source_locator, **parent.source_params}
-            if expected != {**plate.source_locator, **plate.source_params}:
+            try:
+                source = InboundSource.model_validate(expected).model_dump()
+                existing = InboundSource.model_validate(
+                    {**plate.source_locator, **plate.source_params}
+                ).model_dump()
+            except (ValidationError, TypeError):
+                return plate
+            if source != existing:
                 return plate
             role = next((b for b in bindings.values() if b and b.device_role == "RACK_ARM"), None)
             station = dict(settings.source_locations).get(proof["location_code"])
             if role is None or station is None:
                 return plate
-            source = InboundSource.model_validate(expected).model_dump()
             params = dict(
                 source=dict(
                     location_id=station,
@@ -335,19 +341,14 @@ class Inbound:
                     bin_location=source["bin_location"],
                     bin_type=str(source["bin_type"]),
                     bin_cell_location=source["cell_index"],
-                    **{
-                        k: source[k]
-                        for k in (
-                            "reel_layer",
-                            "reel_thickness",
-                            "reel_diameter",
-                            "reel_totalthickness",
-                        )
-                    },
+                    reel_layer=source["reel_layer"],
+                    reel_thickness=source["reel_thickness"],
+                    reel_diameter=size_inch_value(source),
+                    reel_totalthickness=source["reel_totalthickness"],
                 ),
                 target=SCAN,
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,
@@ -525,18 +526,13 @@ class Inbound:
                     location_type="BIN",
                     bin_type=str(target["bin_type"]),
                     bin_cell_location=target["cell_index"],
-                    **{
-                        k: target[k]
-                        for k in (
-                            "reel_layer",
-                            "reel_thickness",
-                            "reel_diameter",
-                            "reel_totalthickness",
-                        )
-                    },
+                    reel_layer=target["reel_layer"],
+                    reel_thickness=target["reel_thickness"],
+                    reel_diameter=size_inch_value(target),
+                    reel_totalthickness=target["reel_totalthickness"],
                 ),
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,
@@ -769,7 +765,7 @@ class Inbound:
             params = dict(
                 source=SCAN, target=dict(location_id="STATION_NG", location_type="SCAN_NG")
             )
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,

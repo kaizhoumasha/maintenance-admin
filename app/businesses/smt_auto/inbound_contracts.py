@@ -26,7 +26,8 @@ class Target(Data):
     cell_index: Annotated[int, Field(ge=1, le=7)]
     reel_layer: int
     reel_thickness: Number
-    reel_diameter: Number
+    size_inch: Number
+    reel_diameter: Number | None
     reel_totalthickness: Number
 
 

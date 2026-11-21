@@ -419,6 +419,7 @@ async def return_face(host, *, ready=True, consume=True):
                 rack_layer=2,
                 rack_column=3,
                 reel_thickness=15.3,
+                size_inch=13,
                 reel_diameter=330.2,
             )
             if ready is True
@@ -452,6 +453,7 @@ async def decided_outbound(outbound_host, request):
             bin_type=3,
             reel_layer=1,
             reel_thickness=15.3,
+            size_inch=7,
             reel_diameter=7,
         ),
     )
@@ -504,6 +506,7 @@ def ready_bin(cell="C2", index=2):
         bin_type=3,
         reel_layer=1,
         reel_thickness=15.3,
+        size_inch=7,
         reel_diameter=7,
     )
 

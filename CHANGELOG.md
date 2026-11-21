@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4] - 2026-11-21
+
+### Changed
+
+- SMT 自动线保留 ECS 原有 `reel_diameter` 字段，直接使用 WMS 下发的 `size_inch` 值，移除毫米到英寸的本地换算。
+- WMS 料盘授权同时保留英寸 `size_inch` 和可空毫米 `reel_diameter`，并同步更新出入库合同、测试和接口文档。
+
 ## [0.3.3] - 2026-11-21
 
 ### Fixed

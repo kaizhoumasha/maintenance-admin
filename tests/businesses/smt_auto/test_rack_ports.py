@@ -15,11 +15,26 @@ from app.businesses.smt_auto.models import (
     AutoTaskInput,
     AutoTaskRequest,
 )
-from app.businesses.smt_auto.rack_ports import AutoRackPorts, RackAuthorization
+from app.businesses.smt_auto.rack_ports import AutoRackPorts, RackAuthorization, _ready
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.models import Device, DeviceRoute, ReliableMessage, WorkLine
 from app.models.base import Base
 from tests.businesses.rack_dispatch import apply_outcome, origin, respond, store
+
+
+def test_ready_accepts_legacy_snapshot_without_size_inch():
+    assert _ready(
+        {
+            "result": "READY",
+            "cell_id": "B1",
+            "cell_index": 1,
+            "bin_type": "TYPE-8",
+            "reel_layer": 1,
+            "reel_thickness": 20,
+            "reel_diameter": 381,
+        },
+        bin_source=True,
+    )
 
 
 @pytest.fixture
@@ -359,6 +374,7 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             "bin_type": "TYPE-8",
             "reel_layer": 1,
             "reel_thickness": 20,
+            "size_inch": 15,
             "reel_diameter": 15,
         }
         grant_request = {"task_id": "task", "bin_code": "B", "scanned_at": 1}
@@ -427,6 +443,7 @@ async def test_final_plate_target_grant_can_rotate_but_never_overrides_old_facts
             "rack_layer": 1,
             "rack_column": 1,
             "reel_thickness": 20,
+            "size_inch": 15,
             "reel_diameter": 15,
         }
         grant_request = {"task_id": "task", "rack_id": "source", "rack_face": "90", "arrived_at": 2}

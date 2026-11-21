@@ -12,7 +12,7 @@ from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.models import WorkLine
 
 from ._execution_facts import arrival_is_open, observe_arm_result, read_decision
-from .ecs_command import ArmResult, PickAndPut, ecs_reel_diameter
+from .ecs_command import ArmResult, PickAndPut
 from .inbound import PhysicalSettings
 from .inbound_contracts import Scan
 from .locking import lock_line
@@ -30,7 +30,7 @@ from .request.outbound_bin_material_decide_v1 import MaterialDecide as BinDecide
 from .request.outbound_material_movement_report_v1 import MovementReport
 from .request.outbound_rackslot_material_decide_v1 import MaterialDecide as RackDecide
 from .work_plan_contracts import DECISIONS as PLANS
-from .work_plan_contracts import Wait
+from .work_plan_contracts import Wait, size_inch_value
 from .work_plans import WorkPlans, outbound_locator_closed
 
 OWNER = CommandOwner("smt_auto")
@@ -444,9 +444,16 @@ class Outbound:
             plan = PLANS["bin" if plate.bin_work_id else "rack"].validate_python(ready)
         except (ValueError, TypeError):
             return False
+        ready = plan.model_dump()
         fields = {k: ready[k] for k in type(plan).model_fields if k != "result"}
         locator = {k: v for k, v in plate.source_locator.items() if k not in ("type", "bin_code")}
-        return fields == {**locator, **plate.source_params}
+        source_params = dict(plate.source_params)
+        if "size_inch" not in source_params:
+            try:
+                source_params["size_inch"] = size_inch_value(source_params)
+            except (KeyError, TypeError, ValueError):
+                return False
+        return fields == {**locator, **source_params}
 
     async def _work_plan_pick_ready(self, session, plate, round_):
         # WAIT keeps the same exception trigger, even though each evaluation has a new ID.
@@ -744,7 +751,7 @@ class Outbound:
                     bin_cell_location=params["cell_index"],
                     reel_layer=params["reel_layer"],
                     reel_thickness=params["reel_thickness"],
-                    reel_diameter=params["reel_diameter"],
+                    reel_diameter=size_inch_value(params),
                     reel_totalthickness=float(
                         Decimal(str(params["reel_thickness"])) * params["reel_layer"]
                     ),
@@ -757,9 +764,9 @@ class Outbound:
                     rack_layer=str(params["rack_layer"]),
                     rack_column=str(params["rack_column"]),
                     reel_thickness=params["reel_thickness"],
-                    reel_diameter=params["reel_diameter"],
+                    reel_diameter=size_inch_value(params),
                 )
-            command = PickAndPut.from_millimeters(source=source, target=SCAN)
+            command = PickAndPut(source=source, target=SCAN)
             timeout = (
                 settings.bin_arm_timeout_ms if plate.bin_work_id else settings.rack_arm_timeout_ms
             )
@@ -958,12 +965,13 @@ class Outbound:
                         **{k: target[k] for k in ("rack_id", "rack_face")},
                         rack_layer=str(target["rack_layer"]),
                         rack_column=str(target["rack_column"]),
-                        **{k: plate.source_params[k] for k in ("reel_thickness", "reel_diameter")},
+                        reel_thickness=plate.source_params["reel_thickness"],
+                        reel_diameter=size_inch_value(plate.source_params),
                     ),
                 )
                 timeout_ms = settings.rack_arm_timeout_ms
             plate.put_call_key = f"auto:{task.task_id}:outbound:{plate.id}:put"
-            command = PickAndPut.from_millimeters(**params)
+            command = PickAndPut(**params)
             params = command.model_dump()
             view = await self.ecs.create(
                 session,
@@ -1429,24 +1437,25 @@ class Outbound:
                 **{k: target[k] for k in ("rack_id", "rack_face")},
                 rack_layer=str(target["rack_layer"]),
                 rack_column=str(target["rack_column"]),
-                **{k: plate.source_params[k] for k in ("reel_thickness", "reel_diameter")},
+                reel_thickness=plate.source_params["reel_thickness"],
+                reel_diameter=size_inch_value(plate.source_params),
             ),
         )
-        # Frozen commands using rack_face may predate the diameter conversion as well.
-        legacy_inches = {
-            **expected,
-            "target": {
-                **expected["target"],
-                "reel_diameter": ecs_reel_diameter(expected["target"]["reel_diameter"]),
-            },
-        }
-        if command not in (expected, legacy_inches):
-            try:
-                normalized = PickAndPut.from_millimeters(**expected).model_dump()
-            except ValidationError:
-                return None
-            if command != normalized:
-                return None
+        try:
+            normalized = PickAndPut(**expected).model_dump()
+            legacy_expected = PickAndPut(
+                **{
+                    **expected,
+                    "target": {
+                        **expected["target"],
+                        "reel_diameter": plate.source_params["reel_diameter"],
+                    },
+                }
+            ).model_dump()
+        except ValidationError:
+            return None
+        if command not in (expected, normalized, legacy_expected):
+            return None
         return dict(
             task_id=plate.task_id,
             source_locator=plate.source_locator,

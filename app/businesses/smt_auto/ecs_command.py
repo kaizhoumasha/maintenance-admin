@@ -1,6 +1,5 @@
 """Single owner declaration for confirmed inbound and outbound arm movements."""
 
-from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -68,11 +67,6 @@ class RackSlot(Data):
         return value
 
 
-def ecs_reel_diameter(diameter):
-    diameter_mm = Decimal(str(diameter))
-    return min((15, 13, 7), key=lambda inches: abs(diameter_mm - Decimal("25.4") * inches))
-
-
 class NgTarget(Data):
     location_id: Literal["STATION_NG"]
     location_type: Literal["SCAN_NG"]
@@ -111,14 +105,6 @@ class ArmResult(Data):
 class PickAndPut(Data):
     source: RackSource | BinTarget | RackSlot | ScanPlatform
     target: ScanPlatform | BinTarget | RackSlot | NgTarget
-
-    @classmethod
-    def from_millimeters(cls, **params) -> "PickAndPut":
-        values = cls(**params).model_dump()
-        for location in (values["source"], values["target"]):
-            if "reel_diameter" in location:
-                location["reel_diameter"] = ecs_reel_diameter(location["reel_diameter"])
-        return cls(**values)
 
     @model_validator(mode="after")
     def normal_path(self):

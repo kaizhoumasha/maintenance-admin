@@ -70,6 +70,7 @@ def test_ready_bin_type_rejects_invalid_codes(bin_type):
                 "bin_type": bin_type,
                 "reel_layer": 1,
                 "reel_thickness": 1,
+                "size_inch": 1,
                 "reel_diameter": 1,
             }
         )
@@ -90,6 +91,7 @@ def test_work_plan_preserves_wms_configured_bin_type(bin_type):
         cell_index=1,
         reel_layer=1,
         reel_thickness=20,
+        size_inch=179,
         reel_diameter=179,
         reel_totalthickness=20,
     )
@@ -106,3 +108,40 @@ def test_work_plan_preserves_wms_configured_bin_type(bin_type):
         if key not in {"bin_code", "reel_totalthickness"}
     }
     assert BinReady(result="READY", **ready).bin_type == bin_type
+
+
+def test_ready_uses_size_inch_and_keeps_nullable_millimeter_diameter():
+    from app.businesses.smt_auto.work_plan_contracts import BinReady
+
+    ready = BinReady(
+        result="READY",
+        cell_id="B1",
+        cell_index=1,
+        bin_type=3,
+        reel_layer=1,
+        reel_thickness=20,
+        size_inch=13,
+        reel_diameter=None,
+    )
+
+    assert ready.size_inch == 13
+    assert ready.reel_diameter is None
+
+
+def test_legacy_ready_snapshot_recovers_size_inch_for_pending_work():
+    from app.businesses.smt_auto.work_plan_contracts import DECISIONS
+
+    ready = DECISIONS["bin"].validate_python(
+        {
+            "result": "READY",
+            "cell_id": "B1",
+            "cell_index": 1,
+            "bin_type": 3,
+            "reel_layer": 1,
+            "reel_thickness": 20,
+            "reel_diameter": 381,
+        }
+    )
+
+    assert ready.size_inch == 15
+    assert ready.reel_diameter == 381

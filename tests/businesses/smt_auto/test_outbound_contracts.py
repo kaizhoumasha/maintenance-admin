@@ -23,9 +23,9 @@ def test_outbound_paths_keep_source_and_target_dimensions(face, side):
         **{key: value for key, value in rack.items() if key != "rack_face"},
         "rack_side": side,
     }
-    target = PickAndPut.from_millimeters(
-        source=scan, target={**rack, "location_id": "STATION_A"}
-    ).model_dump()["target"]
+    target = PickAndPut(source=scan, target={**rack, "location_id": "STATION_A"}).model_dump()[
+        "target"
+    ]
     assert target["rack_side"] == side
     assert "rack_face" not in target
     assert (

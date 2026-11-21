@@ -46,6 +46,7 @@ from .models import (
     AutoTaskRequest,
 )
 from .outbound_contracts import Accept
+from .work_plan_contracts import size_inch_value
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,12 @@ def _ready(data, *, bin_source):
         if bin_source
         else {"rack_id", "rack_face", "slot_id", "rack_layer", "rack_column"}
     )
-    if set(data) != {"result", "reel_thickness", "reel_diameter", *fields}:
+    if set(data) == {"result", "reel_thickness", "reel_diameter", *fields}:
+        try:
+            data = {**data, "size_inch": size_inch_value(data)}
+        except (KeyError, TypeError, ValueError):
+            return False
+    if set(data) != {"result", "reel_thickness", "size_inch", "reel_diameter", *fields}:
         return False
     codes = ("cell_id",) if bin_source else ("rack_id", "slot_id")
     if not all(
@@ -169,7 +175,12 @@ def _ready(data, *, bin_source):
             return False
     return all(
         type(data[key]) is int or type(data[key]) is float and math.isfinite(data[key])
-        for key in ("reel_thickness", "reel_diameter")
+        for key in ("reel_thickness", "size_inch")
+    ) and (
+        data["reel_diameter"] is None
+        or type(data["reel_diameter"]) is int
+        or type(data["reel_diameter"]) is float
+        and math.isfinite(data["reel_diameter"])
     )
 
 
