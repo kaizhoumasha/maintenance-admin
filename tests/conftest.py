@@ -58,6 +58,15 @@ from scripts.seed_admin import seed_admin  # noqa: E402
 load_business_models()
 
 
+@pytest.fixture(autouse=True)
+def restore_celery_beat_schedule():
+    from app.tasks.celery_app import celery_app
+
+    schedule = dict(celery_app.conf.beat_schedule)
+    yield
+    celery_app.conf.beat_schedule = schedule
+
+
 @pytest.fixture(scope="session")
 def sqlite_tables(tmp_path_factory):
     """Copy an empty fixed schema without sharing engines or case data."""
