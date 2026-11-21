@@ -390,6 +390,8 @@ async def accept_ecs_request(
                 receipt_id=existing.id,
                 exchange_id=existing.exchange_id,
             )
+        if binding is None or not _binding_matches_snapshot(binding, existing.event_context or {}):
+            raise RequestHandlerIncomplete("deferred request binding changed after acceptance")
         deferred_data = (existing.event_context or {}).get("deferred_request")
         deferred = DeferredRequest(**deferred_data) if deferred_data else None
         return await _run_handler(
@@ -401,7 +403,7 @@ async def accept_ecs_request(
             binding=binding,
             runtime=runtime,
             deferred=deferred,
-            component_key=component_key,
+            component_key=(existing.event_context or {}).get("component_key"),
         )
     table = receipt_model()
     await session.execute(
