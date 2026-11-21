@@ -1,6 +1,6 @@
 [project]
 name = "enterprise-backend"
-version = "0.3.2"
+version = "0.3.3"
 description = "面向 WMS、MES、WES 等生产企业业务开发的通用企业级后端管理平台模板，提供第三方与内部 API 对接基础能力"
 readme = "README.md"
 requires-python = ">=3.13"
