@@ -7,9 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import logger
 from app.models import AuditLog, AuditLogArchive
 from app.schemas.base import DatabaseId
-from app.schemas.query import CursorParams, FilterGroup
+from app.schemas.query import FilterGroup, UserListParams
 from app.services.filtering import FieldSpec, apply_filter
-from app.services.pagination import paginate_cursor
+from app.services.pagination import paginate
 
 
 def _fields(model: type[AuditLog] | type[AuditLogArchive]) -> dict[str, FieldSpec]:
@@ -28,21 +28,21 @@ _FIELDS = {model: _fields(model) for model in (AuditLog, AuditLogArchive)}
 async def _list(
     session: AsyncSession,
     model: type[AuditLog] | type[AuditLogArchive],
-    params: CursorParams,
+    params: UserListParams,
     filters: FilterGroup | None,
 ) -> dict[str, Any]:
     stmt = apply_filter(select(model), filters, _FIELDS[model])
-    return await paginate_cursor(session, stmt, model.id, params)
+    return await paginate(session, stmt.order_by(model.id.desc()), params)
 
 
 async def list_audit_logs(
-    session: AsyncSession, params: CursorParams, filters: FilterGroup | None = None
+    session: AsyncSession, params: UserListParams, filters: FilterGroup | None = None
 ) -> dict[str, Any]:
     return await _list(session, AuditLog, params, filters)
 
 
 async def list_archived_logs(
-    session: AsyncSession, params: CursorParams, filters: FilterGroup | None = None
+    session: AsyncSession, params: UserListParams, filters: FilterGroup | None = None
 ) -> dict[str, Any]:
     return await _list(session, AuditLogArchive, params, filters)
 

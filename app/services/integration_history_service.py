@@ -1,14 +1,10 @@
 """Body-free history projections; execution remains with original public result ports."""
 
-import base64
-import binascii
-import json
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from uuid import UUID
 
-from sqlalchemy import case, or_, select, tuple_
+from sqlalchemy import case, func, or_, select, tuple_
 
 from app.core.errors import AppError, ErrorCode
 from app.integrations.ecs_callback import EventApplicationRef
@@ -107,108 +103,44 @@ def _utc(value):
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
-def _stamp(value):
-    return _utc(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
 def _invalid():
     return AppError(ErrorCode.INVALID_REQUEST, "历史查询参数无效")
 
 
-def _encode(value):
-    return (
-        base64.urlsafe_b64encode(json.dumps(value, separators=(",", ":")).encode())
-        .decode()
-        .rstrip("=")
-    )
-
-
-def _decode(raw, query_hash):
-    try:
-        if not isinstance(raw, str) or not 1 <= len(raw) <= 256:
-            raise ValueError
-        data = json.loads(
-            base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True)
-        )
-        if (
-            not isinstance(data, dict)
-            or set(data) not in ({"v", "at", "id", "q"}, {"v", "at", "id", "q", "u"})
-            or type(data["v"]) is not int
-            or data["v"] != 1
-            or data["q"] != query_hash
-            or _encode(data) != raw
-        ):
-            raise ValueError
-        for name in ("at", "u"):
-            if name in data:
-                if (
-                    not isinstance(data[name], str)
-                    or _stamp(datetime.fromisoformat(data[name])) != data[name]
-                ):
-                    raise ValueError
-        if not isinstance(data["id"], str) or list(data) != ["v", "at", "id", "q"] + (
-            ["u"] if "u" in data else []
-        ):
-            raise ValueError
-        identity = UUID(data["id"])
-        if str(identity) != data["id"]:
-            raise ValueError
-        return data
-    except (ValueError, TypeError, KeyError, UnicodeError, binascii.Error, RecursionError):
-        raise _invalid() from None
-
-
-async def _page(session, statement, *, params, at, identity, endpoint, exact):
+async def _page(session, statement, *, params, at, identity, exact):
     explicit = params.from_at is not None or params.until_at is not None
     if explicit and (params.from_at is None or params.until_at is None):
         raise _invalid()
     if explicit and not timedelta(0) < params.until_at - params.from_at <= timedelta(days=90):
         raise _invalid()
-    query = params.model_dump(mode="json", exclude={"cursor", "limit"})
-    for name in ("from_at", "until_at"):
-        if getattr(params, name) is not None:
-            query[name] = _stamp(getattr(params, name))
-    # A new optional filter must not invalidate existing unfiltered cursors.
-    if query.get("initiator") is None:
-        query.pop("initiator", None)
-    query["filter"] = parse_filter(params.filter).model_dump(mode="json") if params.filter else None
-    digest = sha256(
-        json.dumps([endpoint, query], sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    cursor = _decode(params.cursor, digest) if params.cursor is not None else None
     default_window = not explicit and not exact
-    if cursor and (("u" in cursor) != default_window):
+    if default_window and params.start != 1:
         raise _invalid()
-    until = datetime.fromisoformat(cursor["u"]) if cursor and default_window else utc_now()
+    until = params.until_at if explicit else utc_now()
+    since = params.from_at if explicit else until - timedelta(days=90)
     if explicit:
         statement = statement.where(at >= params.from_at, at <= params.until_at)
     elif default_window:
-        statement = statement.where(at >= until - timedelta(days=90), at <= until)
-    if cursor:
-        boundary = datetime.fromisoformat(cursor["at"])
-        if default_window and not until - timedelta(days=90) <= boundary <= until:
-            raise _invalid()
-        if explicit and not params.from_at <= boundary <= params.until_at:
-            raise _invalid()
-        statement = statement.where(tuple_(at, identity) < tuple_(boundary, UUID(cursor["id"])))
+        statement = statement.where(at >= since, at <= until)
+    total = await session.scalar(
+        select(func.count()).select_from(statement.order_by(None).subquery())
+    )
     with session.no_autoflush:
         rows = list(
             (
                 await session.execute(
-                    statement.order_by(at.desc(), identity.desc()).limit(params.limit + 1)
+                    statement.order_by(at.desc(), identity.desc())
+                    .offset(params.offset)
+                    .limit(params.window_size)
                 )
             ).mappings()
         )
-    next_cursor = None
-    if len(rows) > params.limit:
-        last = rows[params.limit - 1]
-        value = dict(v=1, at=_stamp(last[at.key]), id=str(last["id"]), q=digest)
-        if default_window:
-            value["u"] = _stamp(until)
-        next_cursor = _encode(value)
-        if len(next_cursor) > 256:
-            raise _invalid()
-    return rows[: params.limit], next_cursor
+    return (
+        rows,
+        total or 0,
+        since if default_window or explicit else None,
+        until if default_window or explicit else None,
+    )
 
 
 def _exchange_statement():
@@ -456,13 +388,12 @@ async def list_exchanges(session, params):
         )
     }
     statement = apply_filter(statement, parse_filter(params.filter), fields)
-    rows, cursor = await _page(
+    rows, total, from_at, until_at = await _page(
         session,
         statement,
         params=params,
         at=Exchange.created_at,
         identity=Exchange.id,
-        endpoint="exchanges",
         exact=params.identity_value is not None
         or (
             params.reference_value is not None
@@ -477,7 +408,14 @@ async def list_exchanges(session, params):
             }
         ),
     )
-    return {"items": await _summaries(session, rows), "next_cursor": cursor}
+    return {
+        "items": await _summaries(session, rows),
+        "total": total,
+        "start": params.start,
+        "end": params.end,
+        "from_at": from_at,
+        "until_at": until_at,
+    }
 
 
 async def get_exchange(session, exchange_id):
@@ -560,13 +498,12 @@ async def list_records(session, exchange_id, params):
         for name in ("record_kind", "evidence_class", "direction", "capture_origin")
     }
     statement = apply_filter(statement, parse_filter(params.filter), fields)
-    rows, cursor = await _page(
+    rows, total, from_at, until_at = await _page(
         session,
         statement,
         params=params,
         at=Record.recorded_at,
         identity=Record.id,
-        endpoint="records:" + str(exchange_id),
         exact=True,
     )
     items = []
@@ -582,7 +519,14 @@ async def list_records(session, exchange_id, params):
         if item["record_kind"] == "RESPONSE_PREPARED":
             item["metadata"] = {"response_scope": "PROTOCOL_PREPARED", **(item["metadata"] or {})}
         items.append(item)
-    return {"items": items, "next_cursor": cursor}
+    return {
+        "items": items,
+        "total": total,
+        "start": params.start,
+        "end": params.end,
+        "from_at": from_at,
+        "until_at": until_at,
+    }
 
 
 async def get_body(session, record_id):

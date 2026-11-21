@@ -730,7 +730,9 @@ async def test_summary_and_result_cost_remain_bounded_with_large_diagnostic_hist
                 started = perf_counter()
                 page = await list_exchanges(
                     session,
-                    ExchangeListParams(from_at=NOW - timedelta(days=90), until_at=NOW, limit=limit),
+                    ExchangeListParams(
+                        from_at=NOW - timedelta(days=90), until_at=NOW, start=1, end=limit
+                    ),
                 )
                 timings[f"summary_{limit}_ms"] = (perf_counter() - started) * 1000
                 assert len(page["items"]) == limit
@@ -740,7 +742,7 @@ async def test_summary_and_result_cost_remain_bounded_with_large_diagnostic_hist
             view = await get_command(session, owner_domain="cost", command_code=code)
             timings["result_lookup_ms"] = (perf_counter() - started) * 1000
             assert view.command_code == code and len(statements) - before == 1
-        assert counts == [4, 4]
+        assert counts == [5, 5]
     finally:
         event.remove(engine.sync_engine, "after_cursor_execute", capture)
     plans = []
