@@ -95,7 +95,7 @@ async def test_user_filter_fields_roles_and_paging(client, admin):
     for field, op, value, expected in cases:
         raw = json.dumps({"conditions": [{"field": field, "op": op, "value": value}]})
         response = await client.get(
-            "/api/v1/users", headers=admin, params={"filter": raw, "page_size": 100}
+            "/api/v1/users", headers=admin, params={"filter": raw, "start": 1, "end": 100}
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -105,7 +105,7 @@ async def test_user_filter_fields_roles_and_paging(client, admin):
     raw = json.dumps({"conditions": [{"field": "username", "op": "in", "value": ["kai", "other"]}]})
     body = (
         await client.get(
-            "/api/v1/users", headers=admin, params={"filter": raw, "page": 2, "page_size": 1}
+            "/api/v1/users", headers=admin, params={"filter": raw, "start": 2, "end": 2}
         )
     ).json()
     assert body["total"] == 2 and [u["id"] for u in body["items"]] == [uid]

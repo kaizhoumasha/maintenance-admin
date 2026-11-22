@@ -246,7 +246,13 @@ async def test_query_and_body_permission_with_old_tables_hidden(
                 outbound["protocol_code"],
             ) == ("DONE", "VALID", "PREPARE_ACCEPTED")
             assert (inbound["receipt_id"], inbound["initiator"]) == (1201, "PEER")
-        params = {"peer_system": peer, "identity_value": reference, "limit": 1, "initiator": "PEER"}
+        params = {
+            "peer_system": peer,
+            "identity_value": reference,
+            "start": 1,
+            "end": 1,
+            "initiator": "PEER",
+        }
         listed = await client.get(root + "/exchanges", headers=admin, params=params)
         assert listed.status_code == 200, listed.text
         item = listed.json()["items"][0]
@@ -254,7 +260,7 @@ async def test_query_and_body_permission_with_old_tables_hidden(
             next_page = await client.get(
                 root + "/exchanges",
                 headers=admin,
-                params={**params, "cursor": listed.json()["next_cursor"]},
+                params={**params, "start": 2, "end": 2},
             )
             assert next_page.status_code == 200 and len(next_page.json()["items"]) == 1
             assert next_page.json()["items"][0]["id"] != item["id"]

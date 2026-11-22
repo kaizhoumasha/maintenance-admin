@@ -129,9 +129,9 @@ ECS 未注册事件继续按原合同返回 ACK。事件名称不能安全投影
 
 新内部主键为 UUIDv7。原 command_code、数值 receipt_id、operation_id、message_id、lease_id、业务键和摘要不改写。历史格式由 schema_version 标识；查询时间输出为 UTC 的 ISO 8601 Z，原协议的毫秒时间及原始字节仍保留其合同。
 
-列表每页默认20、最多100，按 created_at / id 倒序；时间线按 recorded_at / id 倒序。返回 items、next_cursor；后页保留原筛选，仅替换 cursor。游标最长256字符，并绑定端点、筛选及明确时间参数。默认最近90天的上界保存在首个游标内，后续翻页不随时钟移动。一次详情读取使用独立的只读 REPEATABLE READ 会话；分页请求之间不承诺冻结整个数据集。
+列表使用从 1 开始的闭区间 `start/end` 行号窗口，缺省为 1–20，窗口长度为 1–100，`start - 1` 最大为 100000。交互按 created_at / id 倒序，时间线按 recorded_at / id 倒序。返回 items、total、start、end，以及本次实际生效的 from_at、until_at。末段行数不足时仍回显请求窗口。一次详情读取使用独立的只读 REPEATABLE READ 会话；分页请求之间不承诺冻结整个数据集。
 
-普通时间查询使用 from_at 与 until_at，必须同时提供，跨度大于零且不超过90天。时间条件位于结构化筛选的外层 AND，OR 不能扩大窗口。指定精确 identity_value 或单个消息、任务、动作的完整类型引用且未给时间时，覆盖该身份的合法留存期，返回每一个原实例。工作线等分组检索仍使用普通时间窗口。结构化 filter 复用项目的字段白名单，不能筛选原文或完整路由配置。
+普通时间查询使用 from_at 与 until_at，必须同时提供，跨度大于零且不超过90天。未提供时间时，交互列表按当前时间向前 90 天，并在响应中回显解析后的时间边界。后续窗口必须带上已回显的 from_at 与 until_at，避免默认窗口随时钟移动。时间条件位于结构化筛选的外层 AND，OR 不能扩大窗口。指定精确 identity_value 或单个消息、任务、动作的完整类型引用且未给时间时，覆盖该身份的合法留存期，返回每一个原实例。工作线等分组检索仍使用普通时间窗口。结构化 filter 复用项目的字段白名单，不能筛选原文或完整路由配置。旧的 limit、cursor、page、page_size 参数返回 400 `INVALID_REQUEST`。
 
 ## 明确引用
 

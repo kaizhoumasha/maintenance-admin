@@ -277,22 +277,22 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 
 ## 列表筛选与分页（SPEC-018）
 
-完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，回归入口见[开发测试](docs/testing/README.md)。
+当前列表合同见本节，历史分页决策记录见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，回归入口见[开发测试](docs/testing/README.md)。
 
-`GET /api/v1/users`、`/api/v1/audit-logs`、`/api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
+`GET /api/v1/users`、`GET /api/v1/devices`、`GET /api/v1/work-lines`、`GET /api/v1/audit-logs`、`GET /api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
 
 ```bash
 curl -G "$HOST/api/v1/users" -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode 'page=1' --data-urlencode 'page_size=20' \
+  --data-urlencode 'start=1' --data-urlencode 'end=20' \
   --data-urlencode 'filter={"conditions":[{"field":"username","op":"ilike","value":"%kai%"},{"field":"is_active","op":"eq","value":true}]}'
 
 curl -G "$HOST/api/v1/audit-logs" -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode 'limit=20' \
+  --data-urlencode 'start=1' --data-urlencode 'end=20' \
   --data-urlencode 'filter={"conditions":[{"field":"user_id","op":"eq","value":1}]}'
-# 后续页沿用 filter,增加 --data-urlencode "cursor=$NEXT_CURSOR"；归档列表用 /audit-logs/archive。
+# 后续页沿用 filter,把窗口改为 start=21、end=40；归档列表用 /audit-logs/archive。
 ```
 
-Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL 编码）,另填对应的分页参数,Authorization 选 Bearer Token。
+Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL 编码）,另填 `start`、`end`,Authorization 选 Bearer Token。两个参数必须同时提供,窗口长度为 1–100,缺省为 1–20,`start - 1` 最大为 100000。旧的 `page`、`page_size`、`limit`、`cursor` 均返回 400 `INVALID_REQUEST`。
 
 | 列表 | 筛选字段及算子 |
 |---|---|
@@ -311,9 +311,7 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 
 字符串不能含 NUL,pattern 不能以奇数个反斜杠结尾。
 
-**兼容变化**:用户仍返回 `{items,total,page,page_size}`,参数为 `page/page_size/filter`；旧式页码分页的 `page * page_size` 最大为 `100_000`,超过后返回 400 `INVALID_REQUEST`。审计与归档改为 `{items,next_cursor}`,删除 `total/page/page_size`;参数为 `limit`（默认 20,1–100）、`cursor`、`filter`,旧的 `page/page_size` 返回 400。三个列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
-
-审计响应示例:`{"items":[{"id":42,"user_id":1,"action":"admin:user:create","resource":"users","resource_id":7,"detail":null,"ip":null,"created_at":"2026-10-17T12:00:00Z"}],"next_cursor":"eyJpZCI6IDQyfQ"}`。归档条目另有 `archived_at`。`next_cursor=null` 表示末页;按 `id desc` 向后翻页,不能随机跳页。改变筛选条件时丢弃旧游标。翻页期间新记录不会重复进入后续页,记录被归档后会从热表后续页消失;较小 ID 的并发事务晚提交时可能漏过本轮遍历,重新查询可见。
+列表响应统一为 `{"items": [], "total": 128, "start": 15, "end": 30}`。末段行数不足时仍回显请求窗口,`items` 可以更短或为空。用户按 `id` 降序,设备和工作线按 `sort_order, id`,审计和归档按 `id` 降序。所有列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
 
 `filter` 上限为 **2048 UTF-8 字节**,URL 编码后最多约 6KB,部署时还须计入路径和其他参数,核对代理的请求行长度限制。筛选值可能含用户名、邮箱等个人信息;应用日志不记录 query string,反向代理和网关也应避免记录完整查询参数。筛选不保证所有组合都走索引,出现慢查询后再评估索引。
 

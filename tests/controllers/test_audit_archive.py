@@ -82,16 +82,14 @@ async def test_archive_list_pagination_and_permission(client, admin):
     old = await _seed_logs(100, 101, 102)
     await client.post(TRIGGER, headers=admin)
 
-    r = await client.get(ARCHIVE, params={"limit": 2}, headers=admin)
+    r = await client.get(ARCHIVE, params={"start": 1, "end": 2}, headers=admin)
     body = r.json()
     assert r.status_code == 200
-    assert set(body) == {"items", "next_cursor"}
-    assert body["next_cursor"] is not None
+    assert set(body) == {"items", "total", "start", "end"}
     assert [i["id"] for i in body["items"]] == sorted(old, reverse=True)[:2]  # id 倒序
     assert body["items"][0]["archived_at"]
-    r = await client.get(ARCHIVE, params={"limit": 2, "cursor": body["next_cursor"]}, headers=admin)
+    r = await client.get(ARCHIVE, params={"start": 3, "end": 4}, headers=admin)
     assert [i["id"] for i in r.json()["items"]] == [min(old)]
-    assert r.json()["next_cursor"] is None
 
     uid = await _make_user_with_perms(client, admin, ["admin:audit:read"])  # 只有 read 不够
     r = await client.get(ARCHIVE, headers=_bearer(uid))
@@ -101,10 +99,12 @@ async def test_archive_list_pagination_and_permission(client, admin):
 
 async def test_archive_list_rejects_bad_params(client, admin):
     for params in (
-        {"limit": 0},
-        {"limit": 101},
-        {"cursor": "x" * 65},
-        {"cursor": "bad!"},
+        {"start": 0, "end": 1},
+        {"start": 1, "end": 101},
+        {"start": 2},
+        {"end": 2},
+        {"limit": 2},
+        {"cursor": "x"},
     ):
         assert (await client.get(ARCHIVE, params=params, headers=admin)).status_code == 400
 
