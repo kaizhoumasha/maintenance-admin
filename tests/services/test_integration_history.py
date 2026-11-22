@@ -67,23 +67,20 @@ async def test_history_search_keeps_original_instances_distinct(callback_store):
         assert not ({"raw_body", "effective_payload", "route", "input_raw"} & set(page["items"][0]))
 
 
-async def test_time_uuid_cursor_keeps_equal_time_rows(callback_store):
+async def test_time_uuid_window_keeps_equal_time_rows(callback_store):
     from app.schemas.integration_history import ExchangeListParams
     from app.services.integration_history_service import list_exchanges
 
     identity = str(uuid7())
     expected = set(await seed_history(callback_store, times=[NOW] * 7, identity=identity))
-    seen, cursor = [], None
-    while True:
+    seen = []
+    for start in (1, 3, 5, 7):
         async with callback_store() as session:
             page = await list_exchanges(
-                session, ExchangeListParams(identity_value=identity, limit=2, cursor=cursor)
+                session,
+                ExchangeListParams(identity_value=identity, start=start, end=start + 1),
             )
         seen.extend(row["id"] for row in page["items"])
-        cursor = page["next_cursor"]
-        if cursor is None:
-            break
-        assert len(cursor) <= 256
     assert len(seen) == len(set(seen)) == 7 and set(seen) == expected
 
 
@@ -92,24 +89,32 @@ async def test_query_range_and_default_anchor(callback_store, monkeypatch):
     from app.schemas.integration_history import ExchangeListParams
     from app.services import integration_history_service as history
 
-    # Only the clock moves; the original default upper/lower bounds must survive pagination.
     monkeypatch.setattr(history, "utc_now", lambda: NOW)
     await seed_history(
         callback_store,
         times=[NOW - timedelta(days=89), NOW - timedelta(days=1), NOW - timedelta(days=2)],
     )
     async with callback_store() as session:
-        first = await history.list_exchanges(session, ExchangeListParams(limit=1))
+        first = await history.list_exchanges(session, ExchangeListParams(start=1, end=1))
+    assert first["from_at"] == NOW - timedelta(days=90)
+    assert first["until_at"] == NOW
     monkeypatch.setattr(history, "utc_now", lambda: NOW + timedelta(days=5))
     async with callback_store() as session:
+        with pytest.raises(AppError):
+            await history.list_exchanges(session, ExchangeListParams(start=2, end=3))
         rest = await history.list_exchanges(
-            session, ExchangeListParams(limit=100, cursor=first["next_cursor"])
+            session,
+            ExchangeListParams(
+                start=2,
+                end=3,
+                from_at=first["from_at"],
+                until_at=first["until_at"],
+            ),
         )
         assert len(rest["items"]) == 2
         for params in (
             ExchangeListParams(from_at=NOW - timedelta(days=91), until_at=NOW),
             ExchangeListParams(from_at=NOW),
-            ExchangeListParams(cursor=first["next_cursor"], peer_system="ECS"),
         ):
             with pytest.raises(AppError):
                 await history.list_exchanges(session, params)
@@ -150,60 +155,6 @@ async def test_record_timeline_and_body_keep_known_empty_distinct(callback_store
         with pytest.raises(AppError) as error:
             await get_body(session, missing)
         assert error.value.detail == "UNAVAILABLE"
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "unknown",
-        "integer_id",
-        "naive_time",
-        "wrong_version",
-        "boolean_version",
-        "reordered",
-        "padding",
-        "oversize",
-    ],
-)
-async def test_cursor_rejects_noncanonical_values(callback_store, mutation):
-    import base64
-    import json
-
-    from app.core.errors import AppError
-    from app.schemas.integration_history import ExchangeListParams
-    from app.services.integration_history_service import list_exchanges
-
-    identity = str(uuid7())
-    await seed_history(callback_store, times=[NOW] * 3, identity=identity)
-    async with callback_store() as session:
-        first = await list_exchanges(session, ExchangeListParams(identity_value=identity, limit=1))
-        raw = first["next_cursor"]
-        data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
-        if mutation == "unknown":
-            data["unknown"] = 1
-        elif mutation == "integer_id":
-            data["id"] = 1
-        elif mutation == "naive_time":
-            data["at"] = data["at"][:-1]
-        elif mutation == "wrong_version":
-            data["v"] = 2
-        elif mutation == "boolean_version":
-            data["v"] = True
-        elif mutation == "reordered":
-            data = dict(reversed(list(data.items())))
-        altered = (
-            base64.urlsafe_b64encode(json.dumps(data, separators=(",", ":")).encode())
-            .decode()
-            .rstrip("=")
-        )
-        if mutation == "padding":
-            altered += "="
-        if mutation == "oversize":
-            altered = "a" * 256
-        with pytest.raises(AppError):
-            await list_exchanges(
-                session, ExchangeListParams(identity_value=identity, cursor=altered)
-            )
 
 
 async def test_filter_or_cannot_expand_the_outer_time_window(callback_store):
@@ -402,13 +353,14 @@ async def test_history_page_count_is_independent_of_reference_fanout(callback_st
                         identity_value=identity,
                         from_at=NOW - timedelta(days=90),
                         until_at=NOW,
-                        limit=limit,
+                        start=1,
+                        end=limit,
                     ),
                 )
                 assert [r["id"] for r in page["items"]] == sorted(ids[:-1], reverse=True)[:limit]
                 assert not any(".raw_body" in sql or ".effective_payload" in sql for sql in calls)
                 counts.append(len(calls))
-        assert counts[1] <= counts[0] == 4
+        assert counts[1] <= counts[0] == 5
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 

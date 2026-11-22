@@ -10,13 +10,21 @@ MAX_OFFSET = 100_000
 
 
 class PageParams(BaseModel):
-    """统一分页入参:page 从 1 开始,page_size 默认 20、最大 100;越界由校验返回 INVALID_REQUEST。"""
+    """统一分页入参:行号从 1 开始,闭区间长度最多 100。"""
 
-    page: int = Field(1, ge=1)
-    page_size: int = Field(20, ge=1, le=100)
+    start: int | None = Field(None, ge=1)
+    end: int | None = Field(None, ge=1)
 
     @model_validator(mode="after")
     def check_offset(self) -> Self:
+        if self.start is None and self.end is None:
+            self.start, self.end = 1, 20
+        elif self.start is None or self.end is None:
+            raise ValueError("分页必须同时提供 start 和 end")
+        if self.end < self.start:
+            raise ValueError("分页结束行不能小于起始行")
+        if self.end - self.start + 1 > 100:
+            raise ValueError("分页窗口最多 100 行")
         if self.offset > 2**63 - 1:
             raise ValueError("分页 OFFSET 超出数据库范围")
         if self.offset > MAX_OFFSET:
@@ -25,7 +33,11 @@ class PageParams(BaseModel):
 
     @property
     def offset(self) -> int:
-        return (self.page - 1) * self.page_size
+        return self.start - 1
+
+    @property
+    def window_size(self) -> int:
+        return self.end - self.start + 1
 
 
 class Page[T](BaseModel):
@@ -33,5 +45,5 @@ class Page[T](BaseModel):
 
     items: list[T]
     total: int
-    page: int
-    page_size: int
+    start: int
+    end: int

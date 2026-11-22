@@ -17,13 +17,13 @@ from app.schemas.integration_history import (
     ExchangeDetail,
     ExchangeListParams,
     ExchangeSummary,
+    HistoryPage,
     HttpExchangeDetail,
     HttpExchangeSummary,
     HttpRecordSummary,
     RecordListParams,
     RecordSummary,
 )
-from app.schemas.query import CursorPage
 from app.services import audit_service, http_exchange_history
 from app.services import integration_history_service as history
 from app.services.http_exchange_diagnostics import EXCHANGES
@@ -45,7 +45,7 @@ async def _reader(request):
 
 @router.get(
     "/exchanges",
-    response_model=CursorPage[HttpExchangeSummary | ExchangeSummary],
+    response_model=HistoryPage[HttpExchangeSummary | ExchangeSummary],
     responses=error_responses(503),
 )
 async def list_exchanges(
@@ -75,7 +75,7 @@ async def get_exchange(
 
 @router.get(
     "/exchanges/{exchange_id}/records",
-    response_model=CursorPage[HttpRecordSummary | RecordSummary],
+    response_model=HistoryPage[HttpRecordSummary | RecordSummary],
     responses=error_responses(404, 503),
 )
 async def list_records(

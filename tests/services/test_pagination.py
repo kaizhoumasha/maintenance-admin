@@ -6,7 +6,7 @@ from sqlalchemy import event, select
 
 from app.core import AppError
 from app.models import AuditLogArchive, User
-from app.schemas.query import CursorParams
+from app.schemas.query import CursorParams, UserListParams
 from app.services.audit_service import list_archived_logs
 from app.services.pagination import paginate_cursor
 from tests.helpers import raw_cursor
@@ -72,20 +72,17 @@ async def test_cursor_pages_no_count_offset_or_gaps(db, count):
         event.remove(db.bind.sync_engine, "before_cursor_execute", capture)
 
 
-async def test_archive_cursor_traversal(db):
+async def test_archive_window_traversal(db):
     now = datetime.now(UTC)
     db.add_all(
         AuditLogArchive(id=i, created_at=now, action="a", trace_id="t", archived_at=now)
         for i in range(1, 6)
     )
     await db.commit()
-    ids, cursor = [], None
-    while True:
-        page = await list_archived_logs(db, CursorParams(limit=2, cursor=cursor))
+    ids = []
+    for start in (1, 3, 5):
+        page = await list_archived_logs(db, UserListParams(start=start, end=start + 1))
         ids.extend(row.id for row in page["items"])
-        cursor = page["next_cursor"]
-        if cursor is None:
-            break
     assert ids == [5, 4, 3, 2, 1]
 
 

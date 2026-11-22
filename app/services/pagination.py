@@ -17,8 +17,8 @@ async def paginate(session: AsyncSession, stmt: Select[Any], params: PageParams)
     total = await session.scalar(select(func.count()).select_from(stmt.order_by(None).subquery()))
     items = []
     if total:
-        items = list(await session.scalars(stmt.offset(params.offset).limit(params.page_size)))
-    return {"items": items, "total": total or 0, "page": params.page, "page_size": params.page_size}
+        items = list(await session.scalars(stmt.offset(params.offset).limit(params.window_size)))
+    return {"items": items, "total": total or 0, "start": params.start, "end": params.end}
 
 
 def _encode_cursor(row_id: int) -> str:
@@ -35,7 +35,7 @@ def _decode_cursor(cursor: str) -> int:
         if not isinstance(data, dict):
             raise ValueError
         row_id = TypeAdapter(DatabaseId).validate_python(data.get("id"), strict=True)
-        if _encode_cursor(row_id) != cursor:  # 拒绝空白、多余键、尾部多余位等非规范形式
+        if _encode_cursor(row_id) != cursor:
             raise ValueError
         return row_id
     except (ValueError, UnicodeError, ValidationError):
@@ -45,12 +45,12 @@ def _decode_cursor(cursor: str) -> int:
 async def paginate_cursor(
     session: AsyncSession, stmt: Select[Any], id_col: Any, params: CursorParams
 ) -> dict[str, Any]:
+    """Legacy helper retained for non-list internal callers."""
     if params.cursor is not None:
         stmt = stmt.where(id_col < _decode_cursor(params.cursor))
     rows = list(
         await session.scalars(stmt.order_by(None).order_by(id_col.desc()).limit(params.limit + 1))
     )
-    # 多取一条只判断有无下一页,游标必须指向最后返回的行。
     cursor = (
         _encode_cursor(getattr(rows[params.limit - 1], id_col.key))
         if len(rows) > params.limit

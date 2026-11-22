@@ -270,17 +270,23 @@ async def list_exchanges(session, params):
         )
     }
     statement = apply_filter(statement, parse_filter(params.filter), fields)
-    rows, cursor = await legacy._page(
+    rows, total, from_at, until_at = await legacy._page(
         session,
         statement,
         params=params,
         at=h.created_at,
         identity=h.id,
-        endpoint="http-exchanges",
         exact=params.identity_value is not None
         or (reference[0] is not None and reference[0] != "WORKLINE"),
     )
-    return {"items": [_summary(row) for row in rows], "next_cursor": cursor}
+    return {
+        "items": [_summary(row) for row in rows],
+        "total": total,
+        "start": params.start,
+        "end": params.end,
+        "from_at": from_at,
+        "until_at": until_at,
+    }
 
 
 async def get_exchange(session, exchange_id):
@@ -407,13 +413,12 @@ async def list_records(session, exchange_id, params):
             for name in ("record_kind", "evidence_class", "initiator", "capture_origin")
         },
     )
-    rows, cursor = await legacy._page(
+    rows, total, from_at, until_at = await legacy._page(
         session,
         statement,
         params=params,
         at=r.recorded_at,
         identity=r.id,
-        endpoint=f"http-exchange-records:{exchange_id}",
         exact=True,
     )
     items = []
@@ -425,7 +430,14 @@ async def list_records(session, exchange_id, params):
             metadata={name: row[name] for name in ("trace_id", "reason_code") if row[name]} or None,
         )
         items.append(item)
-    return {"items": items, "next_cursor": cursor}
+    return {
+        "items": items,
+        "total": total,
+        "start": params.start,
+        "end": params.end,
+        "from_at": from_at,
+        "until_at": until_at,
+    }
 
 
 async def locate_body(session, record_id):

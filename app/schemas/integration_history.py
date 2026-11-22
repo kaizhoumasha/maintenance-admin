@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, PlainSerializer, field_validator
 
+from app.schemas.base import PageParams
 from app.schemas.query import FilterText
 
 UtcTime = Annotated[
@@ -17,10 +18,8 @@ UtcTime = Annotated[
 ]
 
 
-class HistoryParams(BaseModel):
+class HistoryParams(PageParams):
     model_config = ConfigDict(extra="forbid")
-    limit: int = Field(20, ge=1, le=100)
-    cursor: str | None = Field(None, max_length=256)
     from_at: AwareDatetime | None = None
     until_at: AwareDatetime | None = None
     filter: FilterText = None
@@ -33,6 +32,15 @@ class HistoryParams(BaseModel):
             if "\x00" in value:
                 raise ValueError("invalid query text")
         return value
+
+
+class HistoryPage[T](BaseModel):
+    items: list[T]
+    total: int
+    start: int
+    end: int
+    from_at: UtcTime | None
+    until_at: UtcTime | None
 
 
 HttpInitiator = Literal["WES", "PEER"]
