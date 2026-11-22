@@ -170,7 +170,6 @@ def _decide(
         wait = (200, "DECIDED", {"result": "WAIT", "workline_code": payload.workline_code})
         if not rack_matches or reservation.get("allocated"):
             return wait
-        reservation.pop("released", None)
         allocation = target.model_dump(
             mode="json", exclude={"max_stack_height_mm", "reel_diameters_inch"}
         )
@@ -186,6 +185,7 @@ def _decide(
             allocation["reel_totalthickness"] = (
                 height.numerator if height.denominator == 1 else float(height)
             )
+        reservation.pop("released", None)
         reservation["allocated"] = True
         return 200, "DECIDED", allocation
 

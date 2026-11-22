@@ -208,6 +208,82 @@ async def test_failed_execution_report_releases_the_reserved_slot(mock_app):
     assert reallocated.json()["data"] == allocated.json()["data"]
 
 
+async def test_released_stack_reservation_stays_released_while_retry_waits(mock_app, monkeypatch):
+    from app.businesses.coarse_sorting import mock_wms
+
+    monkeypatch.setattr(mock_wms, "randbelow", lambda _: 1)
+    app = mock_app(empty_cells=[ALLOCATION | {"max_stack_height_mm": 0.3}])
+    first = await send(app, "validate_bind", reel("FIRST") | {"reel_thickness": 0.1})
+    second = await send(app, "validate_bind", reel("SECOND") | {"reel_thickness": 0.2})
+    first_binding = {"binding_id": first.json()["data"]["binding_id"]}
+    second_binding = {"binding_id": second.json()["data"]["binding_id"]}
+    first_slot = (await send(app, "storage_allocate", first_binding)).json()["data"]
+    assert (await send(app, "storage_allocate", second_binding)).json()["data"] == {
+        "result": "WAIT",
+        "workline_code": "RS01",
+    }
+
+    failed = (
+        first_binding
+        | {key: first_slot[key] for key in ("bin_code", "bin_location", "cell_id", "cell_index")}
+        | {
+            "result": "FAILED",
+            "error_detail": {"code": "PUT_TO_BIN_FAILED", "msg": "放料失败"},
+            "placement_status": "CONFIRMED_NOT_PLACED",
+            "completed_at": 2000,
+        }
+    )
+    assert (await send(app, "execution_report", failed)).json()["code"] == "RECORDED"
+    second_slot = (await send(app, "storage_allocate", second_binding)).json()["data"]
+    retry = await send(app, "storage_allocate", first_binding)
+    assert retry.json()["data"] == {"result": "WAIT", "workline_code": "RS01"}
+
+    second_report = (
+        second_binding
+        | {key: second_slot[key] for key in ("bin_code", "bin_location", "cell_id", "cell_index")}
+        | {"completed_at": 2001}
+    )
+    assert (await send(app, "execution_report", second_report)).json()["code"] == "RECORDED"
+    final = await send(app, "storage_allocate", first_binding)
+    assert final.json()["data"] == second_slot | {"reel_totalthickness": 0.2}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {
+            "result": "FAILED",
+            "error_detail": {"code": "FAILED", "msg": "failed"},
+            "placement_status": "UNKNOWN",
+        },
+        {"result": "FAILED", "error_detail": None, "placement_status": "CONFIRMED_NOT_PLACED"},
+        {
+            "result": "FAILED",
+            "error_detail": {"code": "FAILED", "msg": "failed"},
+            "placement_status": "CONFIRMED_PLACED",
+        },
+    ],
+)
+def test_execution_report_rejects_invalid_result_contract(overrides):
+    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_execution_report_v1 import (
+        ExecutionReport,
+    )
+
+    with pytest.raises(ValueError):
+        ExecutionReport.model_validate(
+            {
+                "workline_code": "RS01",
+                "binding_id": "binding",
+                "bin_code": "bin",
+                "bin_location": "A",
+                "cell_id": "cell",
+                "cell_index": 1,
+                "completed_at": 1,
+                **overrides,
+            }
+        )
+
+
 async def test_concurrent_scans_can_authorize_only_one_normal_test_reel(mock_app):
     app = mock_app()
     results = await asyncio.gather(

@@ -28,8 +28,8 @@
 | 换架 / 仅退架 | 5.3 | WMS → WES | Operation：[transport.task.resulted@v1](#transport-rack-out-result) | 回填原旧架实际终位/失败，备查 | 缺失或失败不回退已接纳的调度 |
 | 补架 / 换架 / 仅退架 | 5.4 | WES → WMS | Operation：[inbound.coarse_sorting.storage_allocate@v1](#wms-storage-reallocate) | 新架明确到位或仅退架调度接纳后，使用原 `binding_id`、新 `operation_id` 重新分配 | 取得有效箱格才进入正常步骤 6 |
 | 正常        | 6    | WES → ECS        | Command：[PUT_TO_BIN](#ecs-put-to-bin)                                           | 下发入箱命令                                                         | 已取得有效的放料目标                                  |
-| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 回传原入箱命令的执行结果                                             | 明确物理放料完成                                      |
-| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的物理完成事实                                   | WMS 返回 `RECORDED / DUPLICATE`                     |
+| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 回传原入箱命令的执行结果                                             | 明确放料完成，或明确未放料的失败                    |
+| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的执行结果                                       | WMS 返回 `RECORDED / DUPLICATE`                     |
 | NG          | 3    | WES → ECS        | Command：[MOVE_TO_NG](#ecs-move-to-ng)                                           | 下发搬至对应区域 NG 平台的命令                                       | WMS 验证返回 `NG + reason_code`                     |
 | NG          | 4    | ECS → WES        | Result：[原 MOVE_TO_NG 命令](#ecs-move-to-ng-result)                             | 回传原 NG 搬运命令的执行结果                                         | 明确结果后保存；NG 成功不触发正常入箱反馈             |
 
@@ -134,7 +134,7 @@ flowchart TB
     class done completed
 ```
 
-只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。只有原入箱命令明确证明指定箱格已放料后才报告物理完成。报告未收妥时保留物理完成事实，只恢复原报告或核对，允许下一盘继续，不额外锁住原料格、不再执行该盘搬运。
+只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。原入箱命令明确证明指定箱格已放料后报告成功完成；若明确失败且确认未放料，则发送失败执行报告并释放 WMS 预约；结果未知时保留原命令和预约，不报告成功或释放箱格。报告未收妥时保留执行事实，只恢复原报告或核对，允许下一盘继续，不额外锁住原料格、不再执行该盘搬运。
 
 ### 2.3 NG 处理与异常出口
 

@@ -29,6 +29,6 @@ class ExecutionReport(RequestPayload):
         if self.result == "SUCCESS":
             if self.error_detail is not None or self.placement_status != "CONFIRMED_PLACED":
                 raise ValueError("SUCCESS requires confirmed placement and forbids error_detail")
-        elif self.error_detail is None or self.placement_status == "CONFIRMED_PLACED":
-            raise ValueError("FAILED requires error_detail and a non-placed status")
+        elif self.error_detail is None or self.placement_status != "CONFIRMED_NOT_PLACED":
+            raise ValueError("FAILED requires error_detail and confirmed non-placement")
         return self
