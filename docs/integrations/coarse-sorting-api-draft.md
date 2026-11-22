@@ -515,9 +515,9 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 
 <a id="wms-execution-report"></a>
 
-### 3.3 物理完成反馈
+### 3.3 物理完成及执行结果反馈
 
-仅在原 `PUT_TO_BIN` 的可信成功结果证明指定箱格放料完成后发送。本接口描述正常入箱完成；NG 搬运成功不作为正常入箱反馈。
+原 `PUT_TO_BIN` 的执行结果明确后发送。本接口既反馈指定箱格已完成放料，也反馈已确认未放料的失败。NG 搬运成功不作为正常入箱反馈。
 
 请求：
 
@@ -533,7 +533,10 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
     "bin_location": "B",
     "cell_id": "BIN-A002-1",
     "cell_index": 2,
-    "completed_at": 1793206814000
+    "completed_at": 1793206814000,
+    "result": "SUCCESS",
+    "error_detail": null,
+    "placement_status": "CONFIRMED_PLACED"
   }
 }
 ```
@@ -545,8 +548,13 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 | `bin_code / bin_location` | 原目标料箱条码及其在单层货架上的箱位 |
 | `cell_id / cell_index` | 原分配的完整料格储位编码及料箱内格位，成对回传 WMS |
 | `completed_at`                      | 原 ECS Result 的 `finish_time`，不使用报告发送时间                                            |
+| `result`                             | `SUCCESS` 或 `FAILED`。成功表示已确认放料，失败表示已确认未放料 |
+| `error_detail`                       | 失败时必填的执行错误，成功时为 `null` |
+| `placement_status`                   | `CONFIRMED_PLACED`、`CONFIRMED_NOT_PLACED` 或 `UNKNOWN`。`FAILED` 只能使用 `CONFIRMED_NOT_PLACED` |
 
-目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。失败、未知、超时均不提交本完成接口，也不推导装箱后总高度。
+目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。未确认是否放料时不提交成功报告，也不推导装箱后总高度。
+
+当 ECS 明确放料失败且确认未放料时，WES 使用原绑定和原分配目标发送 `result: "FAILED"` 的报告。WMS 收妥后释放 `storage_allocate@v1` 预约的箱格，WES 保留原操作证据并进入待处理状态。无法确认是否放料时使用 `placement_status: "UNKNOWN"`，不得释放预约。
 
 `command_code / device_code` 及原成功 Result 关联仅由 WES 内部保存，不加入本报告。目标合同以 `workline_code + binding_id` 标识该盘的一次正常入箱完成：同一键的相同目标和完成事实重复报告不重复装载或记账；目标或完成事实冲突时拒绝，不能覆盖原报告。协议 `operation_id` 仍标识具体请求，技术重试复用原身份及冻结正文；业务去重规则待 WMS 按 P10 确认。
 

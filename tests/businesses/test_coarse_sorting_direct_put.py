@@ -109,6 +109,9 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         "cell_id": "BIN-A002-1",
         "cell_index": 7,
         "completed_at": 1234,
+        "result": "SUCCESS",
+        "error_detail": None,
+        "placement_status": "CONFIRMED_PLACED",
     }
     actions = await flow.action_rows(scan_id)
     assert {a["kind"] for a in actions} == {
@@ -340,6 +343,45 @@ async def test_partial_put_failure_settles_original_after_unknown_ack(direct, da
     assert await flow.dispatch() == 0
     assert len(flow.peer.commands) == 2
     assert flow.peer.reports == []
+
+
+async def test_confirmed_empty_put_failure_reports_to_wms(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    flow.peer.command = "invalid"
+    put = await dispatch_put(flow, row)
+    assert (
+        await flow.result(
+            row,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data={},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+            finish_time=1234,
+        )
+    ).status_code == 200
+
+    assert await flow.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
+    assert await flow.dispatch() == 1
+    report = json.loads(flow.peer.reports[-1])
+    assert report["data"] == {
+        "workline_code": flow.workline,
+        "binding_id": "BIND-ORIGINAL",
+        "bin_code": "BIN-A002",
+        "bin_location": "B",
+        "cell_id": "BIN-A002-1",
+        "cell_index": 7,
+        "completed_at": 1234,
+        "result": "FAILED",
+        "error_detail": {"code": "BLOCKED", "msg": "mock failure"},
+        "placement_status": "CONFIRMED_NOT_PLACED",
+    }
+    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+    held = (await flow.rows())[0]
+    assert held["state"] == "AWAITING_PUT"
+    assert not held["pending"]
 
 
 @pytest.mark.parametrize("scenario", ["complete", "missing_proof", "source_changed"])

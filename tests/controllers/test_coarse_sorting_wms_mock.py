@@ -183,6 +183,31 @@ async def test_mock_preserves_the_original_slot_and_report_across_restart(mock_a
     ).status_code == 409
 
 
+async def test_failed_execution_report_releases_the_reserved_slot(mock_app):
+    app = mock_app()
+    validation = await send(app, "validate_bind", scan("RAW-OK"))
+    binding = {"binding_id": validation.json()["data"]["binding_id"]}
+    allocated = await send(app, "storage_allocate", binding)
+    report = binding | {
+        key: allocated.json()["data"][key]
+        for key in ("bin_code", "bin_location", "cell_id", "cell_index")
+    }
+    failed = report | {
+        "result": "FAILED",
+        "error_detail": {"code": "PUT_TO_BIN_FAILED", "msg": "放料失败"},
+        "placement_status": "CONFIRMED_NOT_PLACED",
+        "completed_at": 2000,
+    }
+
+    response = await send(app, "execution_report", failed)
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "RECORDED"
+    reallocated = await send(app, "storage_allocate", binding)
+    assert reallocated.status_code == 200
+    assert reallocated.json()["data"] == allocated.json()["data"]
+
+
 async def test_concurrent_scans_can_authorize_only_one_normal_test_reel(mock_app):
     app = mock_app()
     results = await asyncio.gather(
