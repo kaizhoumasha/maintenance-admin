@@ -292,7 +292,7 @@ async def test_pg_insert_and_archive_between_pages(pg_client, pg_sessions, audit
         await session.execute(delete(AuditLog).where(AuditLog.id == rows[-2].id))
         await session.commit()
     rest = (await query(pg_client, PATHS[1], scope, start=2, end=100)).json()
-    assert [r["id"] for r in rest["items"]] == [newest.id, *[r.id for r in reversed(rows[:-2])]]
+    assert [r["id"] for r in rest["items"]] == [rows[-1].id, *[r.id for r in reversed(rows[:-2])]]
     assert (await query(pg_client, PATHS[1], scope, start=1, end=1)).json()["items"][0][
         "id"
     ] == newest.id
