@@ -43,11 +43,12 @@ NonemptyText = Annotated[str, Field(min_length=1)]
 
 
 class ValidateBindDecision(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     result: Literal["OK", "NG"]
     binding_id: NonemptyText | None = None
     reason_code: NonemptyText | None = None
+    detailMessage: NonemptyText | None = None
 
     @model_validator(mode="after")
     def check_decision(self) -> Self:
@@ -70,7 +71,7 @@ ReelHeight = Annotated[int, Field(ge=0)] | Annotated[float, Field(ge=0, allow_in
 
 
 class WorklineDecision(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     workline_code: Reference
 
@@ -91,7 +92,7 @@ class Wait(WorklineDecision):
 
 
 class CurrentRack(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     rack_id: Reference
 
@@ -122,7 +123,7 @@ allocation_decision = TypeAdapter(
 
 
 class _MockRoundBase(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     round_id: Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._-]{1,100}$")]
     ecs_source_ips: Annotated[list[IPvAnyAddress], Field(min_length=1)]

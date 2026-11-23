@@ -11,7 +11,7 @@ FilterOp = Literal["eq", "in", "ilike", "ge", "le", "between", "is_null", "not_n
 
 
 class FilterCondition(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     field: str
     op: FilterOp
@@ -40,7 +40,7 @@ class FilterCondition(BaseModel):
 
 
 class FilterGroup(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     couple: Literal["and", "or", "not"] = "and"
     conditions: list[FilterCondition | FilterGroup] = Field(min_length=1)
@@ -81,12 +81,12 @@ FilterText = Annotated[
 
 
 class UserListParams(PageParams):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     filter: FilterText = None
 
 
 class CursorParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     limit: int = Field(20, ge=1, le=100)
     cursor: str | None = Field(None, max_length=64)
     filter: FilterText = None

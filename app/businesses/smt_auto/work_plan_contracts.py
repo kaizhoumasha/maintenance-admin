@@ -27,7 +27,7 @@ def size_inch_value(data):
 
 
 class Data(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     @model_validator(mode="before")
     @classmethod

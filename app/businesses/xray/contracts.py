@@ -37,7 +37,7 @@ NgStage = Literal["ENTRY", "COUNT", "LABEL", "VERIFY"]
 
 
 class Strict(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 class OmitAbsent:

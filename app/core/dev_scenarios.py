@@ -21,7 +21,7 @@ NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 class DevRequest(BaseModel):
     """所有场景请求体的基类。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     client_request_id: str | None = Field(
         None, description="不传由服务端生成 uuid7;重复传同一个可验证幂等重放"

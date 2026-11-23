@@ -20,7 +20,7 @@ from app.services import dev_wms_request_service
 
 
 class _DevWmsRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     operation_id: str | None = None  # 不传由服务端生成 uuid7;重复传同一个可验证幂等重放
 

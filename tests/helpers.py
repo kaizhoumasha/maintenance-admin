@@ -483,7 +483,7 @@ def raw_cursor(payload: Any) -> str:
 
 
 class EcsResultPayload(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     qty: int
 
 
@@ -516,7 +516,7 @@ class EcsOther(EcsResultPayload):
 
 
 class TrialPayload(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     qty: int
 
 
@@ -821,7 +821,7 @@ def workline_definition_lookup(code):
 class FlowPredecessor(BaseModel):
     """Only the test business owns this dependency contract."""
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     task_id: str
     request_id: str
     caller_workline: str
@@ -831,14 +831,14 @@ class FlowPredecessor(BaseModel):
 
 
 class FlowWmsRequest(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     message_id: int
     operation: str
     operation_id: str
 
 
 class FlowAcceptance(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     execution_id: str
     device_code: str
     predecessors: list[FlowPredecessor] = []
@@ -1128,7 +1128,7 @@ class FlowService:
 
 
 class FlowMove(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     position: str
 
 

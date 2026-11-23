@@ -27,7 +27,7 @@ async def test_role_switch_selects_new_contract_and_preserves_original_result_co
     from app.services.workline_service import update_workline
 
     class ExitPayload(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         exit_code: str
 
     ecs_command(

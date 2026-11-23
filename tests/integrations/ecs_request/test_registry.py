@@ -7,7 +7,7 @@ from app.integrations.ecs_request.envelope import EcsRequestEnvelope
 
 
 class Decision(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     result: str
 
 

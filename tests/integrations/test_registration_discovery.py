@@ -213,7 +213,7 @@ def test_ecs_request_kind_is_discovered_and_owned(business_modules, monkeypatch)
 from pydantic import BaseModel, ConfigDict
 from app.integrations.ecs_request import CallbackPayload, ecs_request
 class Decision(BaseModel):
-    model_config = ConfigDict(extra='forbid')
+    model_config = ConfigDict(extra='ignore')
     result: str
 @ecs_request('CARTON_VALIDATE', device_role='SCAN1', data=CallbackPayload, response=Decision)
 async def handler(ctx, payload): pass

@@ -150,7 +150,7 @@ def test_contract_checker_reports_ecs_request_registry(monkeypatch, capsys):
     from app.integrations.wms_request import operation as requests
 
     class Decision(BaseModel):
-        model_config = ConfigDict(extra="forbid")
+        model_config = ConfigDict(extra="ignore")
         result: str
 
     monkeypatch.setattr(ecs_events, "_registry", {})
@@ -359,12 +359,12 @@ from pydantic import BaseModel, ConfigDict, field_validator, field_serializer
 from app.integrations.ecs_command import ecs_command
 from app.integrations.ecs_command.contracts import ErrorDetail
 class Result(BaseModel):
-    model_config = ConfigDict(strict=True, extra='forbid')
+    model_config = ConfigDict(strict=True, extra='ignore')
     target: str
 @ecs_command('MOVE', device_roles=('ALPHA_SCAN',), annex_id='alpha.move', annex_version='1',
     result=Result, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=1000)
 class Move(BaseModel):
-    model_config = ConfigDict(strict=True, extra='forbid')
+    model_config = ConfigDict(strict=True, extra='ignore')
     target: str
     @field_validator('target')
     @classmethod

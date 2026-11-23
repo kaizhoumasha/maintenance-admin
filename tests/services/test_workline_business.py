@@ -407,7 +407,7 @@ async def test_new_command_requires_declared_contract_and_own_workline(db, monke
     from tests.helpers import business_composition
 
     class Result(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int
 
     @ecs_command(
@@ -421,7 +421,7 @@ async def test_new_command_requires_declared_contract_and_own_workline(db, monke
         timeout_max_ms=60000,
     )
     class Move(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int
 
     first, second = business_composition("first"), business_composition("second")

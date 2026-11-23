@@ -79,7 +79,7 @@ def test_client_controlled_dict_key_is_masked():
 
 def test_client_chosen_extra_key_is_masked():
     class M(CallbackPayload):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         a: int
 
     with pytest.raises(ValidationError) as ei:

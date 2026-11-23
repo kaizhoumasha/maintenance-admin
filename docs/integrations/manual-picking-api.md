@@ -728,7 +728,7 @@ RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个�
 
 用户给出的配置是本轮文档的指定值。远端 WES 数据库核对仅用于比较其现存配置，不据数据库记录推定设备在线、货架实际到位、库存占用或业务验收；若存在差异，保留两者来源并列入待确认，不修改数据库或本系统配置。
 
-2026-10-30 经 SSH 只读核对 `CANTAISYS@100.94.216.118` 上 `wes_postgres_int` 容器的 `wes_integration` 数据库，查询位于显式 READ ONLY 事务，结束 ROLLBACK。仅读取配置字段，未修改数据、调用 Status 或发送命令：
+2026-10-30 经 SSH 只读核对 `CANTAISYS@100.96.0.2` 上 `wes_postgres_int` 容器的 `wes_integration` 数据库，查询位于显式 READ ONLY 事务，结束 ROLLBACK。仅读取配置字段，未修改数据、调用 Status 或发送命令：
 
 - `wes_biz.work_lines.config` 的 device_bindings、position_bindings 与第 4.2 节两线全部角色/位置映射一致；两线 plugin_key 均为 `manual-picking`。
 - `wes_biz.devices` 的八个扫码设备均归属相应工作线，endpoint_base_url 均为 `http://10.24.209.26:8080`；is_active=true、is_deleted=false 只是旧库配置标记，不是在线或执行许可。

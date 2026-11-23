@@ -31,7 +31,7 @@ class MoveForwardResult(BaseModel):
 class MoveForward(BaseModel):
     model_config = ConfigDict(
         strict=True,
-        extra="forbid",
+        extra="ignore",
         json_schema_extra={"examples": [{"barcode": "RAW-001"}]},
     )
 
@@ -72,7 +72,7 @@ class MoveToNgResult(MoveToLocationResult):
     timeout_max_ms=60000,
 )
 class MoveToNg(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     barcode: str
     reason_code: Reference
@@ -89,7 +89,7 @@ class MoveToNg(BaseModel):
     timeout_max_ms=60000,
 )
 class PutToBin(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
     barcode: Annotated[str, Field(min_length=1)]
     bin_location: BinLocation

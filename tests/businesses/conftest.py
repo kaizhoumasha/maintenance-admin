@@ -47,7 +47,7 @@ from tests.helpers import (
 
 
 class Position(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     position: str
 
 

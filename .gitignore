@@ -18,3 +18,9 @@ backups/
 frontend-dist/
 releases/
 .DS_Store
+.claude-plugin/
+events.jsonl
+statuses/
+labels/
+views.json
+config.json

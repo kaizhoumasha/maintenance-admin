@@ -19,7 +19,7 @@ from .contracts import DirectionResult
     timeout_max_ms=60000,
 )
 class MoveForward(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 @ecs_command(
@@ -33,7 +33,7 @@ class MoveForward(BaseModel):
     timeout_max_ms=60000,
 )
 class MoveRight(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 @ecs_command(
@@ -47,4 +47,4 @@ class MoveRight(BaseModel):
     timeout_max_ms=60000,
 )
 class MoveLeft(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")

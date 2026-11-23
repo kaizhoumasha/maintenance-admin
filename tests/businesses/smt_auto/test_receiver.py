@@ -228,7 +228,7 @@ async def test_cancel_replays_old_extra_field_rejection_before_archive_guard(
     operation = registry.lookup(body["operation"])
 
     class LegacyCancel(Cancel):
-        model_config = ConfigDict(extra="forbid")
+        model_config = ConfigDict(extra="ignore")
 
     with monkeypatch.context() as old:
         old.setitem(

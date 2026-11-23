@@ -27,7 +27,7 @@ Capacity = Annotated[int, Field(strict=True, ge=1, le=2147483647)]
 
 
 class WorkLinePositionWrite(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     position_code: BindingCode
     capacity: Capacity | None = 1
@@ -46,7 +46,7 @@ class WorkLinePositionRead(WorkLinePositionWrite):
 
 
 class WorkLineEditable(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     line_name: str = Field(min_length=1, max_length=100)
     is_enabled: Annotated[bool, Field(strict=True)] = True

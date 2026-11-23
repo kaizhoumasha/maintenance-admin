@@ -4,9 +4,9 @@
 
 本分支的 ECS / WMS 历史统一尚未执行真实上线切换。以下通用升级和旧镜像回退步骤不能直接用于已有数据的历史权威交接：必须按[统一历史 A / B 运行手册](integrations/integration-history.md#历史迁移与制品-a)，先用冻结的 authority-only 制品 A 完成真实停写、补录、最终对账和实际验收，再在独立维护窗口交付 contract 制品 B。此前统一历史收尾版本为 `integrationhistorycontract`，不可作为 A 的构建输入，也不可在旧库裸跑 `upgrade head` 后启动应用。本文保留的日期化部署记录不证明本次变更已部署。
 
-默认访问地址为 **[http://100.94.216.118:18080](http://100.94.216.118:18080)**，Swagger 为 **[http://100.94.216.118:18080/docs](http://100.94.216.118:18080/docs)**。客户端需能通过 Tailscale 访问该地址，不需要 SSH 转发；SSH 运维入口仍为 `ssh CANTAISYS@100.94.216.118`。本项目与现有 WES 共机独立运行。实际部署从[第 6 节](#6-发布准备与旧制品保存)开始，使用固定制品，不在联调服务器重新构建。第 1–5 节保留通用说明及本地构建演练命令；联调服务器上的应用操作统一使用第 6 节的 `dc` 函数，完整加载发布和站点配置。
+默认访问地址为 **[http://100.96.0.2](http://100.96.0.2)**，Swagger 为 **[http://100.96.0.2/docs](http://100.96.0.2/docs)**。客户端需能通过 Cloudflare WARP 访问该地址，不需要 SSH 转发；SSH 运维入口仍为 `ssh CANTAISYS@100.96.0.2`。本项目与现有 WES 共机独立运行。实际部署从[第 6 节](#6-发布准备与旧制品保存)开始，使用固定制品，不在联调服务器重新构建。第 1–5 节保留通用说明及本地构建演练命令；联调服务器上的应用操作统一使用第 6 节的 `dc` 函数，完整加载发布和站点配置。
 
-同一网页入口也开放在内网 **[http://10.24.199.219:18080](http://10.24.199.219:18080)**，Swagger 为 **[http://10.24.199.219:18080/docs](http://10.24.199.219:18080/docs)**。内网客户端使用该地址；PostgreSQL 和 Redis 仍仅通过 Tailscale 地址开放，不随网页入口扩展到内网。
+同一网页入口也开放在内网 **[http://10.24.199.219](http://10.24.199.219)**，Swagger 为 **[http://10.24.199.219/docs](http://10.24.199.219/docs)**。内网客户端使用该地址；PostgreSQL 和 Redis 仍仅通过 Cloudflare WARP 地址开放，不随网页入口扩展到内网。
 
 结构:`nginx`(同域提供前端静态文件 + 反代 `/api`)→ `api`(可多实例)→ `postgres` / `redis`;`worker` 可多个,`beat` 只能一个,`migrate` 每次升级跑一次。需要 Docker Compose ≥ 2.24.4。
 
@@ -18,8 +18,8 @@
 | 现有 WES | Compose 项目 `wes_integration`，目录 `/srv/wes/app/current-single`；已映射宿主机 80、443、5555 |
 | 本项目 | 根目录 `/srv/enterprise-backend`，Compose 项目 `enterprise-backend-int` |
 | 数据隔离 | 独立 PostgreSQL、Redis、网络及数据卷，不复用 WES 的数据库、队列和配置 |
-| 网页入口 | 默认 `100.94.216.118:18080`，内网 `10.24.199.219:18080`；分别绑定这两个明确 IP，不绑定所有网卡 |
-| 本地数据库工具 | PostgreSQL `100.94.216.118:25432`、Redis `100.94.216.118:26379`，均需各自密码；只绑定该 Tailscale IP |
+| 网页入口 | 默认 `100.96.0.2`，内网 `10.24.199.219`；分别绑定这两个明确 IP，不绑定所有网卡 |
+| 本地数据库工具 | PostgreSQL `100.96.0.2:25432`、Redis `100.96.0.2:26379`，均需各自密码；只绑定该 Cloudflare WARP IP |
 | 联调环境 | `ENVIRONMENT=local`；此设置只用于联调，正式生产切回 `production` |
 | Swagger | FastAPI 内置 `/docs` 和 `/openapi.json`，由当前 API 动态生成，nginx 直接反代 |
 
@@ -177,7 +177,7 @@ python3 scripts/release_bundle.py verify 'releases/integration-<提交短SHA>'
 
 ### 固定镜像部署与升级
 
-以下默认在 `CANTAISYS@100.94.216.118` 新建本项目部署。部署根目录为 `/srv/enterprise-backend`，固定 Compose 项目名为 `enterprise-backend-int`，数据卷为 `enterprise-backend-int_pgdata` / `enterprise-backend-int_redisdata`。已有本项目站点必须继续使用其原目录、项目名及数据卷，不能仅改名后启动空卷；以下 `COMPOSE_PROJECT_NAME` 和 `check --project` 也须沿用该原值。不要使用 WES 的 `wes_integration` 项目名或目录。
+以下默认在 `CANTAISYS@100.96.0.2` 新建本项目部署。部署根目录为 `/srv/enterprise-backend`，固定 Compose 项目名为 `enterprise-backend-int`，数据卷为 `enterprise-backend-int_pgdata` / `enterprise-backend-int_redisdata`。已有本项目站点必须继续使用其原目录、项目名及数据卷，不能仅改名后启动空卷；以下 `COMPOSE_PROJECT_NAME` 和 `check --project` 也须沿用该原值。不要使用 WES 的 `wes_integration` 项目名或目录。
 
 首次由有权限的运维人员创建根目录并授权部署用户写入，仅操作本项目目录。将完整发布包上传到 `releases/<发布标识>`；发布目录只放制品原件及指向真实 `.env` 的链接，不覆盖旧包。目录布局为：
 
@@ -249,10 +249,10 @@ PY
 services:
   postgres:
     ports: !override
-      - "100.94.216.118:25432:5432"
+      - "100.96.0.2:25432:5432"
   redis:
     ports: !override
-      - "100.94.216.118:26379:6379"
+      - "100.96.0.2:26379:6379"
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:?请设置独立Redis密码}
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--protected-mode", "yes", "--aclfile", "/usr/local/etc/redis/users.acl"]
@@ -265,7 +265,7 @@ services:
           create_host_path: false
   nginx:
     ports: !override
-      - "100.94.216.118:${NGINX_PORT:-18080}:80"
+      - "100.96.0.2:${NGINX_PORT:-18080}:80"
       - "10.24.199.219:${NGINX_PORT:-18080}:80"
   api:
     environment:
@@ -282,7 +282,7 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:?请设置独立Redis密码}@redis:6379/0
 ```
 
-该文件将 PostgreSQL、Redis 的宿主机端口仅绑定到 Tailscale IP；nginx 同时绑定明确的 Tailscale 和内网 IP。PostgreSQL 沿用原密码认证，Redis 启用独立密码，worker 限制为 2 个并发。原命名数据卷继续保留，Redis 只增加 ACL 文件挂载。无需 Swagger 目录挂载或导出脚本，文档路由直接反代到 API，见下文。不能用普通 `ports` 列表叠加，否则可能保留基础配置中的宿主机端口。`!override` 的行为见 [Docker Compose 合并规则](https://docs.docker.com/reference/compose-file/merge/)。
+该文件将 PostgreSQL、Redis 的宿主机端口仅绑定到 Cloudflare WARP IP；nginx 同时绑定明确的 Cloudflare WARP 和内网 IP。PostgreSQL 沿用原密码认证，Redis 启用独立密码，worker 限制为 2 个并发。原命名数据卷继续保留，Redis 只增加 ACL 文件挂载。无需 Swagger 目录挂载或导出脚本，文档路由直接反代到 API，见下文。不能用普通 `ports` 列表叠加，否则可能保留基础配置中的宿主机端口。`!override` 的行为见 [Docker Compose 合并规则](https://docs.docker.com/reference/compose-file/merge/)。
 
 在包外 nginx 副本中配置本站点路由；当前直接访问时不额外信任代理地址，后续接入 HTTPS 网关时只信任明确的网关来源。不要修改包内文件或重新生成其校验值。后续所有部署命令均在 release、site 配置后追加联调覆盖文件。site 挂载只读且不会自动创建缺失的 nginx 配置文件。
 
@@ -353,9 +353,9 @@ unset ADMIN_PASSWORD
 在可访问对应地址的客户端直接检查，不建立 SSH 转发：
 
 ```bash
-curl --noproxy '*' --fail http://100.94.216.118:18080/ready
-curl --noproxy '*' --fail --head http://100.94.216.118:18080/docs
-curl --noproxy '*' --fail --head http://10.24.199.219:18080/docs
+curl --noproxy '*' --fail http://100.96.0.2/ready
+curl --noproxy '*' --fail --head http://100.96.0.2/docs
+curl --noproxy '*' --fail --head http://10.24.199.219/docs
 ```
 
 当前没有配套管理前端，首页只提供后端说明。先通过接口检查登录、权限/菜单和任务进程；通过 Swagger 调用 `/api/v1/auth/login` 后，取响应中的 `access_token` 填入 Authorize，业务接口仍执行原有鉴权和权限检查。当前 `local` 的 HTTP Cookie 支持同域刷新和退出，但管理前端仍待单独验收，正式生产还需 HTTPS。入口可达也不等于已授权真实 WMS/ECS 回调，启用前仍按来源限制和协议完成验收。保留验收记录，不记录 token/密码。
@@ -367,19 +367,19 @@ curl --noproxy '*' --fail --head http://10.24.199.219:18080/docs
 | 使用方 | PostgreSQL 地址 | Redis 地址 | 配置位置 |
 | --- | --- | --- | --- |
 | 本项目 API、worker、beat、migrate 容器 | `postgres:5432` | `redis:6379` | Compose 中应用服务的 `DATABASE_URL` / `REDIS_URL` |
-| 本地数据库工具 | `100.94.216.118:25432` | `100.94.216.118:26379` | 工具的连接设置；凭据记录在 `shared/database-access.env` |
+| 本地数据库工具 | `100.96.0.2:25432` | `100.96.0.2:26379` | 工具的连接设置；凭据记录在 `shared/database-access.env` |
 
 容器内部通过 Docker 网络解析 Compose 服务名 `postgres`、`redis`，使用容器端口 5432、6379。内部连接的数据库分别为 `enterprise_backend` 和 Redis DB `0`；连接 URL 保留密码认证。25432、26379 是宿主机映射端口，只供容器外的本地工具访问。调整对外地址或端口不需要改变应用内部连接。
 
-**不要将 Tailscale IP 或宿主机映射端口填入上述四个应用服务的 `DATABASE_URL` / `REDIS_URL`，也不要将工具凭据文件 `database-access.env` 用作应用的 `env_file`。**应用继续使用 `postgres:5432`、`redis:6379`；本地工具才使用下节的 Tailscale 地址。
+**不要将 Cloudflare WARP IP 或宿主机映射端口填入上述四个应用服务的 `DATABASE_URL` / `REDIS_URL`，也不要将工具凭据文件 `database-access.env` 用作应用的 `env_file`。**应用继续使用 `postgres:5432`、`redis:6379`；本地工具才使用下节的 Cloudflare WARP 地址。
 
-### 本地工具通过 Tailscale 直连 PostgreSQL / Redis
+### 本地工具通过 Cloudflare WARP 直连 PostgreSQL / Redis
 
-客户端连接 Tailscale 后，使用下列参数，不配置 SSH 隧道：
+客户端连接 Cloudflare WARP 后，使用下列参数，不配置 SSH 隧道：
 
 | 参数 | PostgreSQL | Redis |
 | --- | --- | --- |
-| 主机 | `100.94.216.118` | `100.94.216.118` |
+| 主机 | `100.96.0.2` | `100.96.0.2` |
 | 端口 | `25432` | `26379` |
 | 用户 | `admin` | `default` |
 | 数据库 | `enterprise_backend` | `0` |
@@ -387,12 +387,12 @@ curl --noproxy '*' --fail --head http://10.24.199.219:18080/docs
 | 密码 | 原 PostgreSQL 密码 | 本次新增的独立 Redis 密码 |
 | 传输 | 普通 PostgreSQL TCP，当前未配置数据库 TLS | 普通 Redis TCP，当前未配置 Redis TLS |
 
-连接流量由 Tailscale 加密。端口只绑定 `100.94.216.118`，可达性仍受客户端的 Tailscale 网络权限限制。账号拥有本项目写权限，仅为连通性检查时使用只读查询/PING，不修改业务数据，不清空 Redis；其中包含线上联调会话和 Celery 队列。
+连接流量由 Cloudflare WARP 加密。端口只绑定 `100.96.0.2`，可达性仍受客户端的 Cloudflare WARP 网络权限限制。账号拥有本项目写权限，仅为连通性检查时使用只读查询/PING，不修改业务数据，不清空 Redis；其中包含线上联调会话和 Celery 队列。
 
 当前连接参数和凭据保存在服务器 `/srv/enterprise-backend/shared/database-access.env`，权限为 600。需要配置本地工具时，由运维用户在自己的终端查看：
 
 ```bash
-ssh CANTAISYS@100.94.216.118 'cat /srv/enterprise-backend/shared/database-access.env'
+ssh CANTAISYS@100.96.0.2 'cat /srv/enterprise-backend/shared/database-access.env'
 ```
 
 该文件仅记录本地工具连接参数；应用实际运行配置由 Compose 基础文件、站点覆盖文件及 `shared/.env` 共同决定，Redis 服务端另外加载 ACL。工具记录中的 `POSTGRES_HOST` / `REDIS_HOST` 不用于应用内部寻址。数据库密码不等于 Swagger 的 `admin` 登录密码，勿把凭据复制到文档、普通验收报告或发布包。密码变更须同步维护实际配置及此记录；Redis 还须同步 ACL 摘要和四个应用服务的连接配置，不能只改 `.env` 或只重启 Redis。
@@ -409,12 +409,12 @@ ssh CANTAISYS@100.94.216.118 'cat /srv/enterprise-backend/shared/database-access
 | 应用源 | `a1eccce7bf35fafb82ca408a07ff834d31324e36`，`source_dirty=false`，`linux/amd64`；属于联调候选，未发布新版本 |
 | 数据库 | Alembic head 为 `a6d464b20ab7`，迁移成功；`alembic check` 无新增迁移操作 |
 | 服务 | API、PostgreSQL、Redis healthy，worker ping 正常，beat 单实例，nginx 正常；migrate 为 Exited (0) |
-| 入口变更 | 从 `127.0.0.1:18080` 改为 `100.94.216.118:18080`，只重建本项目 nginx |
-| 内网入口补充 | nginx 新增 `10.24.199.219:18080` 绑定，保留 Tailscale 入口；两个地址的 `/ready`、`/docs`、`/openapi.json` 均返回 200，本地客户端访问两个 `/docs` 也均为 200；只重建本项目 nginx，其他本项目服务及 WES 9 个容器基线不变 |
+| 入口变更 | 从 `127.0.0.1` 改为 `100.96.0.2`，只重建本项目 nginx |
+| 内网入口补充 | nginx 新增 `10.24.199.219` 绑定，保留 Cloudflare WARP 入口；两个地址的 `/ready`、`/docs`、`/openapi.json` 均返回 200，本地客户端访问两个 `/docs` 也均为 200；只重建本项目 nginx，其他本项目服务及 WES 9 个容器基线不变 |
 | 接口验收 | 本次 local 的 14 项检查通过：标准 CookieJar 在 HTTP 下完成登录、自动携带 Cookie 刷新、退出及旧会话撤销；未登录设备查询和调试目录为 401，管理员授权查询为 200 |
 | 当前环境与 Swagger | 联调切为 `local`，FastAPI 内置 Swagger 已在浏览器渲染，动态返回 51 个正式及 local 调试路径；入口 OpenAPI 与 API 容器响应一致，不再使用 36 路径的旧静态快照 |
 | Swagger 配置部署 | 沿用原固定镜像，重建本项目 API、worker、beat 和 nginx；当次未执行迁移，PostgreSQL、Redis 和 WES 保持运行 |
-| 数据库直连变更 | PostgreSQL `100.94.216.118:25432`、Redis `100.94.216.118:26379`；原 PostgreSQL 密码保留，Redis 新增独立密码，原镜像及命名数据卷不变 |
+| 数据库直连变更 | PostgreSQL `100.96.0.2:25432`、Redis `100.96.0.2:26379`；原 PostgreSQL 密码保留，Redis 新增独立密码，原镜像及命名数据卷不变 |
 | 直连认证验收 | 本地客户端无 SSH 隧道完成 PostgreSQL 只读查询和 Redis PING；PostgreSQL 错误密码、Redis 无密码均被拒绝 |
 | 数据保留 | 应用停止期间比对 PostgreSQL schema 内 19 张表，行数及内容摘要一致；Redis 校验标记经容器重建仍保留，验证后仅删除该自有临时标记，AOF 继续启用 |
 | 变更前备份 | 已生成完整自定义格式 PostgreSQL 备份，`pg_restore --list` 通过；pg_dump 提示 TimescaleDB `continuous_agg` 循环外键警告，未执行恢复演练，不能据此宣称恢复已验收 |
@@ -474,8 +474,8 @@ location = /openapi.json {
 
 ```bash
 dc exec -T api python -c "from app.main import app, settings; assert settings.ENVIRONMENT == 'local'; assert app.docs_url == '/docs' and app.openapi_url == '/openapi.json'; print('FastAPI local Swagger enabled')"
-curl --noproxy '*' --fail --head http://100.94.216.118:18080/docs
-curl --noproxy '*' --fail http://100.94.216.118:18080/openapi.json -o /dev/null
+curl --noproxy '*' --fail --head http://100.96.0.2/docs
+curl --noproxy '*' --fail http://100.96.0.2/openapi.json -o /dev/null
 ```
 
 修改 `.env` 的环境值后须重建本项目 API、worker、beat，单纯 restart 不会应用新容器环境；只改 nginx 路由时先 `dc exec -T nginx nginx -t`，成功后 reload，移除旧目录挂载则须只重建 nginx。此流程不需要新镜像或数据库迁移。`local` 调试页的可用性不代表业务协议已验收；当前 WMS 目标是真实地址，连通性阶段不触发调试任务或请求。ECS 调试仍按地址、权限和合同单独约束。
@@ -492,9 +492,9 @@ curl --noproxy '*' --fail http://100.94.216.118:18080/openapi.json -o /dev/null
 
 启用粗分尾段时，沿用现有共享联调服务，在包外为 API、worker 和 Beat 配置同一套站点参数。环境变量、旧候选队列隔离和升级检查见 [WES 联调装配](superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md#wes-联调装配)。
 
-先在构建机从选定干净提交生成、验收新的 amd64 固定制品，上传到新的 `releases/<新发布标识>`，不要覆盖当前目录或标签。在服务器提前加载新镜像、核对基础设施引用与 `shared` 站点文件兼容，并记录本项目及 WES 容器基线。共享 `.env`、站点覆盖文件和 `shared/redis/users.acl` 沿用；它们不随新包覆盖，不更换项目名、数据卷或数据库凭据。加载配置前确认 ACL 存在、`.env` 保留 `REDIS_PASSWORD`；保留两个仅绑定 Tailscale IP 的数据库映射、nginx 的 Tailscale/内网双地址映射和四个应用服务的带密码 Redis URL，不能退回无密码基础配置。
+先在构建机从选定干净提交生成、验收新的 amd64 固定制品，上传到新的 `releases/<新发布标识>`，不要覆盖当前目录或标签。在服务器提前加载新镜像、核对基础设施引用与 `shared` 站点文件兼容，并记录本项目及 WES 容器基线。共享 `.env`、站点覆盖文件和 `shared/redis/users.acl` 沿用；它们不随新包覆盖，不更换项目名、数据卷或数据库凭据。加载配置前确认 ACL 存在、`.env` 保留 `REDIS_PASSWORD`；保留两个仅绑定 Cloudflare WARP IP 的数据库映射、nginx 的 Cloudflare WARP/内网双地址映射和四个应用服务的带密码 Redis URL，不能退回无密码基础配置。
 
-更新前核对 API、worker、beat、migrate 的合并配置：`DATABASE_URL` 主机/端口必须为 `postgres:5432`，`REDIS_URL` 必须为 `redis:6379`，并保留数据库名、密码和 Redis DB `0`。不要将本地工具使用的 `100.94.216.118:25432` / `100.94.216.118:26379` 回填到应用配置，也不要将含密码的完整合并配置打印到普通日志。
+更新前核对 API、worker、beat、migrate 的合并配置：`DATABASE_URL` 主机/端口必须为 `postgres:5432`，`REDIS_URL` 必须为 `redis:6379`，并保留数据库名、密码和 Redis DB `0`。不要将本地工具使用的 `100.96.0.2:25432` / `100.96.0.2:26379` 回填到应用配置，也不要将含密码的完整合并配置打印到普通日志。
 
 停机前准备好新包、旧包和站点配置副本。在当前版本目录执行最终备份；成功校验并异机保存后再更新：
 
@@ -548,21 +548,21 @@ NGINX_PORT=18081
 dc config --quiet
 dc up -d --no-deps --no-build --pull never --force-recreate nginx
 dc ps nginx
-curl --noproxy '*' --fail --head http://100.94.216.118:18081/
+curl --noproxy '*' --fail --head http://100.96.0.2:18081/
 ```
 
-只重建本项目 nginx，入口会短暂中断，API、worker、beat、数据库和 Redis 不重启，也不执行迁移。`restart nginx` 不会应用新端口映射。两条映射共用 `NGINX_PORT`，修改后可分别访问 `http://100.94.216.118:18081` 和 `http://10.24.199.219:18081`，都须先确认新端口空闲；Swagger 同步位于对应地址的 `/docs`，两个入口都要验证。同域相对路径无需调整文档，不需要 SSH 转发。
+只重建本项目 nginx，入口会短暂中断，API、worker、beat、数据库和 Redis 不重启，也不执行迁移。`restart nginx` 不会应用新端口映射。两条映射共用 `NGINX_PORT`，修改后可分别访问 `http://100.96.0.2:18081` 和 `http://10.24.199.219:18081`，都须先确认新端口空闲；Swagger 同步位于对应地址的 `/docs`，两个入口都要验证。同域相对路径无需调整文档，不需要 SSH 转发。
 
 已有 HTTPS 网关也须同步更新上游地址。验证失败时将 `.env` 改回旧端口，再用同一命令重建 nginx；不要重建整套应用。前端 HTTP 检查不能替代容器内 `/ready` 和登录验收。
 
-改成 80 时同样设置 `NGINX_PORT=80`，但必须先解决占用：2026-10-27 检查时 `wes_nginx_int` 已绑定 `0.0.0.0:80`，因此本项目连 `100.94.216.118:80` 也不能同时绑定。可选择：
+改成 80 时同样设置 `NGINX_PORT=80`，但必须先解决占用：2026-10-27 检查时 `wes_nginx_int` 已绑定 `0.0.0.0:80`，因此本项目连 `100.96.0.2:80` 也不能同时绑定。可选择：
 
 - 保留 WES 的 80/443，由现有网关按本项目独立域名转发到候选端口。此时本项目 `NGINX_PORT` 继续为 18080 等独立端口；两个域名分别提供各自前端和 `/api`，避免同路径混流。修改现有网关前须确认 WES 影响并完成配置检查，再安排 reload。
 - 经协调将 WES 的入口迁到其他端口/IP，确认原 80 端口已释放，再将本项目 `NGINX_PORT` 改为 80 并只重建本项目 nginx。不要直接停止 WES 来抢占端口。
 
-现有 WES nginx 在容器内，其 `127.0.0.1` 指向该容器，不能配置成访问本项目的上游。选择网关转发时须验证它到 `100.94.216.118:18080` 的可达性和来源限制；需要专用入口网络时单独设计，不合并两套应用的数据库网络。
+现有 WES nginx 在容器内，其 `127.0.0.1` 指向该容器，不能配置成访问本项目的上游。选择网关转发时须验证它到 `100.96.0.2` 的可达性和来源限制；需要专用入口网络时单独设计，不合并两套应用的数据库网络。
 
-网页映射绑定 `100.94.216.118` 和 `10.24.199.219`，不绑定所有网卡；只有第一个地址经 Tailscale，内网地址使用普通 HTTP。若需其他网卡访问，在包外覆盖文件中配置明确的服务器 IP，并核对防火墙、来源限制及 HTTPS 方案；只改 HTTP 端口不会启用 TLS。`local` 是本次联调选择，正式生产不得沿用该设置替代 HTTPS。
+网页映射绑定 `100.96.0.2` 和 `10.24.199.219`，不绑定所有网卡；只有第一个地址经 Cloudflare WARP，内网地址使用普通 HTTP。若需其他网卡访问，在包外覆盖文件中配置明确的服务器 IP，并核对防火墙、来源限制及 HTTPS 方案；只改 HTTP 端口不会启用 TLS。`local` 是本次联调选择，正式生产不得沿用该设置替代 HTTPS。
 
 ### WMS 回调接收启用门槛
 

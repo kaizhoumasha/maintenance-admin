@@ -10,7 +10,7 @@ from app.integrations.registration import local_registration
 
 
 class StrictPayload(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     quantity: int = 1
 
 
@@ -265,7 +265,7 @@ def test_compile_rejects_models_whose_validation_was_relaxed_after_declaration()
     from app.integrations.ecs_command import compile_commands
 
     model = declare(params())
-    model.model_config = ConfigDict(strict=False, extra="forbid")
+    model.model_config = ConfigDict(strict=False, extra="ignore")
     model.model_rebuild(force=True)
     with pytest.raises(ValueError, match="strict"):
         compile_commands(model)

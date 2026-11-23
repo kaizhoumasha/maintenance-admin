@@ -19,7 +19,7 @@ Version = Annotated[int, Field(strict=True, ge=1)]
 
 
 class DeviceInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
 
 class DeviceUpdate(DeviceInput):

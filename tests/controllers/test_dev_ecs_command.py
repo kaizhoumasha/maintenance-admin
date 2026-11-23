@@ -293,7 +293,7 @@ def test_mounted_examples_use_effective_bindings_model_samples_and_timeout_bound
     from app.integrations.ecs_command import compile_commands, ecs_command
     from app.integrations.ecs_command.contracts import ErrorDetail
 
-    config = ConfigDict(strict=True, extra="forbid")
+    config = ConfigDict(strict=True, extra="ignore")
     if samples is not None:
         config["json_schema_extra"] = {"examples": samples}
     model = create_model("SharedMove", __config__=config, barcode=(str, ...))

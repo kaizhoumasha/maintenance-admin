@@ -44,7 +44,7 @@ class RequestPayload(BaseModel):
     把 ISO 字符串校验成对象,两条路径都能走通的前提是类型能经过 JSON 往返。
     """
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 @dataclass(frozen=True)

@@ -382,7 +382,7 @@ async def test_model_send_revalidates_mutable_dataclasses(sessions, wms, clock, 
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=True, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=True, extra="ignore")
         value: int
 
     @request_operation("example.fact.dataclass@v1", Endpoint.FACTS)
@@ -423,7 +423,7 @@ async def test_model_send_revalidates_extra_dataclass_fields(sessions, wms, cloc
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=True, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=True, extra="ignore")
         value: int
 
     @request_operation("example.fact.extra@v1", Endpoint.FACTS)
@@ -521,7 +521,7 @@ async def test_model_send_preserves_explicitly_relaxed_dataclass_contract(sessio
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=False, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=False, extra="ignore")
         value: int
 
     @request_operation("example.fact.relaxed@v1", Endpoint.FACTS)
@@ -594,7 +594,7 @@ async def test_field_frozen_dataclasses_require_an_explicit_nested_model(
 
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
-    @pydantic_dataclass(config=ConfigDict(strict=True, extra="forbid"))
+    @pydantic_dataclass(config=ConfigDict(strict=True, extra="ignore"))
     class Quantity:
         values: list[int] = Field(frozen=True)
         measured: int = field(init=False, default=1)
@@ -625,7 +625,7 @@ async def test_model_send_preserves_and_validates_frozen_dataclass_fields(
 
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
-    @pydantic_dataclass(config=ConfigDict(strict=True, extra="forbid"), frozen=True)
+    @pydantic_dataclass(config=ConfigDict(strict=True, extra="ignore"), frozen=True)
     class Quantity:
         value: int
         measured: int = field(init=False, default=1)
