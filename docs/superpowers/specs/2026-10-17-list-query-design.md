@@ -174,7 +174,7 @@ FilterCondition = { "field": str, "op": "eq" | "in" | "ilike" | "ge" | "le" | "b
 - 时区比较正确(`12:00Z` 与 `13:00+08:00` 的大小关系)。SQLite 存储会丢失时区偏移,所以这条**只能**在 PG 上验证;`ILIKE` 的大小写行为同理。
 - UTC 归一化上下溢和 `between` 任一端点溢出返回 400,响应与日志不含输入值；可表示的邻近值及正常跨时区比较不受影响。复用 `pg_sessions` 和 HTTPX 请求验证最终行为(Redis 沿用 FakeRedis,不需要真实 Redis);需要新增自包含的 PG fixture(数据库、审计会话工厂一并切换并恢复,账号与角色自建自清,不调用会重置公共 `admin` 角色的 `seed_admin`);现有 `client`、`admin` 固定绑 SQLite,不能与它混用。
 
-数据流、完整测试矩阵、失败模式、实施顺序与任务见实现计划 `docs/superpowers/plans/2026-10-17-list-query-plan.md`。
+本功能已实现；合同与验收条件见本文，筛选/分页的现有回归入口见[开发测试](../../testing/README.md)。
 
 ## 9. 兼容与交付
 
@@ -206,7 +206,7 @@ FilterCondition = { "field": str, "op": "eq" | "in" | "ilike" | "ge" | "le" | "b
 - D6(独立复核问题 5):用户选择 5A,新增 `UserListParams` 也设置 `extra="forbid"`,拒绝未知 URL 查询参数,共享 `PageParams` 不变；补默认、合法组合与未知参数测试,README/PR 明确兼容变化。
 
 **仍待你确认**
-无。本轮所有取舍已逐项确认；实现与验证结果见 PLAN §6。
+无。本轮所有取舍已逐项确认；本方实现已完成；现有回归入口见开发测试说明，不以历史执行数字代替当前验证。
 
 ## 12. 工程评审:已有能力与范围
 

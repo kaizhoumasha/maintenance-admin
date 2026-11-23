@@ -7,8 +7,10 @@ cd "$(dirname "$0")/.."
 [ $# -eq 2 ] || { sed -n '2,4p' "$0"; exit 1; }
 export NAME="$1" DB="$2"
 perl -pi -e '
-  s/maintenance-admin/$ENV{NAME}/g;
-  s/maintenance_test/$ENV{DB}_test/g;
-  s{(/|POSTGRES_DB: )maintenance\b(?![-/.])}{$1$ENV{DB}}g;
-' pyproject.toml app/core/config.py docker-compose.yml .env.example .github/workflows/ci.yml README.md AGENTS.md docs/deploy.md
+  s/enterprise-backend/$ENV{NAME}/g;
+  s/enterprise_backend_test/$ENV{DB}_test/g;
+  s/\benterprise_backend\b/$ENV{DB}/g;
+' pyproject.toml app/core/config.py docker-compose.yml .env.example .github/workflows/ci.yml \
+  README.md AGENTS.md docs/deploy.md .serena/project.yml \
+  tests/controllers/test_filtering_postgres.py tests/scripts/test_release_bundle.py
 uv lock

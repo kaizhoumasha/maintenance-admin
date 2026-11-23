@@ -49,10 +49,13 @@ def new_router(**kwargs: Any) -> APIRouter:
 
 
 def drop_422(openapi: dict[str, Any]) -> dict[str, Any]:
-    """FastAPI 默认文档里的 422 在本项目不存在(校验失败已映射为 400),删掉避免误导。"""
+    """移除映射为 400 的自动校验响应,保留协议显式声明的 422。"""
     for operations in openapi["paths"].values():
         for operation in operations.values():
-            operation["responses"].pop("422", None)
+            responses = operation["responses"]
+            schema = responses.get("422", {}).get("content", {}).get("application/json", {})
+            if schema.get("schema", {}).get("$ref") == "#/components/schemas/HTTPValidationError":
+                responses.pop("422")
     schemas = openapi.get("components", {}).get("schemas", {})
     schemas.pop("HTTPValidationError", None)
     schemas.pop("ValidationError", None)

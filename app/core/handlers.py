@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -6,8 +8,10 @@ from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError, SQL
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.diagnostics import log_exception
+
 from .errors import HTTP_STATUS, AppError, ErrorCode, ErrorResponse
-from .logger import endpoint_src, logger, origin_src, safe_db_exception
+from .logger import endpoint_src, logger, origin_src
 from .request_context import get_trace_id
 
 # 由 HTTP_STATUS 反查,新增错误码只需在 errors.py 定义一次;未列出的状态码统一按 INVALID_REQUEST 处理
@@ -24,6 +28,23 @@ _HTTP_MESSAGE = {
 def _src(request: Request, exc: BaseException) -> dict[str, str]:
     """日志位置列:优先异常实际抛出处,没有项目栈帧(如校验错误)时用命中的接口函数。"""
     return {"src": origin_src(exc) or endpoint_src(request.scope.get("endpoint"))}
+
+
+def _log_technical_error(request, exc, message, *, level=logging.ERROR, stack=True):
+    log_exception(
+        logger,
+        message,
+        exc,
+        component="http",
+        phase="request",
+        level=level,
+        stack=stack,
+        context={
+            **_src(request, exc),
+            "method": request.method,
+            "route": getattr(request.scope.get("route"), "path", request.url.path),
+        },
+    )
 
 
 def _error_response(
@@ -69,15 +90,17 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """
     status = HTTP_STATUS[exc.code]
     # 4xx 是调用方的问题,不记堆栈,避免日志噪音
-    logger.warning(
-        "%s %s | %s %s",
-        exc.code,
-        exc.message,
-        request.method,
-        request.url.path,
-        exc_info=exc if status >= 500 else None,
-        extra=_src(request, exc),
-    )
+    if status >= 500:
+        _log_technical_error(request, exc, str(exc.code), level=logging.WARNING)
+    else:
+        logger.warning(
+            "%s %s | %s %s",
+            exc.code,
+            exc.message,
+            request.method,
+            request.url.path,
+            extra=_src(request, exc),
+        )
     return _error_response(status, exc.code, exc.message, exc.detail, exc.headers)
 
 
@@ -124,22 +147,16 @@ async def db_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """
     处理数据库异常，按类型映射错误码，并把定位信息写入日志。
 
-    响应里只有 trace_id 和异常类型名；开发拿 trace_id 到日志里查 SQL、SQLSTATE、约束名和堆栈。
-    不记录 SQL 参数，避免密码哈希、邮箱等敏感值进日志。
+    响应里只有 trace_id 和异常类型名；开发拿 trace_id 到日志里查诊断。
+    诊断包含 SQLSTATE、受限对象名、约束名和安全堆栈。
+    不记录 SQL、参数或原始驱动消息，避免敏感值进日志。
     """
-    cause = getattr(exc, "orig", None) or exc
-    cause = getattr(cause, "__cause__", None) or cause  # asyncpg 的原始异常挂在 __cause__ 上
-    sql = " ".join((getattr(exc, "statement", None) or "").split())
-    info = (
-        f"sqlstate={getattr(cause, 'sqlstate', None)} "
-        f"constraint={getattr(cause, 'constraint_name', None)} "
-        f"orig={type(cause).__name__} sql={sql} | {request.method} {request.url.path}"
-    )
     detail = type(exc).__name__
-    safe_exc = safe_db_exception(exc)
     if isinstance(exc, IntegrityError):
         # 唯一/外键/非空约束冲突:调用方的问题,不记堆栈
-        logger.warning("database integrity error: %s", info, extra=_src(request, exc))
+        _log_technical_error(
+            request, exc, "database integrity error", level=logging.WARNING, stack=False
+        )
         code, message = ErrorCode.CONFLICT, "数据冲突，请检查是否重复或关联数据是否存在"
     elif isinstance(
         exc, (OperationalError, InterfaceError, PoolTimeoutError, ConnectionError, TimeoutError)
@@ -147,23 +164,17 @@ async def db_error_handler(request: Request, exc: Exception) -> JSONResponse:
         # ConnectionError/TimeoutError:连不上库时 asyncpg 抛的是原生异常,不是 SQLAlchemyError
         # shortcut: OperationalError 也含死锁等,统一按 503;需区分时按 sqlstate 细分
         # shortcut: 原生 ConnectionError 一律视为数据库问题,接入其他外部服务后按来源区分
-        logger.error("database unavailable: %s", info, exc_info=safe_exc, extra=_src(request, exc))
+        _log_technical_error(request, exc, "database unavailable")
         code, message = ErrorCode.DATABASE_UNAVAILABLE, "数据库暂不可用，请稍后重试"
     else:
-        logger.error("database error: %s", info, exc_info=safe_exc, extra=_src(request, exc))
+        _log_technical_error(request, exc, "database error")
         code, message = ErrorCode.INTERNAL_ERROR, "系统内部错误，请稍后重试"
     return _error_response(HTTP_STATUS[code], code, message, detail)
 
 
 async def redis_error_handler(request: Request, exc: RedisError) -> JSONResponse:
     """Redis 不可用时认证无法完成,明确返回 503 而不是 500。"""
-    logger.error(
-        "redis unavailable | %s %s",
-        request.method,
-        request.url.path,
-        exc_info=exc,
-        extra=_src(request, exc),
-    )
+    _log_technical_error(request, exc, "redis unavailable")
     # shortcut: 与数据库不可用共用 503/DATABASE_UNAVAILABLE(状态码须唯一),需区分时新增错误码并改映射
     code = ErrorCode.DATABASE_UNAVAILABLE
     return _error_response(
@@ -182,14 +193,7 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     Returns:
         JSONResponse: 统一的内部错误响应，异常详情仅记录到日志，不返回给客户端。
     """
-    # 异常详情只进日志,不返回给客户端
-    logger.exception(
-        "未处理异常 | %s %s",
-        request.method,
-        request.url.path,
-        exc_info=exc,
-        extra=_src(request, exc),
-    )
+    _log_technical_error(request, exc, "未处理异常")
     return _error_response(
         HTTP_STATUS[ErrorCode.INTERNAL_ERROR], ErrorCode.INTERNAL_ERROR, "系统内部错误，请稍后重试"
     )

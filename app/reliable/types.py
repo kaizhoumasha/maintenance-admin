@@ -1,0 +1,179 @@
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from enum import StrEnum
+from math import isfinite
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from uuid import UUID
+
+from app.http_client import HttpRequest, HttpResult
+
+if TYPE_CHECKING:
+    from .config import TargetConfig
+
+
+class MessageStatus(StrEnum):
+    PENDING = "PENDING"
+    SENDING = "SENDING"
+    STALLED = "STALLED"
+    HELD = "HELD"
+    DONE = "DONE"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    ABANDONED = "ABANDONED"
+
+
+class FailReason(StrEnum):
+    CONFLICT = "CONFLICT"
+    REJECTED = "REJECTED"
+    FAILURE = "FAILURE"
+    CONTRACT_VIOLATION = "CONTRACT_VIOLATION"
+    LOCAL_ERROR = "LOCAL_ERROR"
+
+
+class VerdictKind(StrEnum):
+    DELIVERED = "DELIVERED"
+    NOT_RECEIVED = "NOT_RECEIVED"
+    PEER_TERMINAL = "PEER_TERMINAL"
+    UNKNOWN = "UNKNOWN"
+    HOLD = "HOLD"
+
+
+class InvalidMessage(ValueError):
+    pass
+
+
+class DuplicateMessage(ValueError):
+    pass
+
+
+RETRY_ACK_TIMEOUT = "RETRY_ACK_TIMEOUT"
+REPLACEMENT_PENDING = "REPLACEMENT_PENDING"
+
+
+@dataclass(frozen=True)
+class DeliverySnapshot:
+    origin: str
+    protocol: str
+    unknown_policy: str
+
+    def __post_init__(self):
+        import httpx
+
+        from app.http_client import HttpClientConfig
+
+        HttpClientConfig(self.origin, "snapshot")
+        if httpx.URL(self.origin).raw_path not in (b"", b"/") or self.origin.endswith("/"):
+            raise ValueError("snapshot requires normalized origin")
+        if not self.protocol or self.unknown_policy not in ("HOLD", RETRY_ACK_TIMEOUT):
+            raise ValueError("invalid delivery snapshot")
+
+
+@dataclass(frozen=True)
+class ScopeRef:
+    owner_domain: str
+    kind: Literal["TASK", "LINE"]
+    scope_id: str
+
+    def __post_init__(self):
+        if self.kind not in ("TASK", "LINE") or any(
+            not isinstance(value, str) or not value or "\x00" in value
+            for value in (self.owner_domain, self.scope_id)
+        ):
+            raise ValueError("scope requires an owner, TASK/LINE kind and identity")
+
+
+@dataclass(frozen=True)
+class ScopeStopItem:
+    message_id: int
+    previous_status: MessageStatus
+    dispatch: Literal["NEVER_DISPATCHED", "MAY_HAVE_DISPATCHED", "TERMINAL"]
+
+
+@dataclass(frozen=True)
+class MessageDraft:
+    target: str
+    operation: str
+    operation_id: str
+    request_raw: bytes
+    ttl: timedelta | None = None
+    business_key: str | None = None
+    delivery_snapshot: DeliverySnapshot | None = None
+    expires_at: datetime | None = None
+    scope: ScopeRef | None = None
+    exchange_id: UUID | None = field(default=None, kw_only=True)
+    request_record_id: UUID | None = field(default=None, kw_only=True)
+    owner_domain: str | None = field(default=None, kw_only=True)
+
+
+@dataclass(frozen=True)
+class OutgoingMessage:
+    target: str
+    operation: str
+    operation_id: str
+    request_raw: bytes
+    business_key: str | None
+    trace_id: str | None
+    created_at: datetime
+    expires_at: datetime | None
+    delivery_snapshot: DeliverySnapshot | None = None
+    scope: ScopeRef | None = None
+    exchange_id: UUID | None = field(default=None, kw_only=True)
+    request_record_id: UUID | None = field(default=None, kw_only=True)
+    owner_domain: str | None = field(default=None, kw_only=True)
+
+
+@dataclass(frozen=True)
+class EnqueueResult:
+    message_id: int
+    status: MessageStatus
+    business_key: str | None = None
+
+
+@dataclass(frozen=True)
+class Verdict:
+    kind: VerdictKind
+    response: bytes | None = None
+    retry_after_ms: float | None = None
+    reason: FailReason | None = None
+    pause_reason: str | None = None
+
+    def __post_init__(self):
+        if (self.kind == VerdictKind.HOLD) != (
+            isinstance(self.pause_reason, str) and bool(self.pause_reason)
+        ):
+            raise ValueError("HOLD requires pause reason")
+        if not isinstance(self.kind, VerdictKind):
+            raise ValueError("invalid verdict kind")
+        if self.kind == VerdictKind.DELIVERED and not isinstance(self.response, bytes):
+            raise ValueError("delivered response must be bytes")
+        if self.response is not None and not isinstance(self.response, bytes):
+            raise ValueError("response must be bytes")
+        if self.retry_after_ms is not None:
+            if (
+                self.kind != VerdictKind.NOT_RECEIVED
+                or isinstance(self.retry_after_ms, bool)
+                or not isinstance(self.retry_after_ms, (int, float))
+                or not isfinite(self.retry_after_ms)
+                or self.retry_after_ms < 0
+            ):
+                raise ValueError("invalid retry hint")
+        if self.kind == VerdictKind.PEER_TERMINAL:
+            if not isinstance(self.reason, FailReason) or self.reason == FailReason.LOCAL_ERROR:
+                raise ValueError("invalid peer terminal reason")
+        elif self.reason is not None:
+            raise ValueError("unexpected terminal reason")
+
+
+class ProtocolAdapter(Protocol):
+    def build_request(self, message: OutgoingMessage, target: "TargetConfig") -> HttpRequest: ...
+
+    def classify_response(self, message: OutgoingMessage, result: HttpResult) -> Verdict: ...
+
+
+@runtime_checkable
+class ComparableRequests(Protocol):
+    """可选能力:同身份重入时字节不同,适配器可以声明内容等价(例如只有时间戳变了),
+    此时 `Outbox.enqueue` 返回原消息而不是抛 `DuplicateMessage`。没有这个方法的适配器,
+    字节必须完全相同。"""
+
+    def same_request(self, existing_raw: bytes, new_raw: bytes) -> bool: ...

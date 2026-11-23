@@ -1,0 +1,569 @@
+import logging
+from collections.abc import Callable, Mapping
+from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+
+from sqlalchemy import event, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.request_context import get_trace_id
+from app.http_client import validate_request
+from app.models.reliable import ReliableMessage
+
+from .config import TargetConfig
+from .lifecycle import ensure_savepoint_transaction
+from .store import utc_datetime
+from .types import (
+    ComparableRequests,
+    DuplicateMessage,
+    EnqueueResult,
+    InvalidMessage,
+    MessageDraft,
+    MessageStatus,
+    OutgoingMessage,
+    ProtocolAdapter,
+    ScopeRef,
+    ScopeStopItem,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _log_resumed(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    contexts = sync_session.info["reliable_resumed"].pop(transaction, [])
+    if transaction.nested:
+        sync_session.info["reliable_resumed"].setdefault(transaction.parent, []).extend(contexts)
+        return
+    for context in contexts:
+        logger.info("reliable %s %r", context["event"], context, extra=context)
+
+
+def _drop_resumed(sync_session):
+    transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+    sync_session.info["reliable_resumed"].pop(transaction, None)
+
+
+class Outbox:
+    def __init__(
+        self,
+        targets: Mapping[str, TargetConfig],
+        adapters: Mapping[str, ProtocolAdapter],
+        *,
+        records,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        lifecycles=None,
+    ):
+        self.targets = targets
+        self.records = records
+        self.adapters = adapters
+        self.clock = clock
+        self.lifecycles = lifecycles or {}
+
+    async def enqueue(self, session: AsyncSession, draft: MessageDraft) -> EnqueueResult:
+        if not isinstance(draft, MessageDraft) or not isinstance(draft.request_raw, bytes):
+            raise InvalidMessage("draft requires raw bytes")
+        for value in (draft.target, draft.operation, draft.operation_id):
+            if not isinstance(value, str) or "\x00" in value:
+                raise InvalidMessage("identity must be a storage-compatible string")
+        if draft.business_key is not None and (
+            not isinstance(draft.business_key, str) or "\x00" in draft.business_key
+        ):
+            raise InvalidMessage("invalid business key")
+        if draft.scope is not None and not isinstance(draft.scope, ScopeRef):
+            raise InvalidMessage("invalid scope")
+        query = select(ReliableMessage).where(
+            ReliableMessage.target == draft.target,
+            ReliableMessage.operation == draft.operation,
+            ReliableMessage.operation_id == draft.operation_id,
+        )
+        existing = await session.scalar(query.execution_options(populate_existing=True))
+        if existing is not None:
+            return await self._existing(session, existing, draft)
+        if draft.ttl is not None and (
+            not isinstance(draft.ttl, timedelta) or draft.ttl < timedelta(0)
+        ):
+            raise InvalidMessage("invalid ttl")
+        now = utc_datetime(self.clock())
+        try:
+            expires_at = (
+                utc_datetime(draft.expires_at)
+                if draft.expires_at is not None
+                else (now + draft.ttl if draft.ttl is not None else None)
+            )
+            message = OutgoingMessage(
+                draft.target,
+                draft.operation,
+                draft.operation_id,
+                draft.request_raw,
+                draft.business_key,
+                None if get_trace_id() == "-" else get_trace_id(),
+                now,
+                expires_at,
+                draft.delivery_snapshot,
+                draft.scope,
+                exchange_id=draft.exchange_id,
+                request_record_id=draft.request_record_id,
+                owner_domain=draft.owner_domain,
+            )
+            target = self.targets[draft.target].effective(draft.delivery_snapshot)
+            request = self.adapters[target.protocol].build_request(message, target)
+            if request.body != message.request_raw:
+                raise ValueError("adapter changed frozen body")
+            validate_request(target.http_config(), request)
+        except Exception:
+            raise InvalidMessage("invalid new outgoing message") from None
+        dialect = session.get_bind().dialect.name
+        insert = pg_insert if dialect == "postgresql" else sqlite_insert
+        values = dict(
+            delivery_snapshot=asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None,
+            scope_owner=draft.scope.owner_domain if draft.scope else None,
+            scope_kind=draft.scope.kind if draft.scope else None,
+            scope_id=draft.scope.scope_id if draft.scope else None,
+            target=message.target,
+            protocol=target.protocol,
+            operation=message.operation,
+            operation_id=message.operation_id,
+            status=MessageStatus.PENDING,
+            attempts=0,
+            next_attempt_at=now,
+            expires_at=expires_at,
+            frozen_request_wire=message.request_raw,
+            frozen_request_sha256=sha256(message.request_raw).hexdigest(),
+            business_key=message.business_key,
+            trace_id=message.trace_id,
+            created_at=now,
+            updated_at=now,
+        )
+        while True:
+            await ensure_savepoint_transaction(session)
+            async with session.begin_nested() as registration:
+                exchange_id, request_id = await self.records.register(
+                    session,
+                    message=message,
+                    protocol=target.protocol,
+                )
+                message_id = await session.scalar(
+                    insert(ReliableMessage)
+                    .values(**values, exchange_id=exchange_id, request_record_id=request_id)
+                    .on_conflict_do_nothing(index_elements=["target", "operation", "operation_id"])
+                    .returning(ReliableMessage.id)
+                )
+                if message_id is None:
+                    await registration.rollback()
+                else:
+                    await self.records.link_message(
+                        session,
+                        exchange_id=exchange_id,
+                        message_id=message_id,
+                        at=message.created_at,
+                    )
+            if message_id is not None:
+                return EnqueueResult(message_id, MessageStatus.PENDING, message.business_key)
+            existing = await session.scalar(query.execution_options(populate_existing=True))
+            if existing is not None:
+                return await self._existing(session, existing, draft)
+
+    async def _existing(self, session, existing, draft) -> EnqueueResult:
+        scope = (
+            (draft.scope.owner_domain, draft.scope.kind, draft.scope.scope_id)
+            if draft.scope
+            else (None, None, None)
+        )
+        if (existing.scope_owner, existing.scope_kind, existing.scope_id) != scope:
+            raise DuplicateMessage("identity already has different scope")
+        snapshot = asdict(draft.delivery_snapshot) if draft.delivery_snapshot else None
+        if existing.delivery_snapshot != snapshot:
+            raise DuplicateMessage("identity already has different delivery snapshot")
+        raw = (await self.records.frozen_requests(session, rows=(existing,)))[
+            existing.request_record_id
+        ]
+        if raw != draft.request_raw and not self._same_request(raw, draft):
+            raise DuplicateMessage("identity already has different bytes")
+        return EnqueueResult(existing.id, MessageStatus(existing.status), existing.business_key)
+
+    def _same_request(self, raw, draft) -> bool:
+        """字节不同但适配器认定内容等价(例如只有时间戳变了)时,同身份重入返回原消息。"""
+        if draft.delivery_snapshot is not None:
+            return False
+        target = self.targets.get(draft.target)
+        adapter = self.adapters.get(target.protocol) if target is not None else None
+        return isinstance(adapter, ComparableRequests) and adapter.same_request(
+            raw, draft.request_raw
+        )
+
+    async def check_scope(self, session, *, target, operation, operation_id, scope):
+        row = await session.scalar(
+            select(ReliableMessage).where(
+                ReliableMessage.target == target,
+                ReliableMessage.operation == operation,
+                ReliableMessage.operation_id == operation_id,
+            )
+        )
+        expected = (scope.owner_domain, scope.kind, scope.scope_id) if scope else (None, None, None)
+        if row is None:
+            if scope is not None:
+                raise DuplicateMessage("original scope evidence is unavailable")
+            return
+        if (row.scope_owner, row.scope_kind, row.scope_id) != expected:
+            raise DuplicateMessage("identity already has different scope")
+
+    async def stop_scope(
+        self, session: AsyncSession, scope: ScopeRef, *, reason: str
+    ) -> tuple[ScopeStopItem, ...]:
+        from .lifecycle import transaction_limits
+        from .store import TERMINAL, AttemptOutcome, MessageStore
+        from .types import DeliverySnapshot
+
+        if not isinstance(scope, ScopeRef) or not isinstance(reason, str) or not reason:
+            raise ValueError("scope and stop reason required")
+        identities = list(
+            await session.execute(
+                select(
+                    ReliableMessage.id,
+                    ReliableMessage.operation_id,
+                    ReliableMessage.delivery_snapshot,
+                )
+                .where(
+                    ReliableMessage.scope_owner == scope.owner_domain,
+                    ReliableMessage.scope_kind == scope.kind,
+                    ReliableMessage.scope_id == scope.scope_id,
+                )
+                .order_by(ReliableMessage.id)
+            )
+        )
+        stopped = []
+        for identity in identities:
+            port = context = None
+            if identity.delivery_snapshot is not None:
+                snapshot = DeliverySnapshot(**identity.delivery_snapshot)
+                port = self.lifecycles.get(snapshot.protocol)
+                if port is None:
+                    raise InvalidMessage("snapshot mutation requires its transaction lifecycle")
+                await transaction_limits(session)
+                context = await port.lock_context(session, identity.operation_id)
+            row = await session.scalar(
+                select(ReliableMessage)
+                .where(
+                    ReliableMessage.id == identity.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if row is None:
+                continue
+            previous = MessageStatus(row.status)
+            if previous in TERMINAL:
+                stopped.append(ScopeStopItem(row.id, previous, "TERMINAL"))
+                continue
+            # Claim/recovery counts are not dispatch evidence; only the committed gate is.
+            dispatch = (
+                "MAY_HAVE_DISPATCHED"
+                if row.dispatch_started_at is not None or row.delivery_uncertain
+                else "NEVER_DISPATCHED"
+            )
+            if port is not None:
+                claim = await MessageStore._claim(self, session, row, load_request=False)
+                await port.apply_transition(
+                    session,
+                    context,
+                    claim,
+                    AttemptOutcome(
+                        MessageStatus.ABANDONED,
+                        pause_reason=reason,
+                    ),
+                )
+            now = utc_datetime(self.clock())
+            await self.records.close_attempt(
+                session, message_id=row.id, lease_id=row.lease_id, at=now, reason="SCOPE_STOPPED"
+            )
+            if previous != MessageStatus.SENDING:
+                # The stop found no active lease, even if the previous lease had dispatched.
+                row.lease_not_started = True
+            elif row.lease_not_started is False:
+                row.scope_stopped_lease_id = row.lease_id
+                row.delivery_uncertain = True
+            row.status = MessageStatus.ABANDONED
+            row.pause_reason = reason
+            row.lease_id = row.lease_until = row.next_attempt_at = None
+            row.updated_at = now
+            stopped.append(ScopeStopItem(row.id, previous, dispatch))
+        await session.flush()
+        return tuple(stopped)
+
+    @staticmethod
+    def _time(session, value):
+        return utc_datetime(value, known_sqlite_utc=session.get_bind().dialect.name == "sqlite")
+
+    async def resume_never_dispatched(
+        self,
+        session: AsyncSession,
+        *,
+        scope: ScopeRef,
+        message_id: int,
+        operation_id: str,
+        reason: str,
+    ) -> bool:
+        """Resume an explicitly authorized static intent without changing its original identity."""
+        now = utc_datetime(self.clock())
+        return (
+            await session.scalar(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.id == message_id,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.scope_owner == scope.owner_domain,
+                    ReliableMessage.scope_kind == scope.kind,
+                    ReliableMessage.scope_id == scope.scope_id,
+                    ReliableMessage.status == MessageStatus.ABANDONED,
+                    ReliableMessage.pause_reason == reason,
+                    ReliableMessage.delivery_snapshot.is_(None),
+                    ReliableMessage.dispatch_started_at.is_(None),
+                    ReliableMessage.delivery_uncertain.is_(False),
+                    ReliableMessage.terminal_response_record_id.is_(None),
+                    (ReliableMessage.expires_at.is_(None)) | (ReliableMessage.expires_at > now),
+                )
+                .values(
+                    status=MessageStatus.PENDING,
+                    pause_reason=None,
+                    next_attempt_at=now,
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.id)
+            )
+            is not None
+        )
+
+    async def resume(
+        self, session: AsyncSession, target: str, operation: str, operation_id: str
+    ) -> bool:
+        """STALLED → PENDING,保持原身份与字节;不清除未知事实。非 STALLED 返回 False。"""
+        now = utc_datetime(self.clock())
+        row = (
+            await session.execute(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.status == MessageStatus.STALLED,
+                )
+                .values(
+                    status=MessageStatus.PENDING,
+                    not_received_count=0,
+                    settled_retry_budget=None,
+                    next_attempt_at=now,
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.id, ReliableMessage.trace_id)
+            )
+        ).first()
+        if row is None:
+            return False
+        await self.records.reset_retry_budget(session, message_id=row.id)
+        context = {
+            "target": target,
+            "operation": operation,
+            "operation_id": operation_id,
+            "message_trace_id": row.trace_id,
+            "from_status": MessageStatus.STALLED,
+            "to_status": MessageStatus.PENDING,
+            "event": "resumed",
+        }
+        self._log_after_commit(session, context)
+        return True
+
+    async def settle(
+        self, session: AsyncSession, target: str, operation: str, operation_id: str
+    ) -> bool:
+        """未结束(PENDING/SENDING/STALLED)→ DONE:对端已通过其他渠道(如业务回调)确认接收。
+
+        不再发送,也不写响应(`response_raw` 为空以区别于收到对端应答的 DONE);正在发送的租约随之
+        失效,迟到的发送结果会被忽略。已处于终态返回 False。
+        """
+        snapshot_changed = await self._snapshot_transition(
+            session, target, operation, operation_id, "DONE"
+        )
+        if snapshot_changed is not None:
+            return snapshot_changed
+        now = utc_datetime(self.clock())
+        await self._close_active_attempt(
+            session, target, operation, operation_id, now, "SETTLED_BY_CALLBACK"
+        )
+        row = (
+            await session.execute(
+                update(ReliableMessage)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                    ReliableMessage.status.in_(
+                        (
+                            MessageStatus.PENDING,
+                            MessageStatus.SENDING,
+                            MessageStatus.STALLED,
+                            MessageStatus.HELD,
+                        )
+                    ),
+                )
+                .values(
+                    status=MessageStatus.DONE,
+                    lease_id=None,
+                    lease_until=None,
+                    next_attempt_at=now,  # STALLED 行没有排期,而约束要求非 STALLED 必须有
+                    updated_at=now,
+                )
+                .returning(ReliableMessage.trace_id)
+            )
+        ).first()
+        if row is None:
+            return False
+        self._log_after_commit(
+            session,
+            {
+                "target": target,
+                "operation": operation,
+                "operation_id": operation_id,
+                "message_trace_id": row.trace_id,
+                "to_status": MessageStatus.DONE,
+                "event": "settled",
+            },
+        )
+        return True
+
+    async def hold(self, session, target, operation, operation_id, *, reason):
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("pause reason required")
+        snapshot_changed = await self._snapshot_transition(
+            session, target, operation, operation_id, "HELD", reason
+        )
+        if snapshot_changed is not None:
+            return snapshot_changed
+        now = utc_datetime(self.clock())
+        await self._close_active_attempt(session, target, operation, operation_id, now, "HELD")
+        row = await session.scalar(
+            update(ReliableMessage)
+            .where(
+                ReliableMessage.target == target,
+                ReliableMessage.operation == operation,
+                ReliableMessage.operation_id == operation_id,
+                ReliableMessage.status.in_(("PENDING", "SENDING", "STALLED", "HELD")),
+            )
+            .values(
+                status="HELD",
+                pause_reason=reason,
+                next_attempt_at=None,
+                lease_id=None,
+                lease_until=None,
+                updated_at=utc_datetime(self.clock()),
+            )
+            .returning(ReliableMessage.id)
+        )
+        return row is not None
+
+    async def _close_active_attempt(self, session, target, operation, operation_id, now, reason):
+        row = (
+            await session.execute(
+                select(ReliableMessage.id, ReliableMessage.lease_id)
+                .where(
+                    ReliableMessage.target == target,
+                    ReliableMessage.operation == operation,
+                    ReliableMessage.operation_id == operation_id,
+                )
+                .with_for_update()
+            )
+        ).one_or_none()
+        if row is not None:
+            await self.records.close_attempt(
+                session,
+                message_id=row.id,
+                lease_id=row.lease_id,
+                at=now,
+                reason=reason,
+            )
+
+    async def _snapshot_transition(
+        self, session, target, operation, operation_id, status, reason=None
+    ):
+        from .lifecycle import ensure_savepoint_transaction, transaction_limits
+        from .store import AttemptOutcome, Claim
+        from .types import DeliverySnapshot
+
+        query = select(ReliableMessage).where(
+            ReliableMessage.target == target,
+            ReliableMessage.operation == operation,
+            ReliableMessage.operation_id == operation_id,
+        )
+        existing = await session.scalar(query)
+        if existing is None or existing.delivery_snapshot is None:
+            return None
+        snapshot = DeliverySnapshot(**existing.delivery_snapshot)
+        port = self.lifecycles.get(snapshot.protocol)
+        if port is None:
+            raise InvalidMessage("snapshot mutation requires its transaction lifecycle")
+        await ensure_savepoint_transaction(session)
+        async with session.begin_nested():
+            await transaction_limits(session)
+            context = await port.lock_context(session, operation_id)
+            row = await session.scalar(
+                query.with_for_update().execution_options(populate_existing=True)
+            )
+            if row is None or row.status not in ("PENDING", "SENDING", "STALLED", "HELD"):
+                return False
+            if row.delivery_snapshot != asdict(snapshot):
+                raise InvalidMessage("snapshot changed during transaction")
+            now = utc_datetime(self.clock())
+            # Receipt-driven state changes do not use the transport copy to send.
+            message = OutgoingMessage(
+                row.target,
+                row.operation,
+                row.operation_id,
+                b"",
+                row.business_key,
+                row.trace_id,
+                utc_datetime(row.created_at, known_sqlite_utc=True),
+                utc_datetime(row.expires_at, known_sqlite_utc=True),
+                snapshot,
+                exchange_id=row.exchange_id,
+                request_record_id=row.request_record_id,
+            )
+            claim = Claim(
+                row.id,
+                message,
+                row.lease_id or "",
+                utc_datetime(row.lease_until, known_sqlite_utc=True) or now,
+                row.attempts + 1,
+                row.not_received_count,
+                bool(row.delivery_uncertain),
+            )
+            await self.records.close_attempt(
+                session,
+                message_id=row.id,
+                lease_id=row.lease_id,
+                at=now,
+                reason="SETTLED_BY_CALLBACK" if status == "DONE" else "HELD",
+            )
+            row.status = status
+            row.pause_reason = reason
+            row.lease_id = row.lease_until = None
+            row.next_attempt_at = None if status in ("HELD", "ABANDONED") else now
+            row.updated_at = now
+            await port.apply_transition(
+                session, context, claim, AttemptOutcome(MessageStatus(status), pause_reason=reason)
+            )
+            await session.flush()
+        return True
+
+    @staticmethod
+    def _log_after_commit(session: AsyncSession, context: dict) -> None:
+        # 与其它状态转换一致:只在事务真正提交后记日志,回滚则丢弃。
+        sync_session = session.sync_session
+        if "reliable_resumed" not in sync_session.info:
+            sync_session.info["reliable_resumed"] = {}
+            event.listen(sync_session, "after_commit", _log_resumed)
+            event.listen(sync_session, "after_rollback", _drop_resumed)
+        transaction = sync_session.get_nested_transaction() or sync_session.get_transaction()
+        sync_session.info["reliable_resumed"].setdefault(transaction, []).append(context)

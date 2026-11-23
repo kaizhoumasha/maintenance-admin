@@ -1,0 +1,99 @@
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from app.database import create_database_engine as create_async_engine
+from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database, legacy_callback_tables
+
+receipts, snapshots = legacy_callback_tables()
+
+BASE = "a023a20261024"
+REVISION = "a024a20261024"
+
+
+@pytest.fixture(params=["sqlite", "pg"])
+async def callback_db(request, tmp_path):
+    async with AsyncExitStack() as databases:
+        if request.param == "sqlite":
+            url = f"sqlite+aiosqlite:///{tmp_path / 'ecs.db'}"
+        else:
+            url, _ = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
+
+        async def migrate(command, revision):
+            return await run_alembic(url, command, revision)
+
+        upgraded = await migrate("upgrade", REVISION)
+        assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+        engine = create_async_engine(url)
+        try:
+            yield engine, migrate
+        finally:
+            await engine.dispose()
+
+
+def receipt(operation_id):
+    return receipts.insert().values(
+        operation="ecs.event@v1",
+        operation_id=operation_id,
+        raw_digest="a" * 64,
+        effective_digest=None,
+        compare_mode="RAW",
+        status_code=200,
+        body={"code": "OK"},
+        resp_timestamp=1792656000000,
+        created_at=datetime.now(UTC),
+    )
+
+
+def snapshot(source):
+    return snapshots.insert().values(
+        request_id="req-1",
+        received_at=datetime.now(UTC),
+        body_b64="e30=",
+        truncated=False,
+        http_status=200,
+        outcome="ok",
+        source=source,
+    )
+
+
+async def test_upgrade_accepts_64_char_receipt_identity_and_snapshot_source(callback_db):
+    engine, _ = callback_db
+    async with async_sessionmaker(engine).begin() as session:
+        await session.execute(receipt("a" * 64))
+        await session.execute(snapshot("ecs"))
+    async with async_sessionmaker(engine)() as session:
+        assert await session.scalar(select(receipts.c.operation_id)) == "a" * 64
+        assert await session.scalar(select(snapshots.c.source)) == "ecs"
+
+
+async def test_downgrade_is_refused_when_64_char_identity_or_source_exists(callback_db):
+    engine, migrate = callback_db
+    factory = async_sessionmaker(engine)
+    async with factory.begin() as session:
+        await session.execute(receipt("a" * 64))
+        await session.execute(snapshot("ecs"))
+    refused = await migrate("downgrade", BASE)
+    assert refused.returncode != 0
+    async with factory.begin() as session:
+        assert await session.scalar(select(receipts.c.operation_id)) == "a" * 64
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
+        await session.execute(receipts.delete())
+    still_refused = await migrate("downgrade", BASE)
+    assert still_refused.returncode != 0
+    async with factory.begin() as session:
+        assert await session.scalar(select(snapshots.c.source)) == "ecs"
+
+
+async def test_empty_schema_roundtrips(callback_db):
+    _, migrate = callback_db
+    down = await migrate("downgrade", BASE)
+    assert down.returncode == 0, down.stdout + down.stderr
+    up = await migrate("upgrade", REVISION)
+    assert up.returncode == 0, up.stdout + up.stderr

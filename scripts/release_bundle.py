@@ -12,6 +12,7 @@ import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 SERVICES = {"api", "worker", "beat", "migrate"}
 PAYLOAD = (
@@ -42,14 +43,43 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def source_hash() -> str:
-    digest = hashlib.sha256()
+def source_files() -> tuple[str, ...]:
     names = run("git", "ls-files", "-co", "--exclude-standard", "-z").split("\0")
-    for name in sorted(set(filter(None, names))):
-        path = Path(name)
-        if path.is_file():
-            digest.update(name.encode() + b"\0" + sha256(path).encode() + b"\0")
+    return tuple(sorted(name for name in set(names) if name and Path(name).is_file()))
+
+
+def source_hash(names: tuple[str, ...] | None = None) -> str:
+    digest = hashlib.sha256()
+    for name in source_files() if names is None else names:
+        digest.update(name.encode() + b"\0" + sha256(Path(name)).encode() + b"\0")
     return digest.hexdigest()
+
+
+def payload_files(root: Path, source_paths: set[str]) -> list[str]:
+    from markdown_it import MarkdownIt
+
+    parser = MarkdownIt("commonmark")
+    pending, included = list(PAYLOAD), set()
+    while pending:
+        name = pending.pop()
+        if name in included:
+            continue
+        if name not in source_paths:
+            raise ValueError(f"交付文件未纳入源码指纹: {name}")
+        included.add(name)
+        if Path(name).suffix.lower() != ".md":
+            continue
+        for token in parser.parse(Path(name).read_text()):
+            for child in token.children or ():
+                if child.type != "link_open":
+                    continue
+                url = urlsplit(child.attrGet("href") or "")
+                dependency = Path(os.path.normpath(Path(name).parent / unquote(url.path)))
+                if url.scheme or url.netloc or dependency.suffix.lower() != ".md":
+                    continue
+                if (root / dependency).resolve().is_relative_to(root):
+                    pending.append(dependency.as_posix())
+    return sorted(included)
 
 
 def image_info(image: str) -> dict:
@@ -85,7 +115,8 @@ def prepare(image: str, output: Path, allow_dirty: bool) -> None:
     if versions != [version]:
         raise ValueError("pyproject.toml 与 FastAPI 版本不一致")
     revision = run("git", "rev-parse", "HEAD")
-    fingerprint = source_hash()
+    names = source_files()
+    fingerprint = source_hash(names)
     labels = {
         "org.opencontainers.image.version": version,
         "org.opencontainers.image.revision": revision,
@@ -96,7 +127,7 @@ def prepare(image: str, output: Path, allow_dirty: bool) -> None:
     for key, value in labels.items():
         command.extend(["--label", f"{key}={value}"])
     subprocess.run([*command, "."], check=True)
-    if source_hash() != fingerprint:
+    if source_files() != names or source_hash(names) != fingerprint:
         raise ValueError("构建期间源码变化,不能生成发布清单;请使用新标签重试")
     info = image_info(image)
     heads = run("uv", "run", "--frozen", "alembic", "heads").splitlines()
@@ -128,8 +159,9 @@ def prepare(image: str, output: Path, allow_dirty: bool) -> None:
         if not digests:
             raise ValueError(f"{service} 缺少仓库摘要,无法固定基础设施镜像")
         infrastructure[service] = {"reference": digests[0], "image_id": details["Id"]}
+    payload = payload_files(root, set(names))
     output.mkdir(parents=True)
-    for name in PAYLOAD:
+    for name in payload:
         target = output / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(name, target)
@@ -141,6 +173,8 @@ def prepare(image: str, output: Path, allow_dirty: bool) -> None:
     files = {
         str(p.relative_to(output)): sha256(p) for p in sorted(output.rglob("*")) if p.is_file()
     }
+    if source_files() != names or source_hash(names) != fingerprint:
+        raise ValueError("打包期间源码变化,不能生成发布清单;请使用新标签重试")
     manifest = {
         "version": version,
         "source_revision": revision,

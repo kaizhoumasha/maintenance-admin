@@ -82,10 +82,10 @@ def test_in_accepts_boundary_lengths(count):
 def test_complete_query_models():
     from pydantic import ValidationError
 
-    assert UserListParams(filter="{}", page=2).page == 2
+    assert UserListParams(filter="{}", start=2, end=21).start == 2
     assert CursorParams(filter="{}", cursor="abc").limit == 20
     for cls, params in (
-        (CursorParams, {"page": 1}),
+        (CursorParams, {"start": 1}),
         (UserListParams, {"filer": "{}"}),
         (CursorParams, {"limit": 0}),
         (CursorParams, {"limit": 101}),

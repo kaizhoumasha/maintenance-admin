@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import pytest
 from celery.schedules import crontab
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from app.database import create_database_engine as create_async_engine
 from app.models import AuditLog, AuditLogArchive, Base
 from app.tasks import audit_tasks
 from app.tasks.celery_app import celery_app

@@ -189,7 +189,9 @@ async def test_audit_failure_does_not_break_business(client, admin, monkeypatch,
         r = await strict.post(USERS, json=PAYLOAD, headers=admin)
     assert r.status_code == 201
     assert (await client.get(f"{USERS}/{r.json()['id']}", headers=admin)).status_code == 200
-    assert any("审计日志写入失败" in rec.getMessage() for rec in caplog.records)
+    records = [rec for rec in caplog.records if "审计日志写入失败" in rec.getMessage()]
+    assert records and records[0].component == "audit" and records[0].phase == "write"
+    assert "origin=" in records[0].getMessage()
     assert "audit-secret" not in caplog.text
 
 
@@ -205,13 +207,7 @@ async def test_audit_logs_pagination(client, admin):
         ids.append(r.json()["id"])
     newest_first = ids[::-1]
 
-    pages, params = [], {"limit": 2}
-    while True:
-        page = await _logs(client, admin, **params)
-        pages.append(page)
-        if page["next_cursor"] is None:
-            break
-        params["cursor"] = page["next_cursor"]
+    pages = [await _logs(client, admin, start=start, end=start + 1) for start in (1, 3, 5)]
     assert [len(p["items"]) for p in pages] == [2, 2, 1]
     got = [[i["resource_id"] for i in p["items"]] for p in pages]
     assert got == [newest_first[:2], newest_first[2:4], newest_first[4:]]
@@ -220,10 +216,12 @@ async def test_audit_logs_pagination(client, admin):
 @pytest.mark.parametrize(
     "params",
     [
-        {"limit": 0},
-        {"limit": 101},
-        {"cursor": "x" * 65},
-        {"cursor": "bad!"},
+        {"start": 0, "end": 1},
+        {"start": 1, "end": 101},
+        {"start": 2},
+        {"end": 2},
+        {"limit": 20},
+        {"cursor": "x"},
     ],
 )
 async def test_audit_logs_rejects_bad_params(client, admin, params):

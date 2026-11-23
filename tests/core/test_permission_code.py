@@ -1,4 +1,4 @@
-"""权限码规则:三段式 <module>:<resource>:<action>,且一个权限码只对应一个路由。"""
+"""权限码规则:三段式,同一权限可保护多个独立路由。"""
 
 import pytest
 
@@ -21,11 +21,58 @@ def test_require_permission_rejects_bad_format(code, monkeypatch):
         require_permission(code)
 
 
-def test_require_permission_rejects_duplicate_code(monkeypatch):
-    monkeypatch.setattr(deps, "registered_codes", set())
-    require_permission("admin:demo:read")
-    with pytest.raises(ValueError, match="重复"):
-        require_permission("admin:demo:read")
+async def test_same_permission_routes_enforce_grants_revocation_and_documentation(
+    client, admin, monkeypatch
+):
+    from typing import Annotated
+
+    from fastapi import Depends, FastAPI, Request
+    from httpx import ASGITransport, AsyncClient
+
+    from app.core import AppError
+    from app.core.handlers import app_error_handler
+    from app.core.routing import new_router
+    from app.main import app
+    from app.models import User
+    from tests.helpers import bearer, make_user_with_perms
+
+    original_codes = set(deps.registered_codes)
+    monkeypatch.setattr(deps, "registered_codes", set(original_codes))
+    router = new_router()
+
+    @router.get("/first")
+    async def first(
+        request: Request, user: Annotated[User, Depends(require_permission("admin:user:read"))]
+    ):
+        return {"user_id": user.id, "action": request.state.audit_action}
+
+    @router.get("/second")
+    async def second(
+        request: Request, user: Annotated[User, Depends(require_permission("admin:user:read"))]
+    ):
+        return {"user_id": user.id, "action": request.state.audit_action}
+
+    api = FastAPI(exception_handlers={AppError: app_error_handler})
+    api.dependency_overrides.update(app.dependency_overrides)
+    api.include_router(router)
+    uid = await make_user_with_perms(client, admin, ["admin:user:read"])
+    role = next(
+        r for r in (await client.get("/api/v1/roles", headers=admin)).json() if r["name"] == "r"
+    )
+    async with AsyncClient(transport=ASGITransport(app=api), base_url="http://test") as isolated:
+        for path in ("/first", "/second"):
+            assert "403" in api.openapi()["paths"][path]["get"]["responses"]
+            assert (await isolated.get(path)).status_code == 401
+            response = await isolated.get(path, headers=bearer(uid))
+            assert response.status_code == 200
+            assert response.json() == {"user_id": uid, "action": "admin:user:read"}
+        response = await client.put(
+            f"/api/v1/roles/{role['id']}/permissions", json={"permissions": []}, headers=admin
+        )
+        assert response.status_code == 200
+        for path in ("/first", "/second"):
+            assert (await isolated.get(path, headers=bearer(uid))).status_code == 403
+        assert deps.registered_codes == original_codes
 
 
 @pytest.mark.parametrize(

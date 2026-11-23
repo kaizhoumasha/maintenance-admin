@@ -4,37 +4,97 @@ import os
 import subprocess
 import sys
 import time
-import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
+
+from sqlalchemy import update
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-test-secret-test-secret-32")
 os.environ.setdefault("REDIS_URL", "redis://localhost:26379/0")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
 
+import aiosqlite  # noqa: E402
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from redis.asyncio import Redis  # noqa: E402
 from sqlalchemy import delete, exists, func, select, text  # noqa: E402
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app.core.config import Settings  # noqa: E402
+
+# The test process must not inherit app settings from a developer's .env.
+Settings.model_config["env_file"] = None
+
+from app.businesses.catalog import load_business_models  # noqa: E402
 from app.core import hash_password  # noqa: E402
 from app.core.database import get_session  # noqa: E402
+from app.core.identifiers import uuid7  # noqa: E402
 from app.core.redis import get_redis  # noqa: E402
+from app.database import SCHEMA  # noqa: E402
+from app.database import create_database_engine as create_async_engine  # noqa: E402
+from app.integrations.wms_callback import snapshots  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (  # noqa: E402
     AuditLog,
     AuditLogArchive,
     Base,
+    Device,
+    DeviceRoute,
     Menu,
     Permission,
+    ReliableMessage,
     Role,
+    TransportTask,
     User,
+    WorkLine,
     role_permission,
 )
 from app.services.session_service import _ISSUE_TOKENS, _REVOKE_ALL  # noqa: E402
 from scripts.seed_admin import seed_admin  # noqa: E402
+
+load_business_models()
+
+
+@pytest.fixture(autouse=True)
+def restore_celery_beat_schedule():
+    from app.tasks.celery_app import celery_app
+
+    schedule = dict(celery_app.conf.beat_schedule)
+    yield
+    celery_app.conf.beat_schedule = schedule
+
+
+@pytest.fixture(scope="session")
+def sqlite_tables(tmp_path_factory):
+    """Copy an empty fixed schema without sharing engines or case data."""
+    template = None
+
+    async def populate(engine):
+        nonlocal template
+        assert engine.dialect.name == "sqlite"
+        try:
+            if template is None:
+                candidate = tmp_path_factory.mktemp("sqlite-schema") / "base.db"
+                builder = create_async_engine(f"sqlite+aiosqlite:///{candidate}")
+                try:
+                    async with builder.begin() as connection:
+                        await connection.run_sync(Base.metadata.create_all, checkfirst=False)
+                finally:
+                    await builder.dispose()
+                template = candidate
+            async with engine.connect() as connection:
+                raw = await connection.get_raw_connection()
+                # Drain the source worker before resetting the destination on cancellation.
+                async with aiosqlite.connect(f"{template.as_uri()}?mode=ro", uri=True) as source:
+                    await source.backup(raw.driver_connection)
+        except BaseException:
+            await engine.dispose()
+            raise
+
+    return populate
 
 
 @pytest.fixture(scope="session")
@@ -58,6 +118,145 @@ async def pg_sessions(pg_url):
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def postgres_tables():
+    """Reuse owned tables while keeping each case's engines and committed data isolated."""
+    from sqlalchemy.schema import CreateSchema, DropSchema
+
+    schemas = {}
+
+    async def drop_schema(url, schema):
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await connection.exec_driver_sql("SET LOCAL lock_timeout = '5s'")
+                await connection.execute(DropSchema(schema, cascade=True))
+        finally:
+            await engine.dispose()
+
+    @asynccontextmanager
+    async def database(url, family, metadata):
+        if any(
+            table.name in {"reliable_message", "transport_task", "integration_exchange"}
+            for table in metadata.tables.values()
+        ):
+            from tests.helpers import copy_history_tables
+
+            copy_history_tables(metadata)
+        assert all(table.schema in (None, SCHEMA) for table in metadata.tables.values())
+        key = (url, family)
+        fresh = key not in schemas
+        schema = schemas.get(key) or f"test_{family}_{uuid7().hex}"
+        engine = create_async_engine(
+            url, execution_options={"schema_translate_map": {SCHEMA: schema, None: schema}}
+        )
+        try:
+            if fresh:
+                async with engine.begin() as connection:
+                    await connection.execute(CreateSchema(schema))
+                    await connection.run_sync(metadata.create_all)
+                schemas[key] = schema
+            else:
+                async with engine.begin() as connection:
+                    await connection.exec_driver_sql("SET LOCAL lock_timeout = '5s'")
+                    names = list(
+                        await connection.scalars(
+                            text(
+                                "SELECT tablename FROM pg_tables "
+                                "WHERE schemaname = :schema ORDER BY tablename"
+                            ),
+                            {"schema": schema},
+                        )
+                    )
+                    if names:
+                        quote = engine.dialect.identifier_preparer.quote_identifier
+                        tables = ", ".join(f"{quote(schema)}.{quote(name)}" for name in names)
+                        await connection.exec_driver_sql(
+                            f"TRUNCATE TABLE {tables} RESTART IDENTITY"
+                        )
+            yield engine
+        finally:
+            await engine.dispose()
+
+    try:
+        yield database
+    finally:
+        async with AsyncExitStack() as cleanup:
+            for (url, _), schema in schemas.items():
+                cleanup.push_async_callback(drop_schema, url, schema)
+
+
+# WMS 回调相关的共享存储夹具:SQLite 空库副本与独立 PostgreSQL 各跑一遍,回调路由改用它的会话工厂
+@pytest.fixture(params=["sqlite", "postgres"])
+async def callback_db(request, tmp_path, monkeypatch, sqlite_tables):
+    if request.param == "postgres":
+        engine = create_async_engine(request.getfixturevalue("pg_url"))
+    else:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'callback.db'}")
+        await sqlite_tables(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(app.state, "callback_session_factory", factory, raising=False)
+    try:
+        yield factory
+    finally:
+        if request.param == "postgres":
+            async with factory.begin() as session:
+                from app.models import IntegrationExchange
+                from tests.helpers import clear_integration_history
+
+                outgoing = list(await session.scalars(select(ReliableMessage.exchange_id)))
+                await session.execute(
+                    update(IntegrationExchange)
+                    .where(
+                        IntegrationExchange.role == "RECEIPT",
+                        IntegrationExchange.receipt_active.is_(True),
+                    )
+                    .values(receipt_active=False)
+                )
+                await session.execute(delete(ReliableMessage))  # Transport 回调测试造的任务与消息
+                await session.execute(delete(TransportTask))
+                received = list(
+                    await session.scalars(
+                        select(IntegrationExchange.id).where(IntegrationExchange.id.is_not(None))
+                    )
+                )
+                await clear_integration_history(session, set(outgoing + received))
+        await engine.dispose()
+
+
+@pytest.fixture
+async def callback_effects(callback_db):
+    from sqlalchemy import Column, Integer, MetaData, Table, Text
+
+    metadata = MetaData()
+    effects = Table(
+        "test_callback_effects",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("marker", Text),
+    )
+    engine = callback_db.kw["bind"]
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+    try:
+        yield effects
+    finally:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.drop_all)
+
+
+# 回调接收合同测试用:另外保证回调路径不碰 Redis 限流,并重置快照计数
+@pytest.fixture
+async def callback_store(callback_db, monkeypatch, redis):
+    monkeypatch.setattr(snapshots, "_windows", {})
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("callback must not access Redis rate limiting")
+
+    monkeypatch.setattr(redis, "eval", forbidden)
+    return callback_db
 
 
 @pytest.fixture
@@ -154,13 +353,12 @@ class FakeRedis:
 
 
 @pytest.fixture
-async def db():
+async def db(sqlite_tables):
     """service 层测试用的独立会话(内存 SQLite)。"""
     engine = create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await sqlite_tables(engine)
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         yield session
     await engine.dispose()
@@ -171,15 +369,10 @@ async def redis():
     return FakeRedis()
 
 
-@pytest.fixture
-async def client(redis):
-    # 内存 SQLite 隔离测试；StaticPool 让所有连接共享同一个内存库
-    engine = create_async_engine(
-        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
-    )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+@asynccontextmanager
+async def application_client(factory, redis):
+    overrides = app.dependency_overrides.copy()
+    audit_factory = app.state.audit_session_factory
 
     async def override():
         async with factory() as session:
@@ -188,12 +381,36 @@ async def client(redis):
     app.dependency_overrides[get_session] = override
     app.dependency_overrides[get_redis] = lambda: redis
     app.state.audit_session_factory = factory
-    async with AsyncClient(
-        transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
-    ) as c:
-        yield c
-    app.dependency_overrides.clear()
-    await engine.dispose()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(overrides)
+        app.state.audit_session_factory = audit_factory
+
+
+@pytest.fixture
+async def client(redis, sqlite_tables):
+    # 内存 SQLite 隔离测试；StaticPool 让所有连接共享同一个内存库
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    try:
+        await sqlite_tables(engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with application_client(factory, redis) as client:
+            yield client
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def callback_client(callback_db, redis):
+    async with application_client(callback_db, redis) as client:
+        yield client
 
 
 @pytest.fixture
@@ -212,7 +429,7 @@ async def admin(client):
 @pytest.fixture
 async def pg_client(pg_sessions, redis):
     """自建最小授权数据,清理后检查公共 RBAC 数据未变;不运行生产种子。"""
-    suffix = uuid.uuid4().hex
+    suffix = uuid7().hex
     users, roles, created_permissions = [], [], []
     overrides = app.dependency_overrides.copy()
     audit_factory = app.state.audit_session_factory
@@ -302,3 +519,186 @@ async def pg_client(pg_sessions, redis):
             assert await snapshot(session) == before
         assert app.dependency_overrides == overrides
         assert app.state.audit_session_factory is audit_factory
+
+
+@pytest.fixture
+async def asset_factory(tmp_path, sqlite_tables):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
+    await sqlite_tables(engine)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+async def asset_pg(pg_sessions):
+    prefix = "T" + uuid7().hex
+    try:
+        yield pg_sessions, prefix
+    finally:
+        async with pg_sessions.begin() as session:
+            await session.execute(delete(Device).where(Device.device_code.like(prefix + "%")))
+            await session.execute(
+                delete(DeviceRoute).where(DeviceRoute.device_code.like(prefix + "%"))
+            )
+            await session.execute(delete(WorkLine).where(WorkLine.line_code.like(prefix + "%")))
+            await session.execute(delete(AuditLog).where(AuditLog.trace_id == prefix))
+
+
+@pytest.fixture
+def workline_business_catalog(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.businesses import catalog
+    from tests.helpers import workline_business_definition
+
+    monkeypatch.setattr(
+        catalog,
+        "entries",
+        lambda: tuple(
+            SimpleNamespace(DEFINITION=workline_business_definition(code))
+            for code in ("test_sorting", "other_sorting")
+        ),
+    )
+
+
+@pytest.fixture
+def shared_wms_contract(monkeypatch):
+    """Two businesses explicitly consume one formal shared request; a third does not."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from app.businesses import catalog
+    from app.businesses.components import ComponentDefinition
+    from app.integrations.ecs_callback import registry as events
+    from app.integrations.ecs_request import registry as ecs_requests
+    from app.integrations.wms_callback import registry as callbacks
+    from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
+    from app.integrations.wms_request import operation as requests
+    from tests.helpers import business_composition
+
+    module = "app.businesses._components.shared_wms.request.shared_ask_v1"
+    component = ComponentDefinition(key="shared_wms", entry_modules=(module,))
+    first, second, unrelated = (business_composition(code) for code in ("first", "second", "third"))
+    for entry in (first, second, unrelated):
+        entry.DEFINITION = replace(entry.DEFINITION, initial_entries=())
+        entry.ENTRY_MODULES = ()
+    first.COMPONENTS = second.COMPONENTS = (component,)
+    monkeypatch.setattr(catalog, "entries", lambda: (first, second, unrelated))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(events, "_registry", {})
+    monkeypatch.setattr(ecs_requests, "_registry", {})
+    monkeypatch.setattr(callbacks, "_registry", {})
+    monkeypatch.setattr(requests, "_registry", {})
+
+    class Ask(RequestPayload):
+        reference: str
+
+    Ask.__module__ = module
+    request_operation("shared.ask@v1", Endpoint.DECISIONS)(Ask)
+    catalog.validate_business_contracts()
+    return SimpleNamespace(model=Ask, operation="shared.ask@v1", entries=(first, second, unrelated))
+
+
+@pytest.fixture
+async def formal_manual(pg_sessions, monkeypatch, request):
+    from tests.helpers import formal_manual_fixture
+
+    async with formal_manual_fixture(
+        pg_sessions, monkeypatch, line_count=getattr(request, "param", 2)
+    ) as state:
+        yield state
+
+
+def pytest_sessionfinish(session, exitstatus):
+    from tests.migration_helpers import drop_migration_templates
+
+    drop_migration_templates()
+
+
+def pytest_addoption(parser):
+    from tests.lane_partition import parse_lane
+
+    parser.addoption(
+        "--test-lane",
+        type=parse_lane,
+        metavar="N/T",
+        help="Run whole-file test lane N of T; each process needs independent test stores",
+    )
+
+
+_LANE_ASSIGNMENT: pytest.StashKey[dict[str, int] | None] = pytest.StashKey()
+
+
+def _collection_starts(config):
+    starts = []
+    for arg in config.args:
+        raw = arg.split("::", 1)[0]
+        path = Path(raw)
+        starts.append(path if path.is_absolute() else config.rootpath / path)
+    return starts
+
+
+def _lane_assignment(config):
+    if _LANE_ASSIGNMENT in config.stash:
+        return config.stash[_LANE_ASSIGNMENT]
+    selected = config.getoption("test_lane")
+    if selected is None:
+        config.stash[_LANE_ASSIGNMENT] = None
+        return None
+    from tests.lane_partition import assignment_from_durations, load_durations, test_files
+
+    _lane, total = selected
+    paths = test_files(
+        config.rootpath,
+        _collection_starts(config),
+        config.getini("python_files"),
+        config.getini("norecursedirs"),
+    )
+    assigned = assignment_from_durations(paths, load_durations(), total)
+    config.stash[_LANE_ASSIGNMENT] = assigned
+    return assigned
+
+
+def pytest_ignore_collect(collection_path, config):
+    if not collection_path.is_file():
+        return None
+    assigned = _lane_assignment(config)
+    if not assigned:
+        return None
+    try:
+        relative = collection_path.relative_to(config.rootpath).as_posix()
+    except ValueError:
+        return None
+    lane = assigned.get(relative)
+    if lane is None or lane == config.getoption("test_lane")[0]:
+        return None
+    return True
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    selected = config.getoption("test_lane")
+    if selected is None:
+        return
+    from tests.lane_partition import load_durations, partition_files
+
+    lane, _total = selected
+    assigned = _lane_assignment(config)
+    paths = {item.nodeid.split("::", 1)[0] for item in items}
+    if assigned is None:
+        assigned = partition_files(
+            ((item.nodeid.split("::", 1)[0], item.fixturenames) for item in items),
+            selected[1],
+            load_durations(),
+        )
+    elif not paths <= assigned.keys():
+        missing = ", ".join(sorted(paths - assigned.keys()))
+        raise pytest.UsageError(f"lane assignment did not cover collected files: {missing}")
+    kept, deselected = [], []
+    for item in items:
+        target = kept if assigned[item.nodeid.split("::", 1)[0]] == lane else deselected
+        target.append(item)
+    items[:] = kept
+    config.hook.pytest_deselected(items=deselected)

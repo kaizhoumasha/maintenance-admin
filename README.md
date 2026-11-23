@@ -1,8 +1,18 @@
-# maintenance-admin
+# enterprise-backend
 
-当前目标版本 0.2.0(`release/0.2.0` 准备中,未发布)。本次发布范围是后端模板,固定镜像目前仅验收 `linux/arm64`,配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md);固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+手工与 BIN_Roller 共用货架作业和有序动作。进场、换面按原搬运结果核对位置和面向；离场用原 WMS Submit 接纳完成工作线调度。SMT 自动线已接入 API、worker 和 Beat 共用的正式目录，现场联调与实机验收单独进行。粗分后续阶段已完成项目内隔离实现，正式目录只启用原首段。数据库切换步骤见 [手工业务测试与切换说明](docs/testing/smt-manual.md#共享货架调度切换)。
 
-维保协同后台管理系统（RBAC）。
+工作位进场额度现由 `positions[].capacity` 配置，运行计数限定本线当前任务；管理字段与切换要求见[人工 API](docs/integrations/manual-picking-api.md#manual-request-limit)，设计和验收范围见[容量设计](docs/superpowers/specs/2026-11-03-workline-position-capacity-design.md)、[实施计划](docs/superpowers/plans/2026-11-03-workline-position-capacity-implementation.md)及[软件验收记录](docs/testing/smt-manual.md#position-capacity)。
+
+面向生产企业的通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，提供通用、易用的第三方与内部 API 对接基础能力。
+
+平台提供认证与会话、用户/角色/权限、动态菜单、审计、列表查询、异步任务和部署工具；具体业务规则由使用模板的项目承载。API 对接已实现独立异步 HTTP 客户端和协议无关的出站可靠交互首版（事务发件箱、持久化重试、租约与恢复），并提供 WMS/ECS 回调接收入口；接收与投递不代表业务或物理完成。
+
+ECS / WMS 对接历史现统一为交互、证据和明确引用，保留原命令、消息、数值事件 ID 与长期重放。查询接口分别展示交付、协议和业务采用状态，摘要与正文使用独立权限；接口、保留规则和分阶段迁移见[统一对接历史](docs/integrations/integration-history.md)，软件验证见[验证记录](docs/testing/integration-history.md)。现有库必须先完成制品 A 的停写、补录、权威交接及实际验收，再独立交付制品 B 收缩，不能直接执行最终源码的 `upgrade head`。
+
+最近发布基线为 `v0.2.0`，当前分支包含改名及 HTTP 客户端等后续未发布变更。固定镜像目前仅验收 `linux/arm64`，配套前端及实际站点交付另行验收。发布范围、兼容变化及剩余边界见 [发布说明](CHANGELOG.md)；固定镜像部署、旧制品保存及回退见 [部署说明](docs/deploy.md#6-发布准备与旧制品保存)。
+
+默认 Compose 项目名固定为 `enterprise-backend`，数据卷为 `enterprise-backend_pgdata` 和 `enterprise-backend_redisdata`，不再随仓库目录名变化。数据库名统一为 `enterprise_backend`，独立测试库使用 `enterprise_backend_test`；现有 API 路径及权限码不变。已有部署在完成备份和数据迁移前，须通过 `-p` 或 `COMPOSE_PROJECT_NAME` 指定原项目名，沿用原数据卷和站点配置；仅修改项目名不会迁移数据。旧数据库原地改名及工具连接同步见 [数据库改名](docs/deploy.md#数据库改名)。显式设置了 `APP_NAME` 或 `APP_IMAGE` 的环境继续以配置值为准，按需更新。
 
 开发约定见 [AGENTS.md](AGENTS.md) 和 [CLAUDE.md](CLAUDE.md)；变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -27,7 +37,7 @@ docker compose ps   # 确认 postgres / redis 都是 healthy
 ```bash
 uv sync
 cp .env.example .env
-uv run alembic upgrade head     # 应用 migrations/versions 下已有的迁移
+uv run alembic upgrade head     # 在线校验归属并迁入 enterprise_backend schema，再应用迁移
 # 改了 models 之后才需要生成新迁移:
 # uv run alembic revision --autogenerate -m "说明"   # 生成后先检查再 upgrade
 uv run uvicorn app.main:app --reload
@@ -39,12 +49,16 @@ scripts/lint.sh      # ruff check --fix + format
 
 PostgreSQL 与 Redis 集成测试需显式设置 `TEST_DATABASE_URL`、`TEST_REDIS_URL`，均须指向独立测试库/实例，不能复用业务数据。PostgreSQL 测试会执行迁移；显式配置后连接失败会报错，不会静默跳过。
 
+CI 将完整套件分为十道，每道拥有独立 PostgreSQL、三个专项迁移库和 Redis；十道全部通过才算完整验证。可选 `--test-lane=N/T` 的用法、隔离要求及本机实测见[并行测试分道](docs/testing/test-lanes.md)；默认 `uv run pytest` 保持完整运行。
+
+项目 PostgreSQL 表和 Alembic 版本表固定放在 `enterprise_backend` schema，API、可靠发送器与 Celery 连接均使用该 schema，不回退到 `public`。schema 搬迁仅接受完整 `a023a20261024` 旧基线，原地移动其 12 张项目表及版本表，其他系统表不动；更早的旧库先用旧代码升级到该基线。后续历史统一仍须按上面的 A / B 维护窗口分别交付。SQLite 测试将 schema 映射为空。迁移边界、停机步骤与验证见 [Schema 隔离](docs/deploy.md#schema-隔离)。
+
 ```bash
-TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/maintenance_test \
+TEST_DATABASE_URL=postgresql+asyncpg://admin:admin123@localhost:25432/enterprise_backend_test \
 TEST_REDIS_URL=redis://localhost:26379/15 uv run pytest
 ```
 
-运行前创建独立的 `maintenance_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
+运行前创建独立的 `enterprise_backend_test` 数据库，并确保 Redis 的 15 号库专用于测试。Docker Compose 的依赖端口仅绑定 `127.0.0.1`：Postgres 25432、Redis 26379；本机开发 API 默认 8000，`ENVIRONMENT=local` 时接口文档在 `/docs`。
 
 ### 3. 容器运行
 
@@ -71,6 +85,10 @@ docker compose --profile app run --rm -e ADMIN_PASSWORD='<密码>' api python -m
 | `ACCESS_TOKEN_EXPIRE_MINUTES` / `REFRESH_TOKEN_EXPIRE_DAYS` | 默认 30 分钟 / 7 天 |
 | `CORS_ORIGINS` | 前端源，逗号分隔；同域部署（nginx 反代）留空，留空则不启用 CORS |
 | `AUDIT_RETENTION_DAYS` | 审计日志保留天数，默认 90，超过的由每日任务归档 |
+| `INTEGRATION_HISTORY_RETENTION_DAYS` | 普通对接历史摘要与索引默认保留 90 天；原收据资格、诊断正文和未决恢复证据沿各自合同，见[保留规则](docs/integrations/integration-history.md#保留与清理) |
+| `SMT_MANUAL_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，如 `60000`；从原 prepare 接纳的本地保存时间起计算首版计划等待。首版计划未到且未配置时保持 PREPARING，不发送版本 0 完成确认；配置时长须与 WMS 约定 |
+| `SMT_AUTO_FIRST_PLAN_WAIT_MS` | 可选正整数毫秒，从原 prepare 首次可靠接纳起计时。留空时继续等待首版计划 |
+| `SMT_AUTO_WORKLINES` | 站点运行配置的 JSON 数组。每项提供工作线 ID、版本和来源工位映射。两臂超时可分别配置，省略时发送 `timeout: 0`。Transport 调用方取数据库工作线 ID。空数组表示当前没有配置自动线 |
 | `POSTGRES_PASSWORD` / `NGINX_PORT` / `FRONTEND_DIST` / `FORWARDED_ALLOW_IPS` | 仅容器部署使用，见 `docs/deploy.md` |
 
 ### 5. 初始化管理员(RBAC)
@@ -83,17 +101,19 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 
 初始化参数复用用户创建接口的用户名、邮箱和密码校验,非法输入在任何种子写入前拒绝,不会回显密码。重复执行也须提供合法参数;已有用户的邮箱和密码仍保持原值。
 
-权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),且一个权限码只能用于一个路由。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误或重复使用会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
+权限存在 `permission` 表里(`GET/POST /permissions` 管理);权限码统一三段式 `<module>:<resource>:<action>`(如 `admin:user:create`,小写字母/数字/下划线),同一合法权限码可由多个路由独立声明。路由加 `dependencies=[Depends(require_permission("admin:user:read"))]` 即可鉴权,无权限返回 403 `FORBIDDEN`。格式错误会在导入时抛 `ValueError`;但码没写进 seed 或库里时只会让所有人 403,`tests/core/test_permission_code.py` 会检查路由用到的码与 `INITIAL_PERMISSIONS` 完全一致。新增权限码后重跑一次 `scripts.seed_admin` 即可挂给 admin 角色。
 模型关系:User ↔ user_role ↔ Role ↔ role_permission ↔ Permission。
 
-用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。
+用户管理（改资料、启停、改密码、重置密码）：停用用户和改/重置密码都会撤销该用户全部 refresh 会话。**保留管理员**：停用用户、改用户角色、改角色权限这三种操作，如果会让系统里没有任何活跃用户拥有 `admin:role:set_permissions`，返回 409 并回滚。角色仍绑定用户时不能删除（409）。并发保护、会话索引寿命及权限复用的稳定边界见[后台加固合同](docs/superpowers/specs/2026-10-26-repository-review-hardening-design.md)。
+
+具有管理权限的非 `admin` 角色成员，在更新用户、重置密码、分配角色和设置角色权限时，只能操作其权限范围内的用户或角色。创建角色和变更授权也只能授出本人已有权限。范围检查与资料或授权写入使用同一数据库事务锁。`admin` 角色的成员和该角色的授权由持有对应操作权限的 `admin` 成员管理。存在内置 `admin` 角色时，至少保留一位持有 `admin:role:set_permissions` 的活跃成员。
 
 ### 6. 认证
 
 - `POST /api/v1/auth/login`（JSON，每 IP 每分钟 5 次）返回 `access_token`；refresh token 放在 HttpOnly cookie `refresh_token`（路径 `/api/v1/auth`，`SameSite=Strict`，非 local 环境带 `Secure`），前端读不到。因为是 `Strict`，前后端必须同站（同域或开发代理）；跨站部署需改 `samesite` 并补 CSRF 防护。
 - `POST /auth/refresh` 凭 cookie 换新的 token 对，旧 refresh 立即作废；`/auth/logout` 撤销当前设备，`/auth/logout-all` 撤销该用户全部设备。
 - 用户有 `allow_multi_login`：默认 `False`（单点登录，新登录会顶掉旧会话），admin 为 `True`。
-- access token 无状态、不进黑名单，登出后最长 `ACCESS_TOKEN_EXPIRE_MINUTES` 内仍可用；用户被停用则立即失效（每次请求都校验 `is_active`）。
+- access token 不进黑名单，登出后最长 `ACCESS_TOKEN_EXPIRE_MINUTES` 内仍可用。停用账号时更新数据库中的会话版本，两种旧令牌在事务提交后失效。Redis 中的旧刷新凭据可留到原有效期结束，重新启用后需要重新登录。
 
 ### 7. 菜单（前端动态路由）
 
@@ -108,7 +128,7 @@ uv run python -m scripts.seed_admin <username> <email>   # 密码走 ADMIN_PASSW
 ### 8. 目录结构（Controller / Service / Model 三层）
 
 ```bash
-maintenance-admin/
+enterprise-backend/
   app/
     main.py              # 创建 app、中间件、include_router、lifespan
     controllers/         # C：路由，只做参数接收与返回，不写业务（auth / users / roles / permissions / menus / audit / health）
@@ -116,6 +136,11 @@ maintenance-admin/
     models/              # M：SQLAlchemy ORM 表
     schemas/             # V：请求/响应模型（Pydantic）
     core/                # config / database / redis / security / errors / handlers / ratelimit / logger / trace 上下文
+    http_client/         # 独立纯 HTTP 客户端：单次 bytes 收发、超时、连接池、大小限制
+    reliable/            # 出站事务发件箱、租约、原身份重试、TTL；不含协议实现
+    reliable_runtime.py  # lifespan 发送器与专用连接池装配
+    integrations/        # WMS/ECS/Transport 平台协议接入；固定平台演示按共享清单仅在 local 加载
+    businesses/          # 领域业务声明、合同、服务及模型；显式清单和简单工厂组装已有通信能力
     middlewares/         # trace_id（X-Trace-Id + 访问日志）、审计日志
     tasks/               # Celery，可单独部署 worker
   migrations/            # Alembic（文件名 YYYY-MM-DD_slug）
@@ -125,15 +150,105 @@ maintenance-admin/
 ```
 
 调用方向约定为 controllers → services → models，不要反向依赖（`tests/architecture/test_layering.py` 强制：models/schemas/core 不能导入 services 或 controllers，services 不能导入 controllers）。
+`app/http_client/` 独立于 `app.core`、业务模块和存储依赖；公开同步 `validate_request(config, request)` 与单次 `send` 复用校验，不创建客户端、不发网。合同见 [SPEC-019A](docs/superpowers/specs/2026-10-20-spec-019a-http-client.md)。`app/reliable/` 通过它在调用者事务内校验新消息，并由 FastAPI lifespan 的发送器投递；不迁移现有任务。可靠层合同见 [SPEC-019B](docs/superpowers/specs/2026-10-20-spec-019b-reliable-interaction.md)，配置、接入示例及离线验证见 [可靠投递参考](docs/integrations/reliable-delivery.md)。
+
+[通用 ECS Status](docs/integrations/ecs-status.md) 可通过 Python 独立查询指定 ECS 的全部或单台设备，不依赖设备登记或存储；正式 `GET /api/v1/ecs/status` 在所有环境挂载，要求登录及独立权限 `ecs:status:query`，沿用API请求限流。只返回状态及来源，不落库、不登记、不发送命令；local Swagger展示同一个正式接口，生产文档可见性仍按原环境配置。它是内置能力，不是第四类业务注册表。
+
+Transport 出站能力已提供 `app.integrations.wms_transport.TransportService.move_rack`，通过调用方 `AsyncSession` 同事务登记任务及可靠消息，支持 `Rack`、`Zone`、`RackPosition`。调用方保存并重用规范小写 UUIDv7 `client_request_id`；同号同输入返回原句柄，同号变更输入（含 caller 路由信息）抛 `IdempotencyConflict`。方法不提交外层事务；句柄只证明登记义务，不证明 WMS 接纳或物理完成。请求按最终 UTF-8 字节冻结，固定上限 256 KiB；迁移 `a019d20261022` 新增 `transport_task`，表非空时拒绝降级删除。装配及生产门槛见 [Transport 出站设计](docs/superpowers/specs/2026-10-21-transport-outbound-design.md)，没有自动注册真实目标。
+
+货架场景入口为 `RackScenarios(transport_service)`，从同一包导入 `RackRole` 与 `RackDestination`；`enter_rack`、`rotate_rack`、`depart_rack` 按显式角色选择模板，复用原会话和能力层，不提交、不新增生命周期存储。进场/离场目标仅接受 `RackPosition | Zone`，换面可信状态仍由能力层读取。调用方须固定同一生命周期的角色；RETURN 换面 CK04、进场 Zone 等真实启用前确认项见[货架场景设计](docs/superpowers/specs/2026-10-22-rack-transport-integration-design.md)，工程测试通过不代表 WMS 接纳或物理完成。
+
+ECS入门从[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)开始：可直接在Swagger填写指定模拟ECS地址调试，也可在业务事务中登记命令并安全消费结果；无需先搭建临时测试环境。接口边界查[ECS接入说明](docs/integrations/ecs-command.md)。同事件／任务的多角色接入见[角色注册与运行时注入](docs/integrations/ecs-roles.md)：角色由业务常量声明，运行时注入绑定及路由，不依赖设备／工作线管理或 Status。
+
+SMT 自动线已在隔离目录验证入库、出库、原箱释放和完成确认。设备参数见 [ECS 交互示例](docs/integrations/ECS%20已确认交互示例.md)，接口与交付边界见 [AUTO API](docs/integrations/smt-auto-api.md) 和 [开发验收记录](docs/testing/smt-auto.md)。
+
+对接评审资料见 [X-Ray](docs/integrations/xray-api.md)、[开箱机 0.21 设计](docs/integrations/opening-machine-overview-design.md)、[开箱机后续实施计划](docs/superpowers/plans/2026-11-05-opening-machine-wes-implementation.md) 和 [粗分接口草案](docs/integrations/coarse-sorting-api-draft.md)。各文档列出了待确认合同和后续验收。
+
+其他可靠投递接入先跑[第一个可靠投递实验](docs/reliable-transport-lab.md)，配置与事务写法查[可靠投递参考](docs/integrations/reliable-delivery.md)，Transport 的正式请求、ACK、回调和合同待确认项查[Transport 参考](docs/integrations/wms-transport.md)。[开发测试](docs/testing/README.md)说明一次性 PostgreSQL/Redis 与回归入口；ECS 使用前述独立教程/参考，真实接入与业务结果消费按各自合同安排。
+
+业务接入统一使用 `app/businesses/<业务>/`、精确模型 WMS send/ECS create、命令 `device_roles` 和 composition `COMMANDS`。
+composition 可用静态 `COMPONENTS` 复用多个内部能力；catalog 编译显式消费者和每业务唯一输入目标，运行主体与推进仍只有业务。WMS 请求保存本地原业务关联，Transport 保存原 owner；有效结果提交后只唤醒原业务，Transport 还须实际应用结果版本前进。接入与兼容边界见[业务组合与原归属指南](docs/integrations/business-packages.md#31-业务内部复用多个代码能力)，阶段一、二验收记录见[开发测试](docs/testing/README.md)。
+最短路线见[业务开发快速开始](docs/integrations/business-development-quickstart.md)，不兼容边界与验证见[单一 API 验收记录](docs/integrations/business-development-single-api-acceptance.md)。
+正式源码 catalog 已登记粗分扫码、WMS 验证及首个 MOVE_FORWARD / Result 阶段，以及完整 `smt_manual` 手工宿主；后者组合同源 sorting_task/BIN_Roller。交付提交、最终软件门槛及未验边界见[手工统一验收](docs/testing/smt-manual.md#current-delivery)；登记源码不表示已部署。动态 HTTP 调试字段不作为业务 SDK 形式。
+
+WES → WMS 的 `decisions` / `facts` 出站端点已实现，当前已登记粗分验证 operation `inbound.coarse_sorting.validate_bind@v1`（decisions）：`app.integrations.wms_request` 提供 operation 注册（`@request_operation`，位于 `app/businesses/<业务>/request.py` 或入口包，须列入所属 composition.ENTRY_MODULES 并由 catalog 拥有）、信封冻结和公共响应分类，`WmsRequests.send(session, Payload(...), operation_id=...)` 在调用方事务内入队；两个端点分别配置 `protocol` 为 `wms-facts`、`wms-decisions` 的目标（路径 `/api/v1/wes/facts`、`/api/v1/wes/decisions`）。每个 operation 须先对照 WMS 合同确认再添加；业务用 `WmsRequests.get_result` 按原消息身份读取可信终局响应，用 `TransportService.get_result` / `list_unclosed_predecessors` 读取已应用搬运结果及明确前序，具体字段和闭合规则见[出站结果契约](docs/integrations/outbound-results.md)。
+
+首次接入先看[业务开发快速开始](docs/integrations/business-development-quickstart.md)，其中包括启动应用前的独立合同检查命令；受理、推进及恢复见[事务配方](docs/integrations/business-transaction-recipes.md)。工作线业务按[业务包开发指南](docs/integrations/business-packages.md)在 `app/businesses/<业务>/` 声明角色、位置和初始入口，由显式清单及简单工厂复用 WMS、Transport、ECS 和 Outbox。启动先加载正式入口并交叉校验合同，再加载 local 入口和构造服务；受理使用原收据事务，需要结果消费的推进另开 REPEATABLE READ 事务，整组重读并原子提交消费依据与下一意图。
+
+管理员通过 `GET /api/v1/businesses` 读取已部署业务选项，新建工作线必选业务，旧线保留空值，首次选择后不可切换或清空。当前正式清单提供 coarse_sorting 扫码 → WMS 验证 → MOVE_FORWARD → 原 Result 消费，必需设备角色为 INPUT_ARM 和 CONVEYOR，另声明可选的 OUTPUT_ARM。扫码事实、原 WMS 决策和新 ECS Result 提交后按业务唤醒，统一 `business.advance_pending(business_code)` 任务调用声明的待办入口，Beat 每 5 秒调用同一任务兜底；推进使用自己的会话工厂，原 Sender 发送；成功后停在待箱格分配，WMS 业务 NG 停在待 NG 搬运。粗分直分入箱、NG、补换架和仅退架的隔离实现及启用边界见[实施计划](docs/superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md)。手工业务按上述独立 `smt_manual` 宿主交付，正式登记与内部验证不代表真实对端或现场验收。
+
+共享联调环境可显式启用粗分尾段，API、worker 和 Beat 共用同一份配置。配置和启用检查见 [WES 联调装配](docs/superpowers/plans/2026-11-06-coarse-sorting-staged-implementation.md#wes-联调装配)。
+
+ECS 设备事件通过 `POST /api/v1/callback/event` 接收：严格校验信封，按核心字段与 `data` 的摘要去重，事务提交后返回 `200 ACK`，只表示持久接收。入口最多读取 256 KiB，使用 ECS 独立的 ACK/错误格式，不经过 Redis 限流；开放前需由网关限制来源。当前已正式登记粗分 SCAN_COMPLETED 扫码受理处理器，未绑定或角色事件未注册仍 ACK 并保存受限诊断，不自动回放。新增类型用 `@ecs_event(name, device_role=ROLE, data=Payload)` 注册到 `app/businesses/<业务>/ecs_event.py` 或同名包，并显式列入 catalog 所属 composition.ENTRY_MODULES，应用注入绑定解析器，处理器只写当前事务；先部署全部处理器及绑定再启用 ECS 事件。接口、迁移和接入步骤见 [ECS 事件回调设计](docs/superpowers/specs/2026-10-24-ecs-event-callback-design.md)及 [处理器说明](app/integrations/ecs_callback/__init__.py)。
+
+调试状态由 ECS 决定，额外 `is_debug` 不参与新事件身份或处理器上下文。历史收据仍按旧摘要查重并返回原响应，不重写身份、不回放旧事件；接收实例须协调切换算法，不支持新旧版本混跑。
+
+下述投递、恢复和未知结果重试规则描述默认 STATIC 路径；ECS SNAPSHOT 的 UNKNOWN/租约中断按冻结路由的 `retry_window` 沿原命令身份回队列，配置暂停或没有可续期窗口时才进入 HELD，见 [ECS 接入说明](docs/integrations/ecs-command.md)。
+
+默认 `RELIABLE_TARGETS={}` 仍以专用数据库池扫描/恢复存量消息，但不创建 HTTP 客户端；只领取本进程已配置、已注册适配器且有客户端的目标，其余未过期消息保留 `PENDING`，不因配置漂移转为终态失败。本地退避 cap 默认 300 秒；`RELIABLE_MAX_RETRY_AFTER_S=3600` 只限制对端等待提示的采纳，可由 JSON `defaults` / target 覆盖，等待不延长 TTL。终态按 `updated_at` 保留 90 天，清理后可靠层不再保证本地幂等；Transport 独立任务映射仍保留，不因可靠消息清理而重新入队。原文明文存储；对端去重验收、安全与出口限流仍是启用真实目标前的门槛，当前没有真实目标注册。
+发送尝试完成后唤醒本实例发送器补位；领取批量小于并发预算时继续填充空槽。后台检查在系统正常运行时执行，不需要停机；后台检查间隔默认 1 秒。发送器启动首轮、轮询计时器到点、扫描异常等待该间隔后重试时执行后台检查；发送完成唤醒或连续补位时，只有距上次后台检查已满该间隔才执行，否则仅领取发送。
+
+每次后台检查先扫描 TTL 到期的 `PENDING` 消息，再回收租约到期的 `SENDING` 消息，默认各最多处理 100 行；两项上限独立于发送领取批量，不新增环境变量，发送槽满或没有目标时仍按上述条件执行。TTL 扫描将到期消息标为 `EXPIRED`；租约回收将未过 TTL 的消息转回 `PENDING` 并退避，已过 TTL 的转为 `EXPIRED`。这些处理不代表对端未执行，仍须按稳定身份去重。
+
+**TTL（Time To Live，消息有效时长）**决定一条消息还能在多长时间内发起发送或重试。以新消息入队创建时写入的 `created_at` 起算，固定截止时间为 `expires_at = created_at + ttl`，不是从事务提交或首次发送时起算；重试、退避、对端等待提示及返回已有消息的重复入队都不会延长或重置 TTL。不设置 `ttl` 时不因有效期截止自动过期，但仍可能进入成功或失败终态。
+
+例如，10:00 入队创建、TTL 为 30 分钟，则从 10:30 起不再发起新的发送或重试。到期的 `PENDING` 消息由后台检查标为 `EXPIRED`，实际发送前也会再次检查截止时间。已经发出的在途请求不会因 TTL 到期被强行取消，仍受原 HTTP 超时和租约回写条件约束，合法成功响应可能在到期后将消息转为 `DONE`；租约到期回收时若 TTL 已过，则转为 `EXPIRED`。TTL 到期不代表对端未执行，也不撤销对端动作。
+
+可选的目标级未送达预算（`max_not_received_attempts`）只统计「确认未送达」（请求未发出，或对端明确未接纳）；一旦出现过结果未知（响应丢失、租约中断或回收），该消息不再受预算约束，继续以原身份重提。未出现未知且次数达到预算的消息转为 `STALLED`：保留原身份与字节，不再发送，不会过期，也不会被保留期清理，并输出 `reliable stalled` 告警。只有调用方显式调用 `Outbox.resume` 才能把它放回 `PENDING`（计数清零，未知标记保留；提交后记 `reliable resumed` 日志）。可选 `fixed_retry_interval_s` 把本地重试等待固定为该值。
+
+| 时间限制 | 起算点与作用 |
+|---|---|
+| TTL | 从消息入队创建的 `created_at` 起算，限制发起新发送或重试的期限 |
+| HTTP 超时 | 从一次 HTTP 调用开始计时，限制本次调用的执行和等待时长；超时不一定代表对端未接收或未执行 |
+| 租约时长 | 从发送器领取消息时起算，时长为目标 HTTP 超时加租约余量，用于处理权分配与崩溃恢复，不会延长 TTL |
+| 终态保留期 | 从进入 `DONE` / `FAILED` / `EXPIRED` 时的 `updated_at` 起算，默认保留 90 天，再由定时任务清理记录；不是发送有效期 |
+
+多实例部署前，所有发送器、入队生产者及清理进程所在主机必须启用 NTP/chrony 等时钟同步并监控偏差和跳变。持久时间目前来自应用 UTC 墙钟，不是数据库统一授时；实例间偏差与调度、回写延迟合计应远小于默认 5 秒租约余量。不能满足此前提时可能提前接管并重复投递；租约围栏只保护回写，不替代对端按稳定身份去重。
+
 新增资源（以 `xxx` 为例）：`controllers/xxx.py`、`services/xxx_service.py`、`models/xxx.py`、`schemas/xxx.py`，然后在 `main.py` 注册 router、在 `models/__init__.py` 导出模型；有异步任务再加 `tasks/`。
 
-### 9. 统一错误处理（沿用 maintenance-agent）
+#### 接入声明与排障
+
+三类接入统一为“选目录 → 新建文件 → 装饰器声明名称和 Payload”。ECS/WMS 回调声明异步处理函数，
+WMS 请求直接装饰 `RequestPayload` 模型。旧类式注册已移除，迁移方法见接入指南。
+文件名统一为 `name.lower().replace('.', '_').replace('@', '_') + '.py'`，导入期报错提供双方来源或
+正确文件名及修复方法。完整示例、协议差异和排障步骤见 [接入指南](docs/integrations/registration.md)。
+
+#### 联调控制台(仅 `ENVIRONMENT=local`)
+
+登录 Swagger 后用 `GET /api/v1/dev/integrations/registry` 一处查看 ECS 角色事件、已装配的角色命令合同、WMS 回调和 WMS 请求的
+实际注册名称、设备角色、来源文件/符号、local-only、请求端点和 Payload Schema；命令另含 Result Schema。完整应用另装配内置 ECS Status 能力及其查询/响应 Schema，不属于业务注册表。local-only 在发现入口记录；
+清单存在不代表消息执行或物理完成。应用启动失败时按启动异常中的修复路标处理。
+
+Swagger 里 `POST /api/v1/dev/transport/tasks` 是统一出站入口:在 Examples 下拉选业务场景(货架进场/换面/离场、料箱投料/回架/交换),走真实的业务接入层登记出站;`GET /api/v1/dev/transport/tasks/status/{business_key}` 查看投递状态与请求、响应原文。没有真实对端时,把目标指向本应用自身即可用内置 Mock WMS(需单 worker,`uvicorn --reload` 即是),再用 `PUT /api/v1/dev/mock-wms/mode` 切换响应行为:
+
+```bash
+RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"}}}'
+```
+
+回调侧:`POST /api/v1/dev/transport/{transport_task_id}/callbacks` 选 `succeeded` 或 `position_unknown`,按该任务的冻结事实构造样例回调并走真实接收管线,返回每条的响应与诊断;`GET /api/v1/dev/transport/{transport_task_id}` 看任务状态。
+
+WMS 请求端点(decisions、facts)的联调在 `/api/v1/dev/wms/requests`:`GET /operations` 是已注册 operation 的目录(端点、标题、TTL、Payload Schema、示例);`POST` 在 Examples 下拉选 operation 触发,走真实的 `WmsRequests.send` 入队;`GET /status/{operation_id}` 看投递状态与请求、响应原文。同一 `operation_id` 同 Payload 重复触发返回同一条消息,Payload 不同返回 409。Mock WMS 同时认识 `/api/v1/wes/facts`、`/api/v1/wes/decisions`,两者共用 `PUT /api/v1/dev/mock-wms/mode` 切换响应模式。通用 Mock 的 `DECIDED` 响应返回空 `data`。启用专用 Mock 后，配置的 X-Ray 工作线可凭 WES 请求签名取得模拟业务决定，配置见 [X-Ray 专用 Mock WMS](docs/integrations/xray-api.md#51-x-ray-专用-mock-wms)。
+
+通用联调为两个 WMS 请求端点各配置一个目标，指向本应用自身。
+
+```bash
+RELIABLE_TARGETS='{"targets":{"wms-transport":{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"},"wms-facts":{"base_url":"http://127.0.0.1:8000","protocol":"wms-facts"},"wms-decisions":{"base_url":"http://127.0.0.1:8000","protocol":"wms-decisions"}}}'
+```
+
+演示 operation 在 `app/integrations/wms_request/dev.py`,只在 local 登记;真实 operation 的写法见该文件头注释。
+
+粗分尾段启用后，调试目录可查看箱格分配和执行报告的合同。这两项请求由粗分业务推进发送。
+
+新增业务接入层时,在 `app/businesses/<业务>/dev.py` 用 `@dev_scenario` 登记场景，并把入口加入 catalog 所属 composition.ENTRY_MODULES，local 加载后才出现在下拉里,详见 `docs/superpowers/specs/2026-10-22-transport-dev-console-design.md`。非 local 环境这些路由不存在。**部署时必须显式设置 `ENVIRONMENT`(如 `production`)**:它的默认值是 `local`,漏设会同时挂出该控制台(含无认证的 Mock WMS 接收端)、开放 API 文档并关闭 Cookie 的 Secure。示例里的 Zone、储位、滚筒线编码是占位值,联调前按现场替换。
+
+### 9. 统一错误处理
 
 - 新增路由统一用 `app.core.routing.new_router()` 创建 router；OpenAPI 根据参数和依赖自动补 400/401/403/429，路由只需声明额外的业务错误（如 404/409/503），参数校验统一返回 400，不声明 422。
 - 业务错误一律 `raise AppError(ErrorCode.X, "中文消息", detail)`，路由里不手写错误响应。
 - 新错误码同时加到 `core/errors.py` 的 `ErrorCode` 和 `HTTP_STATUS`（状态码需唯一），并补 `tests/core/test_errors.py`。
 - 响应体统一为 `{trace_id, code, message, detail}`；参数校验、404/405 和未捕获异常都由 `core/handlers.py` 转成同一格式，未知异常详情只进日志。
-- 数据库异常（`SQLAlchemyError`）也由 handler 统一处理：约束冲突 → 409 `CONFLICT`，连接/超时 → 503 `DATABASE_UNAVAILABLE`，其余 → 500。响应只含 `trace_id` 和异常类型名；用 `trace_id` 到日志里查 SQLSTATE、约束名、SQL 语句和堆栈（不记 SQL 参数）。service 里不要 `try/except SQLAlchemyError` 吞掉异常。
+- 数据库异常（`SQLAlchemyError`）也由 handler 统一处理：约束冲突 → 409 `CONFLICT`，连接/超时 → 503 `DATABASE_UNAVAILABLE`，其余 → 500。响应只含 `trace_id` 和异常类型名；用 `trace_id` 到日志里查 SQLSTATE、白名单内的约束名/缺失对象名、源位置和安全堆栈，不记录 SQL 语句、参数或原始异常正文。service 里不要 `try/except SQLAlchemyError` 吞掉异常。
 
 ### 10. 限流(SPEC-015)
 
@@ -151,8 +266,8 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 
 本仓库设为 GitHub Template Repository，新项目用 "Use this template" 生成，然后：
 
-1. `scripts/rename_project.sh <项目名> <数据库名>`（例：`demo-admin demo`），替换项目名、数据库名并刷新 `uv.lock`；之后可删除该脚本。
-2. 手改 `pyproject.toml` 的 `description`、`.serena/project.yml` 的 `project_name` 和本文件的标题/简介；`AGENTS.md` 第一段按新项目调整；本文件「统一错误处理」一节标题里的 `maintenance-agent` 是出处说明，按需删除。
+1. 在初始化数据库前运行 `scripts/rename_project.sh <项目名> <数据库名>`（例：`demo-admin demo`），替换项目名、数据库名及相关配置、文档和测试引用，并刷新 `uv.lock`；之后可删除该脚本。此脚本用于新项目，不迁移已有数据库或数据卷。
+2. 手改 `pyproject.toml` 的 `description`、`app/main.py` 的应用描述和本文件的简介；`AGENTS.md` 的项目定位按新项目调整。
 3. `cp .env.example .env`，换掉 `JWT_SECRET_KEY`（`openssl rand -hex 32`）。
 4. `docker compose up -d && uv sync && uv run alembic upgrade head`，再 `uv run python -m scripts.seed_admin <用户名> <邮箱>`。
 5. 按需删除示例：`app/controllers/maintenance.py`（手动触发审计归档，对应权限码 `admin:maintenance:archive_audit` 也要从 `INITIAL_PERMISSIONS` 和 `main.py` 里去掉）；`INITIAL_MENUS` 里按实际页面增删。
@@ -162,22 +277,22 @@ Redis 滑动窗口(ZSET + Lua 脚本,一次往返、原子),key 为 `ratelimit:{
 
 ## 列表筛选与分页（SPEC-018）
 
-完整契约见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，实施与验收记录见 [实现计划](docs/superpowers/plans/2026-10-17-list-query-plan.md)。
+当前列表合同见本节，历史分页决策记录见 [SPEC-018 设计](docs/superpowers/specs/2026-10-17-list-query-design.md)，回归入口见[开发测试](docs/testing/README.md)。
 
-`GET /api/v1/users`、`/api/v1/audit-logs`、`/api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
+`GET /api/v1/users`、`GET /api/v1/devices`、`GET /api/v1/work-lines`、`GET /api/v1/audit-logs`、`GET /api/v1/audit-logs/archive` 接受可选的 `filter` JSON 字符串。根为条件组,`couple` 支持 `and`（默认）、`or`、`not`;组不能为空,最多三层,`not` 只能有一个子项。错误字段、算子、值或未知键均返回 400 `INVALID_REQUEST`,不静默忽略条件。
 
 ```bash
 curl -G "$HOST/api/v1/users" -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode 'page=1' --data-urlencode 'page_size=20' \
+  --data-urlencode 'start=1' --data-urlencode 'end=20' \
   --data-urlencode 'filter={"conditions":[{"field":"username","op":"ilike","value":"%kai%"},{"field":"is_active","op":"eq","value":true}]}'
 
 curl -G "$HOST/api/v1/audit-logs" -H "Authorization: Bearer $TOKEN" \
-  --data-urlencode 'limit=20' \
+  --data-urlencode 'start=1' --data-urlencode 'end=20' \
   --data-urlencode 'filter={"conditions":[{"field":"user_id","op":"eq","value":1}]}'
-# 后续页沿用 filter,增加 --data-urlencode "cursor=$NEXT_CURSOR"；归档列表用 /audit-logs/archive。
+# 后续页沿用 filter,把窗口改为 start=21、end=40；归档列表用 /audit-logs/archive。
 ```
 
-Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL 编码）,另填对应的分页参数,Authorization 选 Bearer Token。
+Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL 编码）,另填 `start`、`end`,Authorization 选 Bearer Token。两个参数必须同时提供,窗口长度为 1–100,缺省为 1–20,`start - 1` 最大为 100000。旧的 `page`、`page_size`、`limit`、`cursor` 均返回 400 `INVALID_REQUEST`。
 
 | 列表 | 筛选字段及算子 |
 |---|---|
@@ -196,8 +311,14 @@ Postman 使用 GET,在 **Params** 表填 `filter` 和原始 JSON（不手工 URL
 
 字符串不能含 NUL,pattern 不能以奇数个反斜杠结尾。
 
-**兼容变化**:用户仍返回 `{items,total,page,page_size}`,参数为 `page/page_size/filter`。审计与归档改为 `{items,next_cursor}`,删除 `total/page/page_size`;参数为 `limit`（默认 20,1–100）、`cursor`、`filter`,旧的 `page/page_size` 返回 400。三个列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
-
-审计响应示例:`{"items":[{"id":42,"user_id":1,"action":"admin:user:create","resource":"users","resource_id":7,"detail":null,"ip":null,"created_at":"2026-10-17T12:00:00Z"}],"next_cursor":"eyJpZCI6IDQyfQ"}`。归档条目另有 `archived_at`。`next_cursor=null` 表示末页;按 `id desc` 向后翻页,不能随机跳页。改变筛选条件时丢弃旧游标。翻页期间新记录不会重复进入后续页,记录被归档后会从热表后续页消失;较小 ID 的并发事务晚提交时可能漏过本轮遍历,重新查询可见。
+列表响应统一为 `{"items": [], "total": 128, "start": 15, "end": 30}`。末段行数不足时仍回显请求窗口,`items` 可以更短或为空。用户按 `id` 降序,设备和工作线按 `sort_order, id`,审计和归档按 `id` 降序。所有列表均拒绝未知 URL 参数（如 `filer`）,调用方须先移除前端专用参数。
 
 `filter` 上限为 **2048 UTF-8 字节**,URL 编码后最多约 6KB,部署时还须计入路径和其他参数,核对代理的请求行长度限制。筛选值可能含用户名、邮箱等个人信息;应用日志不记录 query string,反向代理和网关也应避免记录完整查询参数。筛选不保证所有组合都走索引,出现慢查询后再评估索引。
+
+ECS 命令与结果闭环的显式装配、事务及启用门槛见 [ECS P1 接入说明](docs/integrations/ecs-command.md)。模板不包含真实设备路由或附录。
+
+普通开发者使用[ECS最小业务接入教程](docs/integrations/ecs-command-tutorial.md)完成业务接入或Swagger调试；需要回归时使用[现有pytest测试](docs/testing/ecs-command-verification.md)，不另建ECS隔离阶段。
+
+HTTP、Sender、维护与 Celery 的统一安全诊断、字段规则及降噪边界见 [安全日志诊断](docs/logging.md)。
+
+设备目录、工作线逻辑分组/角色绑定与按需状态查询（列表仅配置，详情/手动刷新共用POST刷新，无后台同步或状态落库）见[设备管理指南](docs/integrations/device-management.md)，管理入口要求管理员身份和独立资产权限。

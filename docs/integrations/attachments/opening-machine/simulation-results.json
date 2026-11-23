@@ -1,0 +1,1910 @@
+{
+  "main": {
+    "cases": 9472,
+    "odd_cases": 5480,
+    "layer_attempts": 21831623,
+    "ng_layers": 11260329,
+    "success_pieces": 21142588,
+    "max_supply_lead": [
+      22,
+      14
+    ],
+    "put_wait_retries": 32745225,
+    "cache_moves": 6638
+  },
+  "cached_sweep": {
+    "cases": 1206,
+    "max_supply_lead": [
+      20,
+      14
+    ]
+  },
+  "comparison": {
+    "paired_whole": {
+      "cases": 288,
+      "max_supply_lead": [
+        22,
+        14
+      ],
+      "cache_moves": 183,
+      "quota_commands": 360897,
+      "mean_layer_gap": 4.627282440714097,
+      "mean_time_gap": 4.6349035258960045,
+      "mean_cache_moves": 0.6354166666666666,
+      "mean_quota_commands": 1253.1145833333333
+    },
+    "paired_cached": {
+      "cases": 288,
+      "max_supply_lead": [
+        20,
+        14
+      ],
+      "cache_moves": 54483,
+      "quota_commands": 429720,
+      "mean_layer_gap": 4.3322338928856885,
+      "mean_time_gap": 4.331454821556822,
+      "mean_cache_moves": 189.17708333333334,
+      "mean_quota_commands": 1492.0833333333333
+    },
+    "upper_first": {
+      "cases": 288,
+      "max_supply_lead": [
+        2502,
+        0
+      ],
+      "cache_moves": 195,
+      "quota_commands": 360897,
+      "mean_layer_gap": 1250.5,
+      "mean_time_gap": 1250.107456205555,
+      "mean_cache_moves": 0.6770833333333334,
+      "mean_quota_commands": 1253.1145833333333
+    }
+  },
+  "controls": {
+    "source_guard_removed": {
+      "status": "source_deadlock",
+      "requested": 4,
+      "execution_target": 4,
+      "seed": 0,
+      "pattern": "random",
+      "ng_profile": "last_layer_once",
+      "timing": "random",
+      "policy": "paired_cached",
+      "trace": [
+        {
+          "time": 3,
+          "action": "ARM01_new_carton_SCAN1_WMS_box_confirmed",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            0,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            0,
+            1,
+            18
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 7,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            2,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            0,
+            1,
+            16
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            1,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 10,
+          "action": "ARM04_success_receiver_confirmed_2pcs",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            0,
+            1,
+            16
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 10,
+          "action": "ECS_quota_result_WES_updates_business_progress",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            0,
+            1,
+            16
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 15,
+          "action": "MOVE_BACKWARD",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": null,
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 18,
+          "action": "ARM01_new_carton_SCAN1_WMS_box_confirmed",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            16
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 23,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            2
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            14
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            1,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 38,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            2,
+            0
+          ],
+          "drawn": [
+            2,
+            2
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            14
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            1,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 41,
+          "action": "ARM04_success_receiver_confirmed_2pcs",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            2
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            14
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 42,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            2,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 55,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            2,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 58,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            2,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 62,
+          "action": "PUT_NG_wait_confirmation",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": [
+            1,
+            2,
+            1
+          ]
+        },
+        {
+          "time": 70,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 70,
+          "action": "ECS_quota_result_WES_updates_business_progress",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            4
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            12
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 75,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            3,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 87,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            3,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 91,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            2,
+            2
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": [
+            1,
+            3,
+            1
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 95,
+          "action": "ARM04_success_receiver_confirmed_2pcs",
+          "good": [
+            2,
+            4
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 95,
+          "action": "ECS_end_supply_Buffer_handles_tail",
+          "good": [
+            2,
+            4
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 95,
+          "action": "ECS_quota_result_WES_updates_business_progress",
+          "good": [
+            2,
+            4
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 95,
+          "action": "source_deadlock",
+          "good": [
+            2,
+            4
+          ],
+          "drawn": [
+            2,
+            6
+          ],
+          "ng": [
+            0,
+            2
+          ],
+          "active": [
+            1,
+            1,
+            10
+          ],
+          "cache": [
+            0,
+            1,
+            16
+          ],
+          "in_flight": null,
+          "ng_pending": null
+        }
+      ]
+    },
+    "permanent_ng": {
+      "status": "attempt_limit_external_persistent_NG",
+      "requested": 5,
+      "execution_target": 6,
+      "seed": 0,
+      "pattern": "random",
+      "ng_profile": "permanent_ng",
+      "timing": "random",
+      "policy": "paired_whole",
+      "trace": [
+        {
+          "time": 3274,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            192,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            6
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3274,
+          "action": "ECS_quota_result_WES_updates_business_progress",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            192,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            6
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3276,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            194,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            4
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            97,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3285,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            194,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            4
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            97,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3288,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            194,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            4
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            97,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3292,
+          "action": "PUT_NG_wait_confirmation",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            194,
+            0
+          ],
+          "ng": [
+            192,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            4
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": [
+            0,
+            97,
+            15
+          ]
+        },
+        {
+          "time": 3297,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            194,
+            0
+          ],
+          "ng": [
+            194,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            4
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3298,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            196,
+            0
+          ],
+          "ng": [
+            194,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            2
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            98,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3305,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            196,
+            0
+          ],
+          "ng": [
+            194,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            2
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            98,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3306,
+          "action": "PUT_NG_wait_confirmation",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            196,
+            0
+          ],
+          "ng": [
+            194,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            2
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": [
+            0,
+            98,
+            15
+          ]
+        },
+        {
+          "time": 3326,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            196,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": [
+            0,
+            15,
+            2
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3332,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": [
+            0,
+            99,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3347,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": [
+            0,
+            99,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3361,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": [
+            0,
+            99,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3371,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": [
+            0,
+            99,
+            15
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3375,
+          "action": "PUT_NG_wait_confirmation",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            196,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": [
+            0,
+            99,
+            15
+          ]
+        },
+        {
+          "time": 3388,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3388,
+          "action": "ECS_quota_result_WES_updates_business_progress",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": null,
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3391,
+          "action": "ARM01_new_carton_SCAN1_WMS_box_confirmed",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            198,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            8
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        },
+        {
+          "time": 3398,
+          "action": "ARM03_GET_2pcs",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            200,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            6
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            100,
+            16
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3411,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            200,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            6
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            100,
+            16
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3421,
+          "action": "ARM04_wait_same_layer_no_new_GET",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            200,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            6
+          ],
+          "cache": null,
+          "in_flight": [
+            0,
+            100,
+            16
+          ],
+          "ng_pending": null
+        },
+        {
+          "time": 3422,
+          "action": "PUT_NG_wait_confirmation",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            200,
+            0
+          ],
+          "ng": [
+            198,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            6
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": [
+            0,
+            100,
+            16
+          ]
+        },
+        {
+          "time": 3436,
+          "action": "PUT_NG_confirmed_one_layer_replacement_credit",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            200,
+            0
+          ],
+          "ng": [
+            200,
+            0
+          ],
+          "active": [
+            0,
+            16,
+            6
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        }
+      ]
+    },
+    "permanent_wait": {
+      "status": "external_device_wait",
+      "requested": 5,
+      "execution_target": 6,
+      "seed": 0,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "blocked_forever",
+      "policy": "paired_whole",
+      "trace": [
+        {
+          "time": 3,
+          "action": "ARM01_new_carton_SCAN1_WMS_box_confirmed",
+          "good": [
+            0,
+            0
+          ],
+          "drawn": [
+            0,
+            0
+          ],
+          "ng": [
+            0,
+            0
+          ],
+          "active": [
+            0,
+            1,
+            18
+          ],
+          "cache": null,
+          "in_flight": null,
+          "ng_pending": null
+        }
+      ]
+    }
+  },
+  "samples": [
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 5,
+      "execution_target": 6,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_whole",
+      "successful_supply": [
+        6,
+        6
+      ],
+      "drawn": [
+        8,
+        6
+      ],
+      "ng_confirmed": [
+        2,
+        0
+      ],
+      "boxes": [
+        1,
+        1
+      ],
+      "cache_moves": 1,
+      "source_operations": 2,
+      "quota_commands": 3,
+      "internal_waits": 27,
+      "put_wait_retries": 8,
+      "max_supply_lead": [
+        6,
+        0
+      ],
+      "mean_layer_gap": 3.0,
+      "mean_time_gap": 3.980806142034549,
+      "supply_time": 521,
+      "tail_padding_layers": [
+        10,
+        14
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          1,
+          5
+        ],
+        "cache": [
+          0,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 5,
+      "execution_target": 6,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_cached",
+      "successful_supply": [
+        6,
+        6
+      ],
+      "drawn": [
+        8,
+        6
+      ],
+      "ng_confirmed": [
+        2,
+        0
+      ],
+      "boxes": [
+        1,
+        1
+      ],
+      "cache_moves": 1,
+      "source_operations": 2,
+      "quota_commands": 4,
+      "internal_waits": 27,
+      "put_wait_retries": 8,
+      "max_supply_lead": [
+        6,
+        0
+      ],
+      "mean_layer_gap": 3.0,
+      "mean_time_gap": 3.980806142034549,
+      "supply_time": 521,
+      "tail_padding_layers": [
+        10,
+        14
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          1,
+          5
+        ],
+        "cache": [
+          0,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 5,
+      "execution_target": 6,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "upper_first",
+      "successful_supply": [
+        6,
+        6
+      ],
+      "drawn": [
+        8,
+        6
+      ],
+      "ng_confirmed": [
+        2,
+        0
+      ],
+      "boxes": [
+        1,
+        1
+      ],
+      "cache_moves": 1,
+      "source_operations": 2,
+      "quota_commands": 3,
+      "internal_waits": 27,
+      "put_wait_retries": 8,
+      "max_supply_lead": [
+        6,
+        0
+      ],
+      "mean_layer_gap": 3.0,
+      "mean_time_gap": 3.980806142034549,
+      "supply_time": 521,
+      "tail_padding_layers": [
+        10,
+        14
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          1,
+          5
+        ],
+        "cache": [
+          0,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2500,
+      "execution_target": 2500,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_whole",
+      "successful_supply": [
+        2500,
+        2500
+      ],
+      "drawn": [
+        3318,
+        3434
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 1,
+      "source_operations": 667,
+      "quota_commands": 668,
+      "internal_waits": 13344,
+      "put_wait_retries": 5047,
+      "max_supply_lead": [
+        20,
+        14
+      ],
+      "mean_layer_gap": 4.4,
+      "mean_time_gap": 4.714777939294705,
+      "supply_time": 310253,
+      "tail_padding_layers": [
+        11,
+        8
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          5
+        ],
+        "cache": [
+          0,
+          286,
+          7
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2500,
+      "execution_target": 2500,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_cached",
+      "successful_supply": [
+        2500,
+        2500
+      ],
+      "drawn": [
+        3318,
+        3434
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 323,
+      "source_operations": 667,
+      "quota_commands": 1110,
+      "internal_waits": 13666,
+      "put_wait_retries": 5047,
+      "max_supply_lead": [
+        18,
+        14
+      ],
+      "mean_layer_gap": 3.7136,
+      "mean_time_gap": 3.9185090889268683,
+      "supply_time": 311863,
+      "tail_padding_layers": [
+        11,
+        8
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          5
+        ],
+        "cache": [
+          0,
+          286,
+          7
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2500,
+      "execution_target": 2500,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "upper_first",
+      "successful_supply": [
+        2500,
+        2500
+      ],
+      "drawn": [
+        3318,
+        3434
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 1,
+      "source_operations": 667,
+      "quota_commands": 668,
+      "internal_waits": 13344,
+      "put_wait_retries": 5047,
+      "max_supply_lead": [
+        2500,
+        0
+      ],
+      "mean_layer_gap": 1250.0,
+      "mean_time_gap": 1266.796330736528,
+      "supply_time": 310253,
+      "tail_padding_layers": [
+        11,
+        8
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          5
+        ],
+        "cache": [
+          0,
+          286,
+          7
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2501,
+      "execution_target": 2502,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_whole",
+      "successful_supply": [
+        2502,
+        2502
+      ],
+      "drawn": [
+        3320,
+        3436
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 1,
+      "source_operations": 667,
+      "quota_commands": 668,
+      "internal_waits": 13352,
+      "put_wait_retries": 5051,
+      "max_supply_lead": [
+        20,
+        14
+      ],
+      "mean_layer_gap": 4.400479616306955,
+      "mean_time_gap": 4.715170139023102,
+      "supply_time": 310452,
+      "tail_padding_layers": [
+        10,
+        7
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          4
+        ],
+        "cache": [
+          0,
+          286,
+          6
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2501,
+      "execution_target": 2502,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "paired_cached",
+      "successful_supply": [
+        2502,
+        2502
+      ],
+      "drawn": [
+        3320,
+        3436
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 325,
+      "source_operations": 667,
+      "quota_commands": 1109,
+      "internal_waits": 13676,
+      "put_wait_retries": 5051,
+      "max_supply_lead": [
+        18,
+        14
+      ],
+      "mean_layer_gap": 3.709832134292566,
+      "mean_time_gap": 3.9176728447281395,
+      "supply_time": 312072,
+      "tail_padding_layers": [
+        10,
+        7
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          4
+        ],
+        "cache": [
+          0,
+          286,
+          6
+        ]
+      }
+    },
+    {
+      "status": "supply_and_tail_complete",
+      "requested": 2501,
+      "execution_target": 2502,
+      "seed": 88,
+      "pattern": "random",
+      "ng_profile": "25pct",
+      "timing": "lower_slow",
+      "policy": "upper_first",
+      "successful_supply": [
+        2502,
+        2502
+      ],
+      "drawn": [
+        3320,
+        3436
+      ],
+      "ng_confirmed": [
+        818,
+        934
+      ],
+      "boxes": [
+        286,
+        381
+      ],
+      "cache_moves": 1,
+      "source_operations": 667,
+      "quota_commands": 668,
+      "internal_waits": 13352,
+      "put_wait_retries": 5051,
+      "max_supply_lead": [
+        2502,
+        0
+      ],
+      "mean_layer_gap": 1251.0,
+      "mean_time_gap": 1267.8388027778851,
+      "supply_time": 310452,
+      "tail_padding_layers": [
+        10,
+        7
+      ],
+      "tail_closed": [
+        true,
+        true
+      ],
+      "source_remainders": {
+        "active": [
+          1,
+          381,
+          4
+        ],
+        "cache": [
+          0,
+          286,
+          6
+        ]
+      }
+    }
+  ],
+  "model": {
+    "box_max_pieces": [
+      22,
+      16
+    ],
+    "layer_pieces": 2,
+    "one_leftover_cache": true,
+    "odd_round_up": true,
+    "WES_Buffer_readiness_input": false,
+    "hard_dispatch_gap_limits": false,
+    "Buffer_internals": "black box with finite plant-owned waiting",
+    "pair_metric": "real material successfully supplied, not Magazine dispatch"
+  }
+}

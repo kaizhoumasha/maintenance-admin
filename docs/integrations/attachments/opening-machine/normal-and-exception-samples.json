@@ -1,0 +1,118 @@
+{
+  "normal": {
+    "status": "supply_and_tail_complete",
+    "requested": 2500,
+    "execution_target": 2500,
+    "seed": 88,
+    "pattern": "random",
+    "ng_profile": "none",
+    "timing": "lower_slow",
+    "policy": "paired_whole",
+    "successful_supply": [
+      2500,
+      2500
+    ],
+    "drawn": [
+      2500,
+      2500
+    ],
+    "ng_confirmed": [
+      0,
+      0
+    ],
+    "boxes": [
+      206,
+      281
+    ],
+    "cache_moves": 1,
+    "source_operations": 487,
+    "quota_commands": 487,
+    "internal_waits": 9208,
+    "put_wait_retries": 3719,
+    "max_supply_lead": [
+      22,
+      14
+    ],
+    "mean_layer_gap": 5.5008,
+    "mean_time_gap": 5.709976169595342,
+    "supply_time": 217789,
+    "tail_padding_layers": [
+      11,
+      8
+    ],
+    "tail_closed": [
+      true,
+      true
+    ],
+    "source_remainders": {
+      "active": [
+        1,
+        281,
+        3
+      ],
+      "cache": [
+        0,
+        206,
+        2
+      ]
+    }
+  },
+  "isolated_last_layer_ng": {
+    "status": "supply_and_tail_complete",
+    "requested": 2500,
+    "execution_target": 2500,
+    "seed": 88,
+    "pattern": "random",
+    "ng_profile": "last_layer_once",
+    "timing": "lower_slow",
+    "policy": "paired_whole",
+    "successful_supply": [
+      2500,
+      2500
+    ],
+    "drawn": [
+      2502,
+      2502
+    ],
+    "ng_confirmed": [
+      2,
+      2
+    ],
+    "boxes": [
+      206,
+      281
+    ],
+    "cache_moves": 1,
+    "source_operations": 487,
+    "quota_commands": 489,
+    "internal_waits": 9217,
+    "put_wait_retries": 3722,
+    "max_supply_lead": [
+      22,
+      14
+    ],
+    "mean_layer_gap": 5.5008,
+    "mean_time_gap": 5.70804741110418,
+    "supply_time": 218008,
+    "tail_padding_layers": [
+      11,
+      8
+    ],
+    "tail_closed": [
+      true,
+      true
+    ],
+    "source_remainders": {
+      "active": [
+        1,
+        281,
+        2
+      ],
+      "cache": [
+        0,
+        206,
+        1
+      ]
+    }
+  }
+}

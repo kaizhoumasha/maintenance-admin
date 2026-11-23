@@ -11,8 +11,10 @@ wheels/
 .env
 .ruff_cache/
 .mypy_cache/
+.serena/
 
 .pytest_cache/
 backups/
 frontend-dist/
 releases/
+.DS_Store

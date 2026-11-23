@@ -1,0 +1,147 @@
+"""The three work-plan requests preserve the documented wire contracts."""
+
+import importlib
+
+import pytest
+from pydantic import ValidationError
+
+from app.businesses import catalog
+from app.businesses.definitions import BusinessDefinition
+from tests.helpers import business_composition
+
+
+@pytest.fixture(autouse=True)
+def isolated_contracts(monkeypatch):
+    entry = business_composition("smt_auto")
+    entry.DEFINITION = BusinessDefinition(code="smt_auto", display_name="Isolated AUTO")
+    entry.ENTRY_MODULES = ("app.businesses.smt_auto.request",)
+    monkeypatch.setattr(catalog, "entries", lambda: (entry,))
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+
+
+@pytest.mark.parametrize(
+    ("module", "data"),
+    [
+        (
+            "putaway_work_plan_v1",
+            {"task_id": "t", "target_bin_code": "b", "scanned_at": 0, "source_racks": []},
+        ),
+        ("outbound_bin_work_plan_v1", {"task_id": "t", "bin_code": "b", "scanned_at": 0}),
+        (
+            "outbound_return_rack_work_plan_v1",
+            {"task_id": "t", "rack_id": "r", "rack_face": "A", "arrived_at": 0},
+        ),
+    ],
+)
+def test_work_plan_request_preserves_original_fields(module, data):
+    contract = importlib.import_module(f"app.businesses.smt_auto.request.{module}").WorkPlan
+    assert contract.model_validate(data).model_dump() == data
+    with pytest.raises(ValidationError):
+        contract.model_validate({**data, "unknown": 1})
+    time = "arrived_at" if "arrived_at" in data else "scanned_at"
+    with pytest.raises(ValidationError):
+        contract.model_validate({**data, time: True})
+
+
+def test_inbound_source_scope_is_bounded_and_unique():
+    contract = importlib.import_module(
+        "app.businesses.smt_auto.request.putaway_work_plan_v1"
+    ).WorkPlan
+    data = {"task_id": "t", "target_bin_code": "b", "scanned_at": 0}
+    for racks in (
+        [{"rack_id": "r", "location_code": "L"}] * 2,
+        [{"rack_id": "r1", "location_code": "L"}, {"rack_id": "r2", "location_code": "L"}],
+        [{"rack_id": str(i), "location_code": str(i)} for i in range(3)],
+    ):
+        with pytest.raises(ValidationError):
+            contract.model_validate({**data, "source_racks": racks})
+
+
+@pytest.mark.parametrize("bin_type", [True, 2.0, None, ""])
+def test_ready_bin_type_rejects_invalid_codes(bin_type):
+    from app.businesses.smt_auto.work_plan_contracts import DECISIONS
+
+    with pytest.raises(ValidationError):
+        DECISIONS["bin"].validate_python(
+            {
+                "result": "READY",
+                "cell_id": "B1",
+                "cell_index": 1,
+                "bin_type": bin_type,
+                "reel_layer": 1,
+                "reel_thickness": 1,
+                "size_inch": 1,
+                "reel_diameter": 1,
+            }
+        )
+
+
+@pytest.mark.parametrize("bin_type", [8, 42, "8", "008", "WMS-CUSTOM"])
+def test_work_plan_preserves_wms_configured_bin_type(bin_type):
+    from app.businesses.smt_auto.inbound_contracts import Target
+    from app.businesses.smt_auto.work_plan_contracts import BinReady, InboundSource
+
+    source = dict(
+        rack_id="R",
+        location_code="L",
+        bin_code="B",
+        bin_location="A",
+        cell_id="C",
+        bin_type=bin_type,
+        cell_index=1,
+        reel_layer=1,
+        reel_thickness=20,
+        size_inch=179,
+        reel_diameter=179,
+        reel_totalthickness=20,
+    )
+    assert InboundSource(**source).bin_type == bin_type
+    target = {
+        key: value
+        for key, value in source.items()
+        if key not in {"rack_id", "location_code", "bin_location"}
+    }
+    assert Target(**target).bin_type == bin_type
+    ready = {
+        key: value
+        for key, value in target.items()
+        if key not in {"bin_code", "reel_totalthickness"}
+    }
+    assert BinReady(result="READY", **ready).bin_type == bin_type
+
+
+def test_ready_uses_size_inch_and_keeps_nullable_millimeter_diameter():
+    from app.businesses.smt_auto.work_plan_contracts import BinReady
+
+    ready = BinReady(
+        result="READY",
+        cell_id="B1",
+        cell_index=1,
+        bin_type=3,
+        reel_layer=1,
+        reel_thickness=20,
+        size_inch=13,
+        reel_diameter=None,
+    )
+
+    assert ready.size_inch == 13
+    assert ready.reel_diameter is None
+
+
+def test_legacy_ready_snapshot_recovers_size_inch_for_pending_work():
+    from app.businesses.smt_auto.work_plan_contracts import DECISIONS
+
+    ready = DECISIONS["bin"].validate_python(
+        {
+            "result": "READY",
+            "cell_id": "B1",
+            "cell_index": 1,
+            "bin_type": 3,
+            "reel_layer": 1,
+            "reel_thickness": 20,
+            "reel_diameter": 381,
+        }
+    )
+
+    assert ready.size_inch == 15
+    assert ready.reel_diameter == 381

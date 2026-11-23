@@ -1,0 +1,349 @@
+import json
+
+import pytest
+from sqlalchemy import delete, select
+
+from app.main import app
+from app.models import AuditLog, Permission, Role, WorkLine, role_permission
+from tests.helpers import bearer, make_user_with_perms
+
+
+@pytest.fixture(autouse=True)
+def deployed_catalog(workline_business_catalog):
+    pass
+
+
+async def test_legacy_null_line_remains_readable(client, admin):
+    async with app.state.audit_session_factory.begin() as session:
+        row = WorkLine(line_code="OLD", line_name="旧工作线")
+        session.add(row)
+        await session.flush()
+        line_id = row.id
+    read = await client.get(f"/api/v1/work-lines/{line_id}", headers=admin)
+    assert read.status_code == 200, read.text
+    assert read.json()["business_code"] is None
+    changed = await client.put(
+        f"/api/v1/work-lines/{line_id}",
+        headers=admin,
+        json={"line_name": "旧线改名", "version": 1},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["business_code"] is None
+    selected = await client.put(
+        f"/api/v1/work-lines/{line_id}",
+        headers=admin,
+        json={"line_name": "旧线改名", "version": 2, "business_code": "test_sorting"},
+    )
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["business_code"] == "test_sorting"
+
+
+@pytest.mark.parametrize("line_code,rack", [("RS01", "CLN01"), ("RS02", "CLN02")])
+async def test_coarse_line_saves_its_own_completion_positions(
+    client, admin, monkeypatch, line_code, rack
+):
+    from app.businesses import catalog
+    from app.businesses.coarse_sorting import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={
+            "line_code": line_code,
+            "line_name": line_code,
+            "business_code": "coarse_sorting",
+            "position_bindings": {"OUTPUT_RACK": rack},
+        },
+    )
+    assert response.status_code == 201, response.text
+    created = response.json()
+    positions = {
+        "OUTPUT_RACK": rack,
+        "PUT_COMPLETION": f"{line_code}-PUT",
+        "NG_COMPLETION": f"{line_code}-NG",
+    }
+    changed = await client.put(
+        f"/api/v1/work-lines/{created['id']}",
+        headers=admin,
+        json={
+            "line_name": line_code,
+            "version": created["version"],
+            "position_bindings": positions,
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    read = await client.get(f"/api/v1/work-lines/{created['id']}", headers=admin)
+    assert read.status_code == 200, read.text
+    assert read.json()["position_bindings"] == positions
+    assert [position["position_code"] for position in read.json()["positions"]] == [rack]
+    options = await client.get("/api/v1/businesses", headers=admin)
+    assert options.status_code == 200, options.text
+    assert options.json()[0]["position_slots"] == [
+        {
+            "key": "OUTPUT_RACK",
+            "display_name": "出料单层货架位",
+            "required": True,
+            "position_type": "RACK_POSITION",
+        },
+        {
+            "key": "PUT_COMPLETION",
+            "display_name": "入箱回报点",
+            "required": False,
+            "position_type": "HANDOFF_POSITION",
+        },
+        {
+            "key": "NG_COMPLETION",
+            "display_name": "NG 回报点",
+            "required": False,
+            "position_type": "HANDOFF_POSITION",
+        },
+    ]
+
+
+@pytest.mark.parametrize("selection", [{}, {"business_code": None}, {"business_code": "missing"}])
+async def test_new_line_requires_known_business(client, admin, selection):
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={"line_code": "NEW", "line_name": "新线", **selection},
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == "INVALID_REQUEST"
+
+
+async def test_business_can_only_be_selected_once(client, admin):
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={"line_code": "NEW", "line_name": "新线", "business_code": "test_sorting"},
+    )
+    assert response.status_code == 201, response.text
+    line = response.json()
+    for value, expected in [("test_sorting", 200), ("other_sorting", 409), (None, 409)]:
+        response = await client.put(
+            f"/api/v1/work-lines/{line['id']}",
+            headers=admin,
+            json={"line_name": "新线", "version": line["version"], "business_code": value},
+        )
+        assert response.status_code == expected, response.text
+        if expected == 200:
+            line = response.json()
+    unchanged = await client.get(f"/api/v1/work-lines/{line['id']}", headers=admin)
+    assert unchanged.json()["version"] == line["version"]
+    assert unchanged.json()["business_code"] == "test_sorting"
+
+
+async def test_business_update_omission_preserves_selection(client, admin):
+    created = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={"line_code": "NEW", "line_name": "新线", "business_code": "test_sorting"},
+    )
+    assert created.status_code == 201, created.text
+    line = created.json()
+    stale = await client.put(
+        f"/api/v1/work-lines/{line['id']}",
+        headers=admin,
+        json={"line_name": "改名", "version": 99},
+    )
+    assert stale.status_code == 409
+    updated = await client.put(
+        f"/api/v1/work-lines/{line['id']}",
+        headers=admin,
+        json={"line_name": "改名", "version": 1},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["business_code"] == "test_sorting"
+    assert updated.json()["version"] == 2
+
+
+async def test_workline_business_is_audited_and_filterable(client, admin):
+    async with app.state.audit_session_factory.begin() as session:
+        old = WorkLine(line_code="OLD", line_name="旧线")
+        session.add(old)
+        await session.flush()
+        line_id = old.id
+    updated = await client.put(
+        f"/api/v1/work-lines/{line_id}",
+        headers=admin,
+        json={
+            "line_name": "旧线",
+            "version": 1,
+            "business_code": "test_sorting",
+            "position_bindings": {"INLET": "P1"},
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["version"] == 2
+    for op, value, count in [
+        ("eq", "test_sorting", 1),
+        ("in", ["other_sorting"], 0),
+        ("is_null", None, 0),
+    ]:
+        condition = {"field": "business_code", "op": op}
+        if value is not None:
+            condition["value"] = value
+        response = await client.get(
+            "/api/v1/work-lines",
+            headers=admin,
+            params={"filter": json.dumps({"conditions": [condition]})},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == count
+    async with app.state.audit_session_factory() as session:
+        logs = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "asset:workline:update", AuditLog.resource_id == line_id
+                )
+            )
+        )
+        assert len(logs) == 1
+        assert logs[0].detail["before"]["business_code"] is None
+        assert logs[0].detail["after"]["business_code"] == "test_sorting"
+        assert logs[0].detail["after"]["position_bindings"] == {"INLET": "P1"}
+
+
+async def test_business_options_require_admin_and_workline_read(client, admin):
+    assert (await client.get("/api/v1/businesses")).status_code == 401
+    regular = await make_user_with_perms(client, admin, ["asset:workline:read"])
+    assert (await client.get("/api/v1/businesses", headers=bearer(regular))).status_code == 403
+    result = await client.get("/api/v1/businesses", headers=admin)
+    assert result.status_code == 200, result.text
+    first = result.json()[0]
+    assert set(first) == {
+        "code",
+        "display_name",
+        "device_roles",
+        "position_slots",
+        "initial_entries",
+    }
+    assert first["device_roles"][0] == {"key": "SCAN1", "display_name": "扫码", "required": True}
+    assert first["position_slots"] == [
+        {
+            "key": "INLET",
+            "display_name": "入口",
+            "required": True,
+            "position_type": "HANDOFF_POSITION",
+        }
+    ]
+    assert first["initial_entries"] == [
+        {"kind": "ecs_event", "name": "SCAN_COMPLETED", "device_role": "SCAN1"}
+    ]
+    async with app.state.audit_session_factory.begin() as session:
+        role_id = await session.scalar(select(Role.id).where(Role.name == "admin"))
+        permission = await session.scalar(
+            select(Permission.id).where(Permission.code == "asset:workline:read")
+        )
+        await session.execute(
+            delete(role_permission).where(
+                role_permission.c.role_id == role_id, role_permission.c.permission_id == permission
+            )
+        )
+    denied = await client.get("/api/v1/businesses", headers=admin)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "asset:workline:read"
+
+
+async def test_created_business_selection_is_in_transaction_audit(client, admin):
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json={"line_code": "NEW", "line_name": "新线", "business_code": "test_sorting"},
+    )
+    assert response.status_code == 201, response.text
+    row = response.json()
+    assert row["version"] == 1
+    async with app.state.audit_session_factory() as session:
+        logs = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "asset:workline:create", AuditLog.resource_id == row["id"]
+                )
+            )
+        )
+        assert len(logs) == 1
+        assert logs[0].detail["before"] == {}
+        assert logs[0].detail["after"]["business_code"] == "test_sorting"
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "3", 2147483648])
+async def test_position_capacity_rejects_non_positive_or_non_sql_integer(
+    client, admin, value, monkeypatch
+):
+    from app.businesses import catalog
+    from app.businesses.smt_manual import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json=dict(
+            line_code="LIMIT",
+            line_name="Line",
+            business_code="smt_manual",
+            position_bindings={"FIVE_RACK": "LIMITP"},
+            positions=[{"position_code": "LIMITP", "capacity": value}],
+        ),
+    )
+    assert response.status_code == 400, response.text
+
+
+async def test_position_capacity_save_omit_clear_version_and_audit(client, admin, monkeypatch):
+    from app.businesses import catalog
+    from app.businesses.smt_manual import composition
+
+    monkeypatch.setattr(catalog, "entries", lambda: (composition,))
+    response = await client.post(
+        "/api/v1/work-lines",
+        headers=admin,
+        json=dict(
+            line_code="LIMIT",
+            line_name="Line",
+            business_code="smt_manual",
+            position_bindings={"FIVE_RACK": "LIMITP"},
+        ),
+    )
+    assert response.status_code == 201, response.text
+    line = response.json()
+    assert line["positions"][0]["capacity"] == 1
+    for version, fields, expected in (
+        (1, {"positions": [{"position_code": "LIMITP", "capacity": 3}]}, 3),
+        (2, {}, 3),
+        (3, {"positions": [{"position_code": "LIMITP", "capacity": None}]}, None),
+        (4, {"positions": [{"position_code": "LIMITP", "capacity": 2147483647}]}, 2147483647),
+    ):
+        response = await client.put(
+            f"/api/v1/work-lines/{line['id']}",
+            headers=admin,
+            json=dict(line_name="Line", version=version, **fields),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["positions"][0]["capacity"] == expected
+        assert response.json()["version"] == version + 1
+    stale = await client.put(
+        f"/api/v1/work-lines/{line['id']}",
+        headers=admin,
+        json=dict(
+            line_name="Line", version=4, positions=[{"position_code": "LIMITP", "capacity": 1}]
+        ),
+    )
+    assert stale.status_code == 409
+    read = await client.get(f"/api/v1/work-lines/{line['id']}", headers=admin)
+    assert read.json()["positions"][0]["capacity"] == 2147483647
+    async with app.state.audit_session_factory() as session:
+        logs = list(
+            await session.scalars(
+                select(AuditLog)
+                .where(AuditLog.resource_id == int(line["id"]))
+                .order_by(AuditLog.id)
+            )
+        )
+        assert [log.detail["after"]["positions"][0]["capacity"] for log in logs] == [
+            1,
+            3,
+            3,
+            None,
+            2147483647,
+        ]

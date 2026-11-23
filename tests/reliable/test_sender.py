@@ -1,0 +1,853 @@
+import asyncio
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import select, update
+
+from app.http_client import DeliveryState, HttpResult
+from app.models import ReliableMessage
+from tests.helpers import message_history_view
+
+
+@pytest.mark.parametrize("claim_batch_size", [1, 4])
+@pytest.mark.parametrize("local_error", [False, True])
+async def test_completed_sends_refill_slots_without_polling_delay(
+    pg_rig, claim_batch_size, local_error
+):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    full, parked, release, refilled = (asyncio.Event() for _ in range(4))
+    requests = []
+    active = maximum = 0
+
+    class Client:
+        async def send(self, request):
+            nonlocal active, maximum
+            identity = dict(request.headers)["X-Operation-Id"]
+            requests.append((identity, request.body))
+            active += 1
+            maximum = max(maximum, active)
+            if len(requests) == 4:
+                full.set()
+            if len(requests) == 6:
+                refilled.set()
+            try:
+                await release.wait()
+                if local_error and int(identity) < 4:
+                    raise RuntimeError("local send failure")
+                return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+            finally:
+                active -= 1
+
+        async def aclose(self):
+            pass
+
+    async def wait(seconds):
+        parked.set()
+        await rig.clock.wait(seconds)
+
+    async with rig.factory() as session:
+        for number in range(6):
+            await rig.outbox.enqueue(session, rig.draft(str(number)))
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        wait=wait,
+        budget=ReliableConfig(rig.targets, claim_batch_size=claim_batch_size),
+    )
+    runner = asyncio.create_task(sender.run())
+    try:
+        # The frozen poll clock tests wakeup; the wall-clock timeout only guards against hangs.
+        async with asyncio.timeout(15):
+            await full.wait()
+            await parked.wait()
+            assert len(requests) == 4 and maximum == 4
+            release.set()
+            await refilled.wait()
+    finally:
+        release.set()
+        await sender.aclose()
+    assert runner.done() and active == 0
+    assert len(requests) == 6 and len({identity for identity, _ in requests}) == 6
+    assert all(body == b"\x00opaque" for _, body in requests)
+    assert rig.clock.monotonic() == 0
+    async with rig.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            )
+        )
+        assert all(row.attempts == 1 for row in rows)
+        assert sum(row.status == "DONE" for row in rows) == (2 if local_error else 6)
+        assert sum(row.fail_reason == "LOCAL_ERROR" for row in rows) == (4 if local_error else 0)
+
+
+async def test_maintenance_batch_is_independent_of_send_claims(storage):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = storage
+    async with rig.factory() as session:
+        for number in range(9):
+            await rig.outbox.enqueue(session, rig.draft(f"sending-{number}"))
+        await session.commit()
+    assert len(await rig.store.claim(9, rig.targets)) == 9
+    async with rig.factory() as session:
+        for number in range(9):
+            await rig.outbox.enqueue(
+                session, rig.draft(f"expired-{number}", ttl=timedelta(seconds=1))
+            )
+        await session.commit()
+    rig.clock.advance(16)
+    sender = Sender(rig.store, {}, {}, {}, budget=ReliableConfig({}, claim_batch_size=1))
+    try:
+        assert await sender.tick() == 0
+    finally:
+        await sender.aclose()
+    async with rig.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            )
+        )
+        assert sum(row.status == "EXPIRED" and row.attempts == 0 for row in rows) == 9
+        assert sum(row.status == "PENDING" and row.attempts == 1 for row in rows) == 9
+        assert all(row.lease_id is None for row in rows)
+
+
+async def test_corrupt_frozen_request_does_not_block_other_messages(storage):
+    from app.reliable.sender import Sender
+    from app.reliable.testing import ScriptedHttpClient
+
+    rig = storage
+    async with rig.factory.begin() as session:
+        interrupted = await rig.outbox.enqueue(session, rig.draft("interrupted"))
+    assert len(await rig.store.claim(1, rig.targets)) == 1
+    rig.clock.advance(16)
+    async with rig.factory.begin() as session:
+        corrupt = await rig.outbox.enqueue(session, rig.draft("corrupt"))
+        healthy = await rig.outbox.enqueue(session, rig.draft("healthy"))
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id.in_((interrupted.message_id, corrupt.message_id)))
+            .values(frozen_request_wire=b"corrupt bytes")
+        )
+    client = ScriptedHttpClient(
+        HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+    )
+    sender = Sender(
+        rig.store, rig.targets, rig.adapters, {rig.target.name: client}, clock=rig.clock
+    )
+    try:
+        assert await sender.tick() == 1
+        await asyncio.gather(*sender.inflight)
+    finally:
+        await sender.aclose()
+    assert [dict(request.headers)["X-Operation-Id"] for request in client.requests] == ["healthy"]
+    async with rig.factory() as session:
+        saved = await session.get(ReliableMessage, corrupt.message_id)
+        assert (saved.status, saved.attempts, saved.frozen_request_wire) == (
+            "HELD",
+            0,
+            b"corrupt bytes",
+        )
+        assert (await session.get(ReliableMessage, healthy.message_id)).status == "DONE"
+        assert (await session.get(ReliableMessage, interrupted.message_id)).status == "PENDING"
+
+
+async def test_maintenance_batches_remain_finite(storage):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = storage
+    async with rig.factory() as session:
+        for number in range(7):
+            await rig.outbox.enqueue(session, rig.draft(f"sending-{number}"))
+        await session.commit()
+    await rig.store.claim(7, rig.targets)
+    async with rig.factory() as session:
+        for number in range(7):
+            await rig.outbox.enqueue(
+                session, rig.draft(f"expired-{number}", ttl=timedelta(seconds=1))
+            )
+        await session.commit()
+    rig.clock.advance(16)
+    sender = Sender(
+        rig.store,
+        {},
+        {},
+        {},
+        budget=ReliableConfig({}, claim_batch_size=1, maintenance_batch_size=5),
+    )
+    try:
+        assert await sender.tick() == 0
+        async with rig.factory() as session:
+            rows = list(
+                await session.scalars(
+                    select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+                )
+            )
+            assert sum(row.status == "EXPIRED" for row in rows) == 5
+            assert sum(row.status == "SENDING" for row in rows) == 2
+            assert sum(row.status == "PENDING" for row in rows) == 7
+        assert await sender.tick() == 0
+    finally:
+        await sender.aclose()
+    async with rig.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            )
+        )
+        assert sum(row.status == "EXPIRED" for row in rows) == 7
+        assert sum(row.status == "PENDING" for row in rows) == 7
+        assert all(row.lease_id is None for row in rows)
+
+
+async def test_idle_poll_expires_messages_without_send_completions(storage):
+    from app.reliable.sender import Sender
+
+    rig = storage
+    polls = asyncio.Queue()
+
+    async def wait(seconds):
+        polls.put_nowait(seconds)
+        await rig.clock.wait(seconds)
+
+    async with rig.factory() as session:
+        result = await rig.outbox.enqueue(session, rig.draft(ttl=timedelta(seconds=1)))
+        await session.commit()
+    sender = Sender(rig.store, {}, {}, {}, wait=wait)
+    runner = asyncio.create_task(sender.run())
+    try:
+        async with asyncio.timeout(3):
+            assert await polls.get() == 1
+            rig.clock.advance(1)
+            assert await polls.get() == 1
+        async with rig.factory() as session:
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
+            assert row.status == "EXPIRED" and row.attempts == 0
+    finally:
+        await sender.aclose()
+    assert runner.done() and not rig.clock.waiters
+
+
+async def test_slots_do_not_preclaim_and_ttl_runs_while_full(rig):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    started = asyncio.Event()
+    unblock = asyncio.Event()
+
+    class Client:
+        requests = []
+
+        async def send(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 4:
+                started.set()
+            await unblock.wait()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            pass
+
+    client = Client()
+    async with rig.factory() as session:
+        for number in range(5):
+            await rig.outbox.enqueue(session, rig.draft(str(number), ttl=timedelta(seconds=1)))
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {"peer": client},
+        clock=rig.clock,
+        budget=ReliableConfig(rig.targets),
+    )
+    try:
+        assert await sender.tick() == 4
+        async with asyncio.timeout(2):
+            await started.wait()
+        assert await sender.tick() == 0
+        async with rig.factory() as session:
+            row = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+                ),
+            )
+            assert row.status == "PENDING" and row.lease_id is None
+        rig.clock.advance(1)
+        assert await sender.tick() == 0
+        async with rig.factory() as session:
+            row = await message_history_view(
+                session,
+                await session.scalar(
+                    select(ReliableMessage).where(ReliableMessage.operation_id == "4")
+                ),
+            )
+            assert row.status == "EXPIRED" and row.attempts == 0
+        unblock.set()
+    finally:
+        unblock.set()
+        await sender.aclose()
+    assert len(client.requests) == 4
+
+
+async def test_completions_claim_without_rerunning_maintenance(pg_rig):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    maintenance = sent = 0
+    all_sent = asyncio.Event()
+    original = rig.store.expire_pending
+
+    async def spy(limit):
+        nonlocal maintenance
+        maintenance += 1
+        return await original(limit)
+
+    class Client:
+        async def send(self, request):
+            nonlocal sent
+            sent += 1
+            if sent == 8:
+                all_sent.set()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            pass
+
+    rig.store.expire_pending = spy
+    async with rig.factory() as session:
+        for number in range(8):
+            await rig.outbox.enqueue(session, rig.draft(str(number)))
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        wait=rig.clock.wait,
+        monotonic=rig.clock.monotonic,
+        budget=ReliableConfig(rig.targets, claim_batch_size=1, max_concurrency=2),
+    )
+    runner = asyncio.create_task(sender.run())
+    try:
+        async with asyncio.timeout(3):
+            await all_sent.wait()
+            while sender.inflight:
+                await asyncio.wait(list(sender.inflight))
+    finally:
+        await sender.aclose()
+    assert runner.done() and maintenance == 1
+    async with rig.factory() as session:
+        rows = list(
+            await session.scalars(
+                select(ReliableMessage).where(ReliableMessage.target == rig.target.name)
+            )
+        )
+        assert len(rows) == 8 and all(row.status == "DONE" for row in rows)
+
+
+@pytest.mark.parametrize("max_concurrency", [1, 3])
+async def test_busy_sender_expires_messages_when_maintenance_interval_elapses(
+    pg_rig, max_concurrency
+):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    started = asyncio.Queue()
+    parked, release = asyncio.Event(), asyncio.Event()
+
+    class Client:
+        async def send(self, request):
+            identity = dict(request.headers)["X-Operation-Id"]
+            if identity == "0":
+                rig.clock.advance(1)
+            started.put_nowait(identity)
+            await release.wait()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            pass
+
+    async def wait(seconds):
+        parked.set()
+        await asyncio.Event().wait()
+
+    async with rig.factory() as session:
+        expired = await rig.outbox.enqueue(session, rig.draft("expire", ttl=timedelta(seconds=1)))
+        await session.execute(
+            update(ReliableMessage)
+            .where(ReliableMessage.id == expired.message_id)
+            .values(next_attempt_at=rig.clock() + timedelta(days=1))
+        )
+        for number in range(3):
+            await rig.outbox.enqueue(session, rig.draft(str(number)))
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        monotonic=rig.clock.monotonic,
+        wait=wait,
+        budget=ReliableConfig(rig.targets, claim_batch_size=1, max_concurrency=max_concurrency),
+    )
+    runner = asyncio.create_task(sender.run())
+    try:
+        async with asyncio.timeout(3):
+            first_started = await started.get()
+            if max_concurrency == 1:
+                assert first_started == "0"
+                await parked.wait()
+                release.set()
+            assert {first_started, await started.get(), await started.get()} == {"0", "1", "2"}
+            release.set()
+            for _ in range(100):
+                async with rig.factory() as session:
+                    row = await message_history_view(
+                        session, await session.get(ReliableMessage, expired.message_id)
+                    )
+                    if row.status == "EXPIRED":
+                        break
+                await asyncio.sleep(0.01)
+            assert row.status == "EXPIRED" and row.attempts == 0
+    finally:
+        release.set()
+        await sender.aclose()
+    assert runner.done()
+
+
+async def test_send_completion_cannot_bypass_scan_error_backoff(pg_rig):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    started = asyncio.Queue()
+    release, waiting = asyncio.Event(), asyncio.Event()
+    requests = []
+    expire_pending = rig.store.expire_pending
+    failed = False
+
+    class Client:
+        async def send(self, request):
+            identity = dict(request.headers)["X-Operation-Id"]
+            requests.append((identity, rig.clock.monotonic()))
+            started.put_nowait(identity)
+            await release.wait()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            pass
+
+    async def expire(limit):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("scan unavailable")
+        return await expire_pending(limit)
+
+    async def wait(seconds):
+        waiting.set()
+        await rig.clock.wait(seconds)
+
+    async with rig.factory() as session:
+        first = await rig.outbox.enqueue(session, rig.draft("first"))
+        second = await rig.outbox.enqueue(session, rig.draft("second"))
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        monotonic=rig.clock.monotonic,
+        wait=wait,
+        budget=ReliableConfig(rig.targets, max_concurrency=1),
+    )
+    await sender.tick()
+    delivery = next(iter(sender.inflight))
+    rig.store.expire_pending = expire
+    runner = asyncio.create_task(sender.run())
+    try:
+        async with asyncio.timeout(3):
+            assert await started.get() == "first"
+            await waiting.wait()
+            release.set()
+            await delivery
+            async with rig.factory() as session:
+                assert (await session.get(ReliableMessage, first.message_id)).status == "DONE"
+                assert (await session.get(ReliableMessage, second.message_id)).status == "PENDING"
+            rig.clock.advance(1)
+            assert await started.get() == "second"
+    finally:
+        release.set()
+        await sender.aclose()
+    assert runner.done() and requests == [("first", 0), ("second", 1)]
+
+
+async def test_loop_survives_scan_error_with_injected_wait(rig, caplog):
+    from app.reliable.sender import Sender
+
+    rounds = []
+    recovered, waiting = asyncio.Event(), asyncio.Event()
+
+    async def expire(limit):
+        rounds.append(limit)
+        if len(rounds) == 1:
+            raise RuntimeError("sensitive database text")
+        recovered.set()
+        return 0
+
+    async def wait(seconds):
+        waiting.set()
+        await rig.clock.wait(seconds)
+
+    rig.store.expire_pending = expire
+    sender = Sender(rig.store, {}, {}, {}, wait=wait)
+    runner = asyncio.create_task(sender.run())
+    async with asyncio.timeout(2):
+        await waiting.wait()
+        assert not recovered.is_set() and len(rounds) == 1
+        rig.clock.advance(1)
+        await recovered.wait()
+    await sender.aclose()
+    assert runner.done() and len(rounds) == 2
+    assert "scan failed" in caplog.text
+    assert "sensitive database text" not in caplog.text
+
+
+async def test_shutdown_leaves_unconfirmed_lease_and_closes_other_resources(storage, caplog):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = storage
+    started, cancelled, unblock, closed = (asyncio.Event() for _ in range(4))
+
+    class Client:
+        async def send(self, request):
+            started.set()
+            try:
+                await unblock.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await unblock.wait()
+                raise
+
+        async def aclose(self):
+            closed.set()
+
+    async with rig.factory() as session:
+        result = await rig.outbox.enqueue(session, rig.draft())
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        budget=ReliableConfig(rig.targets, shutdown_grace_s=0.05),
+    )
+    await sender.tick()
+    await asyncio.wait_for(started.wait(), timeout=3)
+    tasks = list(sender.inflight)
+    try:
+        async with asyncio.timeout(0.5):
+            await sender.aclose()
+        assert cancelled.is_set() and closed.is_set()
+        async with rig.factory() as session:
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
+            assert row.status == "SENDING" and row.lease_id is not None
+        assert "unconfirmed" in caplog.text
+    finally:
+        unblock.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_shutdown_uses_one_monotonic_deadline_for_blocked_release_and_close(storage, caplog):
+    from app.reliable.config import ReliableConfig
+    from app.reliable.sender import Sender
+
+    rig = storage
+    started, block, disposed = (asyncio.Event() for _ in range(3))
+    resources = []
+
+    async def release(claim, targets):
+        resources.append(asyncio.current_task())
+        rig.clock.advance(0.03)
+        await block.wait()
+
+    class Client:
+        async def send(self, request):
+            started.set()
+            await block.wait()
+
+        async def aclose(self):
+            resources.append(asyncio.current_task())
+            rig.clock.advance(0.03)
+            await block.wait()
+
+    async def dispose():
+        resources.append(asyncio.current_task())
+        disposed.set()
+
+    async with rig.factory() as session:
+        result = await rig.outbox.enqueue(session, rig.draft())
+        await session.commit()
+    rig.store.release = release
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        monotonic=rig.clock.monotonic,
+        dispose=dispose,
+        budget=ReliableConfig(rig.targets, shutdown_grace_s=0.05),
+    )
+    await sender.tick()
+    await started.wait()
+    try:
+        async with asyncio.timeout(0.5):
+            await sender.aclose()
+        assert disposed.is_set()
+        assert "lease release" in caplog.text and "HTTP close" in caplog.text
+        async with rig.factory() as session:
+            assert (await session.get(ReliableMessage, result.message_id)).status == "SENDING"
+    finally:
+        block.set()
+        await asyncio.gather(*resources, return_exceptions=True)
+
+
+@pytest.mark.parametrize("phase", ["inflight", "release", "http", "database"])
+async def test_cancelled_shutdown_waiters_do_not_abort_cleanup(pg_rig, phase):
+    from app.reliable.sender import Sender
+
+    rig = pg_rig
+    entered, resume, closed, disposed = (asyncio.Event() for _ in range(4))
+    resources, followers = [], []
+    close_calls = dispose_calls = 0
+
+    class Client:
+        async def send(self, request):
+            if phase == "inflight":
+                entered.set()
+            if phase in ("inflight", "release"):
+                await resume.wait()
+            return HttpResult(DeliveryState.HTTP_RESPONSE_COMPLETE, None, 200, (), b"ok")
+
+        async def aclose(self):
+            nonlocal close_calls
+            resources.append(asyncio.current_task())
+            close_calls += 1
+            if phase == "http":
+                entered.set()
+                await resume.wait()
+            closed.set()
+
+    async def dispose():
+        nonlocal dispose_calls
+        resources.append(asyncio.current_task())
+        dispose_calls += 1
+        if phase == "database":
+            entered.set()
+            await resume.wait()
+        await rig.engine.dispose()
+        disposed.set()
+
+    if phase == "release":
+        release = rig.store.release
+
+        async def blocked_release(claim, targets):
+            resources.append(asyncio.current_task())
+            entered.set()
+            await resume.wait()
+            return await release(claim, targets)
+
+        rig.store.release = blocked_release
+
+    async with rig.factory() as session:
+        result = await rig.outbox.enqueue(session, rig.draft())
+        await session.commit()
+    sender = Sender(
+        rig.store,
+        rig.targets,
+        rig.adapters,
+        {rig.target.name: Client()},
+        clock=rig.clock,
+        dispose=dispose,
+    )
+    await sender.tick()
+    first = asyncio.create_task(sender.aclose())
+    try:
+        async with asyncio.timeout(3):
+            if phase == "release":
+                checkpoint = asyncio.Event()
+                asyncio.get_running_loop().call_soon(checkpoint.set)
+                await checkpoint.wait()
+                for task in tuple(sender.inflight):
+                    task.cancel()
+            await entered.wait()
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            followers = [asyncio.create_task(sender.aclose()) for _ in range(2)]
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+            assert all(not task.done() for task in followers)
+            followers[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await followers[0]
+            assert not disposed.is_set()
+            if phase in ("inflight", "release"):
+                async with rig.factory() as session:
+                    row = await message_history_view(
+                        session, await session.get(ReliableMessage, result.message_id)
+                    )
+                    assert row.status == "SENDING" and row.attempts == 0
+                    assert row.lease_id is not None
+            resume.set()
+            await followers[1]
+            await sender.aclose()
+        assert closed.is_set() and disposed.is_set()
+        assert close_calls == dispose_calls == 1
+        async with rig.factory() as session:
+            row = await message_history_view(
+                session, await session.get(ReliableMessage, result.message_id)
+            )
+            assert row.status == ("PENDING" if phase == "release" else "DONE")
+            assert row.response_raw == (None if phase == "release" else b"ok")
+            assert row.attempts == 1
+            assert row.lease_id is None
+    finally:
+        resume.set()
+        await asyncio.gather(first, *followers, *sender.inflight, return_exceptions=True)
+        await asyncio.gather(*resources, return_exceptions=True)
+        await sender.aclose()
+
+
+async def test_cancelled_shutdown_waiter_keeps_original_deadline(rig, caplog):
+    from app.reliable.sender import Sender
+
+    entered, resume, blocked, cancelled = (asyncio.Event() for _ in range(4))
+    resources = []
+    disposal_started = asyncio.Event()
+
+    class Client:
+        async def aclose(self):
+            resources.append(asyncio.current_task())
+            entered.set()
+            await resume.wait()
+
+    async def dispose():
+        resources.append(asyncio.current_task())
+        disposal_started.set()
+        try:
+            await blocked.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    sender = Sender(
+        rig.store, {}, {}, {"peer": Client()}, monotonic=rig.clock.monotonic, dispose=dispose
+    )
+    first = asyncio.create_task(sender.aclose())
+    try:
+        async with asyncio.timeout(1):
+            await entered.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            rig.clock.advance(16)
+            resume.set()
+            await sender.aclose()
+            await disposal_started.wait()
+            await cancelled.wait()
+        assert "database dispose" in caplog.text
+    finally:
+        resume.set()
+        blocked.set()
+        await asyncio.gather(first, *resources, return_exceptions=True)
+        await sender.aclose()
+
+
+@pytest.mark.parametrize("sqlstate", ["42703", "42P01", "23505"])
+async def test_scan_database_error_logs_safe_diagnostics_and_keeps_polling(caplog, sqlstate):
+    import logging
+
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.core.logger import DevFormatter
+    from app.reliable.sender import Sender
+
+    class DriverError(Exception):
+        pass
+
+    cause = DriverError("private_driver_message")
+    cause.sqlstate = sqlstate
+    wrapped = RuntimeError("private_wrapper_message")
+    wrapped.__cause__ = cause
+
+    class Store:
+        async def expire_pending(self, limit):
+            raise ProgrammingError(
+                "SELECT private_payload FROM private_table",
+                {"password": "private_parameter"},
+                wrapped,
+            )
+
+    waits = []
+
+    async def wait(seconds):
+        waits.append(seconds)
+        sender.stopping = True
+
+    sender = Sender(Store(), {}, {}, {}, wait=wait)
+    with caplog.at_level(logging.ERROR, logger="app.reliable.sender"):
+        await sender.run()
+    record = next(r for r in caplog.records if "reliable scan failed" in r.getMessage())
+    output = DevFormatter(color=False).format(record)
+    assert "ProgrammingError" in output
+    assert sqlstate in output and "DriverError" in output
+    assert ("alembic upgrade head" in output) == (sqlstate in {"42703", "42P01"})
+    assert "Traceback" in output and "expire_pending" in output
+    assert "private_" not in output
+    assert waits == [sender.budget.poll_interval_s]
+
+
+async def test_background_task_error_logs_traceback(caplog):
+    import logging
+
+    from app.core.logger import DevFormatter
+    from app.reliable.sender import Sender
+
+    async def fail():
+        raise RuntimeError("adapter assembly failed")
+
+    task = asyncio.create_task(fail())
+    await asyncio.gather(task, return_exceptions=True)
+    with caplog.at_level(logging.ERROR, logger="app.reliable.sender"):
+        Sender._observe(task)
+    record = next(r for r in caplog.records if "reliable task failed" in r.getMessage())
+    output = DevFormatter(color=False).format(record)
+    assert "Traceback" in output and "RuntimeError" in output and "in fail" in output
+    assert "adapter assembly failed" not in output

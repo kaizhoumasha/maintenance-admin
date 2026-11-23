@@ -6,10 +6,8 @@
 import json
 import re
 
-from sqlalchemy.exc import SQLAlchemyError
-
 from app.core import logger
-from app.core.logger import safe_db_exception
+from app.diagnostics import log_exception
 from app.models import AuditLog
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -88,15 +86,18 @@ class AuditMiddleware:
         await self.app(scope, receive_wrapper, send_wrapper)
 
         # 只记成功;没有 audit_action 说明没走 require_permission(未登录 / 被拒 / 无需权限的接口)
-        if 200 <= status < 300 and state.get("audit_action"):
+        if 200 <= status < 300 and state.get("audit_action") and not state.get("audit_recorded"):
             try:
                 await self._record(
                     scope, state, trace_id, bytes(body), None if req_too_big else bytes(req_body)
                 )
             except Exception as exc:
-                logger.exception(
+                log_exception(
+                    logger,
                     "审计日志写入失败",
-                    exc_info=safe_db_exception(exc) if isinstance(exc, SQLAlchemyError) else exc,
+                    exc,
+                    component="audit",
+                    phase="write",
                 )
 
     async def _record(

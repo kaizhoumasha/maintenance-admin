@@ -1,6 +1,5 @@
 import asyncio
 import threading
-import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -8,6 +7,7 @@ from sqlalchemy import delete
 
 from app.core import hash_password
 from app.core.database import get_session
+from app.core.identifiers import uuid7
 from app.core.redis import get_redis
 from app.core.security import create_access_token
 from app.main import app
@@ -17,7 +17,7 @@ from app.services import session_service, user_service
 
 @pytest.fixture
 async def account(pg_sessions, real_redis):
-    suffix = uuid.uuid4().hex
+    suffix = uuid7().hex
     async with pg_sessions() as session:
         user = User(
             username=suffix,

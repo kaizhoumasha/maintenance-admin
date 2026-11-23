@@ -1,32 +1,26 @@
-import asyncio
-import os
-import subprocess
-import sys
-import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, select, text
 
+from app.core.identifiers import uuid7
 from app.models import AuditLog, AuditLogArchive, Permission, Role, role_permission
 from app.services.audit_service import archive_old
-
-
-async def _migrate(url, command, revision):
-    return await asyncio.to_thread(
-        subprocess.run,
-        [sys.executable, "-m", "alembic", command, revision],
-        cwd=Path(__file__).parents[2],
-        env={**os.environ, "DATABASE_URL": url},
-        capture_output=True,
-        text=True,
-    )
+from tests.helpers import run_alembic as _migrate
 
 
 @pytest.mark.parametrize("has_archive", [False, True])
-async def test_downgrade_requires_empty_archive(pg_url, pg_sessions, has_archive):
-    marker = uuid.uuid4().hex
+async def test_downgrade_requires_empty_archive(schema_database, has_archive):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.database import create_database_engine
+
+    pg_url, _ = schema_database
+    initialized = await _migrate(pg_url, "upgrade", "e7a41c9b3d20")
+    assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+    engine = create_database_engine(pg_url)
+    pg_sessions = async_sessionmaker(engine, expire_on_commit=False)
+    marker = uuid7().hex
     async with pg_sessions() as session:
         permission = await session.scalar(
             select(Permission).where(Permission.code == "admin:audit:read_archive")
@@ -75,10 +69,11 @@ async def test_downgrade_requires_empty_archive(pg_url, pg_sessions, has_archive
                     == "d52e8a6b1f93"
                 )
     finally:
-        restored = await _migrate(pg_url, "upgrade", "head")
+        restored = await _migrate(pg_url, "upgrade", "e7a41c9b3d20")
         assert restored.returncode == 0, restored.stdout + restored.stderr
         async with pg_sessions() as session:
             await session.execute(delete(AuditLogArchive).where(AuditLogArchive.trace_id == marker))
             await session.execute(delete(AuditLog).where(AuditLog.trace_id == marker))
             await session.execute(delete(Role).where(Role.id == role_id))
             await session.commit()
+        await engine.dispose()

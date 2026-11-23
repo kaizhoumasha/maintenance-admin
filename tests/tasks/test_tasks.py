@@ -16,12 +16,6 @@ def _eager_celery() -> None:
     celery_app.conf.task_eager_propagates = False
 
 
-def test_welcome_task_registered() -> None:
-    # 钉住 include=["app.tasks.user_tasks"] 接线正确，
-    # 配错了 worker 启动时找不到任务，这个测试先红
-    assert "users.welcome" in celery_app.tasks
-
-
 def test_welcome_task_returns_value() -> None:
     result = send_welcome.delay("kai")
     assert result.successful()

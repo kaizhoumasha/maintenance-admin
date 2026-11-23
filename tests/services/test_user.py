@@ -25,41 +25,41 @@ async def test_get_me_returns_sorted_permission_codes(db):
     assert (await user_service.get_me(db, kai)).permissions == []
 
 
-async def test_update_user_changes_only_given_fields(db, redis):
+async def test_update_user_changes_only_given_fields(db):
     root, kai = await _setup(db)
     updated = await user_service.update_user(
-        db, redis, root.id, kai.id, UserUpdate(email="new@example.com")
+        db, root.id, kai.id, UserUpdate(email="new@example.com")
     )
     assert updated.email == "new@example.com" and updated.is_active is True
 
 
-async def test_update_user_email_conflict(db, redis):
+async def test_update_user_email_conflict(db):
     root, kai = await _setup(db)
     with pytest.raises(AppError) as e:
-        await user_service.update_user(db, redis, root.id, kai.id, UserUpdate(email=root.email))
+        await user_service.update_user(db, root.id, kai.id, UserUpdate(email=root.email))
     assert e.value.code == ErrorCode.CONFLICT
 
 
-async def test_cannot_disable_self(db, redis):
+async def test_cannot_disable_self(db):
     root, _ = await _setup(db)
     with pytest.raises(AppError) as e:
-        await user_service.update_user(db, redis, root.id, root.id, UserUpdate(is_active=False))
+        await user_service.update_user(db, root.id, root.id, UserUpdate(is_active=False))
     assert e.value.code == ErrorCode.INVALID_REQUEST
 
 
-async def test_disable_revokes_sessions(db, redis):
+async def test_disabling_updates_session_version(db):
     root, kai = await _setup(db)
-    await session_service.issue_tokens(redis, kai)
-    assert f"user_refresh:{kai.id}" in redis.data
-    await user_service.update_user(db, redis, root.id, kai.id, UserUpdate(is_active=False))
-    assert f"user_refresh:{kai.id}" not in redis.data
+    previous = kai.session_version
+    updated = await user_service.update_user(db, root.id, kai.id, UserUpdate(is_active=False))
+    assert updated.is_active is False
+    assert updated.session_version == previous + 1
 
 
-async def test_disabling_last_admin_is_rejected_and_rolled_back(db, redis):
+async def test_disabling_last_admin_is_rejected_and_rolled_back(db):
     root, kai = await _setup(db)  # root 是唯一管理员
     root_id, kai_id = root.id, kai.id  # 回滚会使实例过期,先取出 id
     with pytest.raises(AppError) as e:
-        await user_service.update_user(db, redis, kai_id, root_id, UserUpdate(is_active=False))
+        await user_service.update_user(db, kai_id, root_id, UserUpdate(is_active=False))
     assert e.value.code == ErrorCode.CONFLICT
     await db.rollback()  # HTTP 请求里会话随请求关闭而回滚,这里显式模拟
     assert (await db.get(User, root_id)).is_active is True

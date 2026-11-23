@@ -1,0 +1,492 @@
+"""AUTO runtime and business-owned pending advancement."""
+
+import logging
+from time import perf_counter, time_ns
+
+from sqlalchemy import or_, select, text
+
+from app.businesses._components.bin_roller.ports import RollerWorkRef
+from app.businesses._components.bin_roller.service import ROLLER_SOURCES, BinRoller
+from app.businesses._components.pending_snapshot import (
+    PendingSnapshot,
+    capture_pages,
+    capture_query,
+)
+from app.businesses._components.rack_dispatch.service import RackDispatch
+from app.businesses._components.sorting_task.service import SortingTask
+from app.core.clock import unix_ms
+from app.diagnostics import log_exception
+from app.integrations.ecs_command import CommandOwner
+from app.models import WorkLine
+
+from ._execution_facts import read_decision
+from .archive import RETENTION_MS, Archive
+from .locking import lock_line
+from .models import (
+    AutoBinWork,
+    AutoInboundPlate,
+    AutoOutboundDecisionRound,
+    AutoOutboundPlate,
+    AutoOutboundSourceMember,
+    AutoTask,
+)
+from .queue import QueueKey
+from .rack_ports import AutoRackPorts
+from .roller_ports import RollerPorts
+from .task_flow import TaskFlow
+from .task_service import AutoTaskService
+from .transactions import AutoS1Transactions
+
+logger = logging.getLogger(__name__)
+RACK_SOURCES = ("AUTO_INBOUND_SOURCE", "AUTO_OUTBOUND_RETURN", "AUTO_OUTBOUND_TARGET")
+ROLLER_RECORDS = {
+    "PASSAGE": "bin_passage",
+    "SCAN2_RELEASE": "bin_passage",
+    "RETURN": "bin_return",
+    "FACE": "face_work",
+    "DRAIN": "workline_state",
+}
+ROLLER_KINDS = (*ROLLER_RECORDS, "RACK_CYCLE")
+PLATE_MODELS = {
+    "INBOUND_PLATE": AutoInboundPlate,
+    "INBOUND_REPORT": AutoInboundPlate,
+    "OUTBOUND_PLATE": AutoOutboundPlate,
+    "OUTBOUND_REPORT": AutoOutboundPlate,
+}
+
+
+class AutoTaskQueue:
+    """Encapsulates queue eligibility and stable ordering for AUTO tasks."""
+
+    def eligible(self, tasks, *, now_ms: int):
+        return sorted(
+            (
+                task
+                for task in tasks
+                if getattr(task, "status", None) in (None, "QUEUED")
+                and (task.not_before_ms is None or task.not_before_ms <= now_ms)
+            ),
+            key=lambda task: QueueKey(task.dispatch_sequence, task.issued_timestamp, task.task_id),
+        )
+
+
+class SmtAutoService(AutoTaskService):
+    def __init__(self, capabilities, *, worklines, first_plan_wait_ms=None):
+        from .inbound import Inbound, PhysicalSettings
+        from .outbound import Outbound
+        from .outbound_racks import OutboundRacks
+        from .source_flow import SourceFlow
+
+        self.capabilities = capabilities
+        self.ports = RollerPorts()
+        self.dispatch = RackDispatch("smt_auto", capabilities, task_admission=self)
+        roller = BinRoller(
+            CommandOwner("smt_auto"), capabilities, self.ports, rack_dispatch=self.dispatch
+        )
+        super().__init__(wms=capabilities.wms, roller=roller, first_plan_wait_ms=first_plan_wait_ms)
+        physical = tuple(
+            PhysicalSettings(
+                line.work_line_id,
+                line.work_line_version,
+                line.rack_arm_timeout_ms,
+                line.bin_arm_timeout_ms,
+                line.source_locations,
+            )
+            for line in worklines
+        )
+        args = (capabilities.wms, capabilities.ecs, self.dispatch, roller)
+        self.inbound = Inbound(*args, settings=physical)
+        self.outbound = Outbound(*args, settings=physical)
+        self.racks = AutoRackPorts(self.dispatch, inbound=self.inbound, outbound=self.outbound)
+        self.work_plans = self.inbound.work_plans
+        self.work_plans.roller = roller
+        self.task_flow = TaskFlow(
+            self.wms,
+            roller=roller,
+            dispatch=self.dispatch,
+            work_plans=self.work_plans,
+            inbound=self.inbound,
+            outbound=self.outbound,
+        )
+        self.ports.task_flow = self.task_flow
+        self.archive = Archive(self.task_flow, self.racks)
+        self.transactions = AutoS1Transactions(capabilities, service=self)
+        self.components = {
+            "sorting_task": SortingTask("smt_auto", self, task_table=AutoTask.__table__),
+            "bin_roller": roller,
+            "rack_dispatch": self.dispatch,
+        }
+        self.rack_flows = {}
+        for line in worklines:
+            self.rack_flows[line.work_line_id] = (
+                SourceFlow(self.inbound, station_id=line.transport_station_id),
+                OutboundRacks(self.outbound, station_id=line.transport_station_id),
+            )
+
+    async def allows_task_entry(self, session, *, work_line_id, task_id):
+        current = await self.ports.read_current_task(session, work_line_id=work_line_id)
+        return (
+            current.is_valid
+            and current.task_id == task_id
+            and await self._configured(session, work_line_id)
+        )
+
+    async def _configured(self, session, work_line_id):
+        settings = self.inbound.settings.get(work_line_id)
+        line = await session.get(WorkLine, work_line_id, populate_existing=True)
+        return bool(
+            settings
+            and line
+            and line.is_enabled
+            and line.business_code == "smt_auto"
+            and line.version == settings.work_line_version
+        )
+
+    async def advance(self, kind, record_id, *, now_ms=None, operation=None, timing=None):
+        if now_ms is None:
+            now_ms = unix_ms(self.wms.clock())
+        return await self.transactions.advance(
+            kind, record_id, now_ms=now_ms, operation=operation, timing=timing
+        )
+
+    def _pending(self, now_ms):
+        return {
+            "TASK": select(AutoTask.task_id).where(
+                or_(
+                    AutoTask.status.in_(("QUEUED", "PREPARING", "EXECUTING")),
+                    (AutoTask.status == "CANCELLED") & AutoTask.pending,
+                )
+            ),
+            "BIN": select(AutoBinWork.id).where(AutoBinWork.pending),
+            "BIN_RELEASE_RESULT": select(AutoBinWork.id).where(
+                AutoBinWork.release_command_code.is_not(None),
+                AutoBinWork.release_consumed_at_ms.is_(None),
+            ),
+            "OUTBOUND_FACE": select(AutoOutboundSourceMember.id).where(
+                AutoOutboundSourceMember.arrived_at_ms.is_not(None),
+                AutoOutboundSourceMember.terminal_basis.is_(None),
+            ),
+            "INBOUND_PLATE": select(AutoInboundPlate.id).where(AutoInboundPlate.pending),
+            "OUTBOUND_PLATE": select(AutoOutboundPlate.id).where(AutoOutboundPlate.pending),
+            "INBOUND_REPORT": select(AutoInboundPlate.id).where(
+                AutoInboundPlate.report_message_id.is_not(None),
+                AutoInboundPlate.report_consumed_at_ms.is_(None),
+            ),
+            "OUTBOUND_REPORT": select(AutoOutboundPlate.id).where(
+                AutoOutboundPlate.report_message_id.is_not(None),
+                AutoOutboundPlate.report_consumed_at_ms.is_(None),
+                AutoOutboundPlate.direct_obligations_closed_at_ms.is_(None),
+            ),
+            "ARCHIVE": select(AutoTask.task_id).where(
+                AutoTask.business_type == "inbound",
+                AutoTask.status.in_(("COMPLETED", "CANCELLED")),
+                ~AutoTask.details_cleaned,
+                AutoTask.closed_at_ms <= now_ms - RETENTION_MS,
+            ),
+        }
+
+    async def scan_pending(
+        self, *, limit=100, operation=None, operation_id=None, notified_at_ms=None
+    ):
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("invalid pending page size")
+        now_ms = unix_ms(self.wms.clock())
+        if operation_id is not None:
+            timing = {
+                "trigger": "wms_result",
+                "operation_id": operation_id,
+                "queue_ms": time_ns() // 1_000_000 - notified_at_ms
+                if notified_at_ms is not None
+                else None,
+                "preceding_count": 0,
+                "preceding_ms": 0,
+            }
+            outcome = await self.advance(
+                "OUTBOUND_DECISION", operation_id, now_ms=now_ms, operation=operation, timing=timing
+            )
+            if outcome is not None:
+                return int(not isinstance(outcome, str))
+        sweep_started = perf_counter()
+        preceding_ms = 0.0
+        queries = self._pending(now_ms)
+        with PendingSnapshot() as pending:
+            async with self.capabilities.session_factory() as snapshot, snapshot.begin():
+                if snapshot.get_bind().dialect.name == "postgresql":
+                    await snapshot.connection(
+                        execution_options={"isolation_level": "REPEATABLE READ"}
+                    )
+                    await snapshot.execute(text("SET TRANSACTION READ ONLY"))
+                for kind, query in queries.items():
+                    column = query.selected_columns[0]
+                    await capture_query(snapshot, query, column, pending, kind)
+                await capture_pages(
+                    pending,
+                    "RACK",
+                    lambda after_id, batch_size: self.dispatch.pending_snapshot_ids(
+                        snapshot,
+                        source_kinds=RACK_SOURCES,
+                        after_id=after_id,
+                        limit=batch_size,
+                    ),
+                )
+                for kind in ROLLER_KINDS:
+                    await capture_pages(
+                        pending,
+                        kind,
+                        lambda after_id, batch_size, kind=kind: self.roller.pending_snapshot_ids(
+                            snapshot,
+                            kind=kind,
+                            after_id=after_id,
+                            limit=batch_size,
+                        ),
+                    )
+            pending.rewind()
+            cursors = {kind: True for kind in pending.kinds()}
+            total = 0
+            while cursors:
+                for kind in tuple(cursors):
+                    ids = pending.read_batch(kind, limit)
+                    if not ids:
+                        del cursors[kind]
+                        continue
+                    for record_id in ids:
+                        started = perf_counter()
+                        try:
+                            if kind == "OUTBOUND_PLATE":
+                                await self.advance(
+                                    kind,
+                                    record_id,
+                                    now_ms=now_ms,
+                                    timing={
+                                        "trigger": "sweep",
+                                        "plate_id": record_id,
+                                        "preceding_count": total,
+                                        "preceding_ms": preceding_ms,
+                                        "sweep_scan_ms": (started - sweep_started) * 1000
+                                        - preceding_ms,
+                                    },
+                                )
+                            else:
+                                await self.advance(kind, record_id, now_ms=now_ms)
+                        except Exception as error:
+                            log_exception(
+                                logger,
+                                "SMT AUTO advance failed",
+                                error,
+                                component="smt_auto",
+                                phase="advance",
+                                context={"request_id": str(record_id)},
+                            )
+                        total += 1
+                        preceding_ms += (perf_counter() - started) * 1000
+            return total
+
+    async def advance_original(
+        self, session, kind, record_id, *, now_ms, operation=None, timing=None
+    ):
+        if kind == "CORRECT_RETURN_FACE_READY":
+            first = await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.operation == "outbound.return_rack.work_plan@v1",
+                    AutoOutboundDecisionRound.operation_id == record_id,
+                )
+            )
+            if first is None:
+                return None
+            original_id = first.operation_id
+            record_id = await session.scalar(
+                select(AutoOutboundSourceMember.id).where(
+                    AutoOutboundSourceMember.first_work_plan_round_id == first.id
+                )
+            )
+            if record_id is None:
+                return None
+        decision = None
+        if kind == "OUTBOUND_DECISION":
+            decision_identity = record_id
+            decision = await session.scalar(
+                select(AutoOutboundDecisionRound).where(
+                    AutoOutboundDecisionRound.operation == operation,
+                    AutoOutboundDecisionRound.operation_id == record_id,
+                    AutoOutboundDecisionRound.purpose == "MATERIAL_DECIDE",
+                    AutoOutboundDecisionRound.unresolved,
+                )
+            )
+            if decision is None or decision.plate_id is None:
+                return "NOT_FOUND"
+            if timing is not None:
+                timing.update(plate_id=decision.plate_id, message_id=decision.message_id)
+            response = await read_decision(self.wms, session, decision)
+            if response is None or response.response_data.get("result") != "ACCEPT":
+                return None  # Preserve the normal wakeup for other decision outcomes.
+            kind, record_id = "OUTBOUND_PLATE", decision.plate_id
+        if kind in ("INBOUND_REPORT", "OUTBOUND_REPORT"):
+            flow = self.inbound if kind == "INBOUND_REPORT" else self.outbound
+            return await flow.advance_report(session, plate_id=record_id, now_ms=now_ms)
+        if kind == "ARCHIVE":
+            return await self.archive.clean(session, task_id=record_id, now_ms=now_ms)
+        if kind == "BIN_RELEASE_RESULT":
+            work = await session.get(AutoBinWork, record_id)
+            if work is None:
+                return "NOT_FOUND"
+            return await self.task_flow.consume_release(
+                session, work_line_id=work.work_line_id, arrival_id=work.arrival_id, now_ms=now_ms
+            )
+        if kind in ("RACK", "RACK_CYCLE"):
+            job = await self.dispatch.progress(session, job_id=record_id)
+            allowed = RACK_SOURCES if kind == "RACK" else ROLLER_SOURCES
+            if job is None or job.origin.source_kind not in allowed:
+                return "NOT_FOUND"
+            line_id = job.origin.work_line_id
+            await lock_line(
+                session, self.dispatch, line_id, include_job_ids=(record_id,), roller=self.roller
+            )
+            if kind == "RACK":
+                return await self.racks.advance(
+                    session,
+                    job_id=record_id,
+                    now_ms=now_ms,
+                    allow_new=await self._configured(session, line_id),
+                )
+            return await self.roller.advance(session, RollerWorkRef(kind, record_id))
+        if kind in ROLLER_RECORDS:
+            original = await self.roller.original_record(session, ROLLER_RECORDS[kind], record_id)
+            line_id = original["work_line_id"]
+            if kind == "SCAN2_RELEASE":
+                await session.execute(
+                    select(WorkLine.id).where(WorkLine.id == line_id).with_for_update()
+                )
+                state = await self.task_flow.consume_release(
+                    session, work_line_id=line_id, arrival_id=record_id, now_ms=now_ms
+                )
+                await self.roller.original_record(
+                    session, "bin_passage", record_id, for_update=True
+                )
+                await self.roller.advance(session, RollerWorkRef(kind, record_id))
+                return state
+            job_id = original.get("rack_job_id") if kind == "FACE" else None
+            await lock_line(
+                session,
+                self.dispatch,
+                line_id,
+                roller=self.roller,
+                include_job_ids=(job_id,) if job_id else (),
+            )
+            return await self.roller.advance(session, RollerWorkRef(kind, record_id))
+
+        model = {
+            "TASK": AutoTask,
+            "BIN": AutoBinWork,
+            "OUTBOUND_FACE": AutoOutboundSourceMember,
+            "CORRECT_RETURN_FACE_READY": AutoOutboundSourceMember,
+            **PLATE_MODELS,
+        }.get(kind)
+        if model is None:
+            raise ValueError("unsupported AUTO work kind")
+        subject = await session.get(model, record_id)
+        if subject is None:
+            return None if kind == "CORRECT_RETURN_FACE_READY" else "NOT_FOUND"
+        task = await session.get(AutoTask, subject.task_id) if subject.task_id else None
+        if task is None and kind != "BIN":
+            return None if kind == "CORRECT_RETURN_FACE_READY" else "NOT_FOUND"
+        line_id = subject.work_line_id if kind == "BIN" else task.work_line_id
+        if timing is not None:
+            timing["work_line_id"] = line_id
+        # The outbound plate mutates its original task only. Line-level safety checks still
+        # read other tasks' outstanding physical facts while holding the common WorkLine lock.
+        bindings = await lock_line(
+            session,
+            self.dispatch,
+            line_id,
+            roller=self.roller,
+            timing=timing,
+            task_id=task.task_id if kind == "OUTBOUND_PLATE" else None,
+        )
+        await session.refresh(subject)
+        if decision is not None:
+            await session.refresh(decision)
+            if (
+                not subject.pending
+                or not decision.unresolved
+                or decision.operation_id != decision_identity
+            ):
+                return "ALREADY_ADVANCED"
+        configured = await self._configured(session, line_id)
+        if kind == "TASK":
+            if task.status == "QUEUED":
+                if configured:
+                    return await self.prepare_next(session, work_line_id=line_id, now_ms=now_ms)
+                return "WAITING"
+            if (task.status == "CANCELLED" and task.pending) or (
+                task.status == "PREPARING" and task.prepare_accepted_at_ms is None
+            ):
+                await self.advance_prepare(session, task_id=record_id, now_ms=now_ms)
+            if configured:
+                inbound, outbound = self.rack_flows[line_id]
+                flow = inbound if task.business_type == "inbound" else outbound
+                await flow.advance(session, task_id=record_id, now_ms=now_ms)
+            return await self.task_flow.advance(
+                session, task_id=record_id, now_ms=now_ms, allow_new=configured
+            )
+        if kind == "BIN":
+            await self.work_plans.consume_bin(
+                session, work_line_id=line_id, arrival_id=subject.arrival_id, now_ms=now_ms
+            )
+            if configured:
+                await self.work_plans.start_bin(
+                    session, work_line_id=line_id, arrival_id=subject.arrival_id, now_ms=now_ms
+                )
+            if not configured:
+                return "WAITING"
+            return await self.task_flow.start_release(
+                session, work_line_id=line_id, arrival_id=subject.arrival_id, now_ms=now_ms
+            )
+        if kind == "CORRECT_RETURN_FACE_READY":
+            if not configured:
+                return None
+            replacement = await self.work_plans.start_return_face(
+                session,
+                work_line_id=line_id,
+                member_id=record_id,
+                now_ms=now_ms,
+                correct_operation_id=original_id,
+            )
+            return replacement.operation_id if replacement else None
+        if kind == "OUTBOUND_FACE":
+            await self.work_plans.consume_return_face(
+                session, work_line_id=line_id, member_id=record_id, now_ms=now_ms
+            )
+            if configured:
+                return await self.work_plans.start_return_face(
+                    session, work_line_id=line_id, member_id=record_id, now_ms=now_ms
+                )
+            return "WAITING"
+        if kind == "INBOUND_PLATE":
+            return await self.inbound.advance(
+                session, work_line_id=line_id, plate_id=record_id, now_ms=now_ms
+            )
+        if timing is not None:
+            original_put = subject.put_command_code
+            started = perf_counter()
+            locks_before = timing["all_locks_ms"]
+            result = await self.outbound.advance_locked(
+                session,
+                work_line_id=line_id,
+                plate_id=record_id,
+                now_ms=now_ms,
+                bindings=bindings,
+                timing=timing,
+            )
+            timing["processing_ms"] = max(
+                0, (perf_counter() - started) * 1000 - (timing["all_locks_ms"] - locks_before)
+            )
+            if result is not None and result.put_command_code != original_put:
+                timing["put_command_code"] = result.put_command_code
+            return result
+        return await self.outbound.advance_locked(
+            session,
+            work_line_id=line_id,
+            plate_id=record_id,
+            now_ms=now_ms,
+            bindings=bindings,
+        )

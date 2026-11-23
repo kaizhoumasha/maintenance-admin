@@ -4,39 +4,160 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.business_wakeups import (
+    ecs_result_committed,
+    event_committed,
+    notify_business_committed,
+    wms_delivery_committed,
+    wms_result_committed,
+)
+from app.businesses import catalog
+from app.businesses.coarse_sorting.service import read_scan
+from app.businesses.runtime import BusinessRuntime, build_runtime
 from app.controllers.audit import router as audit_log_router
 from app.controllers.auth import router as auth_router
+from app.controllers.businesses import router as businesses_router
+from app.controllers.devices import router as devices_router
+from app.controllers.ecs_callback import include_ecs_callback
+from app.controllers.ecs_request import include_ecs_request
+from app.controllers.ecs_result import router as ecs_result_router
+from app.controllers.ecs_status import router as ecs_status_router
+from app.controllers.ecs_status import status_capability
 from app.controllers.health import router as health_router
+from app.controllers.integration_history import router as integration_history_router
 from app.controllers.maintenance import router as maintenance_router
 from app.controllers.menus import router as menus_router
 from app.controllers.permissions import router as permissions_router
 from app.controllers.roles import router as roles_router
 from app.controllers.users import router as users_router
+from app.controllers.wms_events import include_wms_events
+from app.controllers.worklines import router as worklines_router
 from app.core import error_responses, get_settings, register_exception_handlers, setup_logging
 from app.core.database import engine, session_factory
 from app.core.ratelimit import RateLimit
 from app.core.redis import get_redis
 from app.core.routing import drop_422
+from app.integrations.discovery import load_runtime_contracts
+from app.integrations.ecs_command.runtime import configure_ecs, ecs_runtime_config
+from app.integrations.wms_request import ADAPTERS as WMS_REQUEST_ADAPTERS
+from app.integrations.wms_transport import ADAPTERS as WMS_TRANSPORT_ADAPTERS
+from app.integrations.wms_transport.acceptance import submission_observer
+from app.integrations.wms_transport.dispatch import TransportDispatch
+from app.integrations.wms_transport.protocol import PROTOCOL as WMS_TRANSPORT_PROTOCOL
 from app.middlewares import AuditMiddleware, trace_id_middleware
+from app.reliable_runtime import reliable_lifespan
+from app.services.device_bindings import resolve_binding, resolve_binding_snapshot
+from app.services.device_routes import DeviceRoutes, authorize_new_command
+from app.services.device_status_service import DeviceStatusService
 
 settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    yield
-    # 优雅停机:归还连接池,避免 Postgres 侧残留空闲连接、Redis 侧连接被强杀
-    await engine.dispose()
-    await get_redis().aclose()
-    get_redis.cache_clear()
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    async def assembly_unavailable(_session):
+        return "ASSEMBLY_UNAVAILABLE"
+
+    def authorize_dispatch(command):
+        runtime = getattr(application.state, "business_runtime", None)
+        if not isinstance(runtime, BusinessRuntime):
+            return assembly_unavailable
+        return runtime.ecs_dispatch_authorizer(command)
+
+    def authorize_transport(task):
+        runtime = getattr(application.state, "business_runtime", None)
+        if not isinstance(runtime, BusinessRuntime):
+            return assembly_unavailable
+        return runtime.transport_dispatch_authorizer(task)
+
+    owns_business_runtime = False
+    try:
+        ecs_commands = getattr(application.state, "ecs_commands", None)
+        if ecs_commands is None:
+            if settings.ENVIRONMENT == "local":
+                ecs_commands = configure_local_ecs(
+                    application,
+                    environment=settings.ENVIRONMENT,
+                    routes=DeviceRoutes(command_bindings, annexes=command_annexes),
+                    annexes=command_annexes,
+                    authorize_new=authorize_new_command,
+                    authorize_dispatch=authorize_dispatch,
+                )
+            elif command_bindings or command_annexes:
+                ecs_commands = configure_ecs(
+                    application,
+                    routes=DeviceRoutes(command_bindings, annexes=command_annexes),
+                    annexes=command_annexes,
+                    authorize_new=authorize_new_command,
+                    authorize_dispatch=authorize_dispatch,
+                )
+        application.state.device_status = DeviceStatusService(session_factory, get_redis())
+        application.state.business_event_committed = (
+            getattr(application.state, "business_event_committed", None) or event_committed
+        )
+        application.state.business_committed = (
+            getattr(application.state, "business_committed", None) or notify_business_committed
+        )
+        application.state.ecs_result_committed = (
+            getattr(application.state, "ecs_result_committed", None) or ecs_result_committed
+        )
+        config = ecs_runtime_config(settings, ecs_commands)
+        async with reliable_lifespan(
+            config,
+            getattr(application.state, "reliable_adapters", {}),
+            lifecycles={
+                **getattr(application.state, "reliable_lifecycles", {}),
+                WMS_TRANSPORT_PROTOCOL: TransportDispatch(authorize_transport),
+            },
+            client_provider=getattr(application.state, "reliable_client_provider", None),
+            on_result=wms_result_committed,
+            on_delivered=wms_delivery_committed,
+            observe_delivered=submission_observer(
+                config.targets, session_factory, application.state.business_committed
+            ),
+        ) as outbox:
+            application.state.outbox = outbox
+            if ecs_commands is not None:
+                ecs_commands.outbox = outbox
+            runtime = getattr(application.state, "business_runtime", None)
+            if runtime is None:
+                runtime = build_runtime(
+                    outbox=outbox,
+                    ecs_commands=ecs_commands,
+                    session_factory=session_factory,
+                )
+                owns_business_runtime = True
+            expected = {definition.code: definition for definition in catalog.definitions()}
+            if (
+                not isinstance(runtime, BusinessRuntime)
+                or runtime.definitions != expected
+                or runtime.services.keys() != expected.keys()
+                or any(service is None for service in runtime.services.values())
+            ):
+                raise ValueError("Business runtime must contain complete definitions and services")
+            application.state.business_runtime = runtime
+            yield
+    finally:
+        if owns_business_runtime:
+            application.state.business_runtime = None
+        application.state.outbox = None
+        application.state.ecs_result_committed = None
+        application.state.business_event_committed = None
+        application.state.business_committed = None
+        await engine.dispose()
+        await get_redis().aclose()
+        get_redis.cache_clear()
 
 
 # 非本地环境隐藏 API 文档
 app = FastAPI(
     lifespan=lifespan,
     title=settings.APP_NAME,
-    description="管理系统后端",
-    version="0.2.0",
+    description=(
+        "通用企业级后端管理平台模板，适用于 WMS、MES、WES 等业务开发，"
+        "提供第三方与内部 API 对接基础能力"
+    ),
+    version="0.3.5",
     # 默认 100 次/分钟/IP/路由,路由可用同 name 的 RateLimit 覆盖
     dependencies=[Depends(RateLimit(100))],
     # 刷新页面后保留已填的 token
@@ -48,16 +169,48 @@ app = FastAPI(
 app.middleware("http")(trace_id_middleware)
 app.add_middleware(AuditMiddleware)  # 后添加 = 最外层,能看到最终状态码
 app.state.audit_session_factory = session_factory
+app.state.integration_history_session_factory = session_factory
+app.state.integration_capabilities = [status_capability()]
+# WMS 目标由 RELIABLE_TARGETS 配置;local ECS 自动装配通用合同并加入同一发送器。
+app.state.reliable_adapters = {**WMS_TRANSPORT_ADAPTERS, **WMS_REQUEST_ADAPTERS}
 register_exception_handlers(app)
 setup_logging()
 app.include_router(users_router, prefix="/api/v1")
 app.include_router(audit_log_router, prefix="/api/v1")
+app.include_router(integration_history_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(roles_router, prefix="/api/v1")
 app.include_router(permissions_router, prefix="/api/v1")
 app.include_router(maintenance_router, prefix="/api/v1")
 app.include_router(menus_router, prefix="/api/v1")
 app.include_router(health_router)
+app.include_router(ecs_result_router, prefix="/api/v1")
+app.include_router(ecs_status_router, prefix="/api/v1")
+app.include_router(devices_router, prefix="/api/v1")
+app.include_router(worklines_router, prefix="/api/v1")
+app.include_router(businesses_router, prefix="/api/v1")
+command_bindings, command_annexes = load_runtime_contracts(settings)
+from app.controllers.dev import include_dev_routers  # noqa: E402
+from app.integrations.ecs_command.dev import configure_local_ecs  # noqa: E402
+
+include_wms_events(app, environment=settings.ENVIRONMENT)
+include_ecs_callback(
+    app,
+    environment=settings.ENVIRONMENT,
+    resolve_binding=resolve_binding,
+    resolve_input_target=catalog.input_target,
+)
+include_ecs_request(
+    app,
+    environment=settings.ENVIRONMENT,
+    resolve_binding_snapshot=resolve_binding_snapshot,
+)
+include_dev_routers(
+    app,
+    environment=settings.ENVIRONMENT,
+    command_bindings=command_bindings,
+    read_business=read_scan,
+)
 
 _openapi = app.openapi
 app.openapi = lambda: drop_422(_openapi())  # type: ignore[method-assign]

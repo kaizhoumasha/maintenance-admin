@@ -1,0 +1,66 @@
+{
+  "parameters": {
+    "ng_probability_per_layer_attempt": 0.005,
+    "pieces_per_layer": 2,
+    "scope": "whole_layer_terminal_put_ng",
+    "not_ng": "finite_internal_wait_or_recoverable_retry"
+  },
+  "sample": {
+    "status": "supply_and_tail_complete",
+    "requested": 2500,
+    "execution_target": 2500,
+    "seed": 88,
+    "pattern": "random",
+    "ng_profile": "0.5pct",
+    "timing": "lower_slow",
+    "policy": "paired_whole",
+    "successful_supply": [
+      2500,
+      2500
+    ],
+    "drawn": [
+      2510,
+      2518
+    ],
+    "ng_confirmed": [
+      10,
+      18
+    ],
+    "boxes": [
+      207,
+      282
+    ],
+    "cache_moves": 1,
+    "source_operations": 489,
+    "quota_commands": 489,
+    "internal_waits": 9288,
+    "put_wait_retries": 3755,
+    "max_supply_lead": [
+      22,
+      14
+    ],
+    "mean_layer_gap": 5.7088,
+    "mean_time_gap": 5.996528141644531,
+    "supply_time": 219479,
+    "tail_padding_layers": [
+      11,
+      8
+    ],
+    "tail_closed": [
+      true,
+      true
+    ],
+    "source_remainders": {
+      "active": [
+        0,
+        207,
+        1
+      ],
+      "cache": [
+        1,
+        282,
+        2
+      ]
+    }
+  }
+}

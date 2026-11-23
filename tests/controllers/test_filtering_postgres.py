@@ -61,7 +61,7 @@ async def test_pg_permissions_and_invalid_inputs(pg_client, path, caplog):
             assert (await query(pg_client, path, **params)).status_code == 400
         assert (await query(pg_client, path, condition("action", "ilike", "%"))).status_code == 400
     assert tag not in "\n".join(
-        r.getMessage() for r in caplog.records if r.name == "maintenance-admin"
+        r.getMessage() for r in caplog.records if r.name == "enterprise-backend"
     )
     assert (await query(pg_client, path)).status_code == 200
 
@@ -97,7 +97,7 @@ async def test_pg_dates_and_string_validation(pg_client, path, caplog):
     assert (
         await query(pg_client, path, condition(field, "eq", "private\x00value"))
     ).status_code == 400
-    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name == "maintenance-admin")
+    app_logs = "\n".join(r.getMessage() for r in caplog.records if r.name == "enterprise-backend")
     for value in bad_dates[1:]:
         assert value not in app_logs
     assert "private" not in app_logs
@@ -149,7 +149,7 @@ async def test_pg_user_fields_patterns_and_role_count(pg_client, pg_sessions):
         (condition("username", "ilike", rf"a\_b\%\\{tag}"), [users[1].id]),
     ]
     for node, expected in cases:
-        response = await query(pg_client, PATHS[0], scope, node, page=1, page_size=100)
+        response = await query(pg_client, PATHS[0], scope, node, start=1, end=100)
         assert response.status_code == 200, response.text
         body = response.json()
         assert [u["id"] for u in body["items"]] == expected
@@ -163,7 +163,7 @@ async def test_pg_user_fields_patterns_and_role_count(pg_client, pg_sessions):
         assert (
             await query(pg_client, PATHS[0], condition("is_active", "eq", value))
         ).status_code == 400
-    response = await query(pg_client, PATHS[0], scope, page=2, page_size=1)
+    response = await query(pg_client, PATHS[0], scope, start=2, end=2)
     assert response.json()["total"] == 2
     assert [u["id"] for u in response.json()["items"]] == [users[0].id]
 
@@ -203,7 +203,7 @@ async def audit_rows(pg_client, pg_sessions):
 
 
 @pytest.mark.parametrize("path,index,action", [(PATHS[1], 0, "hot"), (PATHS[2], 1, "cold")])
-async def test_pg_audit_fields_cursor_sql_and_no_writes(
+async def test_pg_audit_fields_window_sql_and_no_writes(
     pg_client, pg_sessions, audit_rows, path, index, action
 ):
     tag, uid = pg_client["tag"], pg_client["users"][0].id
@@ -214,7 +214,7 @@ async def test_pg_audit_fields_cursor_sql_and_no_writes(
     engine = pg_sessions.kw["bind"].sync_engine
 
     def capture(conn, cursor, statement, parameters, context, executemany):
-        if "FROM audit_logs" in statement:
+        if f"FROM {AuditLog.__table__.fullname}" in statement:
             sql.append(statement.upper())
 
     async with pg_sessions() as session:
@@ -224,21 +224,22 @@ async def test_pg_audit_fields_cursor_sql_and_no_writes(
         ]
     event.listen(engine, "before_cursor_execute", capture)
     try:
-        ids, cursor = [], None
-        while True:
-            params = {"limit": 2, **({"cursor": cursor} if cursor else {})}
+        ids = []
+        for start_row in (1, 3, 5):
             response = await query(
-                pg_client, path, scope, condition("action", "in", [f"{action}_{tag}"]), **params
+                pg_client,
+                path,
+                scope,
+                condition("action", "in", [f"{action}_{tag}"]),
+                start=start_row,
+                end=start_row + 1,
             )
             assert response.status_code == 200, response.text
             body = response.json()
-            assert set(body) == {"items", "next_cursor"}
+            assert set(body) == {"items", "total", "start", "end"}
             ids.extend(r["id"] for r in body["items"])
-            cursor = body["next_cursor"]
-            if cursor is None:
-                break
         assert ids == expected
-        assert sql and all("COUNT(" not in s and "OFFSET" not in s for s in sql)
+        assert sql and any("COUNT(" in s for s in sql) and any("OFFSET" in s for s in sql)
         assert all(("AUDIT_LOGS_ARCHIVE" in s) == (index == 1) for s in sql)
     finally:
         event.remove(engine, "before_cursor_execute", capture)
@@ -266,11 +267,9 @@ async def test_pg_audit_fields_cursor_sql_and_no_writes(
         response = await query(pg_client, path, scope, node)
         assert response.status_code == 200, response.text
         assert [r["id"] for r in response.json()["items"]] == ids
-    assert (await query(pg_client, path, scope, limit=100)).json()["next_cursor"] is None
-    assert (await query(pg_client, path, scope, condition("resource_id", "eq", 99))).json() == {
-        "items": [],
-        "next_cursor": None,
-    }
+    assert (await query(pg_client, path, scope, condition("resource_id", "eq", 99))).json()[
+        "items"
+    ] == []
     assert (await query(pg_client, path, condition("detail", "eq", "private"))).status_code == 400
     async with pg_sessions() as session:
         after = [
@@ -284,7 +283,7 @@ async def test_pg_insert_and_archive_between_pages(pg_client, pg_sessions, audit
     rows, _ = audit_rows
     tag = pg_client["tag"]
     scope = condition("resource", "eq", tag)
-    first = (await query(pg_client, PATHS[1], scope, limit=1)).json()
+    first = (await query(pg_client, PATHS[1], scope, start=1, end=1)).json()
     assert first["items"][0]["id"] == rows[-1].id
     async with pg_sessions() as session:
         newest = AuditLog(resource=tag, action=tag, trace_id=tag)
@@ -292,7 +291,8 @@ async def test_pg_insert_and_archive_between_pages(pg_client, pg_sessions, audit
         # 对应归档副本已存在于测试数据集,只移走尚未返回的热表记录。
         await session.execute(delete(AuditLog).where(AuditLog.id == rows[-2].id))
         await session.commit()
-    rest = (await query(pg_client, PATHS[1], scope, limit=100, cursor=first["next_cursor"])).json()
-    assert [r["id"] for r in rest["items"]] == [r.id for r in reversed(rows[:-2])]
-    assert rest["next_cursor"] is None
-    assert (await query(pg_client, PATHS[1], scope, limit=1)).json()["items"][0]["id"] == newest.id
+    rest = (await query(pg_client, PATHS[1], scope, start=2, end=100)).json()
+    assert [r["id"] for r in rest["items"]] == [rows[-1].id, *[r.id for r in reversed(rows[:-2])]]
+    assert (await query(pg_client, PATHS[1], scope, start=1, end=1)).json()["items"][0][
+        "id"
+    ] == newest.id

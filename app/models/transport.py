@@ -1,0 +1,70 @@
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    Text,
+    Uuid,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .base import Base
+
+
+class TransportTask(Base):
+    __tablename__ = "transport_task"
+    __table_args__ = (
+        Index("transport_task_cycle_idx", "cycle_id"),
+        *(
+            Index(
+                f"transport_task_{column}_idx",
+                column,
+                postgresql_where=text(f"{column} IS NOT NULL"),
+                sqlite_where=text(f"{column} IS NOT NULL"),
+            )
+            for column in (
+                "submission_exchange_id",
+                "acceptance_request_record_id",
+                "acceptance_response_record_id",
+            )
+        ),
+        CheckConstraint(
+            "kind IN ('RACK_MOVE','RACK_ROTATE','BIN_MOVE','BIN_EXCHANGE')", name="kind"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    submission_exchange_id: Mapped[UUID] = mapped_column(Uuid)
+    acceptance_request_record_id: Mapped[UUID | None] = mapped_column(Uuid)
+    acceptance_response_record_id: Mapped[UUID | None] = mapped_column(Uuid)
+    client_request_id: Mapped[str] = mapped_column(Text, unique=True)
+    transport_task_id: Mapped[str] = mapped_column(Text, unique=True)
+    operation_id: Mapped[str] = mapped_column(Text, unique=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    input_digest: Mapped[str] = mapped_column(String(64))
+    workline_id: Mapped[str] = mapped_column(Text)
+    station_id: Mapped[str | None] = mapped_column(Text)
+    owner_domain: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 同一货架一轮生命周期(进场/换面/离场)的本地分组键,不进入 wire 与冻结请求
+    cycle_id: Mapped[str | None] = mapped_column(Text)
+    # 以下列用于 WMS 回调的应用(见回调接收设计 §4.2);JSON 列一律整体重新赋值,不要原地修改
+    frozen: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    submission_acceptance: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    member_positions: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    outcome_status: Mapped[str | None] = mapped_column(String(16))
+    applied_outcome: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    applied_outcome_revision: Mapped[int | None] = mapped_column(BigInteger)
+    outcome_digests: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    pending_outcome: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    position_observation: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    pending_result_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    applied_result_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    applied_trigger_receipt_id: Mapped[int | None] = mapped_column(BigInteger)
+    pending_result_source_unknown: Mapped[bool | None]

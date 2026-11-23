@@ -1,14 +1,16 @@
 """Redis 滑动窗口限流:一个 Lua 脚本一次往返完成清理、计数、写入,保证原子。"""
 
-import uuid
+import logging
 
 from fastapi import Request
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.core.errors import AppError, ErrorCode
+from app.core.identifiers import uuid7
 from app.core.logger import logger
 from app.core.redis import RedisDep
+from app.diagnostics import log_exception
 
 # 用 Redis 的 TIME 而不是应用时钟,多实例部署不受时钟偏差影响;被拒绝的请求不入账,
 # 否则持续被拒的客户端会一直续期自己的封禁。返回 {是否放行, 需等待秒数}
@@ -32,10 +34,11 @@ WINDOW = 60  # 秒;key 里带窗口是为了日后改窗口不会和旧数据混
 class RateLimit:
     """
     限流依赖。全局默认挂在 app 上;路由要覆盖就在装饰器里再放一个同 name 的实例,
-    默认那个会自动跳过。不同 name(如登录的 "login")与默认限流叠加生效。
+    默认那个会自动跳过;`limit=None` 的实例表示该路由豁免默认限流(协议不允许 429 的回调入口)。
+    不同 name(如登录的 "login")与默认限流叠加生效。
     """
 
-    def __init__(self, limit: int, name: str = "ip", per_route: bool = True):
+    def __init__(self, limit: int | None, name: str = "ip", per_route: bool = True):
         self.limit, self.name, self.per_route = limit, name, per_route
 
     async def __call__(self, request: Request, redis: RedisDep) -> None:
@@ -48,6 +51,8 @@ class RateLimit:
         ]
         if overrides and overrides[-1] is not self:
             return
+        if self.limit is None:
+            return
         # shortcut: 取对端地址,反向代理后所有人共用一个 IP;部署时改为解析可信的 X-Forwarded-For
         ip = request.client.host if request.client else "unknown"
         key = f"{self.name}:{ip}" + (f":{route.path}" if self.per_route else "")
@@ -58,12 +63,20 @@ class RateLimit:
                 f"ratelimit:{key}:{WINDOW}",
                 WINDOW,
                 self.limit,
-                uuid.uuid4().hex,
+                uuid7().hex,
             )
-        except (RedisConnectionError, RedisTimeoutError):
+        except (RedisConnectionError, RedisTimeoutError) as error:
             # fail-open:限流是保护不是门禁,Redis 挂了不能把整个 API 一起拖下水;
             # 只放行连接/超时,脚本报错(ResponseError)是 bug,要暴露而不是静默放行
-            logger.warning("ratelimit unavailable, fail-open | %s", key, exc_info=True)
+            log_exception(
+                logger,
+                "ratelimit unavailable, fail-open",
+                error,
+                component="http",
+                phase="rate_limit",
+                level=logging.WARNING,
+                context={"limit": self.name, "route": route.path},
+            )
             return
         if not allowed:
             raise AppError(

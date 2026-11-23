@@ -1,0 +1,106 @@
+"""Confirmed outbound wire shapes; no inferred device empty or NG mapping."""
+
+from typing import Annotated, Literal
+
+from pydantic import Field, TypeAdapter, model_validator
+
+from app.businesses._components.sorting_task.contracts import Face, Identifier
+
+from .work_plan_contracts import Data, Wait
+
+
+class BinLocator(Data):
+    type: Literal["BIN_CELL"]
+    bin_code: Identifier
+    cell_id: Identifier
+
+
+class RackLocator(Data):
+    type: Literal["RACK_SLOT"]
+    rack_id: Identifier
+    rack_face: Face
+    slot_id: Identifier
+
+
+class NgLocator(Data):
+    type: Literal["NG_ZONE"]
+    zone_code: Identifier
+
+
+SourceLocator = Annotated[BinLocator | RackLocator, Field(discriminator="type")]
+
+
+class Target(RackLocator):
+    rack_layer: int
+    rack_column: int
+
+
+class Accept(Data):
+    result: Literal["ACCEPT"]
+    target_locator: Target
+    target_preparation: Literal["ROTATE", "REPLACE"] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def optional_fields(cls, value):
+        if isinstance(value, dict):
+            if "next_source_action" in value:
+                raise ValueError("outbound ACCEPT no longer authorizes the next pick")
+            if "target_preparation" in value and value["target_preparation"] is None:
+                raise ValueError("target_preparation must be absent, not null")
+        return value
+
+
+class BinAccept(Accept):
+    pass
+
+
+class RackAccept(Accept):
+    pass
+
+
+class BinReject(Data):
+    result: Literal["REJECT"]
+    ng_locator: NgLocator
+    source_disposition: Literal["CONTINUE", "CLOSE"]
+
+
+class RackReject(Data):
+    result: Literal["REJECT"]
+    ng_locator: NgLocator
+    source_disposition: Literal["CLOSE"]
+
+
+class Retry(Data):
+    result: Literal["RETRY"]
+
+
+class SourceDone(Data):
+    result: Literal["SOURCE_DONE"]
+
+
+EMPTY_DECISION = TypeAdapter(Annotated[Retry | SourceDone | Wait, Field(discriminator="result")])
+DECISIONS = {
+    "bin": TypeAdapter(Annotated[BinAccept | BinReject | Wait, Field(discriminator="result")]),
+    "rack": TypeAdapter(Annotated[RackAccept | RackReject | Wait, Field(discriminator="result")]),
+}
+
+
+_MATERIAL_FIELDS = (
+    BinAccept.model_fields.keys()
+    | BinReject.model_fields.keys()
+    | Wait.model_fields.keys()
+    | {"next_source_action"}
+)
+
+
+def validate_material_decision(source, data, *, original_put=False):
+    decision = DECISIONS[source].validate_python(data, extra="ignore")
+    if original_put:
+        return
+    other_fields = (_MATERIAL_FIELDS & data.keys()) - type(decision).model_fields.keys()
+    # Existing peers send a null target on REJECT, which carries no normal route authority.
+    if decision.result == "REJECT" and data.get("target_locator") is None:
+        other_fields.discard("target_locator")
+    if other_fields:
+        raise ValueError("outbound material response has fields from another branch")

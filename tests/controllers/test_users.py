@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import user_service
 from tests.helpers import PAYLOAD
+from tests.helpers import refresh as _refresh
 
 
 async def test_create_and_get_user(client, admin):
@@ -94,7 +95,7 @@ async def test_user_filter_fields_roles_and_paging(client, admin):
     for field, op, value, expected in cases:
         raw = json.dumps({"conditions": [{"field": field, "op": op, "value": value}]})
         response = await client.get(
-            "/api/v1/users", headers=admin, params={"filter": raw, "page_size": 100}
+            "/api/v1/users", headers=admin, params={"filter": raw, "start": 1, "end": 100}
         )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -104,7 +105,7 @@ async def test_user_filter_fields_roles_and_paging(client, admin):
     raw = json.dumps({"conditions": [{"field": "username", "op": "in", "value": ["kai", "other"]}]})
     body = (
         await client.get(
-            "/api/v1/users", headers=admin, params={"filter": raw, "page": 2, "page_size": 1}
+            "/api/v1/users", headers=admin, params={"filter": raw, "start": 2, "end": 2}
         )
     ).json()
     assert body["total"] == 2 and [u["id"] for u in body["items"]] == [uid]
@@ -159,16 +160,16 @@ async def test_update_user_errors(client, admin):
     assert r.status_code == 404
 
 
-async def test_disable_user_revokes_sessions_and_access(client, admin, redis):
+async def test_disable_user_revokes_sessions_and_access(client, admin):
     uid = await _new_user(client, admin)
-    r, kai = await _login(client)
-    assert f"user_refresh:{uid}" in redis.data
+    _, kai = await _login(client)
+    refresh_token = client.cookies.get("refresh_token")
     assert (await client.get("/api/v1/users/me", headers=kai)).status_code == 200
 
     r = await client.put(f"/api/v1/users/{uid}", json={"is_active": False}, headers=admin)
     assert r.status_code == 200 and r.json()["is_active"] is False
-    assert f"user_refresh:{uid}" not in redis.data
     assert (await client.get("/api/v1/users/me", headers=kai)).status_code == 401  # 立即失效
+    assert (await _refresh(client, refresh_token)).status_code == 401
     assert (await _login(client))[0].status_code == 401
 
 
@@ -178,9 +179,7 @@ async def test_cannot_disable_self(client, admin):
 
 
 async def test_last_admin_is_protected(client, admin):
-    # root 是唯一拥有 admin:role:set_permissions 的活跃用户
-    ops_perms = ["admin:user:update", "admin:user:assign_role", "admin:role:set_permissions"]
-    uid = await _new_user(client, admin, perms=ops_perms)  # kai 也有该权限
+    uid = await _new_user(client, admin, role_ids=[1])
     _, kai = await _login(client)
 
     # kai 是第二个管理员时,可以停用 root
@@ -189,7 +188,7 @@ async def test_last_admin_is_protected(client, admin):
     # 现在 kai 是最后一个:不能摘掉自己的角色,也不能清空角色权限
     r = await client.put(f"/api/v1/users/{uid}/roles", json={"role_ids": []}, headers=kai)
     assert r.status_code == 409
-    r = await client.put("/api/v1/roles/2/permissions", json={"permissions": []}, headers=kai)
+    r = await client.put("/api/v1/roles/1/permissions", json={"permissions": []}, headers=kai)
     assert r.status_code == 409 and "至少" in r.json()["message"]
 
 

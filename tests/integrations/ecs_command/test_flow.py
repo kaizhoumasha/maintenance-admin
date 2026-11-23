@@ -1,0 +1,1241 @@
+import json
+
+import pytest
+from sqlalchemy import select
+
+from app.http_client import DeliveryState, HttpResult
+from app.integrations import history as history_records
+from app.models import IntegrationExchange, ReliableMessage
+from tests.helpers import EcsMove, read_history_body
+
+
+async def prepare(ecs, key="call"):
+    async with ecs.factory.begin() as session:
+        return await ecs.service.create(
+            session,
+            owner=ecs.owner,
+            call_key=key,
+            device_code="D1",
+            timeout_ms=30000,
+            command=EcsMove.model_validate({"qty": 1}),
+        )
+
+
+def response(code=200, message="ACK"):
+    return HttpResult(
+        DeliveryState.HTTP_RESPONSE_COMPLETE,
+        None,
+        code,
+        (("content-type", "application/json"),),
+        json.dumps(dict(code=code, message=message)).encode(),
+    )
+
+
+def result_body(code):
+    return json.dumps(
+        dict(command_code=code, device_code="D1", result="SUCCESS", finish_time=1, data={"qty": 1})
+    ).encode()
+
+
+async def make_store(ecs):
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.reliable.store import MessageStore
+
+    return MessageStore(
+        ecs.factory, lifecycles={PROTOCOL: EcsLifecycle(ecs.service)}, records=history_records
+    )
+
+
+async def test_finished_nonacceptance_replaces_open_of_same_lease(ecs):
+    from datetime import UTC, datetime
+
+    from app.models import IntegrationExchange
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (first,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(first, ecs.targets["ecs"])
+    await store.finish(
+        first,
+        AttemptOutcome(
+            MessageStatus.PENDING,
+            result=HttpResult(DeliveryState.NOT_SENT, None, None, (), None),
+            next_attempt_at=datetime.now(UTC),
+        ),
+    )
+    async with ecs.factory() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code,
+                IntegrationExchange.role == "ECS_COMMAND",
+            )
+        )
+        assert root is not None
+        from app.integrations.ecs_command.lifecycle import get_attempt_conclusions
+
+        assert await get_attempt_conclusions(session, exchange_id=root.id) == {
+            first.lease_id: "NOT_RECEIVED"
+        }
+    (second,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(second, ecs.targets["ecs"])
+    async with ecs.factory() as session:
+        assert await get_attempt_conclusions(session, exchange_id=root.id) == {
+            first.lease_id: "NOT_RECEIVED",
+            second.lease_id: "OPEN_ATTEMPT",
+        }
+
+
+async def test_result_replay_survives_unified_history_cleanup(ecs):
+    from sqlalchemy import delete
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        original = await receive_ecs_result(session, raw, ecs.service)
+    from datetime import UTC, datetime, timedelta
+
+    from app.tasks.callback_tasks import run_history_cleanup, run_receipt_cleanup
+
+    async with ecs.factory.begin() as session:
+        await session.execute(delete(ReliableMessage))
+    future = datetime.now(UTC) + timedelta(days=100)
+    await run_receipt_cleanup(ecs.factory, 90, now=future)
+    await run_history_cleanup(ecs.factory, now=future)
+    ecs.service.annexes = {}
+    async with ecs.factory.begin() as session:
+        replay = await receive_ecs_result(session, raw, ecs.service)
+        assert replay.status_code == original.status_code == 200
+        assert replay.body == original.body
+        evidence = await session.scalar(
+            select(IntegrationRecord)
+            .join(IntegrationExchange, IntegrationExchange.id == IntegrationRecord.exchange_id)
+            .where(
+                IntegrationExchange.command_code == command.command_code,
+                IntegrationRecord.record_kind == "RESULT_EVIDENCE",
+            )
+        )
+        assert evidence is not None
+        assert evidence.effective_payload["data"] == {"qty": 1}
+
+
+async def test_frozen_request_reference_keeps_independent_integrity(ecs):
+    from hashlib import sha256
+
+    from app.models import IntegrationExchange, IntegrationRecord
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code
+            )
+        )
+        assert root is not None
+        body = await session.get(IntegrationRecord, root.request_record_id)
+        body.raw_body = b"changed but internally consistent"
+        body.stored_bytes = len(body.raw_body)
+        body.body_sha256 = sha256(body.raw_body).hexdigest()
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    assert await store.before_send(claim, ecs.targets["ecs"]) is None
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, claim.message_id)
+        assert message.status == "HELD"
+        assert message.pause_reason == "CONFIG_DRIFT"
+
+
+async def test_corrupt_frozen_snapshot_is_held_before_dispatch(ecs):
+    import time
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        message = await session.scalar(
+            select(ReliableMessage).where(ReliableMessage.operation_id == command.command_code)
+        )
+        message_id = message.id
+        message.frozen_request_wire = b"corrupt bytes"
+    store = await make_store(ecs)
+    assert await store.maintain_snapshots(10, ecs.targets, time.monotonic() + 5) == 1
+    assert await store.claim(1, ecs.targets) == ()
+    async with ecs.factory() as session:
+        message = await session.get(ReliableMessage, message_id)
+        assert (message.status, message.pause_reason, message.dispatch_started_at) == (
+            "HELD",
+            "FROZEN_REQUEST_INTEGRITY",
+            None,
+        )
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        rejected = await receive_ecs_result(session, raw, ecs.service)
+        assert rejected.status_code == 409
+        assert rejected.body["message"] == "RESULT_BEFORE_DISPATCH"
+    async with ecs.factory.begin() as session:
+        replayed = await receive_ecs_result(session, raw, ecs.service)
+        assert replayed.pure_replay and replayed.body == rejected.body
+
+
+@pytest.mark.parametrize("runtime", [False, True])
+@pytest.mark.parametrize("maintained", [False, True])
+@pytest.mark.parametrize("original_intact", [False, True])
+async def test_late_result_uses_original_evidence_when_send_copy_is_corrupt(
+    ecs, monkeypatch, request, runtime, maintained, original_intact
+):
+    import time
+    from datetime import timedelta
+    from hashlib import sha256
+
+    from app.core.config import get_settings
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import EcsCommand, IntegrationRecord
+
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", runtime)
+    command = await prepare(ecs, key=request.node.name)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    until = await store.before_send(claim, ecs.targets["ecs"])
+    assert until is not None
+    async with ecs.factory.begin() as session:
+        message = await session.get(ReliableMessage, claim.message_id)
+        message.frozen_request_wire = b"damaged transport copy"
+        if not original_intact:
+            if runtime:
+                canonical = await session.get(EcsCommand, command.command_code)
+                canonical.request_wire = b"damaged original"
+            else:
+                canonical = await session.get(IntegrationRecord, message.request_record_id)
+                canonical.raw_body = b"damaged original"
+                canonical.stored_bytes = len(canonical.raw_body)
+                canonical.body_sha256 = sha256(canonical.raw_body).hexdigest()
+    if maintained:
+        store.clock = lambda: until + timedelta(seconds=1)
+        assert await store.maintain_snapshots(10, ecs.targets, time.monotonic() + 5) == 1
+        assert await store.claim(1, ecs.targets) == ()
+    raw = result_body(command.command_code)
+    async with ecs.factory.begin() as session:
+        response = await receive_ecs_result(session, raw, ecs.service)
+        assert response.status_code == (200 if original_intact else 409)
+    async with ecs.factory.begin() as session:
+        replayed = await receive_ecs_result(session, raw, ecs.service)
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        message = await session.get(ReliableMessage, claim.message_id)
+        assert replayed.pure_replay and replayed.body == response.body
+        if original_intact:
+            assert (
+                view.status == "SUCCEEDED" and view.result["command_code"] == command.command_code
+            )
+            assert message.status == "DONE"
+        else:
+            assert view.status == "RECONCILING" and view.result is None
+            assert message.status == "HELD"
+        assert message.frozen_request_wire == b"damaged transport copy"
+
+
+async def test_first_result_before_http_response_applies_once(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    async with ecs.factory.begin() as session:
+        first = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert first.status_code == 200
+    async with ecs.factory.begin() as session:
+        again = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert again.body == first.body
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and not view.ack_received
+        row = await session.scalar(select(ReliableMessage))
+        assert row.status == "DONE" and row.terminal_response_record_id is None
+
+
+async def test_config_revocation_stops_sending_but_accepts_original_attempt_result(ecs):
+    from sqlalchemy import delete
+
+    from app.integrations.ecs_command import compile_commands
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import Device, DeviceRoute, WorkLine
+    from app.services.device_routes import DeviceRoutes
+    from tests.helpers import add_bound_device
+
+    async with ecs.factory.begin() as session:
+        line, device, route = await add_bound_device(session, "D1", "http://127.0.0.1:8080")
+        line_id, device_id, route_id = line.id, device.id, route.id
+    ecs.service.routes = DeviceRoutes(
+        compile_commands(EcsMove)[0],
+        annexes=ecs.service.annexes,
+    )
+    try:
+        command = await prepare(ecs)
+        store = await make_store(ecs)
+        claim = (await store.claim(1, ecs.targets))[0]
+        assert await store.before_send(claim, ecs.targets["ecs"])
+        async with ecs.factory.begin() as session:
+            await ecs.outbox.hold(
+                session,
+                "ecs",
+                "ecs.command",
+                command.command_code,
+                reason="AUTHORIZATION_REVOKED",
+            )
+        assert not await store.claim(1, ecs.targets)
+        async with ecs.factory.begin() as session:
+            reply = await receive_ecs_result(
+                session, result_body(command.command_code), ecs.service
+            )
+            assert reply.status_code == 200
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange).where(
+                        IntegrationExchange.role == "ECS_COMMAND",
+                        IntegrationExchange.command_code == command.command_code,
+                    )
+                )
+            ).status == "SUCCEEDED"
+    finally:
+        async with ecs.factory.begin() as session:
+            await session.execute(delete(Device).where(Device.id == device_id))
+            await session.execute(delete(DeviceRoute).where(DeviceRoute.id == route_id))
+            await session.execute(delete(WorkLine).where(WorkLine.id == line_id))
+
+
+async def test_early_result_revokes_claim_before_network(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    async with ecs.factory.begin() as session:
+        reply = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert reply.status_code == 409
+    assert not await store.before_send(claim, ecs.targets["ecs"])
+
+
+async def test_unknown_delivery_retries_original_command(ecs):
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.reliable.delivery import send_one
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+
+    class Client:
+        async def send(self, request):
+            return HttpResult(DeliveryState.DELIVERY_UNKNOWN, None, None, (), None)
+
+        async def aclose(self):
+            pass
+
+    clients = DynamicClients(factory=lambda cfg: Client())
+    await send_one(
+        claim,
+        store=store,
+        targets=ecs.targets,
+        adapters=ecs.adapters,
+        clients={},
+        provider=clients,
+        clock=ecs.service.clock,
+        uniform=lambda a, b: b,
+    )
+    async with ecs.factory() as session:
+        row = await session.scalar(select(ReliableMessage))
+        assert row.status == "PENDING" and row.delivery_uncertain
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "QUEUED"
+    assert await store.claim(1, ecs.targets) == ()
+    await clients.aclose()
+
+
+@pytest.mark.parametrize(
+    "code,message,expected",
+    [
+        (200, "ACK", "DONE"),
+        (400, "INVALID_ENVELOPE", "FAILED"),
+        (409, "IDEMPOTENCY_CONFLICT", "HELD"),
+        (429, "CAPACITY_EXCEEDED", "HELD"),
+        (503, "TEMPORARILY_UNAVAILABLE", "PENDING"),
+        (500, "TEMPORARILY_UNAVAILABLE", "PENDING"),
+    ],
+)
+async def test_sender_matrix_and_command_projection(ecs, code, message, expected):
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.reliable.delivery import send_one
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    seen = []
+
+    class Client:
+        async def send(self, request):
+            seen.append(request.body)
+            return response(code, message)
+
+        async def aclose(self):
+            pass
+
+    provider = DynamicClients(factory=lambda _: Client())
+    await send_one(
+        claim,
+        store=store,
+        targets=ecs.targets,
+        adapters=ecs.adapters,
+        clients={},
+        provider=provider,
+        clock=ecs.service.clock,
+        uniform=lambda a, b: b,
+    )
+    async with ecs.factory() as session:
+        row = await session.scalar(select(ReliableMessage))
+        assert row.status == expected
+        assert seen == [(await read_history_body(session, (row).request_record_id))]
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.delivery_status == expected
+        assert (
+            view.status
+            == {
+                "DONE": "WAITING_RESULT",
+                "FAILED": "REJECTED",
+                "HELD": "RECONCILING",
+                "PENDING": "QUEUED",
+            }[expected]
+        )
+        assert view.result is None
+    await provider.aclose()
+
+
+async def test_known_not_received_conflicts_but_new_inflight_attempt_accepts(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus, Verdict, VerdictKind
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    first = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(first, ecs.targets["ecs"])
+    await store.finish(
+        first,
+        AttemptOutcome(
+            MessageStatus.PENDING,
+            result=response(503, "TEMPORARILY_UNAVAILABLE"),
+            verdict=Verdict(VerdictKind.NOT_RECEIVED),
+            next_attempt_at=ecs.service.clock(),
+        ),
+    )
+    second = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(second, ecs.targets["ecs"])
+    async with ecs.factory.begin() as session:
+        assert (
+            await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        ).status_code == 200
+
+
+@pytest.mark.parametrize("owner", ["test", "coarse_sorting"])
+async def test_result_after_definite_nonacceptance_follows_owner_contract(ecs, owner):
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.integrations.ecs_command.service import CommandOwner
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus, Verdict, VerdictKind
+
+    ecs.owner = CommandOwner(owner)
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.PENDING,
+            result=response(503, "TEMPORARILY_UNAVAILABLE"),
+            verdict=Verdict(VerdictKind.NOT_RECEIVED),
+            next_attempt_at=ecs.service.clock(),
+        ),
+    )
+    async with ecs.factory.begin() as session:
+        first = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert first.status_code == (200 if owner == "coarse_sorting" else 409)
+    async with ecs.factory.begin() as session:
+        assert (
+            await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        ).body == first.body
+        assert (await session.scalar(select(ReliableMessage))).status == (
+            "DONE" if owner == "coarse_sorting" else "HELD"
+        )
+
+
+async def test_result_and_late_rejection_keep_result_and_evidence(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import FailReason, MessageStatus, Verdict, VerdictKind
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    async with ecs.factory.begin() as session:
+        await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+    assert not await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.FAILED,
+            FailReason.REJECTED,
+            response(400, "INVALID_ENVELOPE"),
+            Verdict(VerdictKind.PEER_TERMINAL, reason=FailReason.REJECTED),
+        ),
+    )
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and view.needs_reconciliation
+        from tests.helpers import ecs_attempt_evidence
+
+        assert (await ecs_attempt_evidence(session, command.command_code))[
+            0
+        ].response_raw is not None
+
+
+async def test_result_survives_receipt_and_delivery_cleanup(ecs):
+    from sqlalchemy import delete
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus, Verdict, VerdictKind
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    result = response()
+    await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.DONE,
+            result=result,
+            verdict=Verdict(VerdictKind.DELIVERED, response=result.body),
+        ),
+    )
+    async with ecs.factory.begin() as session:
+        await session.execute(delete(ReliableMessage))
+    async with ecs.factory.begin() as session:
+        first = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert first.status_code == 200
+    from datetime import UTC, datetime, timedelta
+
+    from app.tasks.callback_tasks import run_history_cleanup, run_receipt_cleanup
+
+    future = datetime.now(UTC) + timedelta(days=100)
+    await run_receipt_cleanup(ecs.factory, 90, now=future)
+    await run_history_cleanup(ecs.factory, now=future)
+    ecs.service.annexes = {}
+    async with ecs.factory.begin() as session:
+        assert (
+            await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        ).body == first.body
+        assert (
+            await ecs.service.create(
+                session,
+                owner=ecs.owner,
+                call_key="call",
+                device_code="D1",
+                timeout_ms=30000,
+                command=EcsMove.model_validate({"qty": 1}),
+            )
+        ).command_code == command.command_code
+        assert await session.scalar(select(ReliableMessage)) is None
+
+
+async def test_gate_does_not_renew_lease_expired_during_authorization(ecs):
+    from app.reliable.testing import FakeClock
+
+    clock = FakeClock()
+    ecs.service.clock = clock
+    ecs.outbox.clock = clock
+    await prepare(ecs)
+    store = await make_store(ecs)
+    store.clock = clock
+    claim = (await store.claim(1, ecs.targets))[0]
+    original = ecs.routes.authorize_frozen
+
+    async def slow_authorize(session, route):
+        clock.advance(seconds=30)
+        return await original(session, route)
+
+    ecs.routes.authorize_frozen = slow_authorize
+    assert not await store.before_send(claim, ecs.targets["ecs"])
+
+
+async def test_sender_http_and_result_http_complete_before_ack(ecs):
+    import asyncio
+
+    import httpx
+    from fastapi import FastAPI
+
+    from app.controllers.ecs_result import router
+    from app.http_client import AsyncHttpClient
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.reliable.sender import Sender
+
+    command = await prepare(ecs)
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.callback_session_factory = ecs.factory
+    app.state.ecs_commands = ecs.service
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://wes.test"
+    ) as receiver:
+
+        async def handle(request):
+            assert request.url.path == "/api/v1/device/command"
+            body = json.loads(request.content)
+            assert body["command_code"] == command.command_code and body["priority"] == 1
+            result = await receiver.post(
+                "/api/v1/callback/result",
+                content=result_body(command.command_code),
+                headers={"content-type": "application/json"},
+            )
+            assert result.status_code == 200, result.text
+            return httpx.Response(200, json={"code": 200, "message": "ACK"})
+
+        provider = DynamicClients(
+            factory=lambda cfg: AsyncHttpClient(cfg, transport=httpx.MockTransport(handle))
+        )
+        store = await make_store(ecs)
+        sender = Sender(store, ecs.targets, ecs.adapters, {}, provider=provider)
+        assert await sender.tick() == 1
+        await asyncio.gather(*list(sender.inflight))
+        async with ecs.factory() as session:
+            view = await ecs.service.get_command(
+                session, owner=ecs.owner, command_code=command.command_code
+            )
+            assert view.status == "SUCCEEDED" and view.ack_received
+        await sender.aclose()
+
+
+@pytest.mark.parametrize(
+    "reason,gated,expected_code",
+    [
+        ("AUTHORIZATION_REVOKED", True, 409),
+        ("RACK_POSITION_CONFLICT", False, 409),
+        ("RACK_POSITION_CONFLICT", True, 200),
+    ],
+)
+async def test_paused_command_only_accepts_results_with_original_dispatch_evidence(
+    ecs, reason, gated, expected_code
+):
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    if gated:
+        assert await store.before_send(claim, ecs.targets["ecs"])
+    async with ecs.factory.begin() as session:
+        assert await ecs.outbox.hold(
+            session, "ecs", "ecs.command", command.command_code, reason=reason
+        )
+    async with ecs.factory.begin() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "RECONCILING" and view.hold_reason == reason
+        assert (
+            await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        ).status_code == expected_code
+    if expected_code == 200:
+        async with ecs.factory() as session:
+            view = await ecs.service.get_command(
+                session, owner=ecs.owner, command_code=command.command_code
+            )
+            assert view.status == "SUCCEEDED"
+
+
+async def test_bare_snapshot_settle_does_not_invent_command_acceptance(ecs):
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        with pytest.raises(ValueError):
+            await ecs.outbox.settle(session, "ecs", "ecs.command", command.command_code)
+    async with ecs.factory() as session:
+        assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "QUEUED"
+
+
+async def test_snapshot_mutation_without_lifecycle_is_rejected(ecs):
+    from app.reliable import Outbox
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        with pytest.raises(ValueError):
+            await Outbox({}, {}, records=history_records).hold(
+                session, "ecs", "ecs.command", command.command_code, reason="AUTHORIZATION_REVOKED"
+            )
+    async with ecs.factory() as session:
+        assert (await session.scalar(select(ReliableMessage))).status == "PENDING"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "QUEUED"
+
+
+async def test_revoked_old_origin_does_not_block_new_independent_command(ecs):
+    from app.integrations.ecs_command.routing import RouteAuthorization
+
+    first = await prepare(ecs, "old")
+    ecs.routes.origin = "http://new.test"
+    second = await prepare(ecs, "new")
+
+    async def authorize(session, route):
+        return (
+            RouteAuthorization.REVOKED
+            if route["origin"] == "http://ecs.test"
+            else RouteAuthorization.ALLOW
+        )
+
+    ecs.routes.authorize_frozen = authorize
+    store = await make_store(ecs)
+    old = (await store.claim(1, ecs.targets))[0]
+    assert not await store.before_send(old, ecs.targets["ecs"])
+    new = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(new, ecs.targets["ecs"])
+    async with ecs.factory() as session:
+        old_view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=first.command_code
+        )
+        new_view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=second.command_code
+        )
+        assert old_view.hold_reason == "AUTHORIZATION_REVOKED"
+        assert new_view.status == "DISPATCHING"
+
+
+@pytest.mark.parametrize(
+    "code,message,expected",
+    [
+        (200, "ACK", "DONE"),
+        (503, "TEMPORARILY_UNAVAILABLE", "PENDING"),
+        (500, "TEMPORARILY_UNAVAILABLE", "PENDING"),
+    ],
+)
+async def test_response_after_sending_deadline_is_not_discarded(ecs, code, message, expected):
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.reliable.delivery import send_one
+    from app.reliable.testing import FakeClock
+
+    clock = FakeClock()
+    ecs.service.clock = clock
+    ecs.outbox.clock = clock
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    store.clock = clock
+    claim = (await store.claim(1, ecs.targets))[0]
+
+    class Client:
+        async def send(self, request):
+            clock.advance(seconds=301)
+            return response(code, message)
+
+        async def aclose(self):
+            pass
+
+    provider = DynamicClients(factory=lambda _: Client())
+    await send_one(
+        claim,
+        store=store,
+        targets=ecs.targets,
+        adapters=ecs.adapters,
+        clients={},
+        provider=provider,
+        clock=clock,
+        uniform=lambda a, b: b,
+    )
+    async with ecs.factory() as session:
+        row = await session.scalar(select(ReliableMessage))
+        assert row.status == expected and row.last_http_status == code
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == {"DONE": "WAITING_RESULT", "PENDING": "QUEUED"}[expected]
+    await provider.aclose()
+
+
+async def test_retry_after_is_persisted_without_early_retry(ecs):
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.reliable.delivery import send_one
+    from app.reliable.testing import FakeClock
+
+    clock = FakeClock()
+    ecs.service.clock = clock
+    ecs.outbox.clock = clock
+    await prepare(ecs)
+    store = await make_store(ecs)
+    store.clock = clock
+    claim = (await store.claim(1, ecs.targets))[0]
+
+    class Client:
+        async def send(self, request):
+            r = response(429, "CAPACITY_EXCEEDED")
+            return HttpResult(
+                r.delivery_state, None, r.status_code, (*r.headers, ("Retry-After", "120")), r.body
+            )
+
+        async def aclose(self):
+            pass
+
+    provider = DynamicClients(factory=lambda _: Client())
+    await send_one(
+        claim,
+        store=store,
+        targets=ecs.targets,
+        adapters=ecs.adapters,
+        clients={},
+        provider=provider,
+        clock=clock,
+        uniform=lambda a, b: b,
+    )
+    clock.advance(seconds=119)
+    assert await store.claim(1, ecs.targets) == ()
+    clock.advance(seconds=1)
+    assert len(await store.claim(1, ecs.targets)) == 1
+    await provider.aclose()
+
+
+async def test_http_commit_failure_rolls_back_result_receipt_and_settlement(ecs):
+    from contextlib import asynccontextmanager
+
+    import httpx
+    from fastapi import FastAPI
+    from sqlalchemy import event, func
+
+    from app.controllers.ecs_result import router
+    from app.models import IntegrationRecord
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+
+    @asynccontextmanager
+    async def failing_factory():
+        async with ecs.factory() as session:
+
+            def fail_outer(sync_session):
+                if not sync_session.in_nested_transaction():
+                    raise RuntimeError("injected commit failure")
+
+            event.listen(session.sync_session, "before_commit", fail_outer)
+            yield session
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.ecs_commands = ecs.service
+    app.state.callback_session_factory = failing_factory
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://wes.test"
+    ) as client:
+        result = await client.post(
+            "/api/v1/callback/result", content=result_body(command.command_code)
+        )
+        assert result.status_code == 503
+    async with ecs.factory() as session:
+        for model in (IntegrationRecord, IntegrationExchange):
+            statement = select(func.count()).select_from(model)
+            if model is IntegrationRecord:
+                statement = statement.where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+            elif model is IntegrationExchange:
+                statement = statement.where(IntegrationExchange.role == "RECEIPT")
+            assert await session.scalar(statement) == 0
+        assert (await session.scalar(select(ReliableMessage))).status == "SENDING"
+        assert (
+            await session.scalar(
+                select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+            )
+        ).status == "DISPATCHING"
+
+
+@pytest.mark.parametrize("interruption", ["release", "expired-lease"])
+async def test_interrupted_snapshot_lease_holds_until_matching_result(ecs, interruption):
+    import time
+
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.reliable.testing import FakeClock
+
+    clock = FakeClock()
+    ecs.service.clock = clock
+    ecs.outbox.clock = clock
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    store.clock = clock
+    claim = (await store.claim(1, ecs.targets))[0]
+    await store.before_send(claim, ecs.targets["ecs"])
+    clock.advance(seconds=30)
+    if interruption == "release":
+        assert await store.release(claim, ecs.targets)
+    else:
+        await store.maintain_snapshots(100, ecs.targets, time.monotonic() + 0.3)
+    async with ecs.factory() as session:
+        message = await session.scalar(select(ReliableMessage))
+        assert message.status == "HELD" and message.delivery_uncertain
+        assert message.pause_reason == "LEASE_INTERRUPTED" and message.next_attempt_at is None
+    restarted = await make_store(ecs)
+    restarted.clock = clock
+    assert await restarted.claim(1, ecs.targets) == ()
+    async with ecs.factory.begin() as session:
+        result = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert result.status_code == 200
+        await session.flush()
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and not view.ack_received
+
+
+async def test_failed_device_result_is_applied_and_queryable_without_ack(ecs):
+    from app.integrations.ecs_command.result import receive_ecs_result
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    core = dict(
+        command_code=command.command_code,
+        device_code="D1",
+        result="FAILED",
+        finish_time=1,
+        data={"qty": 1},
+        error_detail={"code": "DEVICE_FAILURE", "msg": "movement failed"},
+    )
+    raw = json.dumps(core).encode()
+    async with ecs.factory.begin() as session:
+        first = await receive_ecs_result(session, raw, ecs.service)
+        assert first.status_code == 200
+    async with ecs.factory.begin() as session:
+        replay = await receive_ecs_result(session, raw, ecs.service)
+        assert replay.body == first.body
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "FAILED" and view.result == core
+        assert view.delivery_status == "DONE" and not view.ack_received
+        message = await session.scalar(select(ReliableMessage))
+        assert message.status == "DONE" and message.terminal_response_record_id is None
+
+
+async def test_missing_original_annex_returns_retryable_503_without_result_evidence(ecs):
+    import httpx
+    from fastapi import FastAPI
+    from sqlalchemy import func
+
+    from app.controllers.ecs_result import router
+    from app.models import IntegrationRecord
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    claim = (await store.claim(1, ecs.targets))[0]
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    annex = ecs.service.annexes.pop(("test", "1"))
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    app.state.ecs_commands = ecs.service
+    app.state.callback_session_factory = ecs.factory
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://wes.test"
+    ) as client:
+        response = await client.post(
+            "/api/v1/callback/result", content=result_body(command.command_code)
+        )
+        assert response.status_code == 503
+        assert response.json() == {"code": 503, "message": "TEMPORARILY_UNAVAILABLE"}
+        async with ecs.factory() as session:
+            for model in (IntegrationRecord, IntegrationExchange):
+                statement = select(func.count()).select_from(model)
+                if model is IntegrationRecord:
+                    statement = statement.where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                elif model is IntegrationExchange:
+                    statement = statement.where(IntegrationExchange.role == "RECEIPT")
+                assert await session.scalar(statement) == 0
+            assert (await session.scalar(select(ReliableMessage))).status == "SENDING"
+            assert (
+                await session.scalar(
+                    select(IntegrationExchange).where(IntegrationExchange.role == "ECS_COMMAND")
+                )
+            ).status == "DISPATCHING"
+        ecs.service.annexes["test", "1"] = annex
+        retried = await client.post(
+            "/api/v1/callback/result", content=result_body(command.command_code)
+        )
+        assert retried.status_code == 200
+
+
+@pytest.mark.parametrize("device_result", ["SUCCESS", "FAILED"])
+@pytest.mark.parametrize("result_timing", ["before_ack", "after_ack"])
+async def test_loopback_command_result_and_reference_consumption(
+    reference,
+    loopback_server,
+    device_result,
+    result_timing,
+):
+    import asyncio
+    from dataclasses import replace
+
+    import httpx
+    from fastapi import FastAPI, Request
+    from sqlalchemy import func, update
+
+    from app.controllers.ecs_result import router
+    from app.integrations.ecs_command.clients import DynamicClients
+    from app.integrations.ecs_command.lifecycle import EcsLifecycle
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.models import IntegrationRecord
+    from app.reliable.sender import Sender
+    from app.reliable.store import MessageStore
+
+    ecs = reference.ecs
+    receiver = FastAPI()
+    receiver.include_router(router, prefix="/api/v1")
+    receiver.state.callback_session_factory = ecs.factory
+    receiver.state.ecs_commands = ecs.service
+    peer = FastAPI()
+    requests = []
+    received_results = []
+
+    # The command ACK may wait for a complete callback round trip on a loaded CI runner.
+    target = replace(ecs.targets["ecs"], timeout_ms=30_000, read_timeout_ms=30_000)
+    async with loopback_server(receiver) as callback_origin:
+        async with httpx.AsyncClient(
+            base_url=callback_origin, timeout=20, trust_env=False
+        ) as client:
+
+            async def report(code):
+                body = reference.result_body(code, device_result)
+                answer = await client.post("/api/v1/callback/result", json=body)
+                received_results.append(answer.json())
+                assert answer.status_code == 200
+
+            @peer.post("/api/v1/device/command")
+            async def command_endpoint(request: Request):
+                raw = await request.body()
+                requests.append(raw)
+                if result_timing == "before_ack":
+                    await report(json.loads(raw)["command_code"])
+                return {"code": 200, "message": "ACK"}
+
+            async with loopback_server(peer) as origin:
+                async with ecs.factory.begin() as session:
+                    await session.execute(update(reference.routes).values(origin=origin))
+                    command = await reference.register(session, action_id=1)
+                store = MessageStore(
+                    ecs.factory,
+                    lifecycles={PROTOCOL: EcsLifecycle(ecs.service)},
+                    records=history_records,
+                )
+                sender = Sender(
+                    store, {target.name: target}, ecs.adapters, {}, provider=DynamicClients()
+                )
+                try:
+                    assert await sender.tick() == 1
+                    async with asyncio.timeout(35):
+                        await asyncio.gather(*list(sender.inflight))
+                    async with ecs.factory.begin() as session:
+                        view = await ecs.service.get_command(
+                            session,
+                            owner=ecs.owner,
+                            command_code=command.command_code,
+                        )
+                        assert view.ack_received and view.delivery_status == "DONE"
+                        if result_timing == "after_ack":
+                            assert view.result is None and view.status == "WAITING_RESULT"
+                            assert not await reference.consume(session, action_id=1)
+                            assert (await reference.state(session))["state"] == "WAITING_RESULT"
+                    await report(command.command_code)
+                    async with ecs.factory.begin() as session:
+                        assert await reference.consume(session, action_id=1)
+                    async with ecs.factory.begin() as session:
+                        assert not await reference.consume(session, action_id=1)
+                        state = await reference.state(session)
+                        assert state["state"] == (
+                            "SUCCEEDED" if device_result == "SUCCESS" else "FAILED"
+                        )
+                        view = await ecs.service.get_by_call(
+                            session, owner=ecs.owner, call_key="action:1"
+                        )
+                        assert view.result["result"] == device_result
+                        assert (
+                            await session.scalar(
+                                select(func.count())
+                                .select_from(reference.actions)
+                                .where(reference.actions.c.state.in_(("SUCCEEDED", "FAILED")))
+                            )
+                            == 1
+                        )
+                        assert (
+                            await session.scalar(
+                                select(func.count())
+                                .select_from(IntegrationRecord)
+                                .where(IntegrationRecord.record_kind == "RESULT_EVIDENCE")
+                            )
+                            == 1
+                        )
+                        row = await session.scalar(
+                            select(IntegrationExchange).where(
+                                IntegrationExchange.role == "ECS_COMMAND"
+                            )
+                        )
+                        assert requests == [
+                            (await read_history_body(session, (row).request_record_id))
+                        ]
+                        assert row.route["origin"] == origin
+                    assert received_results and all(
+                        r == {"code": 200, "message": "ACK"} for r in received_results
+                    )
+                finally:
+                    await sender.aclose()
+
+
+async def test_original_gate_finish_and_result_cost_with_retained_history(ecs):
+    from time import perf_counter
+
+    from app.core.identifiers import uuid7
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.models import IntegrationRecord
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus, Verdict, VerdictKind
+
+    command = await prepare(ecs)
+    async with ecs.factory.begin() as session:
+        root = await session.scalar(
+            select(IntegrationExchange).where(
+                IntegrationExchange.command_code == command.command_code
+            )
+        )
+        await session.execute(
+            IntegrationRecord.__table__.insert(),
+            [
+                dict(
+                    id=uuid7(),
+                    exchange_id=root.id,
+                    record_kind="CALLBACK_RECEIVED",
+                    evidence_class="DIAGNOSTIC",
+                    event_key=f"cost:{n}",
+                    direction="INBOUND",
+                )
+                for n in range(5000)
+            ],
+        )
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    durations = {}
+    started = perf_counter()
+    assert await store.before_send(claim, ecs.targets["ecs"])
+    durations["gate_ms"] = (perf_counter() - started) * 1000
+    started = perf_counter()
+    assert await store.finish(
+        claim,
+        AttemptOutcome(
+            MessageStatus.DONE,
+            result=response(),
+            verdict=Verdict(VerdictKind.DELIVERED, response=response().body),
+        ),
+    )
+    durations["finish_ms"] = (perf_counter() - started) * 1000
+    started = perf_counter()
+    async with ecs.factory.begin() as session:
+        result = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert result.status_code == 200
+    durations["result_commit_ms"] = (perf_counter() - started) * 1000
+    async with ecs.factory() as session:
+        view = await ecs.service.get_command(
+            session, owner=ecs.owner, command_code=command.command_code
+        )
+        assert view.status == "SUCCEEDED" and view.ack_received
+    print(
+        "HISTORY_CORE_COST="
+        + json.dumps(
+            {"backend": ecs.factory.kw["bind"].dialect.name, "diagnostic_rows": 5000, **durations}
+        )
+    )
+
+
+@pytest.mark.parametrize("late", [False, True])
+async def test_result_settles_open_http_exchange_and_restart_restores_it(ecs, late):
+    import asyncio
+    from dataclasses import replace
+
+    from app.integrations.ecs_command.protocol import PROTOCOL
+    from app.integrations.ecs_command.result import receive_ecs_result
+    from app.integrations.http_exchanges import reconcile_outbound
+    from app.models import EcsHttpExchange
+    from app.reliable import Verdict, VerdictKind
+    from app.reliable.store import AttemptOutcome
+    from app.reliable.types import MessageStatus
+
+    # The PostgreSQL fixture shares older projection work with other cases in this lane.
+    async with asyncio.timeout(30):
+        while await reconcile_outbound(ecs.factory):
+            pass
+
+    command = await prepare(ecs)
+    store = await make_store(ecs)
+    (claim,) = await store.claim(1, ecs.targets)
+    target = ecs.targets["ecs"]
+    request = ecs.adapters[PROTOCOL].build_request(claim.message, target)
+    assert await store.before_send(replace(claim, request=request), target)
+
+    async with ecs.factory.begin() as session:
+        result = await receive_ecs_result(session, result_body(command.command_code), ecs.service)
+        assert result.status_code == 200
+
+    # No projection has run since the gate or settlement.
+    async with ecs.factory() as session:
+        query = select(EcsHttpExchange).where(EcsHttpExchange.command_code == command.command_code)
+        assert await session.scalar(query) is None
+    await reconcile_outbound(ecs.factory)
+    async with ecs.factory() as session:
+        row = (await session.scalars(query)).one()
+        assert row.initiator == "WES"
+        assert (row.close_reason, row.attempt_state) == ("SETTLED_BY_CALLBACK", "DELIVERY_UNKNOWN")
+        assert row.response_wire is None
+        identity, finished_at = row.id, row.finished_at
+
+    if late:
+        observed = response()
+        assert not await store.finish(
+            claim,
+            AttemptOutcome(
+                MessageStatus.DONE,
+                result=observed,
+                verdict=Verdict(VerdictKind.DELIVERED, response=observed.body),
+            ),
+        )
+        await reconcile_outbound(ecs.factory)
+        async with ecs.factory() as session:
+            row = (await session.scalars(query)).one()
+            assert (row.id, row.finished_at, row.close_reason) == (
+                identity,
+                finished_at,
+                "SETTLED_BY_CALLBACK",
+            )
+            assert row.response_wire == observed.body and row.late_response_at is not None

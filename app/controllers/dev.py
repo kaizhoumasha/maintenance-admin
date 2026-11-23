@@ -1,0 +1,127 @@
+"""联调控制台:仅 ENVIRONMENT=local 挂载。统一入口按场景下拉触发出站,另有按 business_key 的状态节点。
+
+场景由固定 Transport 平台入口及业务 composition.ENTRY_MODULES 中的 dev 入口显式导入。
+"""
+
+from functools import partial
+from typing import Annotated, Union
+
+from fastapi import Body, Depends, FastAPI
+
+from app.controllers.dev_callback import router as callback_router
+from app.controllers.dev_mock_wms import router as mock_wms_router
+from app.controllers.dev_registry import router as registry_router
+from app.controllers.dev_wms_request import wms_request_router
+from app.core import SessionDep, error_responses, get_current_user, get_settings, logger
+from app.core.dev_scenarios import DevScenario, scenarios
+from app.core.routing import new_router
+from app.integrations.discovery import load_formal_modules, load_local_modules
+from app.integrations.ecs_command.contracts import CommandBinding
+from app.integrations.wms_request import DECISIONS_PROTOCOL, FACTS_PROTOCOL
+from app.integrations.wms_request.operation import operations
+from app.reliable.config import parse_reliable_config, target_config_hint
+from app.schemas.dev_console import DevMessageOut, DevSubmitOut
+from app.services import dev_submit_service
+
+
+def _load_dev_modules() -> None:
+    load_formal_modules()
+    load_local_modules(environment="local", kind="request")
+
+
+def _submit_router(items: list[DevScenario]):
+    by_name = {s.name: s for s in items}
+    # 判别器必须写在 Body(discriminator=...) 上:放进 Annotated 里的 Field 会被 FastAPI 丢弃
+    body = Union[tuple(s.model for s in items)]  # noqa: UP007  运行时构造
+    examples = {
+        s.name: {"summary": s.title, "value": {"scenario": s.name, **s.example}} for s in items
+    }
+    router = new_router(
+        prefix="/dev/transport/tasks",
+        tags=["dev-transport"],
+        dependencies=[Depends(get_current_user)],
+    )
+
+    @router.post("", response_model=DevSubmitOut, responses=error_responses(409))
+    async def submit_task(
+        session: SessionDep,
+        req: Annotated[body, Body(discriminator="scenario", openapi_examples=examples)],
+    ) -> DevSubmitOut:
+        """在 Examples 下拉里选场景,走真实的业务接入层登记出站义务(不等于已送达)。"""
+        scenario = by_name[req.scenario]
+        outcome = await dev_submit_service.submit(session, scenario, req)
+        return DevSubmitOut(
+            scenario=scenario.name,
+            title=scenario.title,
+            business_key=outcome.business_key,
+            client_request_id=outcome.client_request_id,
+        )
+
+    @router.get(
+        "/status/{business_key}", response_model=list[DevMessageOut], responses=error_responses(404)
+    )
+    async def task_message_status(session: SessionDep, business_key: str) -> list[DevMessageOut]:
+        """按 business_key 查看出站消息的投递状态、请求与响应原文。"""
+        return await dev_submit_service.message_status(session, business_key)
+
+    return router
+
+
+def include_dev_routers(
+    app: FastAPI,
+    *,
+    environment: str,
+    command_bindings: tuple[CommandBinding, ...],
+    prefix: str = "/api/v1",
+    read_business=None,
+) -> None:
+    settings = get_settings()
+    targets = parse_reliable_config(settings).targets
+    if environment != "local":
+        return
+    _load_dev_modules()
+    from app.controllers.dev_ecs_command import ecs_command_router, mock_router
+    from app.controllers.dev_ecs_event import ecs_event_router
+
+    app.include_router(ecs_command_router(command_bindings), prefix=prefix)
+    app.include_router(ecs_event_router(read_business=read_business), prefix=prefix)
+    app.include_router(mock_router, prefix=prefix)
+    items = scenarios()
+    if items:
+        app.include_router(_submit_router(items), prefix=prefix)
+    if settings.XRAY_WMS_MOCK_TARGETS:
+        from app.businesses.xray.mock_wms import XrayWmsMock
+
+        app.state.xray_wms_mock = XrayWmsMock(
+            settings.XRAY_WMS_MOCK_TARGETS, settings.XRAY_RETURN_RACKS
+        )
+    if settings.COARSE_SORTING_WMS_MOCK:
+        from app.businesses.coarse_sorting.contracts import parse_mock_rounds
+        from app.businesses.coarse_sorting.mock_wms import authorize_mock_scan
+        from app.businesses.coarse_sorting.mock_wms import router as coarse_mock_router
+
+        rounds = parse_mock_rounds(settings.COARSE_SORTING_WMS_MOCK)
+        app.state.coarse_sorting_mock_rounds = rounds
+        app.state.ecs_event_authorizer = partial(
+            authorize_mock_scan, {config.workline_code: config for config in rounds.values()}
+        )
+        app.include_router(coarse_mock_router, prefix=prefix)
+    app.include_router(mock_wms_router, prefix=prefix)
+    app.include_router(callback_router, prefix=prefix)
+    app.include_router(registry_router, prefix=prefix)
+    if operations():
+        app.include_router(wms_request_router(), prefix=prefix)
+    missing = {FACTS_PROTOCOL, DECISIONS_PROTOCOL} - {t.protocol for t in targets.values()}
+    for protocol in sorted(missing):
+        logger.warning(
+            "dev console: RELIABLE_TARGETS has no target for protocol %s, triggering those "
+            "requests fails with 500 %s",
+            protocol,
+            target_config_hint(targets, protocol),
+        )
+    if not targets:
+        logger.warning(
+            "dev console mounted but RELIABLE_TARGETS has no target: submitting fails with 500. "
+            'Example (mock WMS on this app): RELIABLE_TARGETS=\'{"targets":{"wms-transport":'
+            '{"base_url":"http://127.0.0.1:8000","protocol":"wms-transport"}}}\''
+        )

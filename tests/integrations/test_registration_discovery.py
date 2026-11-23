@@ -1,0 +1,238 @@
+import importlib
+import sys
+
+import pytest
+
+from app import businesses
+from app.integrations.ecs_callback import registry as ecs
+from app.integrations.ecs_request import registry as ecs_requests
+from app.integrations.registration import import_registration_module, local_registration
+from app.integrations.wms_callback import registry as callbacks
+from app.integrations.wms_request import operation as requests
+
+
+@pytest.fixture(autouse=True)
+def isolated_registries(monkeypatch):
+    from app.businesses import catalog
+
+    # These isolated imports exercise the initial discovery phase, before final validation.
+    monkeypatch.setattr(catalog, "_validated_entries", None)
+    monkeypatch.setattr(catalog, "_registration_guard_enabled", False)
+    for registry in (ecs, ecs_requests, callbacks, requests):
+        monkeypatch.setattr(registry, "_registry", {})
+    from app.integrations import discovery
+
+    monkeypatch.setattr(discovery, "_loaded_formal", set())
+
+
+@pytest.fixture
+def business_modules(tmp_path, monkeypatch):
+    monkeypatch.setattr(businesses, "__path__", [str(tmp_path)])
+    prefixes = set()
+
+    def write(path, source=""):
+        parts = path.split(".")
+        prefix = f"app.businesses.{parts[0]}"
+        if prefix not in prefixes:
+            monkeypatch.setattr(businesses, parts[0], None, raising=False)
+            prefixes.add(prefix)
+        parent = tmp_path
+        for part in parts[:-1]:
+            parent /= part
+            parent.mkdir(exist_ok=True)
+            (parent / "__init__.py").touch()
+        (parent / f"{parts[-1]}.py").write_text(source)
+        importlib.invalidate_caches()
+        return f"app.businesses.{path}"
+
+    yield write
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes):
+            sys.modules.pop(name)
+
+
+def declaration(kind, name="example.done@v1"):
+    if kind == "ecs_event":
+        return (
+            "from app.integrations.ecs_callback import ecs_event, CallbackPayload\n"
+            f"@ecs_event({name!r}, device_role='SCAN1', data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        )
+    if kind == "callback":
+        return (
+            "from app.integrations.wms_callback import CallbackPayload, callback_operation\n"
+            f"@callback_operation({name!r}, data=CallbackPayload)\n"
+            "async def handler(ctx, payload): pass\n"
+        )
+    return (
+        "from app.integrations.wms_request import Endpoint, RequestPayload, request_operation\n"
+        f"@request_operation({name!r}, Endpoint.FACTS)\n"
+        "class Payload(RequestPayload): pass\n"
+    )
+
+
+def registered(kind, name):
+    if kind == "ecs_event":
+        return ecs.lookup("SCAN1", name)
+    return {"ecs_event": ecs.lookup, "callback": callbacks.lookup, "request": requests.lookup}[
+        kind
+    ](name)
+
+
+@pytest.mark.parametrize(
+    "kind,path,name",
+    [
+        ("ecs_event", "guard_probe.ecs_event.dev", "DEV"),
+        ("ecs_event", "dev.ecs_event.scan_done", "SCAN_DONE"),
+        ("callback", "guard_probe.callback.dev.example_done_v1", "example.done@v1"),
+        ("request", "guard_probe.request.dev.example_done_v1", "example.done@v1"),
+    ],
+)
+def test_dev_named_production_paths_cannot_register_as_local(business_modules, kind, path, name):
+    module = business_modules(path, declaration(kind, name))
+    with pytest.raises(RuntimeError, match="修复"), local_registration():
+        # 普通 import 也必须受到注册边界保护。
+        importlib.import_module(module)
+
+
+@pytest.mark.parametrize(
+    "kind,entry,name,file",
+    [
+        ("ecs_event", "dev_ecs_event", "SCAN_DONE", "scan_done"),
+        ("callback", "dev_callback", "example.done@v1", "example_done_v1"),
+        ("request", "dev", "example.done@v1", "example_done_v1"),
+    ],
+)
+def test_actual_dev_entrypoints_register_as_local(business_modules, kind, entry, name, file):
+    module = business_modules(f"guard_probe.{entry}.{file}", declaration(kind, name))
+    import_registration_module(module, local_only=True)
+    assert registered(kind, name).registration_source.local_only is True
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+def test_cached_production_import_is_safe_in_local_scope(business_modules, kind):
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+    file = "scan_done" if kind == "ecs_event" else "example_done_v1"
+    module = business_modules(f"guard_probe.{kind}.{file}", declaration(kind, name))
+    import_registration_module(module)
+    original = registered(kind, name)
+    with local_registration():
+        import_registration_module(module)
+    assert registered(kind, name) is original
+    assert original.registration_source.local_only is False
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_request_catalog_can_be_discovered_from_dev_scope(business_modules, cached):
+    if cached:
+        module = business_modules("guard_probe.request.example_done_v1", declaration("request"))
+        import_registration_module(module)
+    else:
+        business_modules("guard_probe.helper")  # 没有 request 入口，发现应跳过。
+    with local_registration():
+        items = requests.operations()
+    assert set(items) == ({"example.done@v1"} if cached else set())
+    assert all(not item.registration_source.local_only for item in items.values())
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+def test_fresh_production_registration_is_blocked_and_scope_recovers(business_modules, kind):
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+    file = "scan_done" if kind == "ecs_event" else "example_done_v1"
+    module = business_modules(f"guard_probe.{kind}.{file}", declaration(kind, name))
+    with pytest.raises(RuntimeError, match="修复"), local_registration():
+        import_registration_module(module)
+    assert module not in sys.modules
+    import_registration_module(module)
+    assert registered(kind, name).registration_source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize("package", [False, True])
+def test_business_entrypoints_can_register_without_per_operation_files(
+    business_modules, kind, package
+):
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+    entry = f"guard_probe.{kind}"
+    module = business_modules(entry + (".__init__" if package else ""), declaration(kind, name))
+    import_registration_module(module.removesuffix(".__init__"))
+    assert registered(kind, name).registration_source.module == f"app.businesses.{entry}"
+    assert registered(kind, name).registration_source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+def test_business_source_keeps_filename_and_local_guards(monkeypatch, kind):
+    from app.integrations.registration import validate_registration_file
+
+    name = "SCAN_DONE" if kind == "ecs_event" else "example.done@v1"
+
+    async def handler(ctx, payload):
+        pass
+
+    handler.__module__ = f"app.businesses.probe.{kind}.wrong"
+    with pytest.raises(ValueError, match="filename mismatch"):
+        validate_registration_file(name, handler)
+    with pytest.raises(RuntimeError, match="local_registration"), local_registration():
+        validate_registration_file(name, handler)
+    handler.__module__ = (
+        f"app.businesses.probe.{kind}.{name.lower().replace('.', '_').replace('@', '_')}"
+    )
+    source = validate_registration_file(name, handler)
+    assert source.module == handler.__module__
+    assert source.symbol.endswith("handler")
+    assert source.local_only is False
+
+
+@pytest.mark.parametrize("kind", ["ecs_event", "callback", "request"])
+@pytest.mark.parametrize(
+    "module",
+    [
+        "app.integrations.untrusted.request",
+        "app.controllers.probe",
+        "app.services.probe",
+        "app.businesses",
+    ],
+)
+def test_application_registration_requires_an_owned_business_or_platform_source(kind, module):
+    namespace = {"__name__": module}
+    with pytest.raises(ValueError, match="source.*修复"):
+        exec(declaration(kind, "DONE" if kind == "ecs_event" else "example.done@v1"), namespace)
+    assert not ecs.events() and not callbacks.operations() and not requests.operations()
+
+
+def test_ecs_request_kind_is_discovered_and_owned(business_modules, monkeypatch):
+    from types import ModuleType
+
+    from app.businesses import catalog
+    from app.businesses.definitions import BusinessDefinition, DeviceRole
+    from app.integrations.ecs_request import registry as ecs_requests
+
+    module = business_modules(
+        "probe.ecs_request.carton_validate",
+        """
+from pydantic import BaseModel, ConfigDict
+from app.integrations.ecs_request import CallbackPayload, ecs_request
+class Decision(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    result: str
+@ecs_request('CARTON_VALIDATE', device_role='SCAN1', data=CallbackPayload, response=Decision)
+async def handler(ctx, payload): pass
+""",
+    )
+    import_registration_module(module)
+    entry = ModuleType("app.businesses.probe.composition")
+    entry.DEFINITION = BusinessDefinition(
+        code="probe",
+        display_name="Probe",
+        device_roles=(DeviceRole(role_key="SCAN1", display_name="Scan"),),
+    )
+    entry.ENTRY_MODULES = (module,)
+    entry.MODEL_MODULES = ()
+    entry.COMMANDS = ()
+    monkeypatch.setattr(catalog, "entries", lambda: (entry,))
+
+    assert catalog.entry_modules("ecs_request", environment="production") == (module,)
+    catalog.validate_business_contracts()
+    assert ecs_requests.lookup("SCAN1", "CARTON_VALIDATE") is not None
+    target = catalog.input_target("probe", ("ecs_request", "CARTON_VALIDATE", "SCAN1"))
+    assert target is not None and target.source.module == module

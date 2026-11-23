@@ -1,0 +1,74 @@
+"""Assemble task resources and delegate to the catalog-owned business pending entry."""
+
+from functools import partial
+
+from app.businesses import catalog
+from app.businesses.runtime import build_runtime
+from app.core import get_settings
+from app.integrations import history as history_records
+from app.integrations.ecs_command import EcsCommands
+from app.integrations.ecs_command.lifecycle import EcsLifecycle
+from app.integrations.ecs_command.protocol import PROTOCOL, EcsCommandAdapter
+from app.integrations.ecs_command.runtime import TARGET, ecs_runtime_config
+from app.integrations.wms_request import ADAPTERS as WMS_ADAPTERS
+from app.integrations.wms_transport import ADAPTERS as TRANSPORT_ADAPTERS
+from app.reliable import Outbox
+from app.services.device_routes import DeviceRoutes, authorize_new_command
+from app.tasks._db import run_with_factory
+from app.tasks.celery_app import celery_app
+from app.xray_dispatch_trace import DispatchTrace, track_worker
+
+
+def _runtime(factory, business: str | None):
+    bindings, annexes = catalog.validated_command_contracts()
+    commands = EcsCommands(
+        None,
+        TARGET,
+        DeviceRoutes(bindings, annexes=annexes),
+        annexes,
+        authorize_new=authorize_new_command,
+    )
+    config = ecs_runtime_config(get_settings(), commands)
+    outbox = Outbox(
+        config.targets,
+        {**WMS_ADAPTERS, **TRANSPORT_ADAPTERS, PROTOCOL: EcsCommandAdapter()},
+        lifecycles={PROTOCOL: EcsLifecycle(commands)},
+        records=history_records,
+    )
+    commands.outbox = outbox
+    return build_runtime(
+        outbox=outbox,
+        ecs_commands=commands,
+        session_factory=factory,
+        business_code=business,
+    )
+
+
+async def advance_pending(
+    factory, business: str, operation=None, operation_id=None, notified_at_ms=None
+) -> int:
+    runtime = _runtime(factory, business)
+    if operation is not None:
+        return await runtime.progressions[business](
+            operation=operation, operation_id=operation_id, notified_at_ms=notified_at_ms
+        )
+    return await runtime.progressions[business]()
+
+
+@celery_app.task(name="business.advance_pending", ignore_result=True, bind=True)
+def advance_business_pending(
+    self, business: str, operation=None, operation_id=None, notified_at_ms=None
+) -> int:
+    request = self.request
+    trace = DispatchTrace.read(request.id, request.headers) if business == "xray" else None
+    with track_worker(trace):
+        return run_with_factory(
+            get_settings().DATABASE_URL,
+            partial(
+                advance_pending,
+                business=business,
+                operation=operation,
+                operation_id=operation_id,
+                notified_at_ms=notified_at_ms,
+            ),
+        )
