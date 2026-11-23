@@ -109,7 +109,8 @@ def _decide(
             reservations = state.setdefault("reservations", {})
             by_cell = defaultdict(list)
             for reservation in reservations.values():
-                by_cell[reservation["cell"]].append(reservation)
+                if not reservation.get("released"):
+                    by_cell[reservation["cell"]].append(reservation)
             thickness = Fraction(str(payload.reel_thickness))
             candidates = []
             for index, cell in enumerate(config.empty_cells):
@@ -173,15 +174,33 @@ def _decide(
             mode="json", exclude={"max_stack_height_mm", "reel_diameters_inch"}
         )
         if isinstance(target, RandomMockCell) and target.max_stack_height_mm is not None:
-            stack = [item for item in reservations.values() if item["cell"] == reservation["cell"]]
+            stack = [
+                item
+                for item in reservations.values()
+                if item["cell"] == reservation["cell"] and not item.get("released")
+            ]
             if any(item.get("allocated") and not item.get("reported") for item in stack):
                 return wait
             height = _stack_height(item for item in stack if item.get("reported"))
             allocation["reel_totalthickness"] = (
                 height.numerator if height.denominator == 1 else float(height)
             )
+        reservation.pop("released", None)
         reservation["allocated"] = True
         return 200, "DECIDED", allocation
+
+    if payload.result == "FAILED":
+        if (
+            payload.placement_status != "CONFIRMED_NOT_PLACED"
+            or not reservation.get("allocated")
+            or reservation.get("reported")
+        ):
+            return STATE_CONFLICT
+        reservation["allocated"] = False
+        reservation.pop("reported", None)
+        if isinstance(config, RandomMockRound):
+            reservation["released"] = True
+        return 200, "RECORDED", {}
 
     if (
         not reservation.get("allocated")

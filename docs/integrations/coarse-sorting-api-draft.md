@@ -28,8 +28,8 @@
 | 换架 / 仅退架 | 5.3 | WMS → WES | Operation：[transport.task.resulted@v1](#transport-rack-out-result) | 回填原旧架实际终位/失败，备查 | 缺失或失败不回退已接纳的调度 |
 | 补架 / 换架 / 仅退架 | 5.4 | WES → WMS | Operation：[inbound.coarse_sorting.storage_allocate@v1](#wms-storage-reallocate) | 新架明确到位或仅退架调度接纳后，使用原 `binding_id`、新 `operation_id` 重新分配 | 取得有效箱格才进入正常步骤 6 |
 | 正常        | 6    | WES → ECS        | Command：[PUT_TO_BIN](#ecs-put-to-bin)                                           | 下发入箱命令                                                         | 已取得有效的放料目标                                  |
-| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 回传原入箱命令的执行结果                                             | 明确物理放料完成                                      |
-| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的物理完成事实                                   | WMS 返回 `RECORDED / DUPLICATE`                     |
+| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 回传原入箱命令的执行结果                                             | 明确放料完成，或明确未放料的失败                    |
+| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的执行结果                                       | WMS 返回 `RECORDED / DUPLICATE`                     |
 | NG          | 3    | WES → ECS        | Command：[MOVE_TO_NG](#ecs-move-to-ng)                                           | 下发搬至对应区域 NG 平台的命令                                       | WMS 验证返回 `NG + reason_code`                     |
 | NG          | 4    | ECS → WES        | Result：[原 MOVE_TO_NG 命令](#ecs-move-to-ng-result)                             | 回传原 NG 搬运命令的执行结果                                         | 明确结果后保存；NG 成功不触发正常入箱反馈             |
 
@@ -134,7 +134,7 @@ flowchart TB
     class done completed
 ```
 
-只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。只有原入箱命令明确证明指定箱格已放料后才报告物理完成。报告未收妥时保留物理完成事实，只恢复原报告或核对，允许下一盘继续，不额外锁住原料格、不再执行该盘搬运。
+只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。原入箱命令明确证明指定箱格已放料后报告成功完成；若明确失败且确认未放料，则发送失败执行报告并释放 WMS 预约；结果未知时保留原命令和预约，不报告成功或释放箱格。报告未收妥时保留执行事实，只恢复原报告或核对，允许下一盘继续，不额外锁住原料格、不再执行该盘搬运。
 
 ### 2.3 NG 处理与异常出口
 
@@ -515,9 +515,9 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 
 <a id="wms-execution-report"></a>
 
-### 3.3 物理完成反馈
+### 3.3 物理完成及执行结果反馈
 
-仅在原 `PUT_TO_BIN` 的可信成功结果证明指定箱格放料完成后发送。本接口描述正常入箱完成；NG 搬运成功不作为正常入箱反馈。
+原 `PUT_TO_BIN` 的执行结果明确后发送。本接口既反馈指定箱格已完成放料，也反馈已确认未放料的失败。NG 搬运成功不作为正常入箱反馈。
 
 请求：
 
@@ -533,7 +533,10 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
     "bin_location": "B",
     "cell_id": "BIN-A002-1",
     "cell_index": 2,
-    "completed_at": 1793206814000
+    "completed_at": 1793206814000,
+    "result": "SUCCESS",
+    "error_detail": null,
+    "placement_status": "CONFIRMED_PLACED"
   }
 }
 ```
@@ -545,8 +548,13 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 | `bin_code / bin_location` | 原目标料箱条码及其在单层货架上的箱位 |
 | `cell_id / cell_index` | 原分配的完整料格储位编码及料箱内格位，成对回传 WMS |
 | `completed_at`                      | 原 ECS Result 的 `finish_time`，不使用报告发送时间                                            |
+| `result`                             | `SUCCESS` 或 `FAILED`。成功表示已确认放料，失败表示已确认未放料 |
+| `error_detail`                       | 失败时必填的执行错误，成功时为 `null` |
+| `placement_status`                   | `CONFIRMED_PLACED`、`CONFIRMED_NOT_PLACED` 或 `UNKNOWN`。`FAILED` 只能使用 `CONFIRMED_NOT_PLACED` |
 
-目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。失败、未知、超时均不提交本完成接口，也不推导装箱后总高度。
+目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。未确认是否放料时不提交成功报告，也不推导装箱后总高度。
+
+当 ECS 明确放料失败且确认未放料时，WES 使用原绑定和原分配目标发送 `result: "FAILED"` 的报告。WMS 收妥后释放 `storage_allocate@v1` 预约的箱格，WES 保留原操作证据并进入待处理状态。无法确认是否放料时使用 `placement_status: "UNKNOWN"`，不得释放预约。
 
 `command_code / device_code` 及原成功 Result 关联仅由 WES 内部保存，不加入本报告。目标合同以 `workline_code + binding_id` 标识该盘的一次正常入箱完成：同一键的相同目标和完成事实重复报告不重复装载或记账；目标或完成事实冲突时拒绝，不能覆盖原报告。协议 `operation_id` 仍标识具体请求，技术重试复用原身份及冻结正文；业务去重规则待 WMS 按 P10 确认。
 

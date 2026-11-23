@@ -237,10 +237,13 @@ class CoarseSortingService:
             if action and action["kind"] == "MOVE_TO_NG":
                 return await self._advance_ng_result(session, row, action, save)
             return await self._resume_ng_validation(session, row, action, line, input_arm, save)
+        if self.direct_put and (
+            row["state"] == "AWAITING_REPORT"
+            or (row["state"] == "AWAITING_PUT" and action and action["kind"] == "REPORT_COMPLETION")
+        ):
+            return await self._advance_report(session, action, save)
         if self.direct_put and row["state"] == "AWAITING_PUT":
             return await self._advance_put(session, row, action, actions, save)
-        if self.direct_put and row["state"] == "AWAITING_REPORT":
-            return await self._advance_report(session, action, save)
 
         if not row["command_code"] and (
             row["state"] in {"AWAITING_MOVE", "AWAITING_ALLOCATION"}
@@ -1248,6 +1251,40 @@ class CoarseSortingService:
             )
             return await save(reason)
         await self._consume(session, action, self._ecs_evidence(asdict(command)))
+        if result["result"] == "FAILED" and not result.get("data"):
+            try:
+                decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
+                original = PutToBin.model_validate(action["request_data"])
+                if (
+                    decision.workline_code != row["workline_code"]
+                    or decision.bin_location != original.bin_location
+                    or decision.cell_index != original.bin_cell_location
+                    or str(decision.bin_type) != original.bin_type
+                    or decision.reel_totalthickness != original.reel_totalthickness
+                ):
+                    return await save("PUT_RECONCILIATION_REQUIRED")
+                model = self.direct_put_contracts.report(
+                    workline_code=row["workline_code"],
+                    binding_id=row["binding_id"],
+                    bin_code=decision.bin_code,
+                    bin_location=decision.bin_location,
+                    cell_id=decision.cell_id,
+                    cell_index=decision.cell_index,
+                    completed_at=result["finish_time"],
+                    result="FAILED",
+                    error_detail=result["error_detail"],
+                    placement_status="CONFIRMED_NOT_PLACED",
+                )
+            except (KeyError, TypeError, ValidationError):
+                return await save("PUT_RECONCILIATION_REQUIRED")
+            action_id = await self._send_request(
+                session, row, action, "REPORT_COMPLETION", REPORT, model
+            )
+            return await save(
+                "AWAITING_REPORT_RESULT",
+                state="AWAITING_PUT",
+                current_action_id=action_id,
+            )
         if (
             command.status != "SUCCEEDED"
             or command.needs_reconciliation
@@ -1276,6 +1313,8 @@ class CoarseSortingService:
                 cell_id=decision.cell_id,
                 cell_index=decision.cell_index,
                 completed_at=result["finish_time"],
+                result="SUCCESS",
+                placement_status="CONFIRMED_PLACED",
             )
         except ValidationError:
             return await save("PUT_RECONCILIATION_REQUIRED")
@@ -1301,6 +1340,13 @@ class CoarseSortingService:
         if not self._valid_response(result, "RECORDED", "DUPLICATE") or result.response_data != {}:
             return await save(self._request_wait_reason(result, "REPORT"))
         await self._consume(session, action, self._wms_evidence(result))
+        if action["request_data"].get("result") == "FAILED":
+            return await save(
+                "PUT_RECONCILIATION_REQUIRED",
+                state="AWAITING_PUT",
+                pending=False,
+                current_action_id=action["predecessor_action_id"],
+            )
         return await save("COMPLETED", state="COMPLETED", pending=False, completed_at=self.clock())
 
     async def _lock_point(self, session, work_line_id):

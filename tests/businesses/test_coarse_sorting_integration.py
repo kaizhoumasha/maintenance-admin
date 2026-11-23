@@ -271,6 +271,9 @@ async def exercise_integration(integration_database, *, mock=None):
         "workline_code": "COARSE",
         "binding_id": "ORIGINAL-BIND",
         "completed_at": 2,
+        "result": "SUCCESS",
+        "error_detail": None,
+        "placement_status": "CONFIRMED_PLACED",
     }
 
 
