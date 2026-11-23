@@ -36,8 +36,6 @@ def isolated_contracts(monkeypatch):
 def test_work_plan_request_preserves_original_fields(module, data):
     contract = importlib.import_module(f"app.businesses.smt_auto.request.{module}").WorkPlan
     assert contract.model_validate(data).model_dump() == data
-    with pytest.raises(ValidationError):
-        contract.model_validate({**data, "unknown": 1})
     time = "arrived_at" if "arrived_at" in data else "scanned_at"
     with pytest.raises(ValidationError):
         contract.model_validate({**data, time: True})

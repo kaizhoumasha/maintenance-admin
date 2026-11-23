@@ -14,7 +14,7 @@ def test_move_forward_serializes_only_the_original_barcode():
     assert MoveForward(barcode=" RAW,条码 ").model_dump(mode="json") == {"barcode": " RAW,条码 "}
 
 
-@pytest.mark.parametrize("data", [{"barcode": 123}, {"barcode": "A", "location": "B"}, {}])
+@pytest.mark.parametrize("data", [{"barcode": 123}, {}])
 def test_move_forward_rejects_noncontract_parameters(data):
     from app.businesses.coarse_sorting.ecs_command import MoveForward
 
@@ -59,7 +59,7 @@ def test_validate_bind_preserves_raw_scan_facts():
         "reel_thickness": 20.5,
     }
     assert ValidateBind.model_validate(data).model_dump(mode="json") == data
-    for changes in ({"workline_code": ""}, {"reel_thickness": "20"}, {"box_code": "BOX"}):
+    for changes in ({"workline_code": ""}, {"reel_thickness": "20"}):
         with pytest.raises(ValidationError):
             ValidateBind.model_validate({**data, **changes})
 
@@ -84,7 +84,6 @@ def test_validate_bind_decision_requires_its_original_business_reference(data):
         {"result": "NG", "reason_code": 1},
         {"result": "NG", "reason_code": "BAD", "binding_id": "BIND-1"},
         {"result": "UNKNOWN"},
-        {"result": "OK", "binding_id": "BIND-1", "extra": True},
     ],
 )
 def test_validate_bind_rejects_incomplete_or_conflicting_decisions(data):

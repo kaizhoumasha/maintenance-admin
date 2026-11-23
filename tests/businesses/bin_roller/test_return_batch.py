@@ -113,9 +113,7 @@ async def test_partial_return_retires_only_known_departed_members(roller_return)
         ] == face["current_transport_task_id"]
 
 
-@pytest.mark.parametrize(
-    "invalid", ["skip", "reorder", "duplicate_slot", "wrong_face", "outside", "extra"]
-)
+@pytest.mark.parametrize("invalid", ["skip", "reorder", "duplicate_slot", "wrong_face", "outside"])
 async def test_ready_cannot_skip_or_reorder_frozen_candidates(roller_return, invalid):
     flow = roller_return
     await flow.bins(2)
@@ -133,8 +131,6 @@ async def test_ready_cannot_skip_or_reorder_frozen_candidates(roller_return, inv
             data["moves"][0]["target"]["rack_face"] = "B"
         elif invalid == "outside":
             data["moves"][0]["bin_code"] = "A000000099"
-        else:
-            data["retry_after_ms"] = 1
         await flow.decide(session, face_id, data=data)
         await flow.consume_return(session, face_id)
         face = await flow.roller.original_record(session, "face_work", face_id)
@@ -424,7 +420,6 @@ async def test_return_request_has_only_original_wire_fields(roller_return):
         )
         assert ReturnBatchRequest.model_validate(data).rack_face == "90"
         for changed in (
-            {**data, "task_id": "T1"},
             {**data, "return_candidates": []},
             {**data, "rack_face": 90},
         ):

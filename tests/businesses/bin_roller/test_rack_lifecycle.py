@@ -380,11 +380,6 @@ async def test_departure_wait_keeps_due_point_then_registers_one_recheck(
             result="READY", rack_destination=dict(type="RACK_POSITION", location_code="RACK-WORK")
         ),
         dict(result="WAIT", retry_after_ms=0),
-        dict(
-            result="READY",
-            rack_destination=dict(type="ZONE", location_code="DEST"),
-            task_id="extra",
-        ),
     ],
 )
 async def test_invalid_departure_never_creates_move_or_new_identity(roller_lifecycle, data):

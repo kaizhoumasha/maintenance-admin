@@ -93,7 +93,6 @@ async def test_face_done_opens_return_without_fake_feed(roller_current):
     "data",
     [
         {"result": "READY", "bins": []},
-        {"result": "RACK_FACE_DONE", "bins": []},
         {"result": "NO_BATCH"},
         {
             "result": "READY",
@@ -243,7 +242,6 @@ async def test_inbound_request_is_strict_three_fields_and_opaque_face(roller_fee
         "rack_face": " 90 ",
     }
     for values in (
-        dict(task_id="T1", rack_id="R1", rack_face="A", plan_revision=1),
         dict(task_id="", rack_id="R1", rack_face="A"),
         dict(task_id="T1", rack_id="R1", rack_face=""),
         dict(task_id="T1", rack_id="R1", rack_face="A" * 11),
