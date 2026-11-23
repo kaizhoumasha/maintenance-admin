@@ -8,10 +8,15 @@ import pytest
 from pydantic import ValidationError
 
 
-def test_move_forward_serializes_only_the_original_barcode():
+# Value: protects=MOVE_FORWARD wire keeps the raw barcode and drops unknown parameters;
+# fails_when=extra parameters reject the command or reach ECS; why_new=only clean input was checked;
+# seam=none; no_claim=ECS acceptance or physical movement.
+@pytest.mark.parametrize("extra", [{}, {"location": "OTHER", "actual_qty": 99}])
+def test_move_forward_serializes_only_the_original_barcode(extra):
     from app.businesses.coarse_sorting.ecs_command import MoveForward
 
-    assert MoveForward(barcode=" RAW,条码 ").model_dump(mode="json") == {"barcode": " RAW,条码 "}
+    command = MoveForward.model_validate({"barcode": " RAW,条码 ", **extra})
+    assert command.model_dump(mode="json") == {"barcode": " RAW,条码 "}
 
 
 @pytest.mark.parametrize("data", [{"barcode": 123}, {}])
@@ -64,13 +69,34 @@ def test_validate_bind_preserves_raw_scan_facts():
             ValidateBind.model_validate({**data, **changes})
 
 
+# Value: protects=OK/NG decisions retain original references and optional peer detail only;
+# fails_when=unknown fields reject or survive, or valid detail is lost;
+# why_new=existing decisions had neither detail nor extra fields;
+# seam=none; no_claim=WMS acceptance or business progression.
+@pytest.mark.parametrize("detail", [{}, {"detailMessage": None}, {"detailMessage": "校验完成"}])
 @pytest.mark.parametrize(
     "data", [{"result": "OK", "binding_id": "BIND-1"}, {"result": "NG", "reason_code": "BAD"}]
 )
-def test_validate_bind_decision_requires_its_original_business_reference(data):
+def test_validate_bind_decision_requires_its_original_business_reference(data, detail):
     from app.businesses.coarse_sorting.contracts import ValidateBindDecision
 
-    assert ValidateBindDecision.model_validate(data).model_dump(exclude_none=True) == data
+    response = data | detail | {"peer_revision": 2, "diagnostics": {"source": "WMS"}}
+    expected = data | {key: value for key, value in detail.items() if value is not None}
+    assert ValidateBindDecision.model_validate(response).model_dump(exclude_none=True) == expected
+
+
+# Value: protects=peer detail remains optional nonempty text on both decision outcomes;
+# fails_when=empty or nontext detail passes validation; why_new=no detail validation cases existed;
+# seam=none; no_claim=WMS transport handling or business progression.
+@pytest.mark.parametrize("detail", ["", 1, [], {}])
+@pytest.mark.parametrize(
+    "data", [{"result": "OK", "binding_id": "BIND-1"}, {"result": "NG", "reason_code": "BAD"}]
+)
+def test_validate_bind_rejects_invalid_peer_detail(data, detail):
+    from app.businesses.coarse_sorting.contracts import ValidateBindDecision
+
+    with pytest.raises(ValidationError):
+        ValidateBindDecision.model_validate(data | {"detailMessage": detail})
 
 
 @pytest.mark.parametrize(

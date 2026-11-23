@@ -10,7 +10,7 @@
 
 结构:`nginx`(同域提供前端静态文件 + 反代 `/api`)→ `api`(可多实例)→ `postgres` / `redis`;`worker` 可多个,`beat` 只能一个,`migrate` 每次升级跑一次。需要 Docker Compose ≥ 2.24.4。
 
-2026-10-27 已部署并完成基础验收，当前站点配置如下；每次更新前仍须重新核对端口、架构和现有项目：
+下表保留 2026-10-27 部署及基础验收时的配置，地址不随当前入口调整而改写；当前访问入口见本文开头，每次更新前仍须重新核对端口、架构和现有项目：
 
 | 项目 | 联调服务器默认方案 |
 | --- | --- |
@@ -18,8 +18,8 @@
 | 现有 WES | Compose 项目 `wes_integration`，目录 `/srv/wes/app/current-single`；已映射宿主机 80、443、5555 |
 | 本项目 | 根目录 `/srv/enterprise-backend`，Compose 项目 `enterprise-backend-int` |
 | 数据隔离 | 独立 PostgreSQL、Redis、网络及数据卷，不复用 WES 的数据库、队列和配置 |
-| 网页入口 | 默认 `100.96.0.2`，内网 `10.24.199.219`；分别绑定这两个明确 IP，不绑定所有网卡 |
-| 本地数据库工具 | PostgreSQL `100.96.0.2:25432`、Redis `100.96.0.2:26379`，均需各自密码；只绑定该 Cloudflare WARP IP |
+| 网页入口 | 默认 `100.94.216.118:18080`，内网 `10.24.199.219:18080`；分别绑定这两个明确 IP，不绑定所有网卡 |
+| 本地数据库工具 | PostgreSQL `100.94.216.118:25432`、Redis `100.94.216.118:26379`，均需各自密码；只绑定该 Tailscale IP |
 | 联调环境 | `ENVIRONMENT=local`；此设置只用于联调，正式生产切回 `production` |
 | Swagger | FastAPI 内置 `/docs` 和 `/openapi.json`，由当前 API 动态生成，nginx 直接反代 |
 
@@ -209,7 +209,7 @@ POSTGRES_PASSWORD=<单独生成的十六进制随机密码>
 REDIS_PASSWORD=<用openssl rand -hex 32单独生成的64位十六进制密码>
 CORS_ORIGINS=
 RELIABLE_TARGETS={"targets":{"wms-transport":{"base_url":"http://10.24.199.217:8285","protocol":"wms-transport","max_not_received_attempts":3},"wms-facts":{"base_url":"http://10.24.199.217:8285","protocol":"wms-facts"},"wms-decisions":{"base_url":"http://10.24.199.217:8285","protocol":"wms-decisions"}}}
-NGINX_PORT=18080
+NGINX_PORT=80
 FRONTEND_DIST=/srv/enterprise-backend/shared/frontend-dist
 SITE_NGINX_CONFIG=/srv/enterprise-backend/shared/nginx/default.conf
 ```
@@ -265,8 +265,8 @@ services:
           create_host_path: false
   nginx:
     ports: !override
-      - "100.96.0.2:${NGINX_PORT:-18080}:80"
-      - "10.24.199.219:${NGINX_PORT:-18080}:80"
+      - "100.96.0.2:${NGINX_PORT:-80}:80"
+      - "10.24.199.219:${NGINX_PORT:-80}:80"
   api:
     environment:
       REDIS_URL: redis://:${REDIS_PASSWORD:?请设置独立Redis密码}@redis:6379/0
@@ -409,12 +409,12 @@ ssh CANTAISYS@100.96.0.2 'cat /srv/enterprise-backend/shared/database-access.env
 | 应用源 | `a1eccce7bf35fafb82ca408a07ff834d31324e36`，`source_dirty=false`，`linux/amd64`；属于联调候选，未发布新版本 |
 | 数据库 | Alembic head 为 `a6d464b20ab7`，迁移成功；`alembic check` 无新增迁移操作 |
 | 服务 | API、PostgreSQL、Redis healthy，worker ping 正常，beat 单实例，nginx 正常；migrate 为 Exited (0) |
-| 入口变更 | 从 `127.0.0.1` 改为 `100.96.0.2`，只重建本项目 nginx |
-| 内网入口补充 | nginx 新增 `10.24.199.219` 绑定，保留 Cloudflare WARP 入口；两个地址的 `/ready`、`/docs`、`/openapi.json` 均返回 200，本地客户端访问两个 `/docs` 也均为 200；只重建本项目 nginx，其他本项目服务及 WES 9 个容器基线不变 |
+| 入口变更 | 从 `127.0.0.1:18080` 改为 `100.94.216.118:18080`，只重建本项目 nginx |
+| 内网入口补充 | nginx 新增 `10.24.199.219:18080` 绑定，保留 Tailscale 入口；两个地址的 `/ready`、`/docs`、`/openapi.json` 均返回 200，本地客户端访问两个 `/docs` 也均为 200；只重建本项目 nginx，其他本项目服务及 WES 9 个容器基线不变 |
 | 接口验收 | 本次 local 的 14 项检查通过：标准 CookieJar 在 HTTP 下完成登录、自动携带 Cookie 刷新、退出及旧会话撤销；未登录设备查询和调试目录为 401，管理员授权查询为 200 |
 | 当前环境与 Swagger | 联调切为 `local`，FastAPI 内置 Swagger 已在浏览器渲染，动态返回 51 个正式及 local 调试路径；入口 OpenAPI 与 API 容器响应一致，不再使用 36 路径的旧静态快照 |
 | Swagger 配置部署 | 沿用原固定镜像，重建本项目 API、worker、beat 和 nginx；当次未执行迁移，PostgreSQL、Redis 和 WES 保持运行 |
-| 数据库直连变更 | PostgreSQL `100.96.0.2:25432`、Redis `100.96.0.2:26379`；原 PostgreSQL 密码保留，Redis 新增独立密码，原镜像及命名数据卷不变 |
+| 数据库直连变更 | PostgreSQL `100.94.216.118:25432`、Redis `100.94.216.118:26379`；原 PostgreSQL 密码保留，Redis 新增独立密码，原镜像及命名数据卷不变 |
 | 直连认证验收 | 本地客户端无 SSH 隧道完成 PostgreSQL 只读查询和 Redis PING；PostgreSQL 错误密码、Redis 无密码均被拒绝 |
 | 数据保留 | 应用停止期间比对 PostgreSQL schema 内 19 张表，行数及内容摘要一致；Redis 校验标记经容器重建仍保留，验证后仅删除该自有临时标记，AOF 继续启用 |
 | 变更前备份 | 已生成完整自定义格式 PostgreSQL 备份，`pg_restore --list` 通过；pg_dump 提示 TimescaleDB `continuous_agg` 循环外键警告，未执行恢复演练，不能据此宣称恢复已验收 |
@@ -555,7 +555,7 @@ curl --noproxy '*' --fail --head http://100.96.0.2:18081/
 
 已有 HTTPS 网关也须同步更新上游地址。验证失败时将 `.env` 改回旧端口，再用同一命令重建 nginx；不要重建整套应用。前端 HTTP 检查不能替代容器内 `/ready` 和登录验收。
 
-改成 80 时同样设置 `NGINX_PORT=80`，但必须先解决占用：2026-10-27 检查时 `wes_nginx_int` 已绑定 `0.0.0.0:80`，因此本项目连 `100.96.0.2:80` 也不能同时绑定。可选择：
+改成 80 时同样设置 `NGINX_PORT=80`，但必须先解决占用：2026-10-27 检查时 `wes_nginx_int` 已绑定 `0.0.0.0:80`，因此当时本项目连 `100.94.216.118:80` 也不能同时绑定。可选择：
 
 - 保留 WES 的 80/443，由现有网关按本项目独立域名转发到候选端口。此时本项目 `NGINX_PORT` 继续为 18080 等独立端口；两个域名分别提供各自前端和 `/api`，避免同路径混流。修改现有网关前须确认 WES 影响并完成配置检查，再安排 reload。
 - 经协调将 WES 的入口迁到其他端口/IP，确认原 80 端口已释放，再将本项目 `NGINX_PORT` 改为 80 并只重建本项目 nginx。不要直接停止 WES 来抢占端口。

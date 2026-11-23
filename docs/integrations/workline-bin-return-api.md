@@ -380,7 +380,7 @@ data 仅包含 result=NO_BATCH，不发送 retry_after_ms 或 moves。它是 WMS
 
 两个 data 字段必填。required_slot_count 为正整数，表示本次请求时当前可请求物理 FIFO 连续合格前缀的待回箱数量，供 WMS 选架参考；不固定为 4，不包含工作位、NG、未知位置或已独立分配/在途成员，不根据旧库 capacity=1 截断为单箱。它不冻结整个 drain 的成员范围，不承诺一次返回足够容量。技术重试保持原数量；本批原服务及已创建整架动作收口后的新申请按当时数量重新计算。无可请求前缀时不发送零数量请求，也不据此认定通道已经排空。
 
-Bin 身份、原顺序、生命周期原因和所有者由 WES 本地保存，不进入请求。请求信封和 data 逐层严格拒绝额外字段、null 和错误类型。
+Bin 身份、原顺序、生命周期原因和所有者由 WES 本地保存，不进入请求。发送方只按字段表构造请求；WES 本地请求 data 忽略额外字段，已定义字段的 null 和错误类型仍拒绝。
 
 #### 2.2.2 READY
 
@@ -514,7 +514,7 @@ Command 使用 `POST /api/v1/device/command`；Result 使用 `POST /api/v1/callb
 
 技术重试保持原 operation_id、timestamp、冻结正文、候选及目标。已登记意图先按保存的原 message/command/Transport 引用读结果，仅原 Sender 按冻结输入重试，不因当前 target/设备/候选变化重新 send/create；提交响应不明沿原 work 的完整事务推进重读原逻辑依据；连接失败或暂时查空都不证明回滚，已见原记录恢复原身份，登记仍须经完整业务判定/唯一性/依赖校验及成功提交，不另设提交确认流程。有效 drain WAIT 已可靠消费后，满足等待条件才创建新求值；确定 return_batch NO_BATCH 按 C03 结束本面本次服务，不设置重试时间。目标冲突、身份歧义、UNKNOWN/HELD、位置未知都保留原证据和责任，不用改 ID、重新排序或改目标“恢复”；已确认人工搬离并接管的本次回流按第 1.3 节移交责任，保留原证据，不再自动恢复。
 
-可选字段无值省略，除字段明确允许外禁止 null；current_face 的共用离场例外按其字段表。return_batch 沿其 wire 读取已定义字段及冗余字段处理规则。drain 请求严格拒绝额外字段，READY/WAIT 响应业务数据按第 2.2 节处理扩展字段。历史幂等摘要沿用原值。
+可选字段无值省略，除字段明确允许外禁止 null；current_face 的共用离场例外按其字段表。return_batch 沿其 wire 读取已定义字段及冗余字段处理规则。WES 本地 drain 请求 data 忽略额外字段，READY/WAIT 响应业务数据按第 2.2 节处理扩展字段。历史幂等摘要沿用原值。
 
 参考来源为 wes_backend 的 `wms-manual-outbound-picking-integration-requirements.md` 第 3.3/3.4、5.6 节及 `wms-outbound-picking-task-integration-requirements.md` 第 9.2.2/9.2.3 节。旧系统存在实现不代表本系统接入或现场通过。
 

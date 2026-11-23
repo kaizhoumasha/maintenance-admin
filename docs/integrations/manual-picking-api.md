@@ -661,7 +661,7 @@ Result 必须匹配原 command_code、device_code 并通过原冻结合同验证
 
 field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信封仍回显原 operation_id；不自行引入 BUSY/429。可选字段无值省略，**除字段表明确允许外禁止 null**，包括显式允许的共用离场 current_face=null 例外。
 
-额外字段策略按方向及模型区分：所有 WES → WMS 请求 data 及其嵌套 RequestPayload 都严格拒绝额外字段，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 主动通知忽略真正未知的扩展字段，明确禁用或属于其他分支的业务字段仍拒绝。同步响应沿各自模型校验。通知的幂等有效字段和历史收据沿原协议，旧字段校验拒绝按原报文重放。
+额外字段策略按方向及模型区分：WES → WMS 请求 data 及其嵌套 RequestPayload 默认忽略额外字段，已定义字段仍严格校验，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 主动通知忽略真正未知的扩展字段，明确禁用或属于其他分支的业务字段仍拒绝。同步响应沿各自模型校验。通知的幂等有效字段和历史收据沿原协议，旧字段校验拒绝按原报文重放。
 
 统一 sorting.task.* 目标的[任务族冗余字段](smt-auto-api.md#task-field-policy)同样适用于 cancel.data 及其选择器。明确禁用或跨模式、分支、选择器的业务字段继续拒绝，取消范围和历史有效内容沿原合同。
 
@@ -728,7 +728,7 @@ RETURN_BUFFER 是每条工作线的回程队列/通道语义，不另造一个�
 
 用户给出的配置是本轮文档的指定值。远端 WES 数据库核对仅用于比较其现存配置，不据数据库记录推定设备在线、货架实际到位、库存占用或业务验收；若存在差异，保留两者来源并列入待确认，不修改数据库或本系统配置。
 
-2026-10-30 经 SSH 只读核对 `CANTAISYS@100.96.0.2` 上 `wes_postgres_int` 容器的 `wes_integration` 数据库，查询位于显式 READ ONLY 事务，结束 ROLLBACK。仅读取配置字段，未修改数据、调用 Status 或发送命令：
+2026-10-30 经 SSH 只读核对 `CANTAISYS@100.94.216.118` 上 `wes_postgres_int` 容器的 `wes_integration` 数据库，查询位于显式 READ ONLY 事务，结束 ROLLBACK。仅读取配置字段，未修改数据、调用 Status 或发送命令：
 
 - `wes_biz.work_lines.config` 的 device_bindings、position_bindings 与第 4.2 节两线全部角色/位置映射一致；两线 plugin_key 均为 `manual-picking`。
 - `wes_biz.devices` 的八个扫码设备均归属相应工作线，endpoint_base_url 均为 `http://10.24.209.26:8080`；is_active=true、is_deleted=false 只是旧库配置标记，不是在线或执行许可。

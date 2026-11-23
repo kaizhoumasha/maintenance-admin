@@ -466,7 +466,7 @@ async def test_replay_and_recovery_with_generic_history_inaccessible(state_migra
     registry._registry.pop(operation, None)
 
     class LegacyCancel(Cancel):
-        model_config = ConfigDict(extra="ignore")
+        model_config = ConfigDict(extra="forbid")
 
     @callback_operation(
         operation,

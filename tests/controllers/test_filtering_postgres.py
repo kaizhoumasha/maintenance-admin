@@ -29,9 +29,10 @@ async def test_pg_permissions_and_invalid_inputs(pg_client, path, caplog):
     client, tag = pg_client["client"], pg_client["tag"]
     assert (await client.get(path)).status_code == 401
     assert (await client.get(path, headers=pg_client["denied"])).status_code == 403
-    assert (await query(pg_client, path)).status_code == 200
+    baseline = await query(pg_client, path)
+    assert baseline.status_code == 200
+    assert (await query(pg_client, path, filer=tag)).json() == baseline.json()
     for params in (
-        {"filer": tag},
         {"filter": ""},
         {"filter": "null"},
         {"filter": "[" * 900 + "]" * 900},
@@ -58,7 +59,9 @@ async def test_pg_permissions_and_invalid_inputs(pg_client, path, caplog):
             {"cursor": raw_cursor({"id": 2147483648})},
             {"cursor": "*"},
         ):
-            assert (await query(pg_client, path, **params)).status_code == 400
+            response = await query(pg_client, path, **params)
+            assert response.status_code == 200
+            assert response.json() == baseline.json()
         assert (await query(pg_client, path, condition("action", "ilike", "%"))).status_code == 400
     assert tag not in "\n".join(
         r.getMessage() for r in caplog.records if r.name == "enterprise-backend"

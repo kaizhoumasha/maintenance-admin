@@ -103,7 +103,7 @@ async def carton_validate(ctx: EcsRequestContext, data: CartonScan) -> None: ...
 上面的名称只说明形状。本文不注册它。
 
 - `data` 使用 `CallbackPayload`，冗余字段忽略。
-- `response` 是严格 Pydantic 模型，`extra="forbid"`。它不是 `CallbackPayload`。
+- `response` 是严格 Pydantic 模型，`extra="ignore"`。它不是 `CallbackPayload`。
 - 注册键是 `(device_role, request_type)`。重复注册报错并指出双方来源。
 - 文件名遵循 `registration_filename`。`CARTON_VALIDATE` 对应 `carton_validate.py`。
 - 处理器是 `async def handler(ctx, data) -> None`。返回值被忽略。

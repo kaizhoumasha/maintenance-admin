@@ -37,7 +37,7 @@ class InvalidRequestPayload(ValueError):
 
 
 class RequestPayload(BaseModel):
-    """严格按 JSON 类型校验,不接受多余字段(合同 REQ-COM-16)。
+    """严格按 JSON 类型校验,忽略未声明的额外字段。
 
     字段尽量用 JSON 原生类型(str、int、float、bool、list、dict、Literal、嵌套模型)。datetime 等写成
     str 再自行解析最省事:直接调用 `send` 传 Python 对象可以通过校验,但联调界面的 JSON 请求体要先

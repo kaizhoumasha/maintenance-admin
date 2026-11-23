@@ -12,9 +12,9 @@ WMS 接入及已装配解析器后的新增 ECS 处理器无需修改控制器�
 | 场景 | 目录 | 声明 | 数据约束 |
 |---|---|---|---|
 | ECS → 本项目 | `app/businesses/<业务>/ecs_event/` | `@ecs_event(name, device_role=ROLE, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
-| ECS → 本项目同步决定 | `app/businesses/<业务>/ecs_request/` | `@ecs_request(request_type, device_role=ROLE, data=Model, response=Decision)` + async 函数 | 请求模型沿用 `CallbackPayload`；响应模型必须 `extra="forbid"`，由处理器 `respond` 或 `defer` |
+| ECS → 本项目同步决定 | `app/businesses/<业务>/ecs_request/` | `@ecs_request(request_type, device_role=ROLE, data=Model, response=Decision)` + async 函数 | 请求模型沿用 `CallbackPayload`；响应模型必须 `extra="ignore"`，由处理器 `respond` 或 `defer` |
 | WMS → 本项目 | `app/businesses/<业务>/callback/` | `@callback_operation(name, data=Model)` + async 函数 | `CallbackPayload` 严格类型、忽略冗余字段 |
-| 本项目 → WMS | `app/businesses/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、禁止冗余字段 |
+| 本项目 → WMS | `app/businesses/<业务>/request/` | `@request_operation(name, Endpoint)` 装饰模型 | `RequestPayload` 严格类型、默认忽略冗余字段 |
 
 业务 composition 可通过 COMPONENTS 显式引用 `app/businesses/_components/<key>/` 内相同的四类目录；
 共享能力没有独立注册表、业务身份或任务。共享入口仍受下文文件名、formal/local、显式模块及迟注册规则约束；
