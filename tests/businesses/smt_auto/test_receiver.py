@@ -1,13 +1,10 @@
 """AUTO host evidence through the real shared WMS callback receiver and public outbox ports."""
 
 from copy import deepcopy
-from dataclasses import replace
 
 import pytest
-from pydantic import ConfigDict
 from sqlalchemy import func, select
 
-from app.businesses._components.sorting_task.contracts import Cancel
 from app.businesses.smt_auto.models import (
     AutoInboundSourceMember,
     AutoOutboundSourceMember,
@@ -18,7 +15,6 @@ from app.businesses.smt_auto.models import (
 )
 from app.core.strict_json import canonical_digest
 from app.integrations.callback_receipts import find_receipt
-from app.integrations.wms_callback import registry
 from app.models import IntegrationExchange, ReliableMessage, WorkLine
 
 
