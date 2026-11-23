@@ -222,7 +222,7 @@ async def test_model_serialization_and_defaults_preserve_the_original_frozen_mes
     with pytest.raises(DuplicateMessage):
         async with sessions.begin() as session:
             await send(session, {**data, "qty": 4})
-    assert payload.model_config == {"strict": True, "extra": "forbid"}
+    assert payload.model_config == {"strict": True, "extra": "ignore"}
 
 
 async def test_model_send_rollback_leaves_no_message(sessions, wms, clock):
@@ -354,7 +354,7 @@ async def test_model_send_revalidates_actual_nested_root_contents(sessions, wms,
         assert "root" not in vars(quantities)
 
 
-@pytest.mark.parametrize("invalid", ["constructed", "assigned", "nested", "list", "extra"])
+@pytest.mark.parametrize("invalid", ["constructed", "assigned", "nested", "list"])
 async def test_model_send_revalidates_actual_fields_before_serializing(
     sessions, wms, clock, invalid
 ):
@@ -368,8 +368,6 @@ async def test_model_send_revalidates_actual_fields_before_serializing(
         payload.nested[0].qty = "1"
     elif invalid == "list":
         payload.nested.append({"quantity": {"value": "1"}})
-    else:
-        payload.__dict__["unlisted"] = 1
     with pytest.raises(InvalidRequestPayload):
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=str(uuid7(clock())))

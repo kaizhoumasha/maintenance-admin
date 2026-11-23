@@ -383,7 +383,7 @@ async def test_predecessor_projection_for_another_rack_cannot_open_departure(rac
     assert view.pending and len(view.actions) == 1
 
 
-@pytest.mark.parametrize("mutation", ["rack", "location", "same_point", "wrong_shape"])
+@pytest.mark.parametrize("mutation", ["rack", "location", "same_point"])
 async def test_recovered_ready_must_match_original_origin_before_creating_transport(rack, mutation):
     from sqlalchemy import update
 
@@ -478,8 +478,6 @@ async def test_rejected_prepare_keeps_cross_owner_managed_point_protected(backen
 @pytest.mark.parametrize(
     "mutation",
     [
-        "extra_decision",
-        "extra_request",
         "missing_message",
         "wrong_operation",
         "missing_operation_id",

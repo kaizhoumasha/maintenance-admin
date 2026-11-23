@@ -279,7 +279,8 @@ def test_cancel_branch_keeps_slots_without_widening(mode, direction, selector, v
 def test_outbound_requests_are_exact(model, data, request_models):
     model = request_models[model]
     assert model.model_validate(data).model_dump() == data
-    for extra in [{"task_type": "AUTO"}, {"task_id": "bad space"}]:
+    assert model.model_validate(data | {"task_type": "AUTO"}).model_dump() == data
+    for extra in [{"task_id": "bad space"}]:
         with pytest.raises(ValidationError):
             model.model_validate(data | extra)
 

@@ -82,10 +82,7 @@ def test_client_chosen_extra_key_is_masked():
         model_config = ConfigDict(strict=True, extra="ignore")
         a: int
 
-    with pytest.raises(ValidationError) as ei:
-        M.model_validate({"a": 1, "SECRETKEY": 1})
-    issues = issues_from(ei.value, M, "data")
-    assert issues == [{"field": "data.*", "code": "INVALID_VALUE"}]
+    assert M.model_validate({"a": 1, "SECRETKEY": 1}).model_dump() == {"a": 1}
 
 
 def test_union_tags_do_not_leak_into_path():

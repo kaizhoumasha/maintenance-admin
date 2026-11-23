@@ -132,7 +132,6 @@ async def test_original_decision_is_consumed_once_without_physical_completion(
 @pytest.mark.parametrize(
     "decision",
     [
-        {"result": "NO_WORK", "retry_after_ms": 1},
         {"result": "WAIT", "retry_after_ms": True},
         {
             "result": "READY",

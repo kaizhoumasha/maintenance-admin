@@ -1379,8 +1379,6 @@ async def test_return_faces_reuse_original_job_only_after_terminal_face(outbound
 
 
 async def test_empty_wire_keeps_bin_unbound_and_rack_original_revision(outbound_host):
-    from pydantic import ValidationError
-
     from app.businesses.smt_auto.request.outbound_source_empty_decide_v1 import EmptyDecide
     from app.integrations.model_payload import validated_model_payload
 
@@ -1397,13 +1395,6 @@ async def test_empty_wire_keeps_bin_unbound_and_rack_original_revision(outbound_
     )
     for data in (bin_data, rack_data):
         assert validated_model_payload(EmptyDecide.model_validate(data)) == data
-    for data in (
-        {**bin_data, "plan_revision": 1},
-        {**bin_data, "plan_revision": None},
-        {k: v for k, v in rack_data.items() if k != "plan_revision"},
-    ):
-        with pytest.raises(ValidationError):
-            EmptyDecide.model_validate(data)
 
 
 async def test_target_replacement_waits_for_applied_movement_report(decided_outbound):

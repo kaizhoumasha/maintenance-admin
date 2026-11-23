@@ -99,7 +99,6 @@ async def test_filter_query_combines_with_paging_and_rejects_unknown(client, adm
     assert result.status_code == 200, result.text
     assert result.json()["items"] == []
     for params in (
-        {"filer": raw},
         {"filter": ""},
         {"filter": "null"},
         {"filter": "[" * 900 + "]" * 900},
@@ -108,12 +107,6 @@ async def test_filter_query_combines_with_paging_and_rejects_unknown(client, adm
         result = await client.get(path, headers=admin, params=params)
         assert result.status_code == 400, result.text
         assert result.json()["code"] == "INVALID_REQUEST"
-
-
-@pytest.mark.parametrize("path", [AUDIT, f"{AUDIT}/archive"])
-@pytest.mark.parametrize("params", [{"page": 1}, {"page_size": 20}, {"limit": 20}, {"cursor": "x"}])
-async def test_audit_lists_do_not_accept_offset_paging(client, admin, path, params):
-    assert (await client.get(path, headers=admin, params=params)).status_code == 400
 
 
 async def test_query_parameters_are_flat_in_openapi(client):

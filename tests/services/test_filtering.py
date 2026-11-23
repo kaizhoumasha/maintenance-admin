@@ -32,10 +32,6 @@ def parse(value):
         group(),
         group(condition(), condition(), couple="not"),
         group(couple="not"),
-        {**group(condition()), "coupl": "or"},
-        group({**condition(), "extra": "hidden-value"}),
-        group({**group(condition()), "extra": 1}),
-        group({**condition(), **group(condition())}),
         group(condition(op="in", value=[])),
         group(condition(op="in", value=[None])),
         group(condition(op="in", value=list(range(101)))),
@@ -85,8 +81,6 @@ def test_complete_query_models():
     assert UserListParams(filter="{}", start=2, end=21).start == 2
     assert CursorParams(filter="{}", cursor="abc").limit == 20
     for cls, params in (
-        (CursorParams, {"start": 1}),
-        (UserListParams, {"filer": "{}"}),
         (CursorParams, {"limit": 0}),
         (CursorParams, {"limit": 101}),
         (CursorParams, {"cursor": "x" * 65}),

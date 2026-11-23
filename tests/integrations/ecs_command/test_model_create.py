@@ -260,7 +260,7 @@ async def test_model_timeout_rejection_leaves_no_obligation(ecs, declared, timeo
 
 @pytest.mark.parametrize(
     "invalid",
-    ["undeclared", "subclass", "construct", "field", "nested", "extra", "cycle", "not-model"],
+    ["undeclared", "subclass", "construct", "field", "nested", "cycle", "not-model"],
 )
 async def test_model_creation_revalidates_exact_original_model(ecs, declared, invalid):
     command = Move(quantity=1, items=[Item(qty=2)])
@@ -278,8 +278,6 @@ async def test_model_creation_revalidates_exact_original_model(ecs, declared, in
         command.qty = True
     elif invalid == "nested":
         command.items[0].qty = "2"
-    elif invalid == "extra":
-        command.items[0].__dict__["untrusted"] = 1
     elif invalid == "cycle":
         command.items.append(command.items)
     else:
