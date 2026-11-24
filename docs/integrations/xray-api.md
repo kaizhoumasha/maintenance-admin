@@ -184,7 +184,7 @@ WMS 与 ECS 的接口字段统一使用下划线分隔（`snake_case`），涵�
 | `actual_qty` | 严格非负整数。清点表示盘内实测 PCS，取放表示本次实际放料的盘数。字段随分支给出，未知时省略。 |
 | `reason_code` / `reason_message` | 非空、无 NUL 的原原因码和说明，长度受正文上限约束，不改写设备原因码。公共错误响应的 reason_code 按下表枚举。 |
 
-各节字段表为 `data` 的完整形状。请求和各响应分支按严格类型校验，未列字段、显式 `null` 和类型强转均拒绝。数字字段以真实 JSON 数字发送，布尔值不能用作数字。UTF-8 JSON 正文上限为 256 KiB。
+各节字段表为 `data` 的完整形状。请求和各响应分支按严格类型校验，忽略真正未知字段；已定义字段的显式非法 `null` 和类型强转仍拒绝。数字字段以真实 JSON 数字发送，布尔值不能用作数字。UTF-8 JSON 正文上限为 256 KiB。
 
 | HTTP / code | 完整 `data` 或处理 |
 | --- | --- |
@@ -226,7 +226,7 @@ WES 将五种 Command 模型列入 `COMMANDS`。三个判定模型各自包含�
 | Result result / error_detail | result 为 SUCCESS／FAILED。FAILED 必含 error_detail 及非空字符串 code、msg，WES 忽略其中真正未知字段。SUCCESS 省略 error_detail 或为 null。 |
 | 原命令与事件重报 | 同身份同原载荷恢复原接纳或收件。同号异载荷按公共冲突处理。正文 UTF-8 JSON，上限 256 KiB。 |
 
-Command `params` 和 Result `data` 按冻结的严格分支校验。模型包含可选字段 `failure_stage`、实际位置和事实数量。Event 的业务字段以各事件字段表为准，缺少实际读数时按表中条件省略。Command 顶层为闭集，Event 和 Result 的顶层诊断扩展沿公共信封处理。正式 Event 的 is_debug 省略或为 false，不以 true 驱动正式业务。
+Command `params` 和 Result `data` 按冻结的严格分支校验。模型包含可选字段 `failure_stage`、实际位置和事实数量。Event 的业务字段以各事件字段表为准，缺少实际读数时按表中条件省略。Command 顶层忽略真正未知字段，Event 和 Result 的顶层诊断扩展沿公共信封处理。正式 Event 的 is_debug 省略或为 false，不以 true 驱动正式业务。
 
 有效接纳和持久收件的完整响应均为 HTTP 200。Command 的响应方向为 ECS → WES，Event 和 Result 的响应方向为 WES → ECS。
 

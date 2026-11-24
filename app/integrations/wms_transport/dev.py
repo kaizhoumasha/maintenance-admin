@@ -33,7 +33,7 @@ ERRORS = {
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid")  # 嵌套字段拼错时报 400,而不是被静默丢弃
+    model_config = ConfigDict(extra="ignore")
 
 
 class TransportRouteIn(_Strict):

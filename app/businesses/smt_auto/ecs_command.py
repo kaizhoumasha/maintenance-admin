@@ -14,7 +14,7 @@ from .work_plan_contracts import Number
 
 
 class Data(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 class ScanPlatform(Data):

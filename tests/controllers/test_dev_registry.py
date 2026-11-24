@@ -21,7 +21,7 @@ PATH = "/api/v1/dev/integrations/registry"
 
 
 class RegistryDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     result: str
 
 

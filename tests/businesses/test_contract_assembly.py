@@ -16,7 +16,7 @@ from tests.helpers import business_composition
 
 
 class Params(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
 
 
 @ecs_command(

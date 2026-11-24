@@ -104,7 +104,7 @@ def test_real_composition_contract_imports_stay_metadata_only(tmp_path, load_mod
         "from app.integrations.ecs_command import ecs_command\n"
         "from app.integrations.ecs_command.contracts import ErrorDetail\n"
         "class Result(BaseModel):\n"
-        "    model_config = ConfigDict(strict=True, extra='forbid')\n"
+        "    model_config = ConfigDict(strict=True, extra='ignore')\n"
         "@ecs_command('MOVE', device_roles=('SCAN',), annex_id='probe', annex_version='1', "
         "result=Result, error=ErrorDetail, timeout_min_ms=0, timeout_max_ms=100)\n"
         "class Payload(Result): pass\n"

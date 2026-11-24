@@ -60,7 +60,7 @@ async def test_json_input_keeps_registered_aliases_defaults_and_serializers(sess
     assert json.loads(row.request_raw)["data"] == {"first": 22, "second": 11, "qty": "Q2"}
 
 
-@pytest.mark.parametrize("data", [{"at": "not a date"}, {"at": "2026-01-01T00:00:00Z", "x": 1}])
+@pytest.mark.parametrize("data", [{"at": "not a date"}])
 async def test_json_input_that_breaks_the_payload_is_a_400(sessions, clock, dated, data):
     async with sessions() as session:
         with pytest.raises(AppError) as error:

@@ -222,7 +222,7 @@ async def test_model_serialization_and_defaults_preserve_the_original_frozen_mes
     with pytest.raises(DuplicateMessage):
         async with sessions.begin() as session:
             await send(session, {**data, "qty": 4})
-    assert payload.model_config == {"strict": True, "extra": "forbid"}
+    assert payload.model_config == {"strict": True, "extra": "ignore"}
 
 
 async def test_model_send_rollback_leaves_no_message(sessions, wms, clock):
@@ -354,7 +354,7 @@ async def test_model_send_revalidates_actual_nested_root_contents(sessions, wms,
         assert "root" not in vars(quantities)
 
 
-@pytest.mark.parametrize("invalid", ["constructed", "assigned", "nested", "list", "extra"])
+@pytest.mark.parametrize("invalid", ["constructed", "assigned", "nested", "list"])
 async def test_model_send_revalidates_actual_fields_before_serializing(
     sessions, wms, clock, invalid
 ):
@@ -368,8 +368,6 @@ async def test_model_send_revalidates_actual_fields_before_serializing(
         payload.nested[0].qty = "1"
     elif invalid == "list":
         payload.nested.append({"quantity": {"value": "1"}})
-    else:
-        payload.__dict__["unlisted"] = 1
     with pytest.raises(InvalidRequestPayload):
         async with sessions.begin() as session:
             await wms.send(session, payload, operation_id=str(uuid7(clock())))
@@ -382,7 +380,7 @@ async def test_model_send_revalidates_mutable_dataclasses(sessions, wms, clock, 
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=True, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=True, extra="ignore")
         value: int
 
     @request_operation("example.fact.dataclass@v1", Endpoint.FACTS)
@@ -423,7 +421,7 @@ async def test_model_send_revalidates_extra_dataclass_fields(sessions, wms, cloc
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=True, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=True, extra="ignore")
         value: int
 
     @request_operation("example.fact.extra@v1", Endpoint.FACTS)
@@ -521,7 +519,7 @@ async def test_model_send_preserves_explicitly_relaxed_dataclass_contract(sessio
 
     @dataclass
     class Quantity:
-        __pydantic_config__ = ConfigDict(strict=False, extra="forbid")
+        __pydantic_config__ = ConfigDict(strict=False, extra="ignore")
         value: int
 
     @request_operation("example.fact.relaxed@v1", Endpoint.FACTS)
@@ -594,7 +592,7 @@ async def test_field_frozen_dataclasses_require_an_explicit_nested_model(
 
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
-    @pydantic_dataclass(config=ConfigDict(strict=True, extra="forbid"))
+    @pydantic_dataclass(config=ConfigDict(strict=True, extra="ignore"))
     class Quantity:
         values: list[int] = Field(frozen=True)
         measured: int = field(init=False, default=1)
@@ -625,7 +623,7 @@ async def test_model_send_preserves_and_validates_frozen_dataclass_fields(
 
     from app.integrations.wms_request import Endpoint, RequestPayload, request_operation
 
-    @pydantic_dataclass(config=ConfigDict(strict=True, extra="forbid"), frozen=True)
+    @pydantic_dataclass(config=ConfigDict(strict=True, extra="ignore"), frozen=True)
     class Quantity:
         value: int
         measured: int = field(init=False, default=1)

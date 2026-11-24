@@ -36,7 +36,7 @@ def test_an_invalid_example_fails_at_registration():
     class Bad(RequestPayload):
         qty: int
         model_config = registry.ConfigDict(
-            strict=True, extra="forbid", json_schema_extra={"examples": [{"qty": "x"}]}
+            strict=True, extra="ignore", json_schema_extra={"examples": [{"qty": "x"}]}
         )
 
     with pytest.raises(ValueError, match="example is invalid"):

@@ -14,7 +14,7 @@
 4. 当前同编码出现在另一 ECS 时，先获取该 ECS 的冲突预览，再调用 `POST /devices/{id}/route-migrations`，明确给出 `version`、`expected_origin`、`preview_token`、`reason`、`confirmed=true`。后台不会覆盖地址。
 5. 配置错误时，调用 `DELETE /devices/{id}?version=...` 删除当前配置。旧命令、结果、证据、审计和独立原路由保留；再登记必须重新预览，生成新配置 ID 和新路由 ID。不存在归档、恢复、回收站或物理删除历史的接口。空工作线才可删除。
 
-完整 API 输入输出与权限表见[设计 §8](../superpowers/specs/2026-10-27-device-workline-status-design.md#8-api-设计)。所有写模型拒绝额外字段；版本冲突返回 409，旧 ID 返回 404。预览缓存不存在或不属于本人统一返回 404；仍可读取但已超过绝对期限的预览返回 409 `PREVIEW_EXPIRED`。Redis TTL 到期已清除的 token 无法区别于不存在，返回 404。旧 NEW token 在登记、删除之后重放返回 409 `PREVIEW_CHANGED`；有效事务回滚后可重试。
+完整 API 输入输出与权限表见[设计 §8](../superpowers/specs/2026-10-27-device-workline-status-design.md#8-api-设计)。写模型忽略额外字段，已定义字段仍按各自约束校验；版本冲突返回 409，旧 ID 返回 404。预览缓存不存在或不属于本人统一返回 404；仍可读取但已超过绝对期限的预览返回 409 `PREVIEW_EXPIRED`。Redis TTL 到期已清除的 token 无法区别于不存在，返回 404。旧 NEW token 在登记、删除之后重放返回 409 `PREVIEW_CHANGED`；有效事务回滚后可重试。
 
 ## 配置与按需状态
 

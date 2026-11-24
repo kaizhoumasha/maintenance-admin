@@ -326,7 +326,6 @@ async def test_new_task_does_not_convert_original_drain_purpose(roller_lifecycle
     [
         "zero",
         "bool",
-        "extra",
         "empty_racks",
         "duplicate_racks",
         "duplicate_faces",
@@ -350,7 +349,6 @@ async def test_drain_contract_is_strict(roller_lifecycle, case):
     invalid = {
         "zero": dict(workline_code="LINE-1", required_slot_count=0),
         "bool": dict(workline_code="LINE-1", required_slot_count=True),
-        "extra": dict(workline_code="LINE-1", required_slot_count=2, task_id="T1"),
         "nullable": dict(workline_code=None, required_slot_count=1),
         "empty_racks": dict(result="READY", racks=[]),
         "duplicate_racks": dict(result="READY", racks=[dict(rack_id="R1", rack_face=["A"])] * 2),

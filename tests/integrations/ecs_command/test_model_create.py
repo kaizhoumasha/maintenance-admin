@@ -26,12 +26,12 @@ from tests.helpers import ecs_binding, read_history_body
 
 
 class Item(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     qty: int
 
 
 class Outcome(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     qty: int
 
 
@@ -46,7 +46,7 @@ class Outcome(BaseModel):
     timeout_max_ms=60000,
 )
 class Move(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid", serialize_by_alias=True)
+    model_config = ConfigDict(strict=True, extra="ignore", serialize_by_alias=True)
     qty: int = Field(alias="quantity")
     items: list[Item] = Field(default_factory=list)
     label: str = "move"
@@ -185,7 +185,7 @@ async def test_model_creation_preserves_actual_values_with_reciprocal_aliases(ec
         timeout_max_ms=60000,
     )
     class Params(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid", serialize_by_alias=True)
+        model_config = ConfigDict(strict=True, extra="ignore", serialize_by_alias=True)
         first: int = Field(alias="second")
         second: int = Field(alias="first")
         item: Item
@@ -260,7 +260,7 @@ async def test_model_timeout_rejection_leaves_no_obligation(ecs, declared, timeo
 
 @pytest.mark.parametrize(
     "invalid",
-    ["undeclared", "subclass", "construct", "field", "nested", "extra", "cycle", "not-model"],
+    ["undeclared", "subclass", "construct", "field", "nested", "cycle", "not-model"],
 )
 async def test_model_creation_revalidates_exact_original_model(ecs, declared, invalid):
     command = Move(quantity=1, items=[Item(qty=2)])
@@ -278,8 +278,6 @@ async def test_model_creation_revalidates_exact_original_model(ecs, declared, in
         command.qty = True
     elif invalid == "nested":
         command.items[0].qty = "2"
-    elif invalid == "extra":
-        command.items[0].__dict__["untrusted"] = 1
     elif invalid == "cycle":
         command.items.append(command.items)
     else:
@@ -491,7 +489,7 @@ async def test_restart_keeps_original_result_contract_after_current_route_change
     assert await store.before_send(claim, ecs.targets["ecs"])
 
     class OutcomeV2(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         token: str
 
     @ecs_command(
@@ -505,7 +503,7 @@ async def test_restart_keeps_original_result_contract_after_current_route_change
         timeout_max_ms=60000,
     )
     class MoveV2(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         token: str
 
     bindings, active = compile_commands(MoveV2)
@@ -596,7 +594,7 @@ async def test_existing_model_call_bypasses_current_declared_capability(ecs, dec
 async def test_unsupported_dataclass_contract_is_rejected_before_enqueue(ecs, declared):
     from pydantic.dataclasses import dataclass
 
-    @dataclass(config=ConfigDict(strict=True, extra="forbid"))
+    @dataclass(config=ConfigDict(strict=True, extra="ignore"))
     class FrozenField:
         qty: int = Field(frozen=True)
 
@@ -611,7 +609,7 @@ async def test_unsupported_dataclass_contract_is_rejected_before_enqueue(ecs, de
         timeout_max_ms=60000,
     )
     class Params(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         data: FrozenField
 
     async with ecs.factory.begin() as session:
@@ -623,16 +621,16 @@ async def test_unsupported_dataclass_contract_is_rejected_before_enqueue(ecs, de
 @pytest.mark.parametrize("kind", ["alias", "json-types", "serializer"])
 async def test_model_creation_preserves_declared_json_output(ecs, declared, kind):
     class AliasParams(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int = Field(alias="quantity")
 
     class JsonParams(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         moment: datetime
         values: tuple[int, ...]
 
     class SerializedParams(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int
 
         @field_serializer("qty")

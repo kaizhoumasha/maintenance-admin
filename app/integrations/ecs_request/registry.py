@@ -127,10 +127,10 @@ def ecs_request(
             raise ValueError(f"{source.location}: invalid device role {device_role!r}")
         if not (isinstance(response, type) and issubclass(response, BaseModel)):
             raise TypeError(f"{source.location}: response must be a Pydantic model")
-        if response.model_config.get("extra") != "forbid":
+        if response.model_config.get("extra") != "ignore":
             raise ValueError(
-                f"{source.location}: response model must use extra='forbid'; "
-                "修复: 为 response 设置 ConfigDict(extra='forbid')"
+                f"{source.location}: response model must use extra='ignore'; "
+                "修复: 为 response 设置 ConfigDict(extra='ignore')"
             )
         key = (device_role, request_type)
         if key in _registry:

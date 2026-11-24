@@ -295,6 +295,8 @@ WES 原样转交料盘条码；WMS 解析条码、验证收货条件并完成 GR
 
 `BARCODE_INVALID` 为待确认原因码示例。NG 不返回可供正常分配的绑定；通信失败、系统不可用和格式错误不包装成业务 NG。本示例暂按 WMS 可由条码和工作线确定 GRN；所需收货上下文及 NG 绑定副作用见第 7 节。
 
+本项目的验证响应模型接受可选的 `data.detailMessage`：省略、`null` 或非空字符串均可，空字符串和其他类型会被拒绝。该字段不替代 `binding_id` 或 `reason_code`，也不参与 WES 的 OK/NG 判定；是否由 WMS 返回仍以双方确认的接口合同为准。
+
 <a id="wms-storage-allocate"></a>
 
 ### 3.2 箱格分配

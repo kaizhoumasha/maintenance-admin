@@ -220,8 +220,6 @@ async def test_audit_logs_pagination(client, admin):
         {"start": 1, "end": 101},
         {"start": 2},
         {"end": 2},
-        {"limit": 20},
-        {"cursor": "x"},
     ],
 )
 async def test_audit_logs_rejects_bad_params(client, admin, params):

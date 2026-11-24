@@ -80,7 +80,7 @@ async def test_continue_uses_the_acceptance_snapshot_binding_resolver(callback_s
     monkeypatch.setattr(registry, "_registry", {})
 
     class Decision(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         result: str
 
     calls = []
@@ -154,7 +154,7 @@ async def test_insert_conflict_reuses_saved_binding_context(monkeypatch):
     monkeypatch.setattr(registry, "_registry", {})
 
     class Decision(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         result: str
 
     observed = []

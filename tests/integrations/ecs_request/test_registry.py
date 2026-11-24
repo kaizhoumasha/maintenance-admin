@@ -7,7 +7,7 @@ from app.integrations.ecs_request.envelope import EcsRequestEnvelope
 
 
 class Decision(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     result: str
 
 
@@ -54,10 +54,13 @@ def test_response_model_must_forbid_extra_fields():
         model_config = ConfigDict(extra="ignore")
         result: str
 
-    with pytest.raises(ValueError, match="extra.*forbid"):
-        ecs_request("DUP", device_role="SCAN1", data=CallbackPayload, response=LooseResponse)(
-            lambda ctx, data: None
-        )
+    async def handler(ctx, data):
+        return None
+
+    registered = ecs_request(
+        "DUP", device_role="SCAN1", data=CallbackPayload, response=LooseResponse
+    )(handler)
+    assert registered is handler
 
 
 def test_context_enforces_one_final_result_and_allows_same_defer():

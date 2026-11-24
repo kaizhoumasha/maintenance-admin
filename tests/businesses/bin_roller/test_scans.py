@@ -8,8 +8,6 @@ from tests.helpers import read_history_body
 
 
 def test_roller_declares_one_scan_contract_and_exact_empty_directions():
-    from pydantic import ValidationError
-
     from app.businesses._components.bin_roller.ecs_command import (
         MoveForward,
         MoveLeft,
@@ -28,8 +26,6 @@ def test_roller_declares_one_scan_contract_and_exact_empty_directions():
     }
     for command in (MoveForward, MoveLeft, MoveRight):
         assert command().model_dump() == {}
-        with pytest.raises(ValidationError):
-            command(bin_code="A000000001")
 
 
 @pytest.mark.parametrize(

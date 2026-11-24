@@ -20,7 +20,7 @@ PATH = "/api/v1/callback/request"
 
 
 class Decision(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     result: str
 
 
@@ -65,7 +65,7 @@ async def test_unknown_request_is_rejected_without_receipt(callback_client, call
 
 async def test_invalid_request_data_is_rejected_without_receipt(callback_client, callback_store):
     class RequiredPayload(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         required: str
 
     @ecs_request("CARTON_VALIDATE", device_role="SCAN1", data=RequiredPayload, response=Decision)

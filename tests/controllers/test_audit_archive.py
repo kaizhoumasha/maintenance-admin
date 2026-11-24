@@ -103,8 +103,6 @@ async def test_archive_list_rejects_bad_params(client, admin):
         {"start": 1, "end": 101},
         {"start": 2},
         {"end": 2},
-        {"limit": 2},
-        {"cursor": "x"},
     ):
         assert (await client.get(ARCHIVE, params=params, headers=admin)).status_code == 400
 

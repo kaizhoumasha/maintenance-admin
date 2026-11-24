@@ -661,7 +661,7 @@ Result 必须匹配原 command_code、device_code 并通过原冻结合同验证
 
 field_path 为 RFC 6901 JSON Pointer，长度 1～256，无值省略。错误信封仍回显原 operation_id；不自行引入 BUSY/429。可选字段无值省略，**除字段表明确允许外禁止 null**，包括显式允许的共用离场 current_face=null 例外。
 
-额外字段策略按方向及模型区分：所有 WES → WMS 请求 data 及其嵌套 RequestPayload 都严格拒绝额外字段，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 主动通知忽略真正未知的扩展字段，明确禁用或属于其他分支的业务字段仍拒绝。同步响应沿各自模型校验。通知的幂等有效字段和历史收据沿原协议，旧字段校验拒绝按原报文重放。
+额外字段策略按方向及模型区分：WES → WMS 请求 data 及其嵌套 RequestPayload 默认忽略额外字段，已定义字段仍严格校验，包括 prepare、completion_confirm、work_admission_decide、arrival_report、inbound_batch、return_batch、drain 和 departure_decide。WMS → WES 主动通知忽略真正未知的扩展字段，明确禁用或属于其他分支的业务字段仍拒绝。同步响应沿各自模型校验。通知的幂等有效字段和历史收据沿原协议，旧字段校验拒绝按原报文重放。
 
 统一 sorting.task.* 目标的[任务族冗余字段](smt-auto-api.md#task-field-policy)同样适用于 cancel.data 及其选择器。明确禁用或跨模式、分支、选择器的业务字段继续拒绝，取消范围和历史有效内容沿原合同。
 

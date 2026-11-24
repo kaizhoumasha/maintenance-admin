@@ -37,7 +37,7 @@ Text = Annotated[str, Field(min_length=1, pattern=r"^[^\x00]+$")]
 
 
 class CommandEnvelope(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     device_code: Text
     command_code: Text
     task_type: Text
@@ -48,7 +48,7 @@ class CommandEnvelope(BaseModel):
 
 
 class ErrorDetail(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     code: str
     msg: str
 

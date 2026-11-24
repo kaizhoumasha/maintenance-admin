@@ -1397,13 +1397,8 @@ async def test_empty_wire_keeps_bin_unbound_and_rack_original_revision(outbound_
     )
     for data in (bin_data, rack_data):
         assert validated_model_payload(EmptyDecide.model_validate(data)) == data
-    for data in (
-        {**bin_data, "plan_revision": 1},
-        {**bin_data, "plan_revision": None},
-        {k: v for k, v in rack_data.items() if k != "plan_revision"},
-    ):
-        with pytest.raises(ValidationError):
-            EmptyDecide.model_validate(data)
+    with pytest.raises(ValidationError):
+        EmptyDecide.model_validate({k: v for k, v in rack_data.items() if k != "plan_revision"})
 
 
 async def test_target_replacement_waits_for_applied_movement_report(decided_outbound):

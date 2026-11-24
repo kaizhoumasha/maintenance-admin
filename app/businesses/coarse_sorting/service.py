@@ -211,6 +211,7 @@ class CoarseSortingService:
             row["state"] == "AWAITING_NG"
             or row["wait_reason"] == "AWAITING_NG_STAGE"
             or row["ng_reason_code"] is not None
+            or (row["validation_response"] or {}).get("response_data", {}).get("result") == "NG"
         )
         if known_ng and self.ng_locations is None:
             return row["wait_reason"]

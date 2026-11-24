@@ -32,7 +32,7 @@ from app.models import User
 class DevCommandIn(BaseModel):
     model_config = ConfigDict(
         strict=True,
-        extra="forbid",
+        extra="ignore",
         json_schema_extra={
             "examples": [
                 {
@@ -65,7 +65,7 @@ class DevCommandOut(DevCommandView):
 
 
 class MockParams(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     qty: int
 
 

@@ -145,7 +145,7 @@ def test_shared_command_compiles_once_for_the_same_role(shared_component):
     from app.integrations.ecs_command.contracts import ErrorDetail
 
     class Data(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
 
     @ecs_command(
         "MOVE",
@@ -327,11 +327,11 @@ def test_component_dev_commands_cannot_enter_formal_compilation(dev_entry):
     from app.integrations.ecs_command.contracts import ErrorDetail
 
     class Result(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int
 
     class Move(BaseModel):
-        model_config = ConfigDict(strict=True, extra="forbid")
+        model_config = ConfigDict(strict=True, extra="ignore")
         qty: int
 
     Move.__module__ = f"app.businesses._components.shared_scan.{dev_entry}"

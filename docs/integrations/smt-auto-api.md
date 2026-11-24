@@ -1945,7 +1945,7 @@ WMS 在同一事务中保存结果上报，并更新物料位置、库存、来�
 <a id="outbound-report-5"></a>
 ##### 4.4.2.5 报文与重复请求约束
 
-- 字段名和枚举大小写敏感，按规定的 JSON 类型发送，不发送 `null`。本 API 的请求 `data` 拒绝额外字段。
+- 字段名和枚举大小写敏感，按规定的 JSON 类型发送，不发送 `null`。发送方只按字段表构造；WES 本地请求 `data` 忽略额外字段。
 - 正常放置须对应本盘最终 `ACCEPT` 及其精确目标；NG 放置须对应本盘最终 `REJECT` 及其 NG 去向。实际放置成功且位置确定后才发送上报。
 - 幂等身份为 `(operation, operation_id)`。响应未知或收到 `503 / UNAVAILABLE` 时，沿用原 `operation_id`、原 `timestamp` 和原请求内容重试，不创建第二份上报身份。
 - 同一身份、相同内容重复上报返回 `200 / DUPLICATE`；同一身份内容变化返回 `409 / CONFLICT`，`reason_code=IDEMPOTENCY_CONFLICT`。
@@ -4175,7 +4175,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 
 数字不接收数字字符串或布尔值，尺寸不接收非有限数。已定义字段缺失、类型/枚举/大小写错误、非法null或重复JSON key拒绝；可选对象无值省略，出现则必须完整，不发空/部分对象。除明确允许（如共用departure.current_face=null）外不传null，不借其他operation的可空性放宽本分支。
 
-发送方按字段表构造；WES本地RequestPayload严格且禁止额外字段。接收方默认校验已定义字段、忽略真正未知字段，operation另行要求严格data/层级时从其规定。已定义但跨模式/分支冲突的字段不能当未知静默丢弃：NO_WORK带取盘授权、WAIT带目标、REJECT带正常target或计划混入其他方向资源均拒绝/保留无效响应，不删字段后执行。类型严格不等于所有接口逐层拒绝未知字段，公共drain等独立合同仍保持。
+发送方按字段表构造；WES本地RequestPayload严格校验类型、默认忽略额外字段。接收方默认校验已定义字段、忽略真正未知字段，operation另行要求严格data/层级时从其规定。已定义但跨模式/分支冲突的字段不能当未知静默丢弃：NO_WORK带取盘授权、WAIT带目标、REJECT带正常target或计划混入其他方向资源均拒绝/保留无效响应，不删字段后执行。类型严格不等于所有接口逐层拒绝未知字段，公共drain等独立合同仍保持。
 
 为兼容既有 SMT AUTO 出库对端，逐盘物料决定的 `REJECT` 可带 `target_locator: null`。非空的正常目标仍会使决定无效。
 
@@ -4198,7 +4198,7 @@ inbound已清理任务通知的唯一例外顺序见9.3：身份漂移先冲突�
 <a id="task-field-policy"></a>
 #### 9.2.2 六类任务的字段策略
 
-接收方按下表处理各任务接口，不将“类型严格”一概解释为“逐层拒绝所有未知字段”。发送方只发送对应字段表内容；WES 本地 RequestPayload 继续禁止额外字段。响应信封仍只发送 operation_id/code/timestamp/data。
+接收方按下表处理各任务接口，不将“类型严格”一概解释为“逐层拒绝所有未知字段”。发送方只发送对应字段表内容；WES 本地 RequestPayload 默认忽略额外字段。响应信封仍只发送 operation_id/code/timestamp/data。
 
 | 接口 | 接收方规则 |
 | --- | --- |

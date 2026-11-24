@@ -85,7 +85,6 @@ async def test_swagger_query_returns_source_without_persisting_results(client, a
     [
         {"ecs_origin": "http://localhost:8000"},
         {"ecs_origin": ORIGIN, "device_code": " ARM03"},
-        {"ecs_origin": ORIGIN, "extra": "ignored?"},
     ],
 )
 async def test_invalid_inputs_never_send(client, admin, status_mock, params):

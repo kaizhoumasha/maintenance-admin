@@ -10,7 +10,7 @@ from app.integrations.registration import local_registration
 
 
 class StrictPayload(BaseModel):
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="ignore")
     quantity: int = 1
 
 
@@ -58,8 +58,7 @@ def test_declaration_preserves_original_models_and_source():
     assert (annex.timeout_min_ms, annex.timeout_max_ms) == (1, 60_000)
     with pytest.raises(ValidationError):
         annex.params_model(quantity="1")
-    with pytest.raises(ValidationError):
-        annex.params_model(unexpected=True)
+    assert annex.params_model(unexpected=True).model_dump() == {"quantity": 1}
     assert compile_commands() == ((), {})
     assert compile_commands(model) == (bindings, annexes)
 
@@ -265,7 +264,7 @@ def test_compile_rejects_models_whose_validation_was_relaxed_after_declaration()
     from app.integrations.ecs_command import compile_commands
 
     model = declare(params())
-    model.model_config = ConfigDict(strict=False, extra="forbid")
+    model.model_config = ConfigDict(strict=False, extra="ignore")
     model.model_rebuild(force=True)
     with pytest.raises(ValueError, match="strict"):
         compile_commands(model)

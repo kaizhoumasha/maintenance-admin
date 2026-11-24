@@ -53,7 +53,7 @@ DEFINITION = BusinessDefinition(
 
 先确定入口、业务经过身份、每条请求/结果的完整字段和错误/超时边界，再定义严格模型。
 ECS/WMS 入站模型复用 `CallbackPayload`，严格校验类型、默认忽略多余字段；WMS 出站模型复用
-`RequestPayload`，严格校验类型并拒绝多余字段。具体业务须按已确认合同确定是否收紧入站字段规则。
+`RequestPayload`，严格校验类型、默认忽略多余字段。具体业务须按已确认合同确定是否收紧字段规则。
 ECS 参数/结果/错误模型必须满足[命令模型约束](ecs-command.md#模型声明与显式编译)，
 在原参数类上用 `@ecs_command(..., device_roles=(SCAN.role_key, ...))` 声明已确认的任务、附录版本和超时。
 严格类型模型可保留各自 `extra` 策略，一个模型可供多个角色共享。新字节按模型 JSON 序列化；
@@ -245,7 +245,7 @@ from app.integrations.ecs_request import CallbackPayload, EcsRequestContext, ecs
 
 
 class Decision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     result: str
 
 

@@ -19,7 +19,7 @@ UtcTime = Annotated[
 
 
 class HistoryParams(PageParams):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     from_at: AwareDatetime | None = None
     until_at: AwareDatetime | None = None
     filter: FilterText = None
@@ -84,7 +84,7 @@ class RecordListParams(HistoryParams):
 
 
 class _ExchangeSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     id: UUID
     schema_version: int
     role: str
@@ -140,7 +140,7 @@ class HttpExchangeDetail(_ExchangeDetail):
 
 
 class _RecordSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
     id: UUID
     exchange_id: UUID
     record_kind: str

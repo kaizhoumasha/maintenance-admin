@@ -990,7 +990,6 @@ async def test_inbound_work_plan_wait_refreshes_only_source_scope(inbound_host):
     [
         {"result": "WAIT", "retry_after_ms": True},
         {"result": "WAIT", "retry_after_ms": 0},
-        {"result": "WAIT", "retry_after_ms": 10, "target": {}},
     ],
 )
 async def test_invalid_material_wait_stays_original_and_unresolved(ready_inbound, wait):

@@ -64,7 +64,7 @@ class EcsStatusResponse(StatusModel):
 
 
 class StatusQueryIn(BaseModel):
-    model_config = ConfigDict(strict=True, frozen=True, extra="forbid")
+    model_config = ConfigDict(strict=True, frozen=True, extra="ignore")
 
     ecs_origin: Annotated[
         str,
