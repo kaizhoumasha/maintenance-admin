@@ -233,8 +233,11 @@ async def test_applied_incomplete_or_failed_result_preserves_evidence_without_co
     saved = (await flow.rows())[0]
     assert saved["move_result"]["result"]["data"] == changes["data"]
     assert saved["command_code"] == row["command_code"]
+    assert saved["pending"]
     flow.rebuild()
     assert await flow.service.advance(row["id"]) == "MOVE_RECONCILIATION_REQUIRED"
+    assert await flow.service.scan_pending() == 1
+    assert (await flow.rows())[0]["pending"]
     assert await flow.dispatch() == 0
     assert len(flow.peer.commands) == 1
 

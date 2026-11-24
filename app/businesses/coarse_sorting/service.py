@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from pydantic import ValidationError
-from sqlalchemy import Table, and_, or_, select
+from sqlalchemy import JSON, Table, and_, func, literal, or_, select
 from sqlalchemy.exc import DBAPIError
 
 from app.businesses._components.rack_dispatch.service import RackDispatch
@@ -17,6 +17,7 @@ from app.diagnostics import log_exception
 from app.integrations.ecs_callback.binding import DeviceBinding
 from app.integrations.ecs_callback.registry import EcsEventContext
 from app.integrations.ecs_command import CommandOwner
+from app.integrations.ecs_command.contracts import ResultEnvelope
 from app.integrations.wms_request import RequestPayload
 from app.integrations.wms_request.adapter import (
     COARSE_MOCK_DECISIONS_TARGET,
@@ -41,7 +42,7 @@ from .contracts import (
     allocation_decision,
 )
 from .definition import DEFINITION
-from .ecs_command import MoveForward, MoveToLocationResult, MoveToNg, MoveToNgResult, PutToBin
+from .ecs_command import MoveForward, MoveToNg, MoveToNgResult, PutToBin, PutToBinResult
 
 logger = logging.getLogger(__name__)
 OWNER = CommandOwner("coarse_sorting")
@@ -221,6 +222,12 @@ class CoarseSortingService:
             return row["wait_reason"]
         actions = await self._lock_actions(session, row)
         action = actions.get(row["current_action_id"])
+        report_started = (
+            self.direct_put
+            and row["state"] in ("AWAITING_PUT", "AWAITING_REPORT")
+            and action
+            and action["kind"] == "REPORT_COMPLETION"
+        )
         round_id = row["payload"].get("mock_round_id")
         active_round = self.mock_rounds.get(row["workline_code"])
         validation = row["validation_response"] or {}
@@ -229,7 +236,7 @@ class CoarseSortingService:
                 round_id != active_round
                 or (not round_id and validation.get("target") == COARSE_MOCK_DECISIONS_TARGET)
             )
-            and row["state"] != "AWAITING_REPORT"
+            and not report_started
             and not (known_ng and action and action["kind"] == "MOVE_TO_NG")
         ):
             return await save("MOCK_ROUND_RECONCILIATION_REQUIRED")
@@ -238,12 +245,9 @@ class CoarseSortingService:
             if action and action["kind"] == "MOVE_TO_NG":
                 return await self._advance_ng_result(session, row, action, save)
             return await self._resume_ng_validation(session, row, action, line, input_arm, save)
-        if self.direct_put and (
-            row["state"] == "AWAITING_REPORT"
-            or (row["state"] == "AWAITING_PUT" and action and action["kind"] == "REPORT_COMPLETION")
-        ):
-            return await self._advance_report(session, action, save)
-        if self.direct_put and row["state"] == "AWAITING_PUT":
+        if report_started:
+            return await self._advance_report(session, row, action, actions, save)
+        if self.direct_put and row["state"] in ("AWAITING_PUT", "AWAITING_REPORT"):
             return await self._advance_put(session, row, action, actions, save)
 
         if not row["command_code"] and (
@@ -552,9 +556,17 @@ class CoarseSortingService:
         if table is None or row["current_action_id"] is None:
             return {}
         ids = [row["current_action_id"], row["allocation_action_id"]]
+        identified = table.c.id.in_(ids)
+        if row["state"] in ("AWAITING_PUT", "AWAITING_REPORT"):
+            predecessor = (
+                select(table.c.predecessor_action_id)
+                .where(table.c.id == row["current_action_id"], table.c.kind == "REPORT_COMPLETION")
+                .scalar_subquery()
+            )
+            identified = or_(identified, table.c.id == predecessor)
         result = await session.execute(
             select(table)
-            .where(table.c.job_id == row["id"], table.c.id.in_(ids))
+            .where(table.c.job_id == row["id"], identified)
             .order_by(table.c.id)
             .with_for_update()
         )
@@ -1170,143 +1182,114 @@ class CoarseSortingService:
         }
 
     @staticmethod
-    def _put_completed(action, result):
-        try:
-            placed = MoveToLocationResult.model_validate(result["data"])
-            snapshot = action["resource_snapshot"]
-            return (
-                action["kind"] == "PUT_TO_BIN"
-                and action["command_owner"] == OWNER.domain
-                and bool(action["call_key"])
-                and result["command_code"] == action["command_code"]
-                and result["device_code"] == action["device_code"]
-                and snapshot["device_code"] == action["device_code"]
-                and snapshot["role"] == "OUTPUT_ARM"
-                and result["result"] == "SUCCESS"
-                and type(result["finish_time"]) is int
-                and result["finish_time"] >= 0
-                and placed.actual_qty == 1
-                and bool(placed.location)
-                and placed.location == snapshot["completion_location"]
-            )
-        except (AttributeError, KeyError, TypeError, ValidationError):
-            return False
+    def _put_result_matches(action, result):
+        snapshot = action.get("resource_snapshot")
+        return (
+            action["kind"] == "PUT_TO_BIN"
+            and action["command_owner"] == OWNER.domain
+            and bool(action["call_key"])
+            and bool(action["command_code"])
+            and isinstance(result, dict)
+            and result.get("command_code") == action["command_code"]
+            and result.get("device_code") == action["device_code"]
+            and isinstance(snapshot, dict)
+            and snapshot.get("device_code") == action["device_code"]
+            and snapshot.get("role") == "OUTPUT_ARM"
+        )
 
-    def _saved_put_completed(self, action, job):
+    def _put_completed(self, action, result):
+        if not self._put_result_matches(action, result) or result.get("result") != "SUCCESS":
+            return False
+        try:
+            placed = PutToBinResult.model_validate(
+                result.get("data"), context={"result": "SUCCESS"}
+            )
+        except ValidationError:
+            return False
+        return (
+            type(result.get("finish_time")) is int
+            and result["finish_time"] >= 0
+            and placed.actual_qty == 1
+            and bool(placed.location)
+            and placed.location == action["resource_snapshot"].get("completion_location")
+        )
+
+    def _put_failed(self, action, result):
+        if (
+            not self._put_result_matches(action, result)
+            or result.get("result") != "FAILED"
+            or not PutToBinResult.confirmed_failure_data(result.get("data"))
+        ):
+            return False
+        try:
+            ResultEnvelope.model_validate(result)
+        except ValidationError:
+            return False
+        return True
+
+    def _saved_put_result(self, action, job):
         if (
             not job
             or job["id"] != action["job_id"]
-            or job["state"] not in ("AWAITING_REPORT", "COMPLETED")
             or job["allocation_action_id"] != action["predecessor_action_id"]
         ):
-            return False
+            return None
         for proof in action["evidence_history"]:
             result = proof.get("data")
             if (
                 proof.get("applied_put") == self._put_identity(action)
                 and proof.get("command_code") == action["command_code"]
-                and self._put_completed(action, result)
-                and proof.get("digest") == canonical_digest(result)
-                and job["placed_at_ms"] == result["finish_time"]
             ):
-                return True
-        return False
+                if (
+                    job["put_result"] == "SUCCESS"
+                    and self._put_completed(action, result)
+                    and job["placed_at_ms"] == result["finish_time"]
+                ) or (
+                    job["put_result"] == "FAILED"
+                    and job["placed_at_ms"] is None
+                    and self._put_failed(action, result)
+                ):
+                    if proof.get("digest") != canonical_digest(result):
+                        continue
+                    return result
+        return None
 
-    async def _advance_put(self, session, row, action, actions, save):
-        allocation = actions.get(row["allocation_action_id"])
+    def _put_report(self, row, action, allocation, result):
         if (
-            not action
-            or action["kind"] != "PUT_TO_BIN"
-            or action["command_owner"] != OWNER.domain
-            or not allocation
+            allocation is None
+            or allocation["job_id"] != row["id"]
+            or action["job_id"] != row["id"]
             or allocation["kind"] != "ALLOCATE_STORAGE"
+            or allocation["operation"] != ALLOCATE
+            or allocation["id"] != row["allocation_action_id"]
             or action["predecessor_action_id"] != allocation["id"]
+            or allocation["request_data"]
+            != {"workline_code": row["workline_code"], "binding_id": row["binding_id"]}
             or not allocation["evidence_history"]
         ):
-            return await save("PUT_RECONCILIATION_REQUIRED")
-        command = await self.capabilities.ecs.get_command(
-            session, owner=OWNER, command_code=action["command_code"]
-        )
+            return None
+        evidence = allocation["evidence_history"][-1]
         if (
-            command is None
-            or command.task_type != "PUT_TO_BIN"
-            or command.device_code != action["device_code"]
+            evidence.get("operation_id") != allocation["operation_id"]
+            or evidence.get("code") != "DECIDED"
         ):
-            return await save("PUT_RECONCILIATION_REQUIRED")
-        original_call = await self.capabilities.ecs.get_by_call(
-            session, owner=OWNER, call_key=action["call_key"]
-        )
-        if (
-            original_call is None
-            or original_call.command_code != action["command_code"]
-            or command.command_code != action["command_code"]
-        ):
-            return await save("PUT_RECONCILIATION_REQUIRED")
-        result = command.result
-        if result is None:
-            reason = (
-                "AWAITING_PUT_RESULT"
-                if not command.needs_reconciliation
-                and command.status in {"QUEUED", "DISPATCHING", "WAITING_RESULT"}
-                else "PUT_RECONCILIATION_REQUIRED"
-            )
-            return await save(reason)
-        await self._consume(session, action, self._ecs_evidence(asdict(command)))
-        if result["result"] == "FAILED" and not result.get("data"):
-            try:
-                decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
-                original = PutToBin.model_validate(action["request_data"])
-                if (
-                    decision.workline_code != row["workline_code"]
-                    or decision.bin_location != original.bin_location
-                    or decision.cell_index != original.bin_cell_location
-                    or str(decision.bin_type) != original.bin_type
-                    or decision.reel_totalthickness != original.reel_totalthickness
-                ):
-                    return await save("PUT_RECONCILIATION_REQUIRED")
-                model = self.direct_put_contracts.report(
-                    workline_code=row["workline_code"],
-                    binding_id=row["binding_id"],
-                    bin_code=decision.bin_code,
-                    bin_location=decision.bin_location,
-                    cell_id=decision.cell_id,
-                    cell_index=decision.cell_index,
-                    completed_at=result["finish_time"],
-                    result="FAILED",
-                    error_detail=result["error_detail"],
-                    placement_status="CONFIRMED_NOT_PLACED",
-                )
-            except (KeyError, TypeError, ValidationError):
-                return await save("PUT_RECONCILIATION_REQUIRED")
-            action_id = await self._send_request(
-                session, row, action, "REPORT_COMPLETION", REPORT, model
-            )
-            return await save(
-                "AWAITING_REPORT_RESULT",
-                state="AWAITING_PUT",
-                current_action_id=action_id,
-            )
-        if (
-            command.status != "SUCCEEDED"
-            or command.needs_reconciliation
-            or result["result"] != "SUCCESS"
-            or result["command_code"] != action["command_code"]
-            or result["device_code"] != action["device_code"]
-        ):
-            return await save("PUT_RECONCILIATION_REQUIRED")
+            return None
         try:
-            decision = Allocated.model_validate(allocation["evidence_history"][-1]["data"])
+            decision = Allocated.model_validate(evidence.get("data"))
             original = PutToBin.model_validate(action["request_data"])
             if (
-                not self._put_completed(action, result)
+                original.barcode != row["payload"].get("barcode")
                 or decision.workline_code != row["workline_code"]
                 or decision.bin_location != original.bin_location
                 or decision.cell_index != original.bin_cell_location
                 or str(decision.bin_type) != original.bin_type
                 or decision.reel_totalthickness != original.reel_totalthickness
             ):
-                return await save("PUT_RECONCILIATION_REQUIRED")
-            model = self.direct_put_contracts.report(
+                return None
+            failed = result["result"] == "FAILED"
+            if failed and row["placed_at_ms"] is not None:
+                return None
+            return self.direct_put_contracts.report(
                 workline_code=row["workline_code"],
                 binding_id=row["binding_id"],
                 bin_code=decision.bin_code,
@@ -1314,41 +1297,147 @@ class CoarseSortingService:
                 cell_id=decision.cell_id,
                 cell_index=decision.cell_index,
                 completed_at=result["finish_time"],
-                result="SUCCESS",
-                placement_status="CONFIRMED_PLACED",
+                result=result["result"],
+                error_detail=result.get("error_detail"),
+                placement_status="CONFIRMED_NOT_PLACED" if failed else "CONFIRMED_PLACED",
             )
         except ValidationError:
+            return None
+
+    async def _advance_put(self, session, row, action, actions, save):
+        allocation = actions.get(row["allocation_action_id"])
+        if (
+            not action
+            or action["kind"] != "PUT_TO_BIN"
+            or action["command_owner"] != OWNER.domain
+            or not action["call_key"]
+        ):
             return await save("PUT_RECONCILIATION_REQUIRED")
-        await self._consume(
-            session,
-            action,
-            {**self._ecs_evidence(asdict(command)), "applied_put": self._put_identity(action)},
+        evidence = None
+        if row["put_result"] is not None:
+            result = await self._original_put_result(session, action, row)
+            if result is None:
+                return await save("PUT_RECONCILIATION_REQUIRED")
+        else:
+            command = await self.capabilities.ecs.get_command(
+                session, owner=OWNER, command_code=action["command_code"]
+            )
+            if (
+                command is None
+                or command.task_type != "PUT_TO_BIN"
+                or command.device_code != action["device_code"]
+            ):
+                return await save("PUT_RECONCILIATION_REQUIRED")
+            original_call = await self.capabilities.ecs.get_by_call(
+                session, owner=OWNER, call_key=action["call_key"]
+            )
+            if (
+                original_call is None
+                or original_call.command_code != action["command_code"]
+                or command.command_code != action["command_code"]
+            ):
+                return await save("PUT_RECONCILIATION_REQUIRED")
+            result = command.result
+            if result is None:
+                reason = (
+                    "AWAITING_PUT_RESULT"
+                    if not command.needs_reconciliation
+                    and command.status in {"QUEUED", "DISPATCHING", "WAITING_RESULT"}
+                    else "PUT_RECONCILIATION_REQUIRED"
+                )
+                return await save(reason)
+            evidence = self._ecs_evidence(asdict(command))
+            if not self._put_outcome_matches(action, command):
+                await self._consume(session, action, evidence)
+                return await save("PUT_RECONCILIATION_REQUIRED")
+        outcome = result["result"]
+        placed_at = result["finish_time"] if outcome == "SUCCESS" else None
+        if row["put_result"] not in (None, outcome) or row["placed_at_ms"] not in (None, placed_at):
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        if evidence is not None:
+            await self._consume(
+                session,
+                action,
+                {**evidence, "applied_put": self._put_identity(action)},
+            )
+        values = dict(
+            state="AWAITING_REPORT",
+            put_result=outcome,
+            report_status="PENDING",
+            placed_at_ms=placed_at,
         )
+        model = self._put_report(row, action, allocation, result)
+        if model is None:
+            return await save("PUT_RECONCILIATION_REQUIRED", **values)
         action_id = await self._send_request(
             session, row, action, "REPORT_COMPLETION", REPORT, model
         )
-        return await save(
-            "AWAITING_REPORT_RESULT",
-            state="AWAITING_REPORT",
-            current_action_id=action_id,
-            placed_at_ms=model.completed_at,
-        )
+        return await save("AWAITING_REPORT_RESULT", current_action_id=action_id, **values)
 
-    async def _advance_report(self, session, action, save):
+    async def _advance_report(self, session, row, action, actions, save):
         if not action or action["kind"] != "REPORT_COMPLETION" or action["operation"] != REPORT:
             return await save("REPORT_RECONCILIATION_REQUIRED")
+        put = actions.get(action["predecessor_action_id"])
+        original = await self._original_put_result(session, put, row) if put is not None else None
+        if original is None:
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        outcome = row["put_result"]
+        if row["state"] == "AWAITING_PUT":
+            if original["result"] != "FAILED" or row["placed_at_ms"] is not None:
+                return await save("PUT_RECONCILIATION_REQUIRED")
+            outcome = "FAILED"
+            await self._consume(
+                session,
+                put,
+                {
+                    **self._ecs_evidence({"command_code": put["command_code"], "result": original}),
+                    "applied_put": self._put_identity(put),
+                },
+            )
+            await save(
+                row["wait_reason"],
+                state="AWAITING_REPORT",
+                put_result=outcome,
+                report_status="PENDING",
+            )
+        placed_at = original["finish_time"] if outcome == "SUCCESS" else None
+        if outcome != original["result"] or row["placed_at_ms"] != placed_at:
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        expected = self._put_report(row, put, actions.get(row["allocation_action_id"]), original)
+        if expected is None:
+            return await save("PUT_RECONCILIATION_REQUIRED")
+        request_data = action["request_data"]
+        if request_data != expected.model_dump():
+            # The original success-only contract froze the target and finish time.
+            if (
+                outcome != "SUCCESS"
+                or request_data
+                != expected.model_dump(
+                    include={
+                        "workline_code",
+                        "binding_id",
+                        "bin_code",
+                        "bin_location",
+                        "cell_id",
+                        "cell_index",
+                        "completed_at",
+                    }
+                )
+                or type(request_data["cell_index"]) is not int
+                or type(request_data["completed_at"]) is not int
+            ):
+                return await save("PUT_RECONCILIATION_REQUIRED")
         result = await self._read_request(session, action)
         if not self._valid_response(result, "RECORDED", "DUPLICATE") or result.response_data != {}:
             return await save(self._request_wait_reason(result, "REPORT"))
         await self._consume(session, action, self._wms_evidence(result))
-        if action["request_data"].get("result") == "FAILED":
-            return await save(
-                "PUT_RECONCILIATION_REQUIRED",
-                state="AWAITING_PUT",
-                pending=False,
-                current_action_id=action["predecessor_action_id"],
-            )
-        return await save("COMPLETED", state="COMPLETED", pending=False, completed_at=self.clock())
+        return await save(
+            "COMPLETED",
+            state="COMPLETED",
+            report_status="COMPLETED",
+            pending=False,
+            completed_at=self.clock(),
+        )
 
     async def _lock_point(self, session, work_line_id):
         jobs = await self.rack_dispatch.admission_jobs(session, work_line_id=work_line_id)
@@ -1403,6 +1492,7 @@ class CoarseSortingService:
                     jobs.c.rack_position_code == row["rack_position_code"],
                     actions.c.kind == "PUT_TO_BIN",
                     jobs.c.placed_at_ms.is_(None),
+                    jobs.c.state != "COMPLETED",
                 )
                 .order_by(actions.c.id)
             )
@@ -1466,7 +1556,15 @@ class CoarseSortingService:
                 if database_failure_code(error) != "40001" or attempt == 2:
                     raise
 
-    async def _original_put_complete(self, session, put, job):
+    def _put_outcome_matches(self, put, command):
+        return not command.needs_reconciliation and (
+            (command.status == "SUCCEEDED" and self._put_completed(put, command.result))
+            or (command.status == "FAILED" and self._put_failed(put, command.result))
+        )
+
+    async def _original_put_result(self, session, put, job):
+        if put["job_id"] != job["id"] or put["kind"] != "PUT_TO_BIN":
+            return None
         command = await self.capabilities.ecs.get_command(
             session, owner=OWNER, command_code=put["command_code"]
         )
@@ -1476,19 +1574,24 @@ class CoarseSortingService:
             else None
         )
         if command is None and original_call is None:
-            good = self._saved_put_completed(put, job)
-        else:
-            good = bool(
-                command
-                and original_call
-                and command.command_code == original_call.command_code == put["command_code"]
-                and command.task_type == "PUT_TO_BIN"
-                and command.device_code == put["device_code"]
-                and command.status == "SUCCEEDED"
-                and not command.needs_reconciliation
-                and self._put_completed(put, command.result)
-            )
-        return good
+            return self._saved_put_result(put, job)
+        if (
+            command
+            and original_call
+            and command.command_code == original_call.command_code == put["command_code"]
+            and command.task_type == "PUT_TO_BIN"
+            and command.device_code == put["device_code"]
+            and self._put_outcome_matches(put, command)
+        ):
+            return command.result
+        return None
+
+    async def _original_put_settled(self, session, put, job, allocation):
+        result = await self._original_put_result(session, put, job)
+        return result is not None and (
+            result["result"] == "SUCCESS"
+            or self._put_report(job, put, allocation, result) is not None
+        )
 
     async def _advance_preparation(self, session, preparation_id):
         from app.businesses._components.rack_dispatch.contracts import (
@@ -1531,6 +1634,30 @@ class CoarseSortingService:
             .mappings()
             .all()
         )
+        scoped_jobs = {
+            row["id"]: row
+            for row in host_rows
+            if row["rack_position_code"] == prep["rack_position_code"]
+        }
+        frozen = literal(prep["predecessor_action_ids"], type_=JSON)
+        if session.get_bind().dialect.name == "postgresql":
+            frozen_ids = select(func.json_array_elements_text(frozen))
+        else:
+            frozen_ids = select(func.json_each(frozen).table_valued("value").c.value)
+        point_puts = (
+            select(actions.c.id, jobs.c.allocation_action_id)
+            .join(jobs, actions.c.job_id == jobs.c.id)
+            .where(
+                jobs.c.work_line_id == prep["work_line_id"],
+                jobs.c.rack_position_code == prep["rack_position_code"],
+                actions.c.kind == "PUT_TO_BIN",
+                or_(
+                    and_(jobs.c.placed_at_ms.is_(None), jobs.c.state != "COMPLETED"),
+                    actions.c.id.in_(frozen_ids),
+                ),
+            )
+            .cte()
+        )
         local = list(
             (
                 await session.execute(
@@ -1539,7 +1666,8 @@ class CoarseSortingService:
                         or_(
                             actions.c.preparation_id == preparation_id,
                             actions.c.id == prep["source_allocation_action_id"],
-                            actions.c.id.in_(prep["predecessor_action_ids"]),
+                            actions.c.id.in_(select(point_puts.c.id)),
+                            actions.c.id.in_(select(point_puts.c.allocation_action_id)),
                         )
                     )
                     .order_by(actions.c.id)
@@ -1583,34 +1711,15 @@ class CoarseSortingService:
         latest = await self._latest_preparation(
             session, prep["work_line_id"], prep["rack_position_code"]
         )
-        point_puts = list(
-            (
-                await session.execute(
-                    select(actions)
-                    .join(jobs, actions.c.job_id == jobs.c.id)
-                    .where(
-                        jobs.c.work_line_id == prep["work_line_id"],
-                        jobs.c.rack_position_code == prep["rack_position_code"],
-                        actions.c.kind == "PUT_TO_BIN",
-                        jobs.c.placed_at_ms.is_(None),
-                    )
-                )
-            ).mappings()
-        )
-        scoped_jobs = {
-            row["id"]
-            for row in host_rows
-            if row["rack_position_code"] == prep["rack_position_code"]
-        }
+        local_by_id = {a["id"]: a for a in local}
         original_puts = {
-            a["id"] for a in local if a["kind"] == "PUT_TO_BIN" and a["job_id"] in scoped_jobs
+            a["id"]: a for a in local if a["kind"] == "PUT_TO_BIN" and a["job_id"] in scoped_jobs
         }
         clear = set(prep["predecessor_action_ids"]).issubset(original_puts)
-        for put in {
-            a["id"]: a for a in [*point_puts, *local] if a["kind"] == "PUT_TO_BIN"
-        }.values():
-            good = await self._original_put_complete(
-                session, put, next((row for row in host_rows if row["id"] == put["job_id"]), None)
+        for put in original_puts.values():
+            host = scoped_jobs[put["job_id"]]
+            good = await self._original_put_settled(
+                session, put, host, local_by_id.get(host["allocation_action_id"])
             )
             clear = clear and good
         allow = not issue and clear and latest and latest["id"] == prep["id"]
@@ -1735,7 +1844,9 @@ class CoarseSortingService:
             ),
             FactRef("preparation", (prep["id"],), (str(prep["generation_no"]),)),
             tuple(
-                FactRef("put", (a["id"],), ("CLEAR" if clear else "UNKNOWN",)) for a in point_puts
+                FactRef("put", (a["id"],), ("CLEAR" if clear else "UNKNOWN",))
+                for a in original_puts.values()
+                if scoped_jobs[a["job_id"]]["placed_at_ms"] is None
             ),
         )
         public = await dispatch.advance(
@@ -2036,7 +2147,9 @@ class CoarseSortingService:
                     select(actions)
                     .where(
                         or_(
-                            actions.c.job_id.in_([row["id"] for row in hosts]),
+                            actions.c.job_id.in_(
+                                select(jobs.c.id).where(jobs.c.work_line_id == line_id)
+                            ),
                             actions.c.rack_job_id == rack_job_id,
                         )
                     )
@@ -2059,7 +2172,11 @@ class CoarseSortingService:
                 await session.execute(
                     select(preparations)
                     .where(
-                        preparations.c.id.in_(related),
+                        preparations.c.id.in_(
+                            select(actions.c.preparation_id).where(
+                                actions.c.rack_job_id == rack_job_id
+                            )
+                        ),
                         preparations.c.work_line_id == line_id,
                         preparations.c.rack_position_code == point,
                     )
@@ -2098,6 +2215,7 @@ class CoarseSortingService:
             or not source
             or source["resource_snapshot"] != self._output_snapshot(line, output)
         )
+        local_by_id = {a["id"]: a for a in local}
         clear, demand = True, "NONE"
         for host in hosts:
             if host["rack_position_code"] not in (None, point) or host["state"] == "NG_COMPLETED":
@@ -2107,7 +2225,9 @@ class CoarseSortingService:
                 complete = bool(puts) and all(
                     [
                         host["allocation_action_id"] == put["predecessor_action_id"]
-                        and await self._original_put_complete(session, put, host)
+                        and await self._original_put_settled(
+                            session, put, host, local_by_id.get(host["allocation_action_id"])
+                        )
                         for put in puts
                     ]
                 )
@@ -2240,7 +2360,7 @@ class CoarseSortingService:
 
 
 async def read_scan(session, digest: str) -> dict | None:
-    """Read the persisted scan in the caller's transaction without advancing it."""
+    """Read the persisted scan, including its PUT outcome and WMS report status."""
     from .models import CoarseSortingScan
 
     table = CoarseSortingScan.__table__

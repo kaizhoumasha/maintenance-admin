@@ -28,8 +28,8 @@
 | 换架 / 仅退架 | 5.3 | WMS → WES | Operation：[transport.task.resulted@v1](#transport-rack-out-result) | 回填原旧架实际终位/失败，备查 | 缺失或失败不回退已接纳的调度 |
 | 补架 / 换架 / 仅退架 | 5.4 | WES → WMS | Operation：[inbound.coarse_sorting.storage_allocate@v1](#wms-storage-reallocate) | 新架明确到位或仅退架调度接纳后，使用原 `binding_id`、新 `operation_id` 重新分配 | 取得有效箱格才进入正常步骤 6 |
 | 正常        | 6    | WES → ECS        | Command：[PUT_TO_BIN](#ecs-put-to-bin)                                           | 下发入箱命令                                                         | 已取得有效的放料目标                                  |
-| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 回传原入箱命令的执行结果                                             | 明确放料完成，或明确未放料的失败                    |
-| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的执行结果                                       | WMS 返回 `RECORDED / DUPLICATE`                     |
+| 正常        | 7    | ECS → WES        | Result：[原 PUT_TO_BIN 命令](#ecs-put-to-bin-result)                             | 先保存原成功或失败执行事实，再登记对应报告                                             | put_result 独立记录；尚无回报或矛盾继续等待/校验                    |
+| 正常        | 8    | WES → WMS        | Operation：[inbound.coarse_sorting.execution_report@v1](#wms-execution-report)   | 反馈原绑定及目标箱格的成功或明确失败事实                             | 原 RECORDED/DUPLICATE 只完成报告，不改变 put_result                     |
 | NG          | 3    | WES → ECS        | Command：[MOVE_TO_NG](#ecs-move-to-ng)                                           | 下发搬至对应区域 NG 平台的命令                                       | WMS 验证返回 `NG + reason_code`                     |
 | NG          | 4    | ECS → WES        | Result：[原 MOVE_TO_NG 命令](#ecs-move-to-ng-result)                             | 回传原 NG 搬运命令的执行结果                                         | 明确结果后保存；NG 成功不触发正常入箱反馈             |
 
@@ -134,7 +134,7 @@ flowchart TB
     class done completed
 ```
 
-只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。原入箱命令明确证明指定箱格已放料后报告成功完成；若明确失败且确认未放料，则发送失败执行报告并释放 WMS 预约；结果未知时保留原命令和预约，不报告成功或释放箱格。报告未收妥时保留执行事实，只恢复原报告或核对，允许下一盘继续，不额外锁住原料格、不再执行该盘搬运。
+只有原移动命令明确完成后才申请箱格；已有活动准备作业时先关联等待，不逐盘重叫货架。WMS 返回补架/换架时转相应子流程，原 F01 入场明确到位且方向匹配后以新请求重新分配。明确 WAIT 到期后以新请求再次求值，通信未知仍恢复原请求；只有代次有效且无活动准备作业的 ALLOCATED 才允许入箱。原入箱命令严格成功后报告成功，明确未放料的失败报告失败；WMS 收妥原报告后分别结束该物料的成功或失败反馈义务。原执行已经严格成功或明确失败时，不因报告重试永久卡住后续物料或货架调度，不重新执行该盘搬运；未知、部分放料信息或冲突仍保留原责任，不凭超时编造失败。
 
 ### 2.3 NG 处理与异常出口
 
@@ -519,7 +519,7 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 
 ### 3.3 物理完成及执行结果反馈
 
-原 `PUT_TO_BIN` 的执行结果明确后发送。本接口既反馈指定箱格已完成放料，也反馈已确认未放料的失败。NG 搬运成功不作为正常入箱反馈。
+原 `PUT_TO_BIN` 严格成功后发送成功入箱反馈；ECS 明确确认未放料的失败发送失败反馈。失败同样是一盘物料的合法闭环，不要求等到成功，也不能永久卡住后续物料。NG 搬运成功不作为正常入箱反馈。
 
 请求：
 
@@ -552,11 +552,27 @@ data 严格只包含以上三个字段，旧架号必填。WES 在原工作点�
 | `completed_at`                      | 原 ECS Result 的 `finish_time`，不使用报告发送时间                                            |
 | `result`                             | `SUCCESS` 或 `FAILED`。成功表示已确认放料，失败表示已确认未放料 |
 | `error_detail`                       | 失败时必填的执行错误，成功时为 `null` |
-| `placement_status`                   | `CONFIRMED_PLACED`、`CONFIRMED_NOT_PLACED` 或 `UNKNOWN`。`FAILED` 只能使用 `CONFIRMED_NOT_PLACED` |
+| `placement_status`                   | 成功为 `CONFIRMED_PLACED`，失败为 `CONFIRMED_NOT_PLACED`；不发送 `UNKNOWN` 报告 |
 
 目标字段从原命令冻结关联取得，不重新请求箱格或读取当前配置覆盖历史。若 ECS 返回与原目标冲突的实际信息，先核对，不报告原目标已完成。未确认是否放料时不提交成功报告，也不推导装箱后总高度。
 
-当 ECS 明确放料失败且确认未放料时，WES 使用原绑定和原分配目标发送 `result: "FAILED"` 的报告。WMS 收妥后释放 `storage_allocate@v1` 预约的箱格，WES 保留原操作证据并进入待处理状态。无法确认是否放料时使用 `placement_status: "UNKNOWN"`，不得释放预约。
+**2026-11-24 用户修正规则：** WES 接受 ECS 的放料失败作为执行终局。原命令、设备及冻结分配匹配、当前采用结果为 FAILED、无未决结果冲突时，`actual_qty=0` 且 `pick_and_put_result="PUT_FAILED"` 明确表示未放料；既有空 `data` 失败形状继续兼容。两者均发送 `FAILED / CONFIRMED_NOT_PLACED` 报告，沿用原错误和完成时间。含部分放料信息或冲突时继续核对，不生成虚假的未放料报告。 `SUCCESS` 同时携带 `pick_and_put_result="PUT_FAILED"` 属于矛盾回报，接收时拒绝；历史已保存的同类证据不能用于成功报告或货架放行。原失败不是等待后续成功的临时状态，普通不同 SUCCESS 仍为 409；WES 不重做原放料。
+
+ECS 的放料结果和 WMS 的报告状态分别记录。接收器先可靠保存原 ECS Result；业务入口消费该原结果后，在登记原报告的事务中保存 `put_result=SUCCESS / FAILED`，随后 Sender 才发送报告。收到明确失败时就记录 `put_result=FAILED`，不等 WMS 收妥才确认失败，也不增加第三种 UNKNOWN 执行结果。
+
+| WES 字段 | 依据与含义 | 时点 |
+| --- | --- | --- |
+| `put_result` | 原 ECS 的 `SUCCESS / FAILED`；结果未消费前为空，空值不是第三种执行结果 | 在 WMS 报告发送前保存；报告响应不改变它 |
+| `report_status` | `PENDING` 表示原报告反馈义务待完成，`COMPLETED` 表示 WMS 已收妥 | 原执行结果已记录后进入 PENDING；原 RECORDED/DUPLICATE 后进入 COMPLETED |
+| 作业 `state` | AWAITING_REPORT / COMPLETED 表示反馈流程阶段，不表示放料成功或失败 | 成功、失败均可经过这两个流程阶段，具体执行结论看 put_result |
+| `placed_at_ms` | 原严格放料成功时间 | 仅 SUCCESS 设置；FAILED 一直为空 |
+| `completed_at` | 作业反馈义务完成时间 | 原报告收妥后设置，不用它判断何时得知放料失败 |
+
+调试投影分别返回 `put_result` 和 `report_status`。例如，失败报告尚未送达时为 `FAILED / PENDING`，WMS 收妥后为 `FAILED / COMPLETED`；成功对应 `SUCCESS / PENDING` 到 `SUCCESS / COMPLETED`。报文中的 `pick_and_put_result="PUT_FAILED"` 始终是 ECS 提供的失败事实，不再兼作 WES 的报告完成状态。
+
+历史同名 `execution_report@v1` 的七字段成功报告继续使用原身份和冻结正文。只有原 PUT 严格成功、原绑定/目标/完成时间全部匹配时，原 RECORDED/DUPLICATE 才完成该报告；七字段格式不用于失败报告，也不能覆盖放料结果。
+
+WMS 收妥失败报告后按原约定释放 `storage_allocate@v1` 预约。报告未收妥时只恢复原报告，原明确失败已经解除对应放料执行占用，不因报告重试永久卡住后续物料或退架。已经退出待办的旧记录不自动重新启用，现场存量仍按[恢复计划 T5](../superpowers/plans/2026-11-24-coarse-sorting-ecs-recovery.md)核实。不通过新 operation_id 或普通 Result 覆盖原失败。
 
 `command_code / device_code` 及原成功 Result 关联仅由 WES 内部保存，不加入本报告。目标合同以 `workline_code + binding_id` 标识该盘的一次正常入箱完成：同一键的相同目标和完成事实重复报告不重复装载或记账；目标或完成事实冲突时拒绝，不能覆盖原报告。协议 `operation_id` 仍标识具体请求，技术重试复用原身份及冻结正文；业务去重规则待 WMS 按 P10 确认。
 
@@ -932,6 +948,8 @@ ACK 不夹带设备命令，也不等于验证通过。重复事件不重复创�
 
 三类命令统一使用顶层 `result=SUCCESS / FAILED` 表达原命令的最终执行结果。`SUCCESS` 须表示该原命令的整个物理动作已完成，具体范围如下；受理 ACK、动作开始或中间位置均不满足此条件。WES 通过 `command_code + device_code` 关联原命令及其冻结目标后解释结果。
 
+执行回报没有第三种 UNKNOWN 结果。明确未放料的 PUT_TO_BIN FAILED 表示原放料执行已经结束，由 WES 向 WMS 报告失败并闭环；ECS 不能在该终局后继续原动作。通信中断或尚未收到回报时等待原 SUCCESS/FAILED，不以超时生成失败，也不通过普通 Result 将已应用失败覆盖为成功。
+
 | 原命令           | result=SUCCESS 的完成范围                          |
 | ---------------- | -------------------------------------------------- |
 | `MOVE_FORWARD` | 本盘已完成从输送线入口到出口的移动                 |
@@ -1095,6 +1113,27 @@ WES 登记 `MOVE_TO_NG` 时保存该工作线的 `NG_COMPLETION` 位置。原命
 }
 ```
 
+2026-11-24 用户提供的 PUT_TO_BIN 放料失败回报形状如下。命令号和设备号是示例值，接收必须匹配 WES 保存的原 PUT_TO_BIN；不从 `PICK_AND_PUT` 命令号文本或设备名推导业务角色。
+
+```json
+{
+  "command_code": "CMD-20260927-PICK_AND_PUT-0001",
+  "device_code": "RS-INPUT-ARM-01",
+  "result": "FAILED",
+  "finish_time": 1790000060000,
+  "data": {
+    "actual_qty": 0,
+    "pick_and_put_result": "PUT_FAILED"
+  },
+  "error_detail": {
+    "code": "1005",
+    "msg": "Cancelled by operator"
+  }
+}
+```
+
+该失败形状只表达原 PUT_TO_BIN 的明确未放料，不放宽 SUCCESS 的 `actual_qty=1` 及原位置要求，也不将 MOVE_TO_NG 的数量规则改为允许 0。执行结果仍只有 SUCCESS/FAILED；报告与业务失败闭环按 §3.3 处理。
+
 `error_detail.code / msg` 按最终附录约定；硬件错误由硬件方处理，WES 保存结果，不将失败或超时转换为物理完成，也不自动更换命令号重做。
 
 WES 成功保存、校验及应用原 Result 后响应（HTTP 200；成功、失败及合法重复结果共用）：
@@ -1123,7 +1162,8 @@ WES 成功保存、校验及应用原 Result 后响应（HTTP 200；成功、失
 | 新架补入在途、失败、取消或未知 | 保留原任务，不把方案或提交接纳当到位，不重新分配或重复叫架                                 |
 | 原新架明确到位                 | 保存原任务及已应用结果版本，沿原 binding_id 以新分配请求身份继续，不重做验证或输送线移动   |
 | MOVE_FORWARD 失败/未知         | 不申请箱格；保存原命令结果或未决状态，硬件方处理异常                                       |
-| PUT_TO_BIN 失败/未知           | 不反馈入箱完成、不换号重搬、不自行释放或更换目标                                           |
+| PUT_TO_BIN 明确未放料失败 | 先记录 put_result=FAILED、report_status=PENDING，再按原绑定/目标报告；WMS 收妥只完成报告，原失败不变，后续物料继续 |
+| PUT_TO_BIN 未知/部分放料/冲突 | 保留原责任核对，不伪造成功或确认未放料，不换号重搬 |
 | 已放料但 WMS 报告未收妥        | 保留物理完成及原目标，仅恢复原报告；收到 RECORDED/DUPLICATE 后结束反馈义务                 |
 | F01失败后原任务回调成功更正 | 采用新增更正合同后，公开已应用成功与原架/位置/方向匹配才恢复；保留失败历史，不区分完成方式，不生成替代搬运 |
 | Result 早于命令 ACK 或重复到达 | 按原 command_code/device_code 及冻结合同处理，不按“设备最近一条命令”猜测                 |

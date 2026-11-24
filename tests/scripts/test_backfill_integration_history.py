@@ -1004,7 +1004,6 @@ async def test_legacy_delivery_summary_survives_runtime_cleanup(legacy):
 async def test_backfilled_preparation_uses_the_live_exact_reference_query(legacy):
     from app.businesses.coarse_sorting.models import (
         CoarseSortingAction,
-        CoarseSortingJob,
         RackPreparation,
     )
     from app.core.identifiers import uuid7
@@ -1015,7 +1014,8 @@ async def test_backfilled_preparation_uses_the_live_exact_reference_query(legacy
     key, preparation = str(uuid7()), str(uuid7())
     identities = {mid: str(uuid7()) for mid in (901, 902)}
     async with legacy.begin() as session:
-        reliable = await source_table(await session.connection(), "reliable_message")
+        connection = await session.connection()
+        reliable = await source_table(connection, "reliable_message")
         for mid in (901, 902):
             await session.execute(
                 reliable.insert().values(
@@ -1031,8 +1031,9 @@ async def test_backfilled_preparation_uses_the_live_exact_reference_query(legacy
                     updated_at=NOW,
                 )
             )
-        session.add(
-            CoarseSortingJob(
+        job = await source_table(connection, "coarse_sorting_job")
+        await session.execute(
+            job.insert().values(
                 id=key,
                 event_digest=key,
                 receipt_id=41,
@@ -1051,7 +1052,6 @@ async def test_backfilled_preparation_uses_the_live_exact_reference_query(legacy
                 wait_reason="WAIT",
             )
         )
-        await session.flush()
         session.add(
             CoarseSortingAction(
                 id=key,

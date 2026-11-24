@@ -1,8 +1,8 @@
-"""Original WMS evidence retained by pending coarse responsibilities."""
+"""Original WMS evidence retained by unresolved coarse responsibilities."""
 
 from sqlalchemy import select, union_all
 
-from .models import CoarseSortingAction, CoarseSortingJob, RackPreparation
+from .models import TERMINAL_JOB_STATES, CoarseSortingAction, CoarseSortingJob, RackPreparation
 
 
 async def wms_message_references(session, *, candidate_ids, line_ids=None):
@@ -11,8 +11,7 @@ async def wms_message_references(session, *, candidate_ids, line_ids=None):
         select(job.work_line_id, action.message_id)
         .join(action, action.job_id == job.id)
         .where(
-            job.pending,
-            action.kind.in_(("ALLOCATE_STORAGE", "REPORT_COMPLETION")),
+            job.pending | job.state.not_in(TERMINAL_JOB_STATES),
             action.message_id.in_(candidate_ids),
         ),
         select(prep.work_line_id, action.message_id)

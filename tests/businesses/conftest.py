@@ -922,6 +922,8 @@ async def direct(coarse_forward, monkeypatch):
                     current_action_id=None,
                     allocation_action_id=None,
                     state="AWAITING_VALIDATION",
+                    put_result=None,
+                    report_status=None,
                     completed_at=None,
                 )
             )

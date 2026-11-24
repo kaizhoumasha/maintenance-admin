@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
+TERMINAL_JOB_STATES = ("COMPLETED", "NG_COMPLETED")
 JOB_STATES = (
     "AWAITING_VALIDATION",
     "AWAITING_MOVE",
@@ -26,8 +27,7 @@ JOB_STATES = (
     "AWAITING_PUT",
     "AWAITING_REPORT",
     "AWAITING_NG",
-    "COMPLETED",
-    "NG_COMPLETED",
+    *TERMINAL_JOB_STATES,
 )
 ACTION_KINDS = (
     "VALIDATE_BIND",
@@ -55,11 +55,22 @@ class CoarseSortingJob(Base):
             name="allocation",
         ),
         CheckConstraint(
-            "state NOT IN ('AWAITING_REPORT', 'COMPLETED') OR placed_at_ms IS NOT NULL",
+            "put_result IS NULL OR (put_result = 'SUCCESS') = (placed_at_ms IS NOT NULL)",
             name="placement",
         ),
         CheckConstraint(
-            "(state IN ('COMPLETED', 'NG_COMPLETED')) = (completed_at IS NOT NULL)",
+            "(state IN ('AWAITING_REPORT', 'COMPLETED')) = (put_result IS NOT NULL) "
+            "AND (put_result IS NULL OR put_result IN ('SUCCESS', 'FAILED'))",
+            name="put_result",
+        ),
+        CheckConstraint(
+            "CASE state WHEN 'AWAITING_REPORT' THEN coalesce(report_status = 'PENDING', false) "
+            "WHEN 'COMPLETED' THEN coalesce(report_status = 'COMPLETED', false) "
+            "ELSE report_status IS NULL END",
+            name="report_status",
+        ),
+        CheckConstraint(
+            f"(state IN {TERMINAL_JOB_STATES}) = (completed_at IS NOT NULL)",
             name="completion",
         ),
         CheckConstraint(
@@ -121,6 +132,8 @@ class CoarseSortingJob(Base):
         ForeignKey("coarse_sorting_rack_preparation.id", use_alter=True, ondelete="RESTRICT")
     )
     placed_at_ms: Mapped[int | None] = mapped_column(BigInteger)
+    put_result: Mapped[str | None] = mapped_column(String(16))
+    report_status: Mapped[str | None] = mapped_column(String(16))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

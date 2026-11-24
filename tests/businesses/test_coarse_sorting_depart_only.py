@@ -635,25 +635,60 @@ async def idle_depart(flow, public_id):
         return await flow.service.rack_dispatch.progress(session, job_id=public_id)
 
 
-async def test_idle_rack_departs_without_preparation_while_placed_report_recovers(rack):
-    row, prep, public_id = await placed_with_original_rack(rack)
+@pytest.mark.parametrize("failed", [False, True], ids=["placed", "not-placed"])
+async def test_idle_rack_departs_without_preparation_while_put_report_recovers(rack, failed):
+    row, prep, public_id = await placed_with_original_rack(rack, finish=not failed)
     rack.peer.report_code = None
+    if failed:
+        put = json.loads(rack.peer.commands[-1])
+        assert (
+            await rack.result(
+                row,
+                command_code=put["command_code"],
+                device_code=rack.output,
+                result="FAILED",
+                data={},
+                error_detail={"code": "BLOCKED", "msg": "mock failure"},
+            )
+        ).status_code == 200
+        assert await rack.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
     public = await idle_depart(rack, public_id)
     assert public.closure_reason == "DEPARTURE_ACK" and not public.pending
     assert [a.kind for a in public.actions] == ["ENTER", "DEPARTURE_DECIDE", "DEPART"]
-    assert (await rack.rows())[0]["state"] == "AWAITING_REPORT"
+    original = (await rack.rows())[0]
+    assert original["state"] == "AWAITING_REPORT"
+    assert original["put_result"] == ("FAILED" if failed else "SUCCESS")
+    assert original["report_status"] == "PENDING"
+    assert original["pending"]
     async with rack.factory() as session:
         assert len(list(await session.scalars(select(RackPreparation)))) == 1
     assert len(rack.peer.transports) == 2
     assert await rack.service.advance_preparation(prep) == "READY"
 
 
-@pytest.mark.parametrize("demand", ["put", "scan", "allocation", "missing_pointer"])
+@pytest.mark.parametrize("demand", ["put", "failed_put", "scan", "allocation", "missing_pointer"])
 async def test_idle_release_retains_uncertain_demand_and_original_direct_responsibility(
     rack, demand
 ):
-    row, _, public_id = await placed_with_original_rack(rack, finish=demand != "put")
-    if demand == "scan":
+    row, _, public_id = await placed_with_original_rack(
+        rack, finish=demand not in {"put", "failed_put"}
+    )
+    if demand == "failed_put":
+        put = json.loads(rack.peer.commands[-1])
+        assert (
+            await rack.result(
+                row,
+                command_code=put["command_code"],
+                device_code=rack.output,
+                result="FAILED",
+                data={"actual_qty": 1},
+                error_detail={"code": "BLOCKED", "msg": "mock failure"},
+            )
+        ).status_code == 200
+        assert await rack.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+        assert (await rack.rows())[0]["pending"]
+        assert not rack.peer.reports
+    elif demand == "scan":
         assert (await rack.post(rack.event(timestamp=1793206799001))).status_code == 200
     elif demand == "allocation":
         rack.peer.allocate = {"result": "WAIT", "workline_code": rack.workline}

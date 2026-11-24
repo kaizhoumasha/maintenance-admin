@@ -79,6 +79,74 @@ async def add_http_runtime_test_schema(engine):
         await connection.run_sync(expand)
 
 
+async def replay_coarse_sorting_history(engine):
+    """Run the original coarse backfill and keep the shared database schema at head."""
+    from importlib import import_module
+
+    from app.businesses._components.rack_dispatch.models import RackJob
+    from app.businesses.coarse_sorting.models import (
+        CoarseSortingAction,
+        CoarseSortingJob,
+        RackPreparation,
+    )
+
+    migrations = [
+        import_module(f"migrations.versions.2026-11-06_{name}")
+        for name in ("coarse_sorting_job", "coarse_sorting_ng", "coarse_rack_preparation")
+    ]
+    migrations.append(import_module("migrations.versions.2026-11-24_coarse_put_failure"))
+    tables = (
+        CoarseSortingJob.__table__,
+        CoarseSortingAction.__table__,
+        RackPreparation.__table__,
+        RackJob.__table__,
+    )
+
+    def remigrate(connection):
+        original = inspect(connection)
+        original_checks = {
+            table: original.get_check_constraints(table.name, schema=table.schema)
+            for table in tables
+        }
+        original_indexes = {
+            table: {
+                index["name"] for index in original.get_indexes(table.name, schema=table.schema)
+            }
+            for table in tables
+        }
+        with Operations.context(MigrationContext.configure(connection)) as operations:
+            for migration in reversed(migrations):
+                migration.downgrade()
+            for migration in migrations:
+                migration.upgrade()
+            restored = inspect(connection)
+            for table in tables:
+                restored_checks = {
+                    check["name"]: check["sqltext"]
+                    for check in restored.get_check_constraints(table.name, schema=table.schema)
+                }
+                for check in original_checks[table]:
+                    name, expression = check["name"], check["sqltext"]
+                    if restored_checks.get(name) != expression:
+                        if name in restored_checks:
+                            operations.drop_constraint(
+                                name, table.name, type_="check", schema=table.schema
+                            )
+                        operations.create_check_constraint(
+                            name, table.name, expression, schema=table.schema
+                        )
+                restored_indexes = {
+                    index["name"] for index in restored.get_indexes(table.name, schema=table.schema)
+                }
+                model_indexes = {index.name: index for index in table.indexes}
+                for name in sorted(original_indexes[table] - restored_indexes):
+                    model_indexes[name].create(connection)
+
+    async with engine.begin() as connection:
+        await connection.run_sync(remigrate)
+    await engine.dispose()
+
+
 @pytest.fixture(scope="session")
 def sqlite_migration_start(tmp_path_factory):
     templates = {}
