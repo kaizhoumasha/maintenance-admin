@@ -539,6 +539,7 @@ async def test_unknown_obligation_is_not_excused_by_another_closed_owner(history
             job.completed_at,
             job.placed_at_ms,
         ) = False, "COMPLETED", key, key, old, 1
+        job.put_result, job.report_status = "SUCCESS", "COMPLETED"
         for owner, value in (("coarse_sorting", key), ("unknown-owner", "still-needed")):
             await write_reference(
                 session,
@@ -559,6 +560,7 @@ async def test_unknown_obligation_is_not_excused_by_another_closed_owner(history
             job = await session.get(CoarseSortingJob, key)
             job.current_action_id = job.allocation_action_id = None
             job.state, job.completed_at, job.placed_at_ms = "AWAITING_VALIDATION", None, None
+            job.put_result = job.report_status = None
             await session.flush()
             await session.execute(delete(CoarseSortingAction).where(CoarseSortingAction.id == key))
             await session.execute(delete(CoarseSortingJob).where(CoarseSortingJob.id == key))

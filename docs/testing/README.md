@@ -35,6 +35,7 @@ CI 使用[十道完整测试](test-lanes.md)，每道独立运行 PostgreSQL、�
 | 工作线业务公共接缝 | `tests/businesses/`、`tests/controllers/test_workline_business.py`、`tests/services/test_workline_business.py`；模型 send/create、COMMANDS 角色交集、catalog/固定平台来源保护、正式冷启动、合同交叉校验、两线绑定、受理/独立推进事务、消费与 Outbox 原子性；[业务包开发指南](../integrations/business-packages.md)。真实业务仍待独立确认 |
 | 业务多能力组合与原归属唤醒 | [阶段一验收](business-components-phase1.md)、[阶段二验收](business-components-phase2.md)；共享合同消费者/唯一输入目标、新动作授权与原重放、WMS 原关联、Transport 原 owner 及实际应用后通知；测试组件不进入生产 catalog |
 | BIN_Roller 箱流、架流与记录适配 | `tests/businesses/bin_roller/`；四点与 SCAN2 接缝、FIFO、原身份/恢复、统一架生命周期及隔离并发；[WES 记录适配验证](bin-roller-wes-recorded-cases.md)区分原始事实与受控刺激。正式手工消费者、组件状态迁移及真实 worker/Beat 软件验证见[手工统一验收](smt-manual.md#current-delivery)；供应商/现场验收未执行 |
+| 粗分放料与原报告恢复 | [粗分恢复回归](coarse-sorting-recovery.md)列出原身份、终局、货架责任、证据保留和兼容迁移的验证入口 |
 | ECS 命令与结果 | [ECS 测试说明](ecs-command-verification.md)，复用实际装配、原期限、当前许可和消费者锁序，不增加独立验收平台 |
 | 统一对接历史与分阶段迁移 | [软件验证记录](integration-history.md)、[接口与运维合同](../integrations/integration-history.md)；原身份/冲突/长期重放、正文权限/审计、引用保护清理、可恢复补录及 authority / contract 拒绝门禁；A 的隔离源码验证与最终全套分开计数，未进行真实停写切换或现场验收 |
 | 安全诊断 | `tests/core/test_global_diagnostics.py`、`tests/reliable/test_sender_logging.py`、delivery/snapshot 与 `tests/tasks/`；安全字段、取消/落库失败传播，各任务独立降噪/恢复；[日志说明](../logging.md) |

@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, func, literal, select, true
 
 from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import RackPreparation
@@ -243,7 +243,8 @@ async def second_allocation(flow, decision):
 
 
 @pytest.mark.parametrize("mode", ["REPLACE_REQUIRED", "DEPART_REQUIRED"])
-async def test_new_put_and_departure_cannot_both_get_conflicting_authority(rack, mode):
+@pytest.mark.parametrize("failed", [False, True], ids=["placed", "not-placed"])
+async def test_new_put_and_departure_cannot_both_get_conflicting_authority(rack, mode, failed):
     flow = rack
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
@@ -279,16 +280,202 @@ async def test_new_put_and_departure_cannot_both_get_conflicting_authority(rack,
                 first,
                 command_code=put["command_code"],
                 device_code=flow.output,
-                data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+                result="FAILED" if failed else "SUCCESS",
+                data={} if failed else {"actual_qty": 1, "location": "STATION_OUTPUT1"},
+                error_detail={"code": "BLOCKED", "msg": "mock failure"} if failed else None,
             )
         ).status_code == 200
         assert await flow.service.advance_preparation(prep) == "AWAITING_DEPARTURE_RESULT"
-        # Physical placement closes its direct responsibility before the independent report ACK.
+        # The original outcome settles physical responsibility before the independent report ACK.
         assert not flow.peer.reports
         assert (await flow.rows())[0]["state"] == "AWAITING_PUT"
     else:
         assert rows[first["id"]]["state"] == "AWAITING_RACK"
         assert not any(a["kind"] == "PUT_TO_BIN" for a in await flow.action_rows(first["id"]))
+
+
+@pytest.mark.parametrize("proof", ["healthy", "late-conflict", "contradictory-saved"])
+async def test_new_preparation_rechecks_placed_put_while_report_is_pending(rack, proof):
+    from app.core.strict_json import canonical_digest
+    from app.models import ReliableMessage
+    from tests.helpers import clear_integration_history
+
+    flow = rack
+    flow.sender.uniform = lambda _lower, upper: upper
+    flow.peer.allocate = allocated(flow)
+    first = await reach_allocate(flow)
+    enable_racks(flow)
+    assert await flow.service.advance(first["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.dispatch() == 1
+    put = json.loads(flow.peer.commands[-1])
+    assert (
+        await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
+    flow.peer.report_code = None
+    assert await flow.dispatch() == 1
+    original_put = next(a for a in await flow.action_rows(first["id"]) if a["kind"] == "PUT_TO_BIN")
+    if proof == "late-conflict":
+        conflict = await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data={},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["message"] == "IDEMPOTENCY_CONFLICT"
+    elif proof == "contradictory-saved":
+        async with flow.factory.begin() as session:
+            root_id = await session.scalar(
+                select(IntegrationExchange.id).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == put["command_code"],
+                )
+            )
+            assert root_id is not None
+            await session.execute(
+                delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id)
+            )
+            await clear_integration_history(session, (root_id,))
+            saved = original_put["evidence_history"][-1]
+            data = {
+                **saved["data"],
+                "data": {**saved["data"]["data"], "pick_and_put_result": "PUT_FAILED"},
+            }
+            await session.execute(
+                flow.actions.update()
+                .where(flow.actions.c.id == original_put["id"])
+                .values(
+                    evidence_history=[{**saved, "data": data, "digest": canonical_digest(data)}]
+                )
+            )
+    second = await second_allocation(
+        flow,
+        {
+            "result": "REPLACE_REQUIRED",
+            "workline_code": flow.workline,
+            "current_rack": {"rack_id": "RACK-1"},
+            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+        },
+    )
+    assert await flow.service.advance(second["id"]) == "AWAITING_RACK"
+    previous, following = await flow.rows()
+    prep = following["rack_preparation_id"]
+    assert (previous["put_result"], previous["report_status"], previous["placed_at_ms"]) == (
+        "SUCCESS",
+        "PENDING",
+        1,
+    )
+    expected = "AWAITING_DEPARTURE_RESULT" if proof == "healthy" else "AWAITING_PREDECESSORS"
+    assert await flow.service.advance_preparation(prep) == expected
+    if proof == "late-conflict":
+        async with flow.factory.begin() as session:
+            preparation = await session.get(RackPreparation, prep)
+            assert preparation.predecessor_action_ids == [original_put["id"]]
+            # An older preparation can already have frozen an empty predecessor set.
+            preparation.predecessor_action_ids = []
+        assert await flow.service.advance_preparation(prep) == "AWAITING_PREDECESSORS"
+    assert await flow.dispatch() == int(proof == "healthy")
+    assert len(flow.peer.reports) == 1
+    assert not flow.peer.transports
+
+
+async def test_preparation_keeps_original_put_predecessor_with_a_long_workline_history(rack):
+    flow = rack
+    flow.peer.allocate = allocated(flow)
+    closed = await reach_allocate(flow, timestamp=1793206798999)
+    assert await flow.service.advance(closed["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.dispatch() == 1
+    old_put = json.loads(flow.peer.commands[-1])
+    assert (
+        await flow.result(
+            closed,
+            command_code=old_put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data={},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance(closed["id"]) == "AWAITING_REPORT_RESULT"
+    assert await flow.dispatch() == 1
+    assert await flow.service.advance(closed["id"]) == "COMPLETED"
+    (historical_report,) = flow.peer.reports
+    closed_job = (await flow.rows())[0]
+    assert closed_job["put_result"] == "FAILED" and closed_job["placed_at_ms"] is None
+    # A closed failure no longer needs to contribute its allocation proof to a new preparation.
+    async with flow.factory.begin() as session:
+        await session.execute(
+            flow.actions.update()
+            .where(flow.actions.c.id == closed_job["allocation_action_id"])
+            .values(evidence_history=[])
+        )
+
+    first = await reach_allocate(flow)
+    enable_racks(flow)
+    assert await flow.service.advance(first["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.dispatch() == 1
+    put = json.loads(flow.peer.commands[-1])
+
+    second = await second_allocation(
+        flow,
+        {
+            "result": "REPLACE_REQUIRED",
+            "workline_code": flow.workline,
+            "current_rack": {"rack_id": "RACK-1"},
+            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+        },
+    )
+    assert await flow.service.advance(second["id"]) == "AWAITING_RACK"
+    prep = (await flow.rows())[-1]["rack_preparation_id"]
+
+    original_put = (await flow.action_rows(first["id"]))[-1]
+    async with flow.factory() as session:
+        preparation = await session.get(RackPreparation, prep)
+        assert preparation.predecessor_action_ids == [original_put["id"]]
+
+    if flow.factory.kw["bind"].dialect.name == "postgresql":
+        # Keep exercising PostgreSQL's driver parameter limit with old staged projections.
+        job = flow.table
+        history = select(cast(func.generate_series(1, 32768), String).label("number")).subquery()
+        overrides = {
+            "id": literal("history-job-") + history.c.number,
+            "event_digest": func.lpad(history.c.number, 64, "0"),
+            "state": literal("AWAITING_ALLOCATION"),
+            "wait_reason": literal("AWAITING_ALLOCATION_STAGE"),
+            "pending": literal(False),
+            "current_action_id": literal(None),
+            "rack_preparation_id": literal(None),
+        }
+        rows = (
+            select(*(overrides.get(column.name, column) for column in job.c))
+            .select_from(job.join(history, true()))
+            .where(job.c.id == second["id"])
+        )
+        async with flow.factory.begin() as session:
+            await session.execute(job.insert().from_select(list(job.c.keys()), rows))
+
+    assert await flow.service.advance_preparation(prep) == "AWAITING_PREDECESSORS"
+    assert not flow.peer.transports
+    assert (
+        await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data={},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance_preparation(prep) == "AWAITING_DEPARTURE_RESULT"
+    assert flow.peer.reports == [historical_report]
 
 
 async def test_arrival_does_not_allow_wms_to_reuse_the_old_rack(rack):
@@ -699,8 +886,11 @@ async def test_pending_original_rack_evidence_survives_actual_terminal_cleanup(r
     ]
 
 
-@pytest.mark.parametrize("proof", ["complete", "missing", "unknown", "wrong_call", "wrong_task"])
-async def test_original_saved_put_completion_is_required_when_command_was_removed(rack, proof):
+@pytest.mark.parametrize(
+    "proof",
+    ["placed", "not_placed", "missing", "unknown", "wrong_call", "wrong_task", "contradictory"],
+)
+async def test_original_saved_put_outcome_is_required_when_command_was_removed(rack, proof):
 
     flow = rack
     flow.peer.allocate = allocated(flow)
@@ -721,15 +911,24 @@ async def test_original_saved_put_completion_is_required_when_command_was_remove
     put = next(a for a in await flow.action_rows(first["id"]) if a["kind"] == "PUT_TO_BIN")
     await flow.dispatch()
     if proof != "unknown":
+        failed = proof == "not_placed"
         assert (
             await flow.result(
                 first,
                 command_code=put["command_code"],
                 device_code=flow.output,
-                data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+                result="FAILED" if failed else "SUCCESS",
+                data={} if failed else {"actual_qty": 1, "location": "STATION_OUTPUT1"},
+                error_detail={"code": "BLOCKED", "msg": "mock failure"} if failed else None,
             )
         ).status_code == 200
         assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
+        current = (await flow.rows())[0]
+        assert current["put_result"] == ("FAILED" if failed else "SUCCESS")
+        assert current["report_status"] == "PENDING"
+        if failed:
+            assert await flow.dispatch() == 1
+            assert await flow.service.advance(first["id"]) == "COMPLETED"
     async with flow.factory.begin() as session:
         from app.models import ReliableMessage
         from tests.helpers import clear_integration_history
@@ -748,7 +947,7 @@ async def test_original_saved_put_completion_is_required_when_command_was_remove
                 .where(flow.actions.c.id == put["id"])
                 .values(evidence_history=[])
             )
-        elif proof in ("wrong_call", "wrong_task"):
+        elif proof in ("wrong_call", "wrong_task", "contradictory"):
             action = (
                 (await session.execute(select(flow.actions).where(flow.actions.c.id == put["id"])))
                 .mappings()
@@ -757,16 +956,31 @@ async def test_original_saved_put_completion_is_required_when_command_was_remove
             evidence = [dict(item) for item in action["evidence_history"]]
             for item in evidence:
                 if "applied_put" in item:
-                    item["applied_put"] = {
-                        **item["applied_put"],
-                        "call_key" if proof == "wrong_call" else "task_type": "different-original",
-                    }
+                    if proof == "contradictory":
+                        from app.core.strict_json import canonical_digest
+
+                        item["data"] = {
+                            **item["data"],
+                            "data": {**item["data"]["data"], "pick_and_put_result": "PUT_FAILED"},
+                        }
+                        item["digest"] = canonical_digest(item["data"])
+                    else:
+                        item["applied_put"] = {
+                            **item["applied_put"],
+                            "call_key"
+                            if proof == "wrong_call"
+                            else "task_type": "different-original",
+                        }
             await session.execute(
                 flow.actions.update()
                 .where(flow.actions.c.id == put["id"])
                 .values(evidence_history=evidence)
             )
-    expected = "AWAITING_DEPARTURE_RESULT" if proof == "complete" else "AWAITING_PREDECESSORS"
+    expected = (
+        "AWAITING_DEPARTURE_RESULT"
+        if proof in ("placed", "not_placed")
+        else "AWAITING_PREDECESSORS"
+    )
     assert await flow.service.advance_preparation(prep) == expected
     assert not flow.peer.transports
 

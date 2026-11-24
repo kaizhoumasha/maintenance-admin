@@ -1,7 +1,8 @@
 """Schema changes retain scans and refuse to discard original outbound evidence."""
 
 import runpy
-from datetime import datetime
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,10 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from alembic.util import CommandError
+
+from app.database import create_database_engine
+from tests.helpers import run_alembic
+from tests.migration_helpers import isolated_schema_database, source_table
 
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations/versions"
 FIELDS = (
@@ -92,7 +97,9 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
             migration = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_sorting_job.py"))
             second = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_sorting_ng.py"))
             third = runpy.run_path(str(MIGRATIONS / "2026-11-06_coarse_rack_preparation.py"))
+            put_report = runpy.run_path(str(MIGRATIONS / "2026-11-24_coarse_put_failure.py"))
             with Operations.context(MigrationContext.configure(sync)):
+                put_report["downgrade"]()
                 third["downgrade"]()
                 second["downgrade"]()
                 migration["downgrade"]()
@@ -181,3 +188,264 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
 
         await connection.run_sync(check)
         await transaction.rollback()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_put_failure_migration_preserves_original_jobs_and_guards_evidence(
+    backend, tmp_path, request
+):
+    from app.core.strict_json import canonical_digest
+
+    previous = "ecs_request_projection_v1"
+    now = datetime(2026, 11, 24, tzinfo=UTC)
+    async with AsyncExitStack() as databases:
+        if backend == "postgres":
+            url, engine = await databases.enter_async_context(
+                isolated_schema_database(request.getfixturevalue("pg_url"))
+            )
+        else:
+            url = f"sqlite+aiosqlite:///{tmp_path / 'coarse-put-failure.db'}"
+            engine = create_database_engine(url)
+            databases.push_async_callback(engine.dispose)
+
+        result = await run_alembic(url, "upgrade", previous)
+        assert result.returncode == 0, result.stdout + result.stderr
+        async with engine.begin() as connection:
+            job = await source_table(connection, "coarse_sorting_job")
+            action = await source_table(connection, "coarse_sorting_action")
+            for number, (state, pending, wait_reason) in enumerate(
+                (
+                    ("AWAITING_PUT", False, "PUT_RECONCILIATION_REQUIRED"),
+                    ("AWAITING_REPORT", True, "AWAITING_REPORT_RESULT"),
+                    ("COMPLETED", False, "COMPLETED"),
+                ),
+                start=1,
+            ):
+                job_id, allocation_id, put_id = (
+                    f"original-{name}-{number}" for name in ("job", "allocation", "put")
+                )
+                await connection.execute(
+                    job.insert().values(
+                        id=job_id,
+                        event_digest=f"original-digest-{number}",
+                        receipt_id=number,
+                        work_line_id=1,
+                        workline_code="COARSE-A",
+                        device_id=1,
+                        device_code="SCAN-A",
+                        device_role="SCAN1",
+                        device_version=1,
+                        work_line_version=1,
+                        binding_revision="original",
+                        timestamp=number,
+                        payload={"barcode": f"original-barcode-{number}"},
+                        received_at=now,
+                        pending=pending,
+                        wait_reason=wait_reason,
+                    )
+                )
+                original_action = action.insert().values(
+                    job_id=job_id, round_no=1, request_data={}, evidence_history=[], created_at=now
+                )
+                await connection.execute(
+                    original_action.values(
+                        id=allocation_id,
+                        kind="ALLOCATE_STORAGE",
+                        rack_generation_no=0,
+                        operation="inbound.coarse_sorting.storage_allocate@v1",
+                        operation_id=f"original-operation-{number}",
+                        message_id=number,
+                    )
+                )
+                result = {
+                    "command_code": f"original-command-{number}",
+                    "device_code": "OUTPUT-A",
+                    "result": "SUCCESS",
+                    "finish_time": number,
+                    "data": {"actual_qty": 1, "location": "ORIGINAL-DROP"},
+                    "error_detail": None,
+                }
+                proof = {
+                    "applied_put": {
+                        "owner_domain": "coarse_sorting",
+                        "call_key": f"original-call-{number}",
+                        "command_code": result["command_code"],
+                        "task_type": "PUT_TO_BIN",
+                        "device_code": result["device_code"],
+                    },
+                    "command_code": result["command_code"],
+                    "digest": canonical_digest(result),
+                    "data": result,
+                }
+                await connection.execute(
+                    original_action.values(
+                        id=put_id,
+                        kind="PUT_TO_BIN",
+                        predecessor_action_id=allocation_id,
+                        command_owner="coarse_sorting",
+                        call_key=f"original-call-{number}",
+                        command_code=result["command_code"],
+                        device_code=result["device_code"],
+                        resource_snapshot={
+                            "device_code": result["device_code"],
+                            "role": "OUTPUT_ARM",
+                            "completion_location": "ORIGINAL-DROP",
+                        },
+                        evidence_history=[] if state == "AWAITING_PUT" else [proof],
+                    )
+                )
+                current_id = put_id
+                if state != "AWAITING_PUT":
+                    current_id = f"original-report-{number}"
+                    await connection.execute(
+                        original_action.values(
+                            id=current_id,
+                            kind="REPORT_COMPLETION",
+                            predecessor_action_id=put_id,
+                            operation="inbound.coarse_sorting.execution_report@v1",
+                            operation_id=f"original-report-operation-{number}",
+                            message_id=number + 10,
+                        )
+                    )
+                await connection.execute(
+                    job.update()
+                    .where(job.c.id == job_id)
+                    .values(
+                        state=state,
+                        current_action_id=current_id,
+                        allocation_action_id=allocation_id,
+                        placed_at_ms=number if state != "AWAITING_PUT" else None,
+                        completed_at=now if state == "COMPLETED" else None,
+                    )
+                )
+            original = (
+                (await connection.execute(sa.select(job).order_by(job.c.id))).mappings().all()
+            )
+            original_actions = (
+                (await connection.execute(sa.select(action).order_by(action.c.id))).mappings().all()
+            )
+
+        for number in (2, 3):
+            put_id = f"original-put-{number}"
+            (saved,) = next(row for row in original_actions if row["id"] == put_id)[
+                "evidence_history"
+            ]
+            contradictory = {
+                **saved["data"],
+                "data": {**saved["data"]["data"], "pick_and_put_result": "PUT_FAILED"},
+            }
+            proof = {**saved, "data": contradictory, "digest": canonical_digest(contradictory)}
+            put_action = action.update().where(action.c.id == put_id)
+            async with engine.begin() as connection:
+                await connection.execute(put_action.values(evidence_history=[proof]))
+            refused = await run_alembic(url, "upgrade", "coarse_put_failure_v1")
+            assert refused.returncode != 0, refused.stdout + refused.stderr
+            assert f"original-job-{number}" in refused.stdout + refused.stderr
+            async with engine.begin() as connection:
+                preserved_job = await source_table(connection, "coarse_sorting_job")
+                assert "put_result" not in preserved_job.c
+                assert "report_status" not in preserved_job.c
+                assert (
+                    await connection.execute(sa.select(job).order_by(job.c.id))
+                ).mappings().all() == original
+                assert await connection.scalar(
+                    sa.select(action.c.evidence_history).where(action.c.id == put_id)
+                ) == [proof]
+                await connection.execute(put_action.values(evidence_history=[saved]))
+
+        result = await run_alembic(url, "upgrade", "coarse_put_failure_v1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        async with engine.begin() as connection:
+            current_job = await source_table(connection, "coarse_sorting_job")
+            current = (
+                (await connection.execute(sa.select(current_job).order_by(current_job.c.id)))
+                .mappings()
+                .all()
+            )
+            assert (
+                await connection.execute(sa.select(job).order_by(job.c.id))
+            ).mappings().all() == original
+            assert [(row["put_result"], row["report_status"]) for row in current] == [
+                (None, None),
+                ("SUCCESS", "PENDING"),
+                ("SUCCESS", "COMPLETED"),
+            ]
+            assert (
+                await connection.execute(sa.select(action).order_by(action.c.id))
+            ).mappings().all() == original_actions
+            pending_report = current_job.update().where(current_job.c.id == "original-job-2")
+            await connection.execute(pending_report.values(current_action_id="original-put-2"))
+
+        refused = await run_alembic(url, "downgrade", previous)
+        assert refused.returncode != 0
+        assert "PUT report has no original action" in refused.stdout + refused.stderr
+        async with engine.begin() as connection:
+            await connection.execute(pending_report.values(current_action_id="original-report-2"))
+        downgrade = await run_alembic(url, "downgrade", previous)
+        assert downgrade.returncode == 0, downgrade.stdout + downgrade.stderr
+        async with engine.connect() as connection:
+            assert (
+                await connection.execute(sa.select(job).order_by(job.c.id))
+            ).mappings().all() == original
+        upgrade = await run_alembic(url, "upgrade", "coarse_put_failure_v1")
+        assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+
+        async with engine.begin() as connection:
+            fail_put = (
+                current_job.update()
+                .where(current_job.c.id == "original-job-1")
+                .values(
+                    state="AWAITING_REPORT",
+                    put_result="FAILED",
+                    report_status="PENDING",
+                    pending=True,
+                )
+            )
+            await connection.execute(fail_put)
+            for changes, check in (
+                ({"current_action_id": None}, "allocation"),
+                ({"allocation_action_id": None}, "allocation"),
+                ({"completed_at": now}, "completion"),
+                ({"placed_at_ms": 1}, "placement"),
+                ({"put_result": None}, "put_result"),
+                ({"put_result": "UNKNOWN"}, "put_result"),
+                ({"put_result": "SUCCESS"}, "placement"),
+                ({"report_status": None}, "report_status"),
+                ({"report_status": "COMPLETED"}, "report_status"),
+                ({"state": "COMPLETED", "completed_at": now}, "report_status"),
+            ):
+                with pytest.raises(
+                    sa.exc.IntegrityError, match=f"coarse_sorting_job_{check}_check"
+                ):
+                    async with connection.begin_nested():
+                        await connection.execute(fail_put.values(**changes))
+
+        refused = await run_alembic(url, "downgrade", previous)
+        assert refused.returncode != 0
+        assert "failed PUT evidence exists" in refused.stdout + refused.stderr
+        async with engine.begin() as connection:
+            await connection.execute(
+                fail_put.values(
+                    state="COMPLETED", report_status="COMPLETED", pending=False, completed_at=now
+                )
+            )
+        refused = await run_alembic(url, "downgrade", previous)
+        assert refused.returncode != 0
+        assert "failed PUT evidence exists" in refused.stdout + refused.stderr
+        async with engine.connect() as connection:
+            closed = (
+                (
+                    await connection.execute(
+                        sa.select(current_job).where(current_job.c.id == "original-job-1")
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            assert (closed["state"], closed["put_result"], closed["report_status"]) == (
+                "COMPLETED",
+                "FAILED",
+                "COMPLETED",
+            )
+            assert closed["completed_at"] is not None
+            assert closed["placed_at_ms"] is None

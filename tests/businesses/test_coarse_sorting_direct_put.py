@@ -2,25 +2,24 @@
 
 import asyncio
 import json
-import runpy
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, inspect, select
+from sqlalchemy import delete, select
 
 from app.businesses.coarse_sorting import composition
-from app.database import SCHEMA
+from app.businesses.coarse_sorting.service import read_scan
+from app.core.identifiers import uuid7
 from app.integrations.ecs_command import CommandOwner
 from app.models import Device, IntegrationExchange, WorkLine
+from app.tasks.callback_tasks import run_history_cleanup
 from app.tasks.reliable_tasks import run_cleanup
 from tests.helpers import allocated, reach_allocate, reach_move
+from tests.migration_helpers import replay_coarse_sorting_history
 
 ALLOCATE = "inbound.coarse_sorting.storage_allocate@v1"
 REPORT = "inbound.coarse_sorting.execution_report@v1"
-JOB_MIGRATION = (
-    Path(__file__).resolve().parents[2] / "migrations/versions/2026-11-06_coarse_sorting_job.py"
-)
 
 
 async def dispatch_put(flow, row):
@@ -29,13 +28,15 @@ async def dispatch_put(flow, row):
     return json.loads(flow.peer.commands[-1])
 
 
-async def finish_put(flow, row, put):
+async def finish_put(flow, row, put, *, failed=False):
     assert (
         await flow.result(
             row,
             command_code=put["command_code"],
             device_code=flow.output,
-            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            result="FAILED" if failed else "SUCCESS",
+            data={} if failed else {"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"} if failed else None,
         )
     ).status_code == 200
     assert await flow.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
@@ -94,9 +95,15 @@ async def test_original_bin_put_and_report_survive_ack_restart_and_rebind(direct
         )
     ).status_code == 200
     assert await flow.service.advance(scan_id) == "AWAITING_REPORT_RESULT"
+    async with flow.factory() as session:
+        view = await read_scan(session, row["event_digest"])
+    assert (view.get("put_result"), view.get("report_status")) == ("SUCCESS", "PENDING")
     flow.peer.report_code = "DUPLICATE"
     assert await flow.dispatch() == 1
     assert await flow.service.advance(scan_id) == "COMPLETED"
+    async with flow.factory() as session:
+        view = await read_scan(session, row["event_digest"])
+    assert (view["put_result"], view["report_status"]) == ("SUCCESS", "COMPLETED")
     assert await flow.service.scan_pending() == 0
     assert await flow.dispatch() == 0
     assert len(flow.peer.commands) == 2
@@ -252,8 +259,28 @@ async def test_wrong_station_preserves_original_put_for_reconciliation(direct):
     assert (await flow.action_rows(row["id"]))[-1]["command_code"] == put["command_code"]
 
 
-@pytest.mark.parametrize("index", [None, 2], ids=["missing", "differs-from-command"])
-async def test_retained_target_must_match_frozen_put_before_reporting(direct, index):
+@pytest.mark.parametrize(
+    ("index", "proof"),
+    [
+        (None, "live"),
+        (2, "live"),
+        (None, "saved"),
+        (2, "saved"),
+        (2, "wrong-digest"),
+        (2, "one-live"),
+    ],
+    ids=[
+        "missing",
+        "differs-from-command",
+        "saved-failure",
+        "saved-success",
+        "wrong-digest",
+        "one-live",
+    ],
+)
+async def test_retained_target_must_match_frozen_put_before_reporting(
+    direct, monkeypatch, index, proof
+):
     direct.peer.allocate = allocated(direct)
     row = await reach_allocate(direct)
     put = await dispatch_put(direct, row)
@@ -271,22 +298,82 @@ async def test_retained_target_must_match_frozen_put_before_reporting(direct, in
             .values(evidence_history=[{**evidence, "data": target}])
         )
 
+    outcome = "FAILED" if index is None else "SUCCESS"
     assert (
         await direct.result(
             row,
             command_code=put["command_code"],
             device_code=direct.output,
-            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            result=outcome,
+            data={} if outcome == "FAILED" else {"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            error_detail={"code": "1005", "msg": "Cancelled by operator"}
+            if outcome == "FAILED"
+            else None,
         )
     ).status_code == 200
     direct.rebuild()
     assert await direct.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
     assert await direct.dispatch() == 0
     assert direct.peer.reports == []
+    current = (await direct.rows())[0]
+    assert (current["state"], current["put_result"], current["report_status"]) == (
+        "AWAITING_REPORT",
+        outcome,
+        "PENDING",
+    )
+    assert current["placed_at_ms"] == (None if outcome == "FAILED" else 1)
     actions = await direct.action_rows(row["id"])
     assert actions[-1]["id"] == original["id"]
     assert actions[-1]["command_code"] == put["command_code"]
-    assert actions[-1]["evidence_history"][-1]["data"]["result"] == "SUCCESS"
+    assert actions[-1]["evidence_history"][-1]["data"]["result"] == outcome
+
+    from app.models import ReliableMessage
+    from tests.helpers import clear_integration_history
+
+    async with direct.factory.begin() as session:
+        if proof in ("saved", "wrong-digest"):
+            root_id = await session.scalar(
+                select(IntegrationExchange.id).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == put["command_code"],
+                )
+            )
+            assert root_id is not None
+            await session.execute(
+                delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id)
+            )
+            await clear_integration_history(session, (root_id,))
+        if proof == "wrong-digest":
+            saved = actions[-1]["evidence_history"][-1]
+            await session.execute(
+                direct.actions.update()
+                .where(direct.actions.c.id == original["id"])
+                .values(evidence_history=[{**saved, "digest": "invalid-digest"}])
+            )
+        await session.execute(
+            direct.actions.update()
+            .where(direct.actions.c.id == allocation["id"])
+            .values(evidence_history=[evidence])
+        )
+    direct.rebuild()
+    if proof == "one-live":
+
+        async def missing_call(_session, **_identity):
+            return None
+
+        monkeypatch.setattr(direct.service.capabilities.ecs, "get_by_call", missing_call)
+    if proof in ("wrong-digest", "one-live"):
+        assert await direct.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
+        assert await direct.dispatch() == 0
+        assert len(direct.peer.commands) == 2
+        assert direct.peer.reports == []
+        assert (await direct.rows())[0] == current
+        return
+    assert await direct.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
+    assert await direct.dispatch() == 1
+    assert await direct.service.advance(row["id"]) == "COMPLETED"
+    assert len(direct.peer.commands) == 2
+    assert json.loads(direct.peer.reports[0])["data"]["result"] == outcome
 
 
 async def test_incomplete_put_success_allows_later_valid_original_result(direct):
@@ -294,7 +381,12 @@ async def test_incomplete_put_success_allows_later_valid_original_result(direct)
     flow.peer.allocate = allocated(flow)
     row = await reach_allocate(flow)
     put = await dispatch_put(flow, row)
-    for data in ({}, {"actual_qty": 1}, {"location": "STATION_OUTPUT1"}):
+    for data in (
+        {},
+        {"actual_qty": 1},
+        {"location": "STATION_OUTPUT1"},
+        {"actual_qty": 1, "location": "STATION_OUTPUT1", "pick_and_put_result": "PUT_FAILED"},
+    ):
         assert (
             await flow.result(
                 row, command_code=put["command_code"], device_code=flow.output, data=data
@@ -304,8 +396,149 @@ async def test_incomplete_put_success_allows_later_valid_original_result(direct)
     await finish_put(flow, row, put)
 
 
+async def test_put_zero_quantity_requires_explicit_nonplacement(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    for result, data in (
+        ("SUCCESS", {"actual_qty": 0, "location": "STATION_OUTPUT1"}),
+        ("FAILED", {"actual_qty": 0}),
+        ("FAILED", {"actual_qty": 0, "pick_and_put_result": "PUT_FINISHED"}),
+        ("FAILED", {"actual_qty": False, "pick_and_put_result": "PUT_FAILED"}),
+        ("FAILED", {"actual_qty": 0, "pick_and_put_result": "PUT_FAILED", "location": "B"}),
+    ):
+        response = await flow.result(
+            row,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result=result,
+            data=data,
+            error_detail={"code": "BLOCKED", "msg": "mock failure"} if result == "FAILED" else None,
+        )
+        assert response.status_code == 400
+    assert await flow.service.advance(row["id"]) == "AWAITING_PUT_RESULT"
+    assert not (await flow.action_rows(row["id"]))[-1]["evidence_history"]
+    assert not flow.peer.reports
+
+
+@pytest.mark.parametrize(
+    ("failure_data", "error_detail", "finish_time"),
+    [
+        ({}, {"code": "BLOCKED", "msg": "mock failure"}, 1234),
+        (
+            {"actual_qty": 0, "pick_and_put_result": "PUT_FAILED"},
+            {"code": "1005", "msg": "Cancelled by operator"},
+            1790000060000,
+        ),
+    ],
+    ids=["empty-data", "ecs-zero-quantity"],
+)
+async def test_confirmed_put_failure_closes_after_original_report_ack(
+    direct, failure_data, error_detail, finish_time
+):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    assert (
+        await flow.result(
+            row,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data=failure_data,
+            error_detail=error_detail,
+            finish_time=finish_time,
+        )
+    ).status_code == 200
+    assert await flow.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
+    awaiting = (await flow.rows())[0]
+    async with flow.factory() as session:
+        view = await read_scan(session, row["event_digest"])
+    assert (view.get("put_result"), view.get("report_status")) == ("FAILED", "PENDING")
+    assert awaiting["state"] == "AWAITING_REPORT"
+    assert awaiting["pending"]
+    assert awaiting["completed_at"] is None
+    assert awaiting["placed_at_ms"] is None
+    assert not flow.peer.reports
+    assert await flow.dispatch() == 1
+    assert json.loads(flow.peer.reports[0])["data"] == {
+        "workline_code": flow.workline,
+        "binding_id": "BIND-ORIGINAL",
+        "bin_code": "BIN-A002",
+        "bin_location": "B",
+        "cell_id": "BIN-A002-1",
+        "cell_index": 7,
+        "completed_at": finish_time,
+        "result": "FAILED",
+        "error_detail": error_detail,
+        "placement_status": "CONFIRMED_NOT_PLACED",
+    }
+
+    flow.rebuild()
+    async with flow.factory() as session:
+        view = await read_scan(session, row["event_digest"])
+    assert (view["put_result"], view["report_status"]) == ("FAILED", "PENDING")
+    assert await flow.service.advance(row["id"]) == "COMPLETED"
+    closed = (await flow.rows())[0]
+    assert closed["state"] == "COMPLETED"
+    async with flow.factory() as session:
+        view = await read_scan(session, row["event_digest"])
+    assert (view["put_result"], view["report_status"]) == ("FAILED", "COMPLETED")
+    assert not closed["pending"]
+    assert closed["completed_at"].replace(tzinfo=UTC) == flow.now
+    assert closed["placed_at_ms"] is None
+    assert closed["current_action_id"] == awaiting["current_action_id"]
+    assert closed["allocation_action_id"] == awaiting["allocation_action_id"]
+    assert await flow.service.scan_pending() == 0
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.commands) == 2
+    assert len(flow.peer.reports) == 1
+
+    flow.peer.decision = {"result": "OK", "binding_id": "BIND-FOLLOWING"}
+    following = await reach_allocate(
+        flow, timestamp=1793206799001, changes={"barcode": "FOLLOWING"}
+    )
+    following_put = await dispatch_put(flow, following)
+    assert following_put["command_code"] != put["command_code"]
+    assert following_put["params"]["barcode"] == "FOLLOWING"
+    await finish_put(flow, following, following_put)
+    assert await flow.dispatch() == 1
+    assert await flow.service.advance(following["id"]) == "COMPLETED"
+    assert json.loads(flow.peer.reports[-1])["data"]["binding_id"] == "BIND-FOLLOWING"
+    assert [
+        (job["state"], job["put_result"], job["report_status"], job["placed_at_ms"])
+        for job in await flow.rows()
+    ] == [
+        ("COMPLETED", "FAILED", "COMPLETED", None),
+        ("COMPLETED", "SUCCESS", "COMPLETED", 1),
+    ]
+
+
+async def test_original_failed_put_report_closes_after_mock_round_activation(direct):
+    flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    await finish_put(flow, row, put, failed=True)
+    assert await flow.dispatch() == 1
+    report = json.loads(flow.peer.reports[0])
+
+    flow.rebuild()
+    service = replace(flow.service, mock_rounds={flow.workline: "new-round"})
+    assert await service.advance(row["id"]) == "COMPLETED"
+    closed = (await flow.rows())[0]
+    assert (closed["put_result"], closed["report_status"]) == ("FAILED", "COMPLETED")
+    assert not closed["pending"]
+    assert closed["placed_at_ms"] is None
+    assert (await flow.action_rows(row["id"]))[-1]["operation_id"] == report["operation_id"]
+    assert await flow.dispatch() == 0
+    assert len(flow.peer.reports) == 1
+
+
 @pytest.mark.parametrize("data", [{"actual_qty": 1}, {"location": "STATION_OUTPUT1"}])
-async def test_partial_put_failure_settles_original_after_unknown_ack(direct, data):
+async def test_failed_put_keeps_original_pending_without_releasing_target(direct, data):
     flow = direct
     flow.peer.allocate = allocated(flow)
     row = await reach_allocate(flow)
@@ -335,6 +568,18 @@ async def test_partial_put_failure_settles_original_after_unknown_ack(direct, da
     held = (await flow.rows())[0]
     assert held["current_action_id"] == action["id"]
     assert held["state"] == "AWAITING_PUT"
+    assert held["pending"]
+    assert held["put_result"] is held["report_status"] is None
+    flow.rebuild()
+    for _ in range(2):
+        assert await flow.service.scan_pending() == 1
+        retained = (await flow.rows())[0]
+        assert retained["pending"]
+        assert retained["current_action_id"] == held["current_action_id"]
+        assert retained["allocation_action_id"] == held["allocation_action_id"]
+        assert retained["binding_id"] == held["binding_id"]
+        assert retained["completed_at"] is None
+    assert await flow.action_rows(row["id"]) == actions
     async with flow.factory() as session:
         command = await flow.commands.get_by_call(
             session, owner=CommandOwner("coarse_sorting"), call_key=action["call_key"]
@@ -345,8 +590,138 @@ async def test_partial_put_failure_settles_original_after_unknown_ack(direct, da
     assert flow.peer.reports == []
 
 
-async def test_confirmed_empty_put_failure_reports_to_wms(direct):
+@pytest.mark.parametrize(
+    ("outcome", "cell_id", "ack", "expected_reason"),
+    [
+        ("SUCCESS", "BIN-A002-1", "RECORDED", "COMPLETED"),
+        ("SUCCESS", "BIN-A002-1", "DUPLICATE", "COMPLETED"),
+        ("SUCCESS", "OTHER-CELL", "RECORDED", "PUT_RECONCILIATION_REQUIRED"),
+        ("FAILED", "BIN-A002-1", "RECORDED", "PUT_RECONCILIATION_REQUIRED"),
+    ],
+    ids=["recorded", "duplicate", "wrong-target", "failed-put"],
+)
+async def test_legacy_success_report_ack_requires_matching_original_put(
+    direct, monkeypatch, outcome, cell_id, ack, expected_reason
+):
+    from typing import Annotated
+
+    from pydantic import Field
+
+    from app.businesses.coarse_sorting.contracts import BinLocation, CellIndex, Reference
+    from app.integrations.wms_request import RequestPayload, operation
+
+    class LegacyExecutionReport(RequestPayload):
+        workline_code: Reference
+        binding_id: Reference
+        bin_code: Reference
+        bin_location: BinLocation
+        cell_id: Reference
+        cell_index: CellIndex
+        completed_at: Annotated[int, Field(ge=0, le=2**63 - 1)]
+
     flow = direct
+    flow.peer.allocate = allocated(flow)
+    row = await reach_allocate(flow)
+    put = await dispatch_put(flow, row)
+    failed = outcome == "FAILED"
+    assert (
+        await flow.result(
+            row,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result=outcome,
+            data={} if failed else {"actual_qty": 1, "location": "STATION_OUTPUT1"},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"} if failed else None,
+            finish_time=1234,
+        )
+    ).status_code == 200
+    original = (await flow.rows())[0]
+    operation_id, action_id = str(uuid7()), str(uuid7())
+    frozen_data = {
+        "workline_code": flow.workline,
+        "binding_id": "BIND-ORIGINAL",
+        "bin_code": "BIN-A002",
+        "bin_location": "B",
+        "cell_id": cell_id,
+        "cell_index": 7,
+        "completed_at": 1234,
+    }
+    # Freeze the old request with the original contract, then restart with the current registry.
+    with monkeypatch.context() as legacy:
+        registry = dict(operation.operations())
+        registry[REPORT] = replace(registry[REPORT], data_model=LegacyExecutionReport)
+        legacy.setattr(operation, "_registry", registry)
+        async with flow.factory.begin() as session:
+            reference = await flow.service.capabilities.wms.send(
+                session, LegacyExecutionReport(**frozen_data), operation_id=operation_id
+            )
+            await session.execute(
+                flow.actions.insert().values(
+                    id=action_id,
+                    job_id=row["id"],
+                    kind="REPORT_COMPLETION",
+                    round_no=1,
+                    predecessor_action_id=original["current_action_id"],
+                    request_data=frozen_data,
+                    evidence_history=[],
+                    created_at=flow.now,
+                    operation=REPORT,
+                    operation_id=operation_id,
+                    message_id=reference.message_id,
+                )
+            )
+            await session.execute(
+                flow.table.update()
+                .where(flow.table.c.id == row["id"])
+                .values(
+                    state="AWAITING_REPORT",
+                    current_action_id=action_id,
+                    put_result=outcome,
+                    report_status="PENDING",
+                    placed_at_ms=None if failed else 1234,
+                    wait_reason="AWAITING_REPORT_RESULT",
+                )
+            )
+    flow.rebuild()
+    flow.peer.report_code = ack
+    assert await flow.dispatch() == 1
+    (original_wire,) = flow.peer.reports
+    wire = json.loads(original_wire)
+    assert (wire["operation"], wire["operation_id"], wire["data"]) == (
+        REPORT,
+        operation_id,
+        frozen_data,
+    )
+
+    assert await flow.service.advance(row["id"]) == expected_reason
+    current = (await flow.rows())[0]
+    closed = expected_reason == "COMPLETED"
+    assert (current["state"], current["put_result"], current["report_status"]) == (
+        "COMPLETED" if closed else "AWAITING_REPORT",
+        outcome,
+        "COMPLETED" if closed else "PENDING",
+    )
+    assert current["pending"] is not closed
+    assert current["current_action_id"] == action_id
+    assert current["allocation_action_id"] == original["allocation_action_id"]
+    report = (await flow.action_rows(row["id"]))[-1]
+    assert (report["message_id"], report["operation_id"], report["request_data"]) == (
+        reference.message_id,
+        operation_id,
+        frozen_data,
+    )
+    assert await flow.dispatch() == 0
+    assert flow.peer.reports == [original_wire]
+    assert len(flow.peer.commands) == 2
+
+
+@pytest.mark.parametrize(
+    "mode", ["undelivered", "acked-pending", "acked-inactive", "acked-wrong-target"]
+)
+async def test_legacy_failed_report_requires_original_active_put_proof(direct, mode):
+    flow = direct
+    delivered = mode != "undelivered"
+    pending = mode != "acked-inactive"
     flow.peer.allocate = allocated(flow)
     row = await reach_allocate(flow)
     flow.peer.command = "invalid"
@@ -363,32 +738,128 @@ async def test_confirmed_empty_put_failure_reports_to_wms(direct):
         )
     ).status_code == 200
 
-    assert await flow.service.advance(row["id"]) == "AWAITING_REPORT_RESULT"
-    assert await flow.dispatch() == 1
-    report = json.loads(flow.peer.reports[-1])
-    assert report["data"] == {
-        "workline_code": flow.workline,
-        "binding_id": "BIND-ORIGINAL",
-        "bin_code": "BIN-A002",
-        "bin_location": "B",
-        "cell_id": "BIN-A002-1",
-        "cell_index": 7,
-        "completed_at": 1234,
-        "result": "FAILED",
-        "error_detail": {"code": "BLOCKED", "msg": "mock failure"},
-        "placement_status": "CONFIRMED_NOT_PLACED",
-    }
-    assert await flow.service.advance(row["id"]) == "PUT_RECONCILIATION_REQUIRED"
-    held = (await flow.rows())[0]
-    assert held["state"] == "AWAITING_PUT"
-    assert not held["pending"]
+    original = (await flow.rows())[0]
+    operation_id, action_id = str(uuid7()), str(uuid7())
+    report = flow.service.direct_put_contracts.report(
+        workline_code=flow.workline,
+        binding_id="BIND-ORIGINAL",
+        bin_code="BIN-A002",
+        bin_location="B",
+        cell_id="OTHER-CELL" if mode == "acked-wrong-target" else "BIN-A002-1",
+        cell_index=7,
+        completed_at=1234,
+        result="FAILED",
+        error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        placement_status="CONFIRMED_NOT_PLACED",
+    )
+    # Seed the persisted action written by older builds, including its original outbox.
+    async with flow.factory.begin() as session:
+        reference = await flow.service.capabilities.wms.send(
+            session, report, operation_id=operation_id
+        )
+        await session.execute(
+            flow.actions.insert().values(
+                id=action_id,
+                job_id=row["id"],
+                kind="REPORT_COMPLETION",
+                round_no=1,
+                predecessor_action_id=original["current_action_id"],
+                request_data=report.model_dump(),
+                evidence_history=[],
+                created_at=flow.now,
+                operation=REPORT,
+                operation_id=operation_id,
+                message_id=reference.message_id,
+            )
+        )
+        await session.execute(
+            flow.table.update()
+            .where(flow.table.c.id == row["id"])
+            .values(
+                current_action_id=action_id, wait_reason="AWAITING_REPORT_RESULT", pending=pending
+            )
+        )
+    if delivered:
+        assert await flow.dispatch() == 1
+    flow.rebuild()
+    assert await flow.service.scan_pending() == int(pending)
+    current = (await flow.rows())[0]
+    assert current["current_action_id"] == action_id
+    assert current["allocation_action_id"] == original["allocation_action_id"]
+    assert current["binding_id"] == original["binding_id"]
+    assert current["placed_at_ms"] is None
+    actions = await flow.action_rows(row["id"])
+    assert len(actions) == 5
+    assert len(flow.peer.commands) == 2
+    assert len(flow.peer.reports) == int(delivered)
+
+    if mode == "acked-pending":
+        assert current["state"] == current["wait_reason"] == "COMPLETED"
+        assert (current["put_result"], current["report_status"]) == ("FAILED", "COMPLETED")
+        assert not current["pending"]
+        assert current["completed_at"] is not None
+        assert await flow.service.scan_pending() == 0
+        return
+    if pending:
+        assert current["state"] == "AWAITING_REPORT"
+        assert (current["put_result"], current["report_status"]) == ("FAILED", "PENDING")
+    else:
+        assert current["state"] == "AWAITING_PUT"
+        assert current["put_result"] is current["report_status"] is None
+    assert current["wait_reason"] == (
+        "PUT_RECONCILIATION_REQUIRED" if mode == "acked-wrong-target" else "AWAITING_REPORT_RESULT"
+    )
+    assert current["pending"] is pending
+    assert current["completed_at"] is None
+    cleanup_time = datetime.now(UTC) + timedelta(days=91)
+    await run_cleanup(flow.factory, 90, now=cleanup_time)
+    await run_history_cleanup(flow.factory, 90, now=cleanup_time)
+
+    wms = flow.service.capabilities.wms
+    allocate_action = next(
+        action for action in actions if action["id"] == original["allocation_action_id"]
+    )
+    put_action = next(action for action in actions if action["id"] == original["current_action_id"])
+    async with flow.factory() as session:
+        allocation = await wms.get_result(
+            session,
+            message_id=allocate_action["message_id"],
+            operation=ALLOCATE,
+            operation_id=allocate_action["operation_id"],
+        )
+        failed_report = await wms.get_result(
+            session, message_id=reference.message_id, operation=REPORT, operation_id=operation_id
+        )
+        command = await flow.commands.get_by_call(
+            session, owner=CommandOwner("coarse_sorting"), call_key=put_action["call_key"]
+        )
+    assert (allocation.availability, failed_report.availability) == ("FOUND", "FOUND")
+    assert (allocation.target, allocation.response_code, allocation.response_data) == (
+        "coarse-wms",
+        "DECIDED",
+        flow.peer.allocate,
+    )
+    assert failed_report.target == "coarse-facts"
+    assert failed_report.response_code == ("RECORDED" if delivered else None)
+    assert failed_report.delivery_terminal is delivered
+    assert command is not None
+    assert (command.command_code, command.status, command.delivery_status) == (
+        put["command_code"],
+        "FAILED",
+        "DONE",
+    )
+    assert command.result["error_detail"] == {"code": "BLOCKED", "msg": "mock failure"}
+    if not pending:
+        assert await flow.service.scan_pending() == 0
+    assert (await flow.rows())[0] == current
+    assert await flow.action_rows(row["id"]) == actions
+    if mode == "undelivered":
+        assert await flow.dispatch() == 1
+        assert await flow.service.advance(row["id"]) == "COMPLETED"
 
 
 @pytest.mark.parametrize("scenario", ["complete", "missing_proof", "source_changed"])
 async def test_default_stop_and_retained_original_move_after_migration(direct, scenario):
-    from alembic.migration import MigrationContext
-    from alembic.operations import Operations
-
     from app.models import ReliableMessage
     from app.schemas.workline import WorkLineUpdate
     from app.services.asset_audit import AssetActor
@@ -408,41 +879,7 @@ async def test_default_stop_and_retained_original_move_after_migration(direct, s
     assert await flow.service.scan_pending() == 0
     engine = flow.factory.kw["bind"]
     if engine.dialect.name == "postgresql":
-        migration = runpy.run_path(str(JOB_MIGRATION))
-        ng_migration = runpy.run_path(
-            str(JOB_MIGRATION.with_name("2026-11-06_coarse_sorting_ng.py"))
-        )
-
-        rack_migration = runpy.run_path(
-            str(JOB_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py"))
-        )
-
-        def remigrate(connection):
-            source_kind = next(
-                check
-                for check in inspect(connection).get_check_constraints(
-                    "rack_dispatch_job", schema=SCHEMA
-                )
-                if check["name"] == "rack_dispatch_job_source_kind_check"
-            )
-            with Operations.context(MigrationContext.configure(connection)) as operations:
-                rack_migration["downgrade"]()
-                ng_migration["downgrade"]()
-                migration["downgrade"]()
-                migration["upgrade"]()
-                ng_migration["upgrade"]()
-                rack_migration["upgrade"]()
-                # The historical upgrade omits sources introduced by later migrations.
-                operations.drop_constraint(
-                    source_kind["name"], "rack_dispatch_job", type_="check", schema=SCHEMA
-                )
-                operations.create_check_constraint(
-                    source_kind["name"], "rack_dispatch_job", source_kind["sqltext"], schema=SCHEMA
-                )
-
-        async with engine.begin() as connection:
-            await connection.run_sync(remigrate)
-        await engine.dispose()
+        await replay_coarse_sorting_history(engine)
 
     from tests.helpers import clear_integration_history
 
@@ -544,12 +981,46 @@ async def test_full_station_keeps_the_second_same_barcode_on_original_move(direc
     assert await flow.service.advance(second["id"]) == "AWAITING_ALLOCATION_RESULT"
 
 
-async def test_original_report_survives_cleanup_until_consumed(direct):
+async def test_original_validation_survives_cleanup_until_consumed(direct):
+    flow = direct
+    assert (await flow.post(flow.event())).status_code == 200
+    scan_id = (await flow.rows())[0]["id"]
+    assert await flow.service.advance(scan_id) == "AWAITING_VALIDATION_RESULT"
+    assert await flow.dispatch() == 1
+    awaiting = (await flow.rows())[0]
+    request = json.loads(flow.peer.requests[0])
+
+    cleanup_time = datetime.now(UTC) + timedelta(days=91)
+    await run_cleanup(flow.factory, 90, now=cleanup_time)
+    await run_history_cleanup(flow.factory, 90, now=cleanup_time)
+    async with flow.factory() as session:
+        result = await flow.service.capabilities.wms.get_result(
+            session,
+            message_id=awaiting["validation_message_id"],
+            operation=request["operation"],
+            operation_id=request["operation_id"],
+        )
+    assert (result.availability, result.response_code, result.response_data) == (
+        "FOUND",
+        "DECIDED",
+        flow.peer.decision,
+    )
+    flow.rebuild()
+    assert await flow.service.advance(scan_id) == "AWAITING_MOVE_RESULT"
+    resumed = (await flow.rows())[0]
+    assert resumed["validation_operation_id"] == request["operation_id"]
+    assert resumed["validation_message_id"] == awaiting["validation_message_id"]
+    assert await flow.dispatch() == 1
+    assert len(flow.peer.requests) == len(flow.peer.commands) == 1
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["placed", "not-placed"])
+async def test_original_report_survives_cleanup_until_consumed(direct, failed):
     flow = direct
     flow.peer.allocate = allocated(flow)
     row = await reach_allocate(flow)
     put = await dispatch_put(flow, row)
-    await finish_put(flow, row, put)
+    await finish_put(flow, row, put, failed=failed)
     flow.peer.report_code = "RECORDED"
     assert await flow.dispatch() == 1
 
@@ -557,38 +1028,67 @@ async def test_original_report_survives_cleanup_until_consumed(direct):
     await run_cleanup(flow.factory, 90, now=cleanup_time)
 
     assert await flow.service.advance(row["id"]) == "COMPLETED"
+    closed = (await flow.rows())[0]
+    assert closed["put_result"] == ("FAILED" if failed else "SUCCESS")
+    assert closed["report_status"] == "COMPLETED"
     assert await flow.dispatch() == 0
     assert len(flow.peer.reports) == 1
 
+    report = next(
+        action
+        for action in await flow.action_rows(row["id"])
+        if action["kind"] == "REPORT_COMPLETION"
+    )
+    await run_cleanup(flow.factory, 90, now=cleanup_time)
+    await run_history_cleanup(flow.factory, 90, now=cleanup_time)
+    async with flow.factory() as session:
+        result = await flow.service.capabilities.wms.get_result(
+            session,
+            message_id=report["message_id"],
+            operation=REPORT,
+            operation_id=report["operation_id"],
+        )
+    assert result.availability == "NOT_FOUND"
 
-async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direct):
+
+@pytest.mark.parametrize("failed", [False, True], ids=["placed", "not-placed"])
+async def test_height_comes_from_wms_while_lost_report_recovers_same_bytes(direct, failed):
     flow = direct
     flow.sender.uniform = lambda _lower, upper: upper
     flow.peer.allocate = allocated(flow)
     first = await reach_allocate(flow)
     first_put = await dispatch_put(flow, first)
     assert first_put["params"]["reel_totalthickness"] == 120
-    await finish_put(flow, first, first_put)
+    await finish_put(flow, first, first_put, failed=failed)
     flow.peer.report_code = None
     assert await flow.dispatch() == 1
     assert await flow.service.advance(first["id"]) == "REPORT_RECONCILIATION_REQUIRED"
     original_report = (await flow.action_rows(first["id"]))[-1]
 
-    # Simulate WMS knowing the next physical height while the original response was lost.
+    # WMS supplies the next physical height while the original report response is lost.
     flow.peer.decision = {"result": "OK", "binding_id": "BIND-SECOND"}
-    flow.peer.allocate = allocated(flow, reel_totalthickness=140.25)
+    next_height = 120 if failed else 140.25
+    flow.peer.allocate = allocated(flow, reel_totalthickness=next_height)
     second = await reach_allocate(flow, timestamp=1793206799001)
     second_put = await dispatch_put(flow, second)
-    assert second_put["params"]["reel_totalthickness"] == 140.25
+    assert second_put["params"]["reel_totalthickness"] == next_height
     assert second_put["params"]["bin_cell_location"] == 7
     assert first_put["command_code"] != second_put["command_code"]
+    await finish_put(flow, second, second_put)
+    flow.peer.report_code = "RECORDED"
+    assert await flow.dispatch() == 1
+    assert await flow.service.advance(second["id"]) == "COMPLETED"
 
     flow.rebuild()
     assert await flow.service.advance(first["id"]) == "REPORT_RECONCILIATION_REQUIRED"
+    current, following = await flow.rows()
+    assert current["put_result"] == ("FAILED" if failed else "SUCCESS")
+    assert current["report_status"] == "PENDING"
+    assert (following["put_result"], following["report_status"]) == ("SUCCESS", "COMPLETED")
     flow.store.clock = flow.sender.clock = lambda: datetime.now(UTC) + timedelta(seconds=65)
     flow.peer.report_code = "DUPLICATE"
     assert await flow.dispatch() == 1
-    assert flow.peer.reports[0] == flow.peer.reports[1]
+    assert flow.peer.reports[0] == flow.peer.reports[2]
     assert await flow.service.advance(first["id"]) == "COMPLETED"
     latest_report = (await flow.action_rows(first["id"]))[-1]
     assert latest_report["operation_id"] == original_report["operation_id"]

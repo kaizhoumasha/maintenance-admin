@@ -162,6 +162,129 @@ async def test_expired_lease_response_updates_only_original_exchange(storage, de
         )
 
 
+@pytest.mark.parametrize("state", ["in-flight", "owner-held", "completed", "projection-pending"])
+async def test_runtime_retention_of_original_wms_reply(storage, delivered, monkeypatch, state):
+    import json
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from fastapi import BackgroundTasks, Request
+
+    from app.businesses.coarse_sorting.request.inbound_coarse_sorting_validate_bind_v1 import (
+        ValidateBind,
+    )
+    from app.controllers.integration_history import get_http_body
+    from app.core.config import get_settings
+    from app.core.errors import AppError, ErrorCode
+    from app.core.identifiers import uuid7
+    from app.integrations.history import SourceRef, link_source
+    from app.integrations.http_exchanges import cleanup_exchanges
+    from app.integrations.wms_request import ADAPTERS, WmsRequests
+    from app.models import ReliableDeliveryAttempt
+
+    monkeypatch.setattr(get_settings(), "INTEGRATION_RUNTIME_AUTHORITY", True)
+    rig = storage
+    target = TargetConfig(rig.target.name, rig.target.base_url, "wms-decisions")
+    targets = {target.name: target}
+    rig.outbox.targets.update(targets)
+    adapter = rig.outbox.adapters[target.protocol] = ADAPTERS[target.protocol]
+    operation_id = str(uuid7())
+    wms = WmsRequests(
+        rig.outbox, owner_domain="coarse_sorting", contract_consumers=lambda _: {"coarse_sorting"}
+    )
+    async with rig.factory.begin() as session:
+        reference = await wms.send(
+            session,
+            ValidateBind(workline_code="A", barcode="B", reel_diameter=7, reel_thickness=15),
+            operation_id=operation_id,
+        )
+        if state == "owner-held":
+            await link_source(
+                session,
+                source=SourceRef("WMS_MESSAGE", str(reference.message_id)),
+                owner_domain="coarse_sorting",
+                reference_kind="BUSINESS_TASK",
+                namespace="coarse_sorting",
+                value=str(uuid7()),
+                relation_role="OWNER",
+                at=rig.clock(),
+            )
+
+    (first,) = await rig.store.claim(1, targets)
+    request = adapter.build_request(first.message, target)
+    assert await rig.store.before_send(replace(first, request=request), target)
+    rig.clock.advance(15)
+    assert await rig.store.recover_expired(1, targets) == 1
+    rig.clock.advance(1)
+    (second,) = await rig.store.claim(1, targets)
+    assert await rig.store.before_send(replace(second, request=request), target)
+
+    def reply(claim, binding):
+        raw = json.dumps(
+            {
+                "operation_id": operation_id,
+                "code": "DECIDED",
+                "timestamp": 1,
+                "data": {"result": "OK", "binding_id": binding},
+            }
+        ).encode()
+        result = replace(delivered.result, body=raw)
+        return replace(
+            delivered, result=result, verdict=adapter.classify_response(claim.message, result)
+        )
+
+    late_reply = reply(first, "BIND-ORIGINAL-OBSERVED")
+    assert not await rig.store.finish(first, late_reply)
+    settled = state in {"owner-held", "completed"}
+    terminal_reply = reply(second, "BIND-CURRENT-APPLIED")
+    if settled:
+        assert await rig.store.finish(second, terminal_reply)
+    if state != "projection-pending":
+        await reconcile_outbound(rig.factory, now=rig.clock())
+    async with rig.factory() as session:
+        original = await session.get(ReliableDeliveryAttempt, (first.message_id, first.lease_id))
+        assert original is not None and original.response_wire == late_reply.result.body
+        original_id = original.id
+
+    after_retention = rig.clock() + timedelta(days=91)
+    await cleanup_exchanges(rig.factory, 90, now=after_retention)
+    if state == "projection-pending":
+        await reconcile_outbound(rig.factory, now=after_retention)
+    async with rig.factory() as session:
+        message = await session.get(ReliableMessage, reference.message_id)
+        assert (message.operation_id, message.status, message.lease_id) == (
+            operation_id,
+            "DONE" if settled else "SENDING",
+            None if settled else second.lease_id,
+        )
+        assert message.terminal_response_wire == (terminal_reply.result.body if settled else None)
+        original = await session.get(ReliableDeliveryAttempt, (first.message_id, first.lease_id))
+
+    async def read_original():
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                integration_history_session_factory=rig.factory, audit_session_factory=rig.factory
+            )
+        )
+        return await get_http_body(
+            Request({"type": "http", "app": app, "headers": []}),
+            "WMS",
+            original_id,
+            "response",
+            BackgroundTasks(),
+            SimpleNamespace(id=1),
+        )
+
+    if state == "completed":
+        assert original is None
+        with pytest.raises(AppError) as missing:
+            await read_original()
+        assert missing.value.code == ErrorCode.NOT_FOUND
+    else:
+        assert (await read_original()).body == late_reply.result.body
+        assert original is not None and original.response_wire == late_reply.result.body
+
+
 async def test_retention_does_not_recreate_an_attempt_expired_during_projection(
     pg_rig, wait_for_lock
 ):

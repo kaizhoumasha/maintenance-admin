@@ -61,6 +61,34 @@ class MoveToNgResult(MoveToLocationResult):
         return self
 
 
+class PutToBinResult(MoveToLocationResult):
+    actual_qty: Annotated[int, Field(strict=True, ge=0, le=1)] | None = None
+
+    @staticmethod
+    def confirmed_failure_data(data: object) -> bool:
+        return isinstance(data, dict) and (
+            not data
+            or (
+                type(data.get("actual_qty")) is int
+                and data == {"actual_qty": 0, "pick_and_put_result": "PUT_FAILED"}
+            )
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_result_data(cls, data, info: ValidationInfo):
+        if not isinstance(data, dict):
+            return data
+        status = (info.context or {}).get("result")
+        if status == "SUCCESS" and data.get("pick_and_put_result") == "PUT_FAILED":
+            raise ValueError("SUCCESS contradicts PUT_FAILED")
+        if data.get("actual_qty") == 0 and (
+            status != "FAILED" or not cls.confirmed_failure_data(data)
+        ):
+            raise ValueError("zero quantity requires FAILED with explicit non-placement")
+        return data
+
+
 @ecs_command(
     "MOVE_TO_NG",
     device_roles=("INPUT_ARM",),
@@ -83,7 +111,7 @@ class MoveToNg(BaseModel):
     device_roles=("OUTPUT_ARM",),
     annex_id="coarse_sorting.put_to_bin",
     annex_version="1",
-    result=MoveToLocationResult,
+    result=PutToBinResult,
     error=ErrorDetail,
     timeout_min_ms=1,
     timeout_max_ms=60000,

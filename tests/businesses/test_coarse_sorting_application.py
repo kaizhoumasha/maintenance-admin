@@ -441,9 +441,11 @@ async def test_schema_downgrade_preserves_accepted_scan(configured_scan):
     rack_migration = runpy.run_path(
         str(SCAN_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py"))
     )
+    put_report = runpy.run_path(str(SCAN_MIGRATION.with_name("2026-11-24_coarse_put_failure.py")))
 
     def downgrade(connection):
         with Operations.context(MigrationContext.configure(connection)):
+            put_report["downgrade"]()
             pending_indexes_migration["downgrade"]()
             rack_migration["downgrade"]()
             ng_migration["downgrade"]()

@@ -16,6 +16,7 @@ from app.businesses.coarse_sorting import composition
 from app.businesses.coarse_sorting.models import CoarseSortingAction, CoarseSortingJob
 from app.models import IntegrationExchange, ReliableMessage, WorkLine
 from tests.helpers import clear_integration_history
+from tests.migration_helpers import replay_coarse_sorting_history
 
 JOB = CoarseSortingJob.__table__
 ACTION = CoarseSortingAction.__table__
@@ -286,23 +287,7 @@ async def test_ng_migration_requires_original_validation_provenance(ng, snapshot
             delete(ReliableMessage).where(ReliableMessage.id == row["validation_message_id"])
         )
 
-    first = runpy.run_path(str(NG_MIGRATION.with_name("2026-11-06_coarse_sorting_job.py")))
-    second = runpy.run_path(str(NG_MIGRATION))
-
-    third = runpy.run_path(str(NG_MIGRATION.with_name("2026-11-06_coarse_rack_preparation.py")))
-
-    def remigrate(connection):
-        with Operations.context(MigrationContext.configure(connection)):
-            third["downgrade"]()
-            second["downgrade"]()
-            first["downgrade"]()
-            first["upgrade"]()
-            second["upgrade"]()
-            third["upgrade"]()
-
-    async with engine.begin() as connection:
-        await connection.run_sync(remigrate)
-    await engine.dispose()
+    await replay_coarse_sorting_history(engine)
 
     validation = (await ng.action_rows(row["id"]))[0]
     if snapshot_change:
@@ -410,10 +395,13 @@ async def test_applied_conflict_or_failure_keeps_original_ng_responsibility(ng, 
     assert await ng.service.advance(row["id"]) == "NG_RECONCILIATION_REQUIRED"
     held = (await ng.rows())[0]
     assert held["state"] == "AWAITING_NG"
+    assert held["pending"]
     assert held["completed_at"] is None
     assert (await ng_result(ng, wire)).status_code == 409
+    ng.assemble(enabled=True)
     assert await ng.service.scan_pending() == 1
     assert (await ng.rows())[0]["current_action_id"] == held["current_action_id"]
+    assert (await ng.rows())[0]["pending"]
     action = (await ng.action_rows(row["id"]))[-1]
     assert len(action["evidence_history"]) == 1
     assert action["command_code"] == wire["command_code"]

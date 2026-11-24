@@ -197,6 +197,7 @@ async def _protected_roots(session, roots, *, runtime=False, message_ids=()):
         protected_message_ids,
     )
     from app.businesses.coarse_sorting.models import (
+        TERMINAL_JOB_STATES,
         CoarseSortingAction,
         CoarseSortingJob,
         RackPreparation,
@@ -367,7 +368,7 @@ async def _protected_roots(session, roots, *, runtime=False, message_ids=()):
                     known.add((root, kind, "coarse_sorting", row[column]))
             if (
                 row["job_id"] is not None
-                and (row["pending"] or row["job_state"] not in {"COMPLETED", "NG_COMPLETED"})
+                and (row["pending"] or row["job_state"] not in TERMINAL_JOB_STATES)
             ) or (
                 row["preparation_id"] is not None
                 and row["state"] not in {"READY", "DEPART_ACCEPTED"}
@@ -384,9 +385,7 @@ async def _protected_roots(session, roots, *, runtime=False, message_ids=()):
                 continue
             known.add((root, kind, namespace, value))
             closed = row["state"] in (
-                {"COMPLETED", "NG_COMPLETED"}
-                if kind == "BUSINESS_TASK"
-                else {"READY", "DEPART_ACCEPTED"}
+                TERMINAL_JOB_STATES if kind == "BUSINESS_TASK" else {"READY", "DEPART_ACCEPTED"}
             )
             if not closed or (kind == "BUSINESS_TASK" and row["pending"]):
                 protected.add(root)

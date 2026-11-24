@@ -165,6 +165,8 @@ POST `/api/v1/device/command` 使用白皮书字段。仅合法 200/ACK 为已�
 
 POST `/api/v1/callback/result` 严格校验核心包络及冻结附录声明的业务字段，顶层和 `error_detail` 忽略真正未知的扩展字段，FAILED 仍须提供符合原附录的 `code`、`msg`，SUCCESS 仍须省略 `error_detail` 或传 null。结果原文保留，完整 `data` 继续参与原摘要，`error_detail` 仍只以 `code`、`msg` 参与摘要。已有证据沿原摘要重放。此前因失败详情的扩展字段在写入结果证据前返回 400 的报文，重报时按正常首次受理条件检查。成功提交后返回 200/ACK。未知命令/设备不匹配 404，提前/矛盾 409，非法输入 400，超限 413，事务或原附录不可用 503。结果证据、收据、命令投影及 settle 同事务。长期证据在短期收据/可靠消息清理后仍提供原响应，不重新创建发送义务。
 
+粗分先可靠保存原 ECS SUCCESS/FAILED；消费该原结果后，以独立 put_result 记录执行结论，并在 WMS 报告发送前记录 report_status=PENDING。WMS 收妥只完成原报告，不改变 put_result；明确失败与成功都可以完成反馈流程，后续物料不因报告重试而永久卡住。报文中的 PUT_FAILED 是 ECS 的失败事实，不是 WMS 报告状态；不增加 UNKNOWN 执行结果。Result 的一次性采用规则保持：已应用 FAILED 后直接发送不同 SUCCESS 仍返回 409，不提供 ECS 更正入口。未收到原 Result 时继续等待回报，身份或事实冲突保持校验。验证范围见[粗分恢复回归](../testing/coarse-sorting-recovery.md)；现场执行、当前预约和存量处置需要各自证据。
+
 参考目录、动作与安全消费只存在于tests，使用现有pytest验证，无需独立隔离设计或实施阶段；已有行为与回归入口见[现有测试说明](../testing/ecs-command-verification.md)。测试不代表供应商、生产路由或现场验收。
 
 ## 发布与验证边界

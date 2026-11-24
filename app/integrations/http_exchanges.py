@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import UUID
 
-from sqlalchemy import case, delete, false, func, inspect, or_, select, tuple_, update
+from sqlalchemy import Text, case, cast, delete, false, func, inspect, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import aliased
@@ -22,7 +22,9 @@ from app.models.http_exchange import (
     http_projection_pending,
 )
 from app.models.integration_history import IntegrationRecord
+from app.models.integration_runtime import RuntimeRetentionHold
 from app.models.reliable import ReliableMessage
+from app.reliable.store import TERMINAL
 
 logger = logging.getLogger(__name__)
 
@@ -568,6 +570,33 @@ def _values(attempt, request, response, reply):
     return table, values
 
 
+def _retained_runtime_wms_reply():
+    if not enabled():
+        return false()
+    attempt, message, hold = ReliableDeliveryAttempt, ReliableMessage, RuntimeRetentionHold
+    owner_hold = (
+        select(hold.subject_id)
+        .where(hold.subject_kind == "WMS_MESSAGE", hold.subject_id == cast(message.id, Text))
+        .exists()
+    )
+    # Owner-aware message cleanup can release the original even if its hold marker still exists.
+    original_required = (
+        select(message.id)
+        .where(
+            message.id == attempt.message_id,
+            message.exchange_id == attempt.exchange_id,
+            message.request_record_id == attempt.request_record_id,
+            or_(message.status.not_in(TERMINAL), owner_hold),
+        )
+        .exists()
+    )
+    return (
+        attempt.protocol.in_(WMS_PROTOCOLS)
+        & attempt.response_record_id.is_not(None)
+        & original_required
+    )
+
+
 async def reconcile_outbound(factory, *, now=None, retention_days=90, limit=100):
     """Restart-safe projection. Runtime revisions remain pending when this transaction fails."""
     from app.integrations.history import read_bodies
@@ -583,7 +612,7 @@ async def reconcile_outbound(factory, *, now=None, retention_days=90, limit=100)
             await session.scalars(
                 select(source)
                 .join_from(queue, source, queue.c.attempt_id == source.id)
-                .where(source.started_at >= cutoff)
+                .where(or_(source.started_at >= cutoff, _retained_runtime_wms_reply()))
                 .order_by(queue.c.attempt_id)
                 .limit(limit)
                 .with_for_update(of=source, skip_locked=True)
@@ -873,7 +902,11 @@ async def cleanup_exchanges(factory, days, *, now=None, limit=500):
             ids = (
                 await session.scalars(
                     select(attempt.id)
-                    .where(attempt.started_at < cutoff, attempt.finished_at.is_not(None))
+                    .where(
+                        attempt.started_at < cutoff,
+                        attempt.finished_at.is_not(None),
+                        ~_retained_runtime_wms_reply(),
+                    )
                     .order_by(attempt.id)
                     .limit(limit)
                     .with_for_update()

@@ -18,15 +18,22 @@ REPORT = "inbound.coarse_sorting.execution_report@v1"
 DEPART = "rack.departure_decide@v1"
 MOCK_OUTPUT_LOCATION = "STATION_PIPELINE1_OUTPUT1"
 MOCK_NG_LOCATION = "STATION_NG_PLATFORM1"
+PUT_FAILURE_DATA = {"actual_qty": 0, "pick_and_put_result": "PUT_FAILED"}
+PUT_FAILURE_ERROR = {"code": "1005", "msg": "Cancelled by operator"}
+PUT_FAILURE_FINISH_TIME = 1790000060000
 
 
-async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp_path):
-    await exercise_integration(f"sqlite+aiosqlite:///{tmp_path / 'first-and-tail.db'}")
+@mark.parametrize("failed_put", [False, True], ids=["success", "failed-put"])
+async def test_integration_resumes_formal_work_only_after_tail_configuration(tmp_path, failed_put):
+    await exercise_integration(
+        f"sqlite+aiosqlite:///{tmp_path / 'first-and-tail.db'}", failed_put=failed_put
+    )
 
 
-async def test_postgres_integration_resumes_original_work_across_processes(pg_url):
+@mark.parametrize("failed_put", [False, True], ids=["success", "failed-put"])
+async def test_postgres_integration_resumes_original_work_across_processes(pg_url, failed_put):
     async with cloned_revision_database(pg_url, "head", downgrade_base=False) as url:
-        await exercise_integration(url)
+        await exercise_integration(url, failed_put=failed_put)
 
 
 @mark.parametrize("mode", ["fixed", "dual"])
@@ -41,7 +48,7 @@ async def test_postgres_mock_round_with_real_outbox_transactions(pg_url):
         await exercise_integration(url, mock="random")
 
 
-async def exercise_integration(integration_database, *, mock=None):
+async def exercise_integration(integration_database, *, mock=None, failed_put=False):
     peer = FastAPI()
     requests, commands, reports, transports = [], [], [], []
     status_checks = []
@@ -80,10 +87,14 @@ async def exercise_integration(integration_database, *, mock=None):
             )
         else:
             assert wire["operation"] == VALIDATE
+            barcode = wire["data"]["barcode"]
             decision = (
                 {"result": "NG", "reason_code": "BARCODE_INVALID"}
-                if wire["data"]["barcode"] == "NG"
-                else {"result": "OK", "binding_id": "ORIGINAL-BIND"}
+                if barcode == "NG"
+                else {
+                    "result": "OK",
+                    "binding_id": "FOLLOWING-BIND" if barcode == "FOLLOWING" else "ORIGINAL-BIND",
+                }
             )
         return {
             "operation_id": wire["operation_id"],
@@ -233,12 +244,18 @@ async def exercise_integration(integration_database, *, mock=None):
         assert blocked == original
         assert len(requests) == 2 and len(commands) == 1 and not reports and not transports
 
-        completed = await run(
-            "resume",
+        configured_tail = dict(
             tail=True,
             COARSE_SORTING_OUTPUT_LOCATIONS='{"COARSE":"OUTPUT-POINT"}',
             COARSE_SORTING_NG_LOCATIONS='{"COARSE":"NG-POINT"}',
         )
+        completed = await run("fail-put" if failed_put else "resume", **configured_tail)
+        if failed_put:
+            assert not reports
+            recovered = await run("recover-put", **configured_tail)
+            report_operation = recovered.pop("failure_report_operation_id")
+            assert recovered == completed
+            put_identity = completed.pop("put")
     assert completed == original
     assert [request["operation"] for request in requests[:5]] == [
         VALIDATE,
@@ -248,28 +265,53 @@ async def exercise_integration(integration_database, *, mock=None):
         ALLOCATE,
     ]
     allocations = [wire for wire in requests if wire["operation"] == ALLOCATE]
-    assert [wire["data"] for wire in allocations] == [
-        {"workline_code": "COARSE", "binding_id": "ORIGINAL-BIND"}
-    ] * 2
+    assert [wire["data"]["binding_id"] for wire in allocations] == (
+        ["ORIGINAL-BIND", "ORIGINAL-BIND", "FOLLOWING-BIND"]
+        if failed_put
+        else ["ORIGINAL-BIND", "ORIGINAL-BIND"]
+    )
+    assert all(wire["data"]["workline_code"] == "COARSE" for wire in allocations)
     assert len({wire["operation_id"] for wire in requests[:5]}) == 5
     assert [(wire["rack_id"], wire["rcs_template_id"]) for wire in transports] == [
         ("OLD", "F01"),
         ("RACK-1", "F01"),
     ]
-    forward, *tail = commands
+    forward, *tail = commands[:3]
     assert forward["command_code"] == original["NORMAL"]["command_code"]
     assert {command["task_type"] for command in tail} == {"MOVE_TO_NG", "PUT_TO_BIN"}
-    assert len(commands) == 3
     assert {command["task_type"]: command["device_code"] for command in tail} == {
         "MOVE_TO_NG": "INPUT",
         "PUT_TO_BIN": "OUTPUT",
     }
+    target = {key: allocation[key] for key in ("bin_code", "bin_location", "cell_id", "cell_index")}
+    if failed_put:
+        assert put_identity["command_code"] == next(
+            command["command_code"] for command in tail if command["task_type"] == "PUT_TO_BIN"
+        )
+        assert [command["task_type"] for command in commands[3:]] == ["MOVE_FORWARD", "PUT_TO_BIN"]
+        assert all(command["params"]["barcode"] == "FOLLOWING" for command in commands[3:])
+        assert len({command["command_code"] for command in commands}) == 5
+        failed_report, success_report = reports
+        assert failed_report["operation_id"] == report_operation != success_report["operation_id"]
+        assert failed_report["operation"] == REPORT
+        assert failed_report["data"] == {
+            **target,
+            "workline_code": "COARSE",
+            "binding_id": "ORIGINAL-BIND",
+            "completed_at": PUT_FAILURE_FINISH_TIME,
+            "result": "FAILED",
+            "error_detail": PUT_FAILURE_ERROR,
+            "placement_status": "CONFIRMED_NOT_PLACED",
+        }
+        reports = [success_report]
+    else:
+        assert len(commands) == 3
     (report_wire,) = reports
     assert report_wire["operation"] == REPORT
     assert report_wire["data"] == {
-        **{key: allocation[key] for key in ("bin_code", "bin_location", "cell_id", "cell_index")},
+        **target,
         "workline_code": "COARSE",
-        "binding_id": "ORIGINAL-BIND",
+        "binding_id": "FOLLOWING-BIND" if failed_put else "ORIGINAL-BIND",
         "completed_at": 2,
         "result": "SUCCESS",
         "error_detail": None,
@@ -413,9 +455,7 @@ async def exercise(phase, origin):
             AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         )
 
-        completed_commands = set()
-
-        async def complete_commands(results):
+        async def complete_commands(results, *, failed_put=False):
             async with asyncio.timeout(12):
                 while True:
                     async with session_factory() as session:
@@ -426,7 +466,7 @@ async def exercise(phase, origin):
                                 .where(
                                     IntegrationExchange.task_type.in_(results),
                                     IntegrationExchange.delivery_status == "DONE",
-                                    IntegrationExchange.command_code.not_in(completed_commands),
+                                    IntegrationExchange.applied_result_id.is_(None),
                                 )
                             )
                         ).all()
@@ -434,18 +474,20 @@ async def exercise(phase, origin):
                         break
                     await asyncio.sleep(0.05)
             for command in commands:
+                failed = failed_put and command.task_type == "PUT_TO_BIN"
                 response = await client.post(
                     "/api/v1/callback/result",
                     json={
                         "command_code": command.command_code,
                         "device_code": command.device_code,
-                        "result": "SUCCESS",
-                        "finish_time": 2,
-                        "data": results[command.task_type],
+                        "result": "FAILED" if failed else "SUCCESS",
+                        "finish_time": PUT_FAILURE_FINISH_TIME if failed else 2,
+                        "data": PUT_FAILURE_DATA if failed else results[command.task_type],
+                        "error_detail": PUT_FAILURE_ERROR if failed else None,
                     },
                 )
                 assert response.status_code == 200, response.text
-                completed_commands.add(command.command_code)
+                assert response.json() == {"code": 200, "message": "ACK"}
 
         if phase == "mock":
             probe = {
@@ -571,6 +613,8 @@ async def exercise(phase, origin):
                 "NORMAL": "OUTPUT_ARM_CONFIGURATION_REQUIRED",
                 "NG": "NG_PLATFORM_CONFIGURATION_REQUIRED",
             }
+        elif phase == "recover-put":
+            expected = {"NORMAL": "COMPLETED", "NG": "NG_COMPLETED"}
         else:
             async with asyncio.timeout(15):
                 while True:
@@ -613,15 +657,41 @@ async def exercise(phase, origin):
                 },
             )
             assert response.status_code == 202, response.text
-            await advance_until({"NORMAL": "AWAITING_PUT_RESULT", "NG": "AWAITING_NG_RESULT"})
+            jobs = await advance_until(
+                {"NORMAL": "AWAITING_PUT_RESULT", "NG": "AWAITING_NG_RESULT"}
+            )
             await complete_commands(
                 {
                     "PUT_TO_BIN": {"actual_qty": 1, "location": "OUTPUT-POINT"},
                     "MOVE_TO_NG": {"actual_qty": 1, "location": "NG-POINT"},
-                }
+                },
+                failed_put=phase == "fail-put",
             )
             expected = {"NORMAL": "COMPLETED", "NG": "NG_COMPLETED"}
-        jobs = await advance_until(expected)
+        # The failing Result must be committed before the next process sweeps it.
+        if phase not in ("fail-put", "recover-put"):
+            jobs = await advance_until(expected)
+        if phase == "recover-put":
+            response = await client.post(
+                "/api/v1/callback/event",
+                json={
+                    "device_code": "INPUT",
+                    "event_type": "SCAN_COMPLETED",
+                    "timestamp": 3,
+                    "data": {"barcode": "FOLLOWING", "size_inch": 7, "thickness_mm": 20},
+                },
+            )
+            assert response.status_code == 200, response.text
+            jobs = await advance_until(expected | {"FOLLOWING": "AWAITING_MOVE_RESULT"})
+            jobs.pop("FOLLOWING")
+            await complete_commands({"MOVE_FORWARD": {"actual_qty": 1}})
+            await advance_until(expected | {"FOLLOWING": "AWAITING_PUT_RESULT"})
+            await complete_commands({"PUT_TO_BIN": {"actual_qty": 1, "location": "OUTPUT-POINT"}})
+            expected["FOLLOWING"] = "COMPLETED"
+            following = (await advance_until(expected))["FOLLOWING"]
+            assert following.binding_id == "FOLLOWING-BIND"
+            assert not following.pending and following.placed_at_ms == 2
+            assert (following.put_result, following.report_status) == ("SUCCESS", "COMPLETED")
         if phase == "mock":
             assert jobs[normal].validation_response["target"] == COARSE_MOCK_DECISIONS_TARGET
             assert jobs[ng].validation_response["target"] == COARSE_MOCK_DECISIONS_TARGET
@@ -636,7 +706,7 @@ async def exercise(phase, origin):
             history = [action for action in actions if action.job_id == job.id]
             chain = {action.kind: action for action in history}
             original = chain["MOVE_FORWARD"] if barcode == "NORMAL" else chain["VALIDATE_BIND"]
-            if phase == "resume":
+            if phase in {"resume", "fail-put", "recover-put"}:
                 successor = (
                     next(
                         action
@@ -658,6 +728,50 @@ async def exercise(phase, origin):
                 "command_code": job.command_code,
                 "binding_id": job.binding_id,
             }
+            if barcode == "NORMAL" and phase in {"fail-put", "recover-put"}:
+                put = chain["PUT_TO_BIN"]
+                assert job.allocation_action_id == put.predecessor_action_id
+                assert job.placed_at_ms is None
+                assert sum(action.kind == "PUT_TO_BIN" for action in history) == 1
+                identities["put"] = {
+                    "action_id": put.id,
+                    "command_code": put.command_code,
+                    "allocation_action_id": job.allocation_action_id,
+                }
+                if phase == "fail-put":
+                    assert job.pending and job.completed_at is None
+                    assert job.put_result is job.report_status is None
+                    assert job.current_action_id == put.id
+                    assert "REPORT_COMPLETION" not in chain
+                    assert not put.evidence_history
+                else:
+                    report = chain["REPORT_COMPLETION"]
+                    assert job.state == "COMPLETED"
+                    assert (job.put_result, job.report_status) == ("FAILED", "COMPLETED")
+                    assert not job.pending and job.completed_at is not None
+                    assert job.current_action_id == report.id
+                    assert report.predecessor_action_id == put.id
+                    identities["failure_report_operation_id"] = report.operation_id
+                    (evidence,) = put.evidence_history
+                    failure = evidence["data"]
+                    assert failure["result"] == "FAILED"
+                    assert failure["data"] == PUT_FAILURE_DATA
+                    replay = await client.post("/api/v1/callback/result", json=failure)
+                    assert replay.status_code == 200, replay.text
+                    conflict = await client.post(
+                        "/api/v1/callback/result",
+                        json=failure
+                        | {
+                            "result": "SUCCESS",
+                            "data": {"actual_qty": 1, "location": "OUTPUT-POINT"},
+                            "error_detail": None,
+                        },
+                    )
+                    assert conflict.status_code == 409
+                    assert conflict.json()["message"] == "IDEMPOTENCY_CONFLICT"
+                    checked = (await advance_until(expected))[barcode]
+                    assert not checked.pending and checked.current_action_id == report.id
+                    assert (checked.put_result, checked.report_status) == ("FAILED", "COMPLETED")
         print(json.dumps(identities))
 
 
