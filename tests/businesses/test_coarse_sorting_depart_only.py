@@ -635,6 +635,102 @@ async def idle_depart(flow, public_id):
         return await flow.service.rack_dispatch.progress(session, job_id=public_id)
 
 
+@pytest.mark.parametrize("conflict_source", ["older-closed", "older-unresolved", "current"])
+async def test_idle_departure_scopes_closed_put_conflict_to_original_rack(rack, conflict_source):
+    first, _, first_rack_id = await placed_with_original_rack(rack, finish=False)
+    first_put = json.loads(rack.peer.commands[-1])
+    failed = {
+        "result": "FAILED",
+        "data": {"actual_qty": 0, "pick_and_put_result": "PUT_FAILED"},
+        "error_detail": {"code": "1005", "msg": "Cancelled by operator"},
+    }
+    success = {"result": "SUCCESS", "data": {"actual_qty": 1, "location": "STATION_OUTPUT1"}}
+    assert (
+        await rack.result(
+            first, command_code=first_put["command_code"], device_code=rack.output, **failed
+        )
+    ).status_code == 200
+    assert await rack.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
+    assert await rack.dispatch() == 1
+    closed_first = conflict_source != "older-unresolved"
+    if closed_first:
+        assert await rack.service.advance(first["id"]) == "COMPLETED"
+    first_rack = await idle_depart(rack, first_rack_id)
+    assert not first_rack.pending and first_rack.closure_reason == "DEPARTURE_ACK"
+
+    rack.peer.allocate = {
+        "result": "REPLENISH_REQUIRED",
+        "workline_code": rack.workline,
+        "incoming_rack": {"rack_id": "NEXT", "target_face": "180"},
+    }
+    second = await fresh_allocate(rack)
+    assert await rack.service.advance(second["id"]) == "AWAITING_RACK"
+    preparation_id = (await rack.rows())[-1]["rack_preparation_id"]
+    assert await rack.service.advance_preparation(preparation_id) == "AWAITING_RACK_RESULT"
+    assert await rack.dispatch() == 1
+    incoming = rack.peer.transports[-1]["data"]
+    assert incoming["rack_id"] == "NEXT"
+    await deliver_transport_callback(
+        rack.factory,
+        "transport.task.resulted@v1",
+        {
+            "transport_task_id": incoming["transport_task_id"],
+            "kind": "RACK_MOVE",
+            "outcome_revision": 1,
+            "rack_id": "NEXT",
+            "status": "SUCCEEDED",
+            "final_position": incoming["target"],
+            "arrival_face": "180",
+        },
+    )
+    assert await rack.service.advance_preparation(preparation_id) == "READY"
+    rack.peer.allocate = allocated(rack, rack_id="NEXT")
+    assert await rack.service.advance(second["id"]) == "AWAITING_ALLOCATION_RESULT"
+    assert await rack.dispatch() == 1
+    assert await rack.service.advance(second["id"]) == "AWAITING_PUT_RESULT"
+    assert await rack.dispatch() == 1
+    second_put = json.loads(rack.peer.commands[-1])
+    assert (
+        await rack.result(
+            second, command_code=second_put["command_code"], device_code=rack.output, **success
+        )
+    ).status_code == 200
+    assert await rack.service.advance(second["id"]) == "AWAITING_REPORT_RESULT"
+    assert await rack.dispatch() == 1
+    assert await rack.service.advance(second["id"]) == "COMPLETED"
+
+    async with rack.factory() as session:
+        racks = await rack.service.rack_dispatch.jobs(
+            session, work_line_id=rack.line_ids[0], source_kinds=("COARSE_INCOMING",)
+        )
+    second_rack = next(item for item in racks if item.origin.source_ref == preparation_id)
+    assert second_rack.id != first_rack_id
+    original, put, changed = (
+        (second, second_put, failed)
+        if conflict_source == "current"
+        else (first, first_put, success)
+    )
+    response = await rack.result(
+        original, command_code=put["command_code"], device_code=rack.output, **changed
+    )
+    assert response.status_code == 409
+    assert response.json()["message"] == "IDEMPOTENCY_CONFLICT"
+
+    transports = len(rack.peer.transports)
+    second_rack = await idle_depart(rack, second_rack.id)
+    if conflict_source == "older-closed":
+        assert not second_rack.pending and second_rack.closure_reason == "DEPARTURE_ACK"
+        assert [a.kind for a in second_rack.actions] == ["ENTER", "DEPARTURE_DECIDE", "DEPART"]
+        assert len(rack.peer.transports) == transports + 1
+    else:
+        assert second_rack.pending
+        assert [a.kind for a in second_rack.actions] == ["ENTER"]
+        assert len(rack.peer.transports) == transports
+    previous, following = await rack.rows()
+    assert previous["report_status"] == ("COMPLETED" if closed_first else "PENDING")
+    assert following["report_status"] == "COMPLETED"
+
+
 @pytest.mark.parametrize("failed", [False, True], ids=["placed", "not-placed"])
 async def test_idle_rack_departs_without_preparation_while_put_report_recovers(rack, failed):
     row, prep, public_id = await placed_with_original_rack(rack, finish=not failed)

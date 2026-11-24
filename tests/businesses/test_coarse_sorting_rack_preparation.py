@@ -294,6 +294,99 @@ async def test_new_put_and_departure_cannot_both_get_conflicting_authority(rack,
         assert not any(a["kind"] == "PUT_TO_BIN" for a in await flow.action_rows(first["id"]))
 
 
+@pytest.mark.parametrize("proof", ["healthy", "late-conflict", "contradictory-saved"])
+async def test_new_preparation_rechecks_placed_put_while_report_is_pending(rack, proof):
+    from app.core.strict_json import canonical_digest
+    from app.models import ReliableMessage
+    from tests.helpers import clear_integration_history
+
+    flow = rack
+    flow.sender.uniform = lambda _lower, upper: upper
+    flow.peer.allocate = allocated(flow)
+    first = await reach_allocate(flow)
+    enable_racks(flow)
+    assert await flow.service.advance(first["id"]) == "AWAITING_PUT_RESULT"
+    assert await flow.dispatch() == 1
+    put = json.loads(flow.peer.commands[-1])
+    assert (
+        await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            data={"actual_qty": 1, "location": "STATION_OUTPUT1"},
+        )
+    ).status_code == 200
+    assert await flow.service.advance(first["id"]) == "AWAITING_REPORT_RESULT"
+    flow.peer.report_code = None
+    assert await flow.dispatch() == 1
+    original_put = next(a for a in await flow.action_rows(first["id"]) if a["kind"] == "PUT_TO_BIN")
+    if proof == "late-conflict":
+        conflict = await flow.result(
+            first,
+            command_code=put["command_code"],
+            device_code=flow.output,
+            result="FAILED",
+            data={},
+            error_detail={"code": "BLOCKED", "msg": "mock failure"},
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["message"] == "IDEMPOTENCY_CONFLICT"
+    elif proof == "contradictory-saved":
+        async with flow.factory.begin() as session:
+            root_id = await session.scalar(
+                select(IntegrationExchange.id).where(
+                    IntegrationExchange.role == "ECS_COMMAND",
+                    IntegrationExchange.command_code == put["command_code"],
+                )
+            )
+            assert root_id is not None
+            await session.execute(
+                delete(ReliableMessage).where(ReliableMessage.exchange_id == root_id)
+            )
+            await clear_integration_history(session, (root_id,))
+            saved = original_put["evidence_history"][-1]
+            data = {
+                **saved["data"],
+                "data": {**saved["data"]["data"], "pick_and_put_result": "PUT_FAILED"},
+            }
+            await session.execute(
+                flow.actions.update()
+                .where(flow.actions.c.id == original_put["id"])
+                .values(
+                    evidence_history=[{**saved, "data": data, "digest": canonical_digest(data)}]
+                )
+            )
+    second = await second_allocation(
+        flow,
+        {
+            "result": "REPLACE_REQUIRED",
+            "workline_code": flow.workline,
+            "current_rack": {"rack_id": "RACK-1"},
+            "incoming_rack": {"rack_id": "NEW", "target_face": "90"},
+        },
+    )
+    assert await flow.service.advance(second["id"]) == "AWAITING_RACK"
+    previous, following = await flow.rows()
+    prep = following["rack_preparation_id"]
+    assert (previous["put_result"], previous["report_status"], previous["placed_at_ms"]) == (
+        "SUCCESS",
+        "PENDING",
+        1,
+    )
+    expected = "AWAITING_DEPARTURE_RESULT" if proof == "healthy" else "AWAITING_PREDECESSORS"
+    assert await flow.service.advance_preparation(prep) == expected
+    if proof == "late-conflict":
+        async with flow.factory.begin() as session:
+            preparation = await session.get(RackPreparation, prep)
+            assert preparation.predecessor_action_ids == [original_put["id"]]
+            # An older preparation can already have frozen an empty predecessor set.
+            preparation.predecessor_action_ids = []
+        assert await flow.service.advance_preparation(prep) == "AWAITING_PREDECESSORS"
+    assert await flow.dispatch() == int(proof == "healthy")
+    assert len(flow.peer.reports) == 1
+    assert not flow.peer.transports
+
+
 async def test_preparation_keeps_original_put_predecessor_with_a_long_workline_history(rack):
     flow = rack
     flow.peer.allocate = allocated(flow)

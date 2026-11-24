@@ -1491,8 +1491,8 @@ class CoarseSortingService:
                     jobs.c.work_line_id == row["work_line_id"],
                     jobs.c.rack_position_code == row["rack_position_code"],
                     actions.c.kind == "PUT_TO_BIN",
-                    jobs.c.placed_at_ms.is_(None),
                     jobs.c.state != "COMPLETED",
+                    or_(jobs.c.placed_at_ms.is_(None), jobs.c.state == "AWAITING_REPORT"),
                 )
                 .order_by(actions.c.id)
             )
@@ -1652,7 +1652,10 @@ class CoarseSortingService:
                 jobs.c.rack_position_code == prep["rack_position_code"],
                 actions.c.kind == "PUT_TO_BIN",
                 or_(
-                    and_(jobs.c.placed_at_ms.is_(None), jobs.c.state != "COMPLETED"),
+                    and_(
+                        jobs.c.state != "COMPLETED",
+                        or_(jobs.c.placed_at_ms.is_(None), jobs.c.state == "AWAITING_REPORT"),
+                    ),
                     actions.c.id.in_(frozen_ids),
                 ),
             )
@@ -2216,18 +2219,57 @@ class CoarseSortingService:
             or source["resource_snapshot"] != self._output_snapshot(line, output)
         )
         local_by_id = {a["id"]: a for a in local}
+        incoming_generation = None
+        if (
+            not issue
+            and public.origin.source_kind == "COARSE_INCOMING"
+            and origin_preparation["id"] == public.origin.source_ref
+            and origin_preparation["workline_code"] == public.origin.workline_code
+            and origin_preparation["state"] == "READY"
+            and origin_preparation["incoming_rack_id"] == public.origin.rack_id
+            and (arrival := local_by_id.get(origin_preparation["current_action_id"]))
+            and arrival["kind"] == "MOVE_RACK_IN"
+            and arrival["preparation_id"] == origin_preparation["id"]
+            and arrival["rack_job_id"] == public.id
+            and public.position_action_id == arrival["rack_action_id"]
+            and public.actual_position == {"kind": "RACK_POSITION", "location_code": point}
+            and public.actual_face == origin_preparation["incoming_target_face"]
+            and any(
+                a.kind == "ENTER" and a.phase == "APPLIED" and a.id == public.position_action_id
+                for a in public.actions
+            )
+        ):
+            incoming_generation = origin_preparation["generation_no"]
         clear, demand = True, "NONE"
         for host in hosts:
             if host["rack_position_code"] not in (None, point) or host["state"] == "NG_COMPLETED":
                 continue
             puts = [a for a in local if a["job_id"] == host["id"] and a["kind"] == "PUT_TO_BIN"]
             if host["state"] in ("AWAITING_PUT", "AWAITING_REPORT", "COMPLETED"):
+                allocation = local_by_id.get(host["allocation_action_id"])
+                if (
+                    incoming_generation is not None
+                    and host["state"] == "COMPLETED"
+                    and not host["pending"]
+                    and host["rack_position_code"] == point
+                    and allocation
+                    and allocation["job_id"] == host["id"]
+                    and allocation["kind"] == "ALLOCATE_STORAGE"
+                    and allocation["operation"] == ALLOCATE
+                    and allocation["rack_generation_no"] is not None
+                    and allocation["rack_generation_no"] < incoming_generation
+                    and puts
+                    and all(
+                        put["predecessor_action_id"] == allocation["id"]
+                        and put["command_owner"] == OWNER.domain
+                        for put in puts
+                    )
+                ):
+                    continue
                 complete = bool(puts) and all(
                     [
                         host["allocation_action_id"] == put["predecessor_action_id"]
-                        and await self._original_put_settled(
-                            session, put, host, local_by_id.get(host["allocation_action_id"])
-                        )
+                        and await self._original_put_settled(session, put, host, allocation)
                         for put in puts
                     ]
                 )

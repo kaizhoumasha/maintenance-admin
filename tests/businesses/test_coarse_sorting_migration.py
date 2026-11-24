@@ -194,6 +194,8 @@ async def test_job_migration_preserves_original_scan_and_action_identity(pg_sess
 async def test_put_failure_migration_preserves_original_jobs_and_guards_evidence(
     backend, tmp_path, request
 ):
+    from app.core.strict_json import canonical_digest
+
     previous = "ecs_request_projection_v1"
     now = datetime(2026, 11, 24, tzinfo=UTC)
     async with AsyncExitStack() as databases:
@@ -255,6 +257,26 @@ async def test_put_failure_migration_preserves_original_jobs_and_guards_evidence
                         message_id=number,
                     )
                 )
+                result = {
+                    "command_code": f"original-command-{number}",
+                    "device_code": "OUTPUT-A",
+                    "result": "SUCCESS",
+                    "finish_time": number,
+                    "data": {"actual_qty": 1, "location": "ORIGINAL-DROP"},
+                    "error_detail": None,
+                }
+                proof = {
+                    "applied_put": {
+                        "owner_domain": "coarse_sorting",
+                        "call_key": f"original-call-{number}",
+                        "command_code": result["command_code"],
+                        "task_type": "PUT_TO_BIN",
+                        "device_code": result["device_code"],
+                    },
+                    "command_code": result["command_code"],
+                    "digest": canonical_digest(result),
+                    "data": result,
+                }
                 await connection.execute(
                     original_action.values(
                         id=put_id,
@@ -262,9 +284,14 @@ async def test_put_failure_migration_preserves_original_jobs_and_guards_evidence
                         predecessor_action_id=allocation_id,
                         command_owner="coarse_sorting",
                         call_key=f"original-call-{number}",
-                        command_code=f"original-command-{number}",
-                        device_code="INPUT-A",
-                        resource_snapshot={},
+                        command_code=result["command_code"],
+                        device_code=result["device_code"],
+                        resource_snapshot={
+                            "device_code": result["device_code"],
+                            "role": "OUTPUT_ARM",
+                            "completion_location": "ORIGINAL-DROP",
+                        },
+                        evidence_history=[] if state == "AWAITING_PUT" else [proof],
                     )
                 )
                 current_id = put_id
@@ -297,6 +324,34 @@ async def test_put_failure_migration_preserves_original_jobs_and_guards_evidence
             original_actions = (
                 (await connection.execute(sa.select(action).order_by(action.c.id))).mappings().all()
             )
+
+        for number in (2, 3):
+            put_id = f"original-put-{number}"
+            (saved,) = next(row for row in original_actions if row["id"] == put_id)[
+                "evidence_history"
+            ]
+            contradictory = {
+                **saved["data"],
+                "data": {**saved["data"]["data"], "pick_and_put_result": "PUT_FAILED"},
+            }
+            proof = {**saved, "data": contradictory, "digest": canonical_digest(contradictory)}
+            put_action = action.update().where(action.c.id == put_id)
+            async with engine.begin() as connection:
+                await connection.execute(put_action.values(evidence_history=[proof]))
+            refused = await run_alembic(url, "upgrade", "coarse_put_failure_v1")
+            assert refused.returncode != 0, refused.stdout + refused.stderr
+            assert f"original-job-{number}" in refused.stdout + refused.stderr
+            async with engine.begin() as connection:
+                preserved_job = await source_table(connection, "coarse_sorting_job")
+                assert "put_result" not in preserved_job.c
+                assert "report_status" not in preserved_job.c
+                assert (
+                    await connection.execute(sa.select(job).order_by(job.c.id))
+                ).mappings().all() == original
+                assert await connection.scalar(
+                    sa.select(action.c.evidence_history).where(action.c.id == put_id)
+                ) == [proof]
+                await connection.execute(put_action.values(evidence_history=[saved]))
 
         result = await run_alembic(url, "upgrade", "coarse_put_failure_v1")
         assert result.returncode == 0, result.stdout + result.stderr

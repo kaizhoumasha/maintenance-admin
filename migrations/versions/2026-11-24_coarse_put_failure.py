@@ -18,6 +18,79 @@ REPORT_STATUS = "coarse_sorting_job_report_status_check"
 def upgrade():
     bind = op.get_bind()
     schema = "enterprise_backend" if bind.dialect.name == "postgresql" else None
+    if schema:
+        bind.exec_driver_sql(f"LOCK TABLE {schema}.{JOB} IN ACCESS EXCLUSIVE MODE")
+    legacy_job = sa.table(
+        JOB,
+        sa.column("id"),
+        sa.column("state"),
+        sa.column("current_action_id"),
+        sa.column("allocation_action_id"),
+        sa.column("placed_at_ms"),
+        schema=schema,
+    )
+    action = sa.table(
+        "coarse_sorting_action",
+        sa.column("id"),
+        sa.column("job_id"),
+        sa.column("kind"),
+        sa.column("operation"),
+        sa.column("predecessor_action_id"),
+        sa.column("command_owner"),
+        sa.column("command_code"),
+        sa.column("call_key"),
+        sa.column("device_code"),
+        sa.column("evidence_history", sa.JSON),
+        schema=schema,
+    )
+    report, put = action.alias("original_report"), action.alias("original_put")
+    original_proofs = (
+        sa.select(
+            legacy_job.c.id,
+            legacy_job.c.placed_at_ms,
+            put.c.command_code,
+            put.c.device_code,
+            put.c.evidence_history,
+        )
+        .select_from(
+            legacy_job.join(report, report.c.id == legacy_job.c.current_action_id).join(
+                put, put.c.id == report.c.predecessor_action_id
+            )
+        )
+        .where(
+            legacy_job.c.state.in_(("AWAITING_REPORT", "COMPLETED")),
+            report.c.job_id == legacy_job.c.id,
+            report.c.kind == "REPORT_COMPLETION",
+            report.c.operation == "inbound.coarse_sorting.execution_report@v1",
+            put.c.job_id == legacy_job.c.id,
+            put.c.kind == "PUT_TO_BIN",
+            put.c.predecessor_action_id == legacy_job.c.allocation_action_id,
+            put.c.command_owner == "coarse_sorting",
+            put.c.call_key.is_not(None),
+        )
+        .order_by(legacy_job.c.id)
+    )
+    affected = []
+    for row in bind.execute(original_proofs).mappings():
+        for proof in row["evidence_history"]:
+            if (
+                isinstance(proof, dict)
+                and proof.get("command_code") == row["command_code"]
+                and isinstance(result := proof.get("data"), dict)
+                and result.get("command_code") == row["command_code"]
+                and result.get("device_code") == row["device_code"]
+                and result.get("result") == "SUCCESS"
+                and result.get("finish_time") == row["placed_at_ms"]
+                and isinstance(data := result.get("data"), dict)
+                and data.get("pick_and_put_result") == "PUT_FAILED"
+            ):
+                affected.append(row["id"])
+                break
+    if affected:
+        raise CommandError(
+            f"contradictory original coarse PUT success for jobs: {', '.join(affected)}"
+        )
+
     op.add_column(JOB, sa.Column("put_result", sa.String(16)), schema=schema)
     op.add_column(JOB, sa.Column("report_status", sa.String(16)), schema=schema)
     job = sa.table(
