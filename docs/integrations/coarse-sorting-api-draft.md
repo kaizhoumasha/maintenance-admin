@@ -106,10 +106,10 @@ flowchart TB
     command["WES｜保存原目标<br/>下发 PUT_TO_BIN"]
     put{"ECS｜入箱结果"}
     putPending["WES｜保存原命令<br/>不报告完成、不重搬"]
-    report["WES｜保存完成事实<br/>反馈原绑定与目标"]
+    report["WES｜记录放料 SUCCESS / FAILED<br/>反馈原绑定与目标"]
     receive{"WMS｜报告响应"}
-    reportPending["WES｜保留物理完成<br/>仅恢复原报告或核对"]
-    done["WES｜反馈义务结束"]
+    reportPending["WES｜保留原放料结果<br/>仅恢复原报告"]
+    done["WES｜报告 COMPLETED<br/>该盘业务终局"]
     start --> move
     move -->|明确完成且无活动准备作业| request
     move -->|明确完成且已有准备作业| rackPrepare
@@ -124,7 +124,8 @@ flowchart TB
     allocate -->|协议拒绝 / 响应未知| requestPending
     command --> put
     put -->|明确指定箱格已放料| report
-    put -->|FAILED / 结果未知| putPending
+    put -->|明确未放料 FAILED| report
+    put -->|尚无 Result / 信息不完整或冲突| putPending
     report --> receive
     receive -->|RECORDED / DUPLICATE| done
     receive -->|未收妥 / 响应未知| reportPending
@@ -569,6 +570,8 @@ ECS 的放料结果和 WMS 的报告状态分别记录。接收器先可靠保�
 | `completed_at` | 作业反馈义务完成时间 | 原报告收妥后设置，不用它判断何时得知放料失败 |
 
 调试投影分别返回 `put_result` 和 `report_status`。例如，失败报告尚未送达时为 `FAILED / PENDING`，WMS 收妥后为 `FAILED / COMPLETED`；成功对应 `SUCCESS / PENDING` 到 `SUCCESS / COMPLETED`。报文中的 `pick_and_put_result="PUT_FAILED"` 始终是 ECS 提供的失败事实，不再兼作 WES 的报告完成状态。
+
+**报告收妥即终局：** 原报告取得有效 `RECORDED / DUPLICATE` 后，该盘业务结束，原 `put_result` 和 `report_status=COMPLETED` 不再改变。ECS 保证终局后不再上报不同执行结果；WES 沿普通 Result 幂等规则拒绝不同结果，不将其当作已接受的更正，也不为已终局物料增加重新打开、继续等待或阻塞后续物料的业务流程。报告尚未收妥时，原结果、目标及未闭合责任仍按原规则核验。
 
 历史同名 `execution_report@v1` 的七字段成功报告继续使用原身份和冻结正文。只有原 PUT 严格成功、原绑定/目标/完成时间全部匹配时，原 RECORDED/DUPLICATE 才完成该报告；七字段格式不用于失败报告，也不能覆盖放料结果。
 
