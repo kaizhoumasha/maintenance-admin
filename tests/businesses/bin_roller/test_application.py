@@ -8,7 +8,7 @@ from app.integrations.wms_request import operation as requests
 def test_one_component_owns_all_four_scan_inputs(roller_declaration):
     component, _ = roller_declaration
     bindings, annexes = catalog.validate_business_contracts()
-    assert len(bindings) == 6
+    assert not any(b.device_role == "SCAN4" and b.task_type == "MOVE_LEFT" for b in bindings)
     assert len(annexes) == 3
     for point in ("SCAN1", "SCAN2", "SCAN3", "SCAN4"):
         key = ("ecs_event", "SCAN_COMPLETED", point)

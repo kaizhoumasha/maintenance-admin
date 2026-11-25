@@ -208,8 +208,13 @@ async def test_superseded_orphan_has_no_permanent_current_runtime(roller_current
     old = (await flow.current_rows("bin_return"))[0]
     await flow.scan("SCAN3", "A000000001-B", timestamp=20)
     current = next(r for r in await flow.current_rows("bin_return") if r["id"] == old["id"])
-    assert not current["is_current"] and current["close_reason"] == "SUPERSEDED"
-    assert current["scan4_command_code"] is None
+    assert not current["is_current"] and current["close_reason"] is None
+    code = current["scan4_command_code"]
+    await flow.result(code, "SCAN4")
+    await flow.advance_current("RETURN", old["id"])
+    current = next(r for r in await flow.current_rows("bin_return") if r["id"] == old["id"])
+    assert current["close_reason"] == "NG_DIVERTED"
+    assert current["scan4_command_code"] == code
 
 
 async def test_closed_member_and_face_stay_while_original_step_and_rack_need_them(
