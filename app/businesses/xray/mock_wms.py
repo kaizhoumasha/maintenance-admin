@@ -159,7 +159,7 @@ class XrayWmsMock:
 
     async def _decide_random(self, session, payload, operation_id):
         if isinstance(payload, pkg.PkgDecide):
-            if randbelow(10) == 0:
+            if randbelow(20) == 0:
                 return {"result": "BYPASS_COUNT"}
             return {
                 "result": "COUNT_REQUIRED",
