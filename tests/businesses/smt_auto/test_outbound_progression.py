@@ -129,6 +129,24 @@ async def test_material_decide_supplies_target_when_plan_has_no_target(decided_o
             "plan_revision": 1,
             "added_bin_source_racks": [{"rack_id": "BIN", "rack_face": ["A"]}],
         }
+        session.add(
+            AutoTaskInput(
+                task_id="t",
+                operation="sorting.task.plan_delta@v1",
+                operation_id="plan-2",
+                request_timestamp=2,
+                first_received_at_ms=2,
+                effective_digest="d2",
+                contract_version="v1",
+                disposition="APPLIED",
+                applied_plan_revision=2,
+                effective_request={
+                    "task_id": "t",
+                    "plan_revision": 2,
+                    "target_rack": {"rack_id": "target", "rack_face": "A"},
+                },
+            )
+        )
 
     await host.settle("outbound.bin.material.decide@v1", accepted_target())
     async with host.factory.begin() as session:

@@ -388,8 +388,8 @@ class AutoRackPorts:
                     r
                     for r in rows[AutoTaskInput]
                     if r.task_id == task.task_id
-                    and r.applied_plan_revision == 1
                     and r.target_job_id == job_id
+                    and r.effective_request.get("target_rack")
                 ]
                 if len(original) == 1:
                     target = original[0].effective_request.get("target_rack", {})
@@ -490,7 +490,6 @@ class AutoRackPorts:
             if (
                 kind != "ENTER"
                 or origin.source_kind != "AUTO_OUTBOUND_TARGET"
-                or row.applied_plan_revision != 1
                 or row.disposition != "APPLIED"
                 or target.get("rack_id") != origin.rack_id
                 or target.get("rack_face") != face
