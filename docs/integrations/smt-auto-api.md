@@ -574,9 +574,9 @@ HTTP 202；保留明细期间同消息重放 200 / DUPLICATE。同任务不能�
 | task_id、plan_revision | 必填，关联原任务及连续版本 | 相同 |
 | 五层料箱供箱架 added_bin_source_racks[] | 提供 SCAN2 接料箱，架对象为 rack_id + rack_face[] | 提供 SCAN2 待拣料箱，同一架面结构 |
 | 单层来源架 added_source_racks[] | 支持；架对象仅 rack_id，不传动态业务面向 | 禁止；不得当未知字段忽略或改成退料架 |
-| 转运目标架 target_rack | 禁止 | 首版必填对象 rack_id + 单值 rack_face；后续版本省略 |
+| 转运目标架 target_rack | 禁止 | 首版可选对象 rack_id + 单值 rack_face；首版未给时可由后续版本补充一次 |
 | 退料来源架 added_return_racks[] | 禁止 | 支持；架对象为 rack_id + rack_faces[]，保持来源及面顺序 |
-| 首版 / 后续增量 | 每版至少一种非空新增架数组；两类架可同版或分批补齐 | 首版可仅给转运架，也可同时给一种或两种来源；后续至少一种非空来源数组，不改首版 target_rack |
+| 首版 / 后续增量 | 每版至少一种非空新增架数组；两类架可同版或分批补齐 | 首版至少一种非空资源，可仅给来源或转运架；后续至少一种非空新增资源，可补充一次 target_rack |
 
 因此 inbound 的资源范围只有“五层料箱供箱架 + 单层来源架”，outbound 的资源范围是“五层料箱供箱架 + 转运目标架 + 退料来源架”。资源范围不要求每一版同时出现所有架型，候选计划也不证明物理到位。非本方向已定义资源字段混入时返回 `422 / REJECTED / INVALID_DATA`，不能静默裁剪后接受；真正未知字段仍沿任务字段合同。`rack_face[]`（供箱）、单值 `rack_face`（目标）与 `rack_faces[]`（退料）保留各自原结构，不统一字段名。
 
@@ -623,10 +623,10 @@ AUTO/outbound：
 | --- | --- |
 | 五层供箱（两方向共用） | added_bin_source_racks[] 的项为 rack_id、非空有序且不重复的 rack_face[]；以 task_id/plan_revision/rack_id/face 保存，可跨版本同架同面追加新成员，原清单/在途/同面接续沿 U08，不用旧版完成覆盖新版需求 |
 | inbound 单层来源 | added_source_racks[] 只列 rack_id，不加动态 rack_face、左右工作位、箱码、料格或取盘尺寸；按版本及数组原序形成候选，同架仍是原在途/在位过程时复用原进场，不双侧调入；版本递增不证明重新到位 |
-| outbound 转运目标 | target_rack={rack_id,rack_face}，面为单值字符串，仅AUTO/outbound首版必填，允许首版只给目标；后续省略、不补充/改写。只准备初始目标架面，不授权单盘PUT；本盘精确目标和ROTATE/REPLACE来自material.decide |
+| outbound 转运目标 | target_rack={rack_id,rack_face}，面为单值字符串，AUTO/outbound首版可选；若首版未给，可在后续连续版本补充一次，之后不得重复或改写。若计划级 target_rack 始终缺失，`material.decide` 的 ACCEPT.target_locator 可首次提供本盘目标架和储位，并按本盘目标创建目标架作业。只准备初始目标架面，不授权单盘PUT；本盘精确目标和ROTATE/REPLACE来自material.decide |
 | outbound 退料来源 | added_return_racks[] 的项为 rack_id、非空有序且不重复的 rack_faces[]，按架数组再按面数组原序展开；同任务同架面仅安排一次，后续只追加未安排面，不预列全部SLOT/条码/尺寸，不用added_direct_picks替代 |
 
-无该类新增时省略，禁止null/空数组。入库每版至少一种非空新增；出库首版可仅目标，后续至少一种非空来源。架号/面值类型见[字段规则](#field-rules)，不改变rack_face[]/单值rack_face/rack_faces[]三个原字段结构；不增跨来源总队列、齐套字段或“正常新增/异常补足”分支。WMS按合法连续版本追加，WES不因追加原因要求另发任务，不自行补料或重授。
+无该类新增时省略，禁止null/空数组。入库每版至少一种非空新增；出库每版至少一种非空资源，target_rack最多成功应用一次，且可在后续版本补充。计划级 target_rack 缺失时，WMS 可在 `material.decide` 的 ACCEPT 中提供完整 `target_locator`，由 WES 为当前盘创建目标架作业。架号/面值类型见[字段规则](#field-rules)，不改变rack_face[]/单值rack_face/rack_faces[]三个原字段结构；不增跨来源总队列、齐套字段或“正常新增/异常补足”分支。WMS按合法连续版本追加，WES不因追加原因要求另发任务，不自行补料或重授。
 
 同一任务可先发布一类资源、后用新operation_id/下一连续revision补齐另一类，前版明确成功后再发后版；资源按原动作和工作位条件分别准备，不等所有计划齐套。真正取盘仍须接料箱或来源架/面实际就绪及WMS有效授权，缺资源不表示任务完成。新计划不覆盖原成员、READY、命令、参数、报告或未知动作；撤销另走cancel。
 
@@ -2846,7 +2846,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 | --- | --- | --- |
 | 任务的料箱供箱架/面需求 | 沿现有 AUTO added_bin_source_racks[] = {rack_id, rack_face[]}，追加及精确撤销见[§3.6](#task-cancel)；投箱分配复用[现有合同](manual-picking-api.md#manual-inbound) | 本业务提交原任务/版本的独立供箱需求并读取原进度；不把该成员作为已在滚筒上的 BIN 来源关联。公共执行见 §8，不从 target_rack 或 added_return_racks 猜供箱需求 |
 | RackSlot 逐盘取料来源架/面 | [§3.5](#task-plan)的 added_return_racks | 本业务按 §4.2.3/§4.3.3 和 §6.3.2 定义到位作业、取盘授权和面级收口；它不是料箱供箱清单，不自动触发 inbound_batch 或套用 feed_complete |
-| 物料接料目标架/面 | [§3.5](#task-plan)首版 target_rack；后续本盘目标及准备取自 [§4.3.2](#bin-decide)/[§4.3.3](#rack-decide)的 ACCEPT | 本业务保留本盘精确目标、准备条件及放盘义务；不能将目标架登记成料箱供箱架或 drain 承接架 |
+| 物料接料目标架/面 | [§3.5](#task-plan)首版或后续补充的 target_rack；后续本盘目标及准备取自 [§4.3.2](#bin-decide)/[§4.3.3](#rack-decide)的 ACCEPT | 本业务保留本盘精确目标、准备条件及放盘义务；不能将目标架登记成料箱供箱架或 drain 承接架 |
 
 三类资源沿现有自动线声明及本仓库搬运场景映射，不以物理架层数替代业务角色选择模板：
 
@@ -2864,7 +2864,7 @@ CK04沿现有RackScenarios能力及[Transport合同差异](wms-transport.md#仍�
 
 | 层次 | 现有字段及含义 | 映射与边界 |
 | --- | --- | --- |
-| 初始目标资源 | `plan_delta.data.target_rack = {rack_id, rack_face}` | AUTO/outbound 首版安排转运接料架及面，业务角色 TRANSFER、工作位 TRANSFER_RACK；不指定单盘储位，不能直接据此创建单盘放盘命令 |
+| 初始目标资源 | `plan_delta.data.target_rack = {rack_id, rack_face}` | AUTO/outbound 首版或后续版本安排转运接料架及面，业务角色 TRANSFER、工作位 TRANSFER_RACK；不指定单盘储位，不能直接据此创建单盘放盘命令 |
 | 本盘最终授权 | 两类 `material.decide` 的 `ACCEPT.target_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id/rack_layer/rack_column` | WMS 预留本盘唯一目标储位；目标换面/换架按同响应的 `target_preparation`，不固定套用首版旧架面；`slot_id` 为业务储位，整数层/列由 WMS 同次明确提供，不相互推算 |
 | 设备执行 | 货架侧臂（KT11 ARM02 / KT14 ARM04）`PICK_AND_PUT`：`params.source.location_type=SCAN_PLATFORM`，`params.target.location_type=FIVE_LAYER_RACK` | 目标 `location_id=STATION_A`，对应本线左侧 TRANSFER_RACK；现场 OUT61/OUT63 仍用于 WMS/RCS。架号/面取本盘最终授权原值，目标层/列由该授权整数转字符串，厚度用本盘原授权的毫米值，直径使用本盘 WMS 授权的 `size_inch`，毫米值保留在 `reel_diameter`。ECS 不发送 `slot_id` 或目标 `bin_*`，不从 BIN 来源复制箱型/箱格/层数/总厚度 |
 | 实际位置报告 | `movement_report.data.to_locator`：`type=RACK_SLOT`，`rack_id/rack_face/slot_id` | 本盘确定放置成功且实际位置与最终授权一致后，报告原业务目标四字段；不报告设备层/列，不用报告 ACK 证明物理成功，不改变原报告匹配与去重规则 |
@@ -3080,7 +3080,7 @@ source_rack_exhausted 的整架业务判定及其依据由 WMS 自行负责，�
 <a id="target-preparation"></a>
 #### 6.3.3 本盘目标准备与物理义务
 
-初始物料目标取首版 target_rack，后续精确目标及 ROTATE/REPLACE 取本盘 ACCEPT.target_locator/target_preparation。ROTATE 换同一目标架的面，REPLACE 的旧架去向独立请求共用 departure_decide；模板沿 §6.1，不从物理层数猜角色，不向 ECS 机械臂发送搬架指令。当前盘的 REPLACE 所需物理条件已具备时，原来源及其他独立来源仅处于取盘授权求值、WAIT 或 READY 尚未下发取盘时，均可继续准备，并且不会挡住当前盘所需的换架。已有旧目标的放盘责任、未知位置和必报义务继续按原条件核对。
+初始物料目标取首个已应用的 target_rack，后续精确目标及 ROTATE/REPLACE 取本盘 ACCEPT.target_locator/target_preparation。ROTATE 换同一目标架的面，REPLACE 的旧架去向独立请求共用 departure_decide；模板沿 §6.1，不从物理层数猜角色，不向 ECS 机械臂发送搬架指令。当前盘的 REPLACE 所需物理条件已具备时，原来源及其他独立来源仅处于取盘授权求值、WAIT 或 READY 尚未下发取盘时，均可继续准备，并且不会挡住当前盘所需的换架。已有旧目标的放盘责任、未知位置和必报义务继续按原条件核对。
 
 若本盘 `ACCEPT` 只给出 `target_locator`，且原离场搬运的已应用结果确认转运位腾空，该点也没有在位、已登记或在途的架作业，WES 可沿原分配为该架登记一次 `ENTER`。已离场的同一架号可以开启新轮次。等待本轮到位结果匹配架号、面向和点位后才下发放盘。
 

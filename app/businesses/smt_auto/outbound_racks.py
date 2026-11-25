@@ -155,18 +155,23 @@ class OutboundRacks:
                     )
             break
         target_jobs = [j for j in active if j.origin.point == points["TRANSFER_RACK"]]
-        first_target_registered = False
-        first = await session.scalar(
-            select(AutoTaskInput).where(
+        target_registered = False
+        plan_inputs = await session.scalars(
+            select(AutoTaskInput)
+            .where(
                 AutoTaskInput.task_id == task_id,
-                AutoTaskInput.applied_plan_revision == 1,
                 AutoTaskInput.disposition == "APPLIED",
             )
+            .order_by(AutoTaskInput.applied_plan_revision)
         )
-        if first and first.target_job_id is None and not target_jobs:
-            target = first.effective_request.get("target_rack", {})
+        target_input = next(
+            (item for item in plan_inputs if item.effective_request.get("target_rack")),
+            None,
+        )
+        if target_input and target_input.target_job_id is None and not target_jobs:
+            target = target_input.effective_request["target_rack"]
             if set(target) == {"rack_id", "rack_face"}:
-                first_target_registered = bool(
+                target_registered = bool(
                     await self._enter(
                         session,
                         task,
@@ -175,7 +180,7 @@ class OutboundRacks:
                         point=points["TRANSFER_RACK"],
                         rack_id=target["rack_id"],
                         face=target["rack_face"],
-                        auth=RackAuthorization("FIRST_TARGET", first.id),
+                        auth=RackAuthorization("FIRST_TARGET", target_input.id),
                     )
                 )
         for plate in await session.scalars(
@@ -192,7 +197,7 @@ class OutboundRacks:
             round_ = await session.get(AutoOutboundDecisionRound, plate.final_decision_round_id)
             data = (round_.response_snapshot or {}).get("data", {}) if round_ else {}
             preparation = data.get("target_preparation")
-            if data.get("result") != "ACCEPT" or first_target_registered:
+            if data.get("result") != "ACCEPT" or target_registered:
                 continue
             target = data["target_locator"]
             auth = RackAuthorization("PLATE_TARGET", plate.id)

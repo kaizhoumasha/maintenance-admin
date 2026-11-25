@@ -19,6 +19,7 @@ from app.models import WorkLine
 from .archive import archive_guard
 from .models import (
     AutoInboundSourceMember,
+    AutoOutboundPlate,
     AutoOutboundSourceMember,
     AutoSupplyMember,
     AutoTask,
@@ -325,6 +326,25 @@ class AutoTaskService:
                 return Duplicate()
         if payload.plan_revision != task.plan_revision + 1:
             raise Conflict({"reason_code": "REVISION_CONFLICT"})
+        if (
+            task.task_type == "AUTO"
+            and task.business_type == "outbound"
+            and payload.target_rack is not None
+        ):
+            applied = await ctx.session.scalars(
+                select(AutoTaskInput).where(
+                    AutoTaskInput.task_id == task.task_id,
+                    AutoTaskInput.disposition == "APPLIED",
+                )
+            )
+            plate_authorized = await ctx.session.scalar(
+                select(AutoOutboundPlate.id).where(
+                    AutoOutboundPlate.task_id == task.task_id,
+                    AutoOutboundPlate.final_decision_round_id.is_not(None),
+                )
+            )
+            if any(row.effective_request.get("target_rack") for row in applied) or plate_authorized:
+                raise Rejected("INVALID_DATA")
         task.plan_revision = payload.plan_revision
         task.status = "EXECUTING"
         row = original or self._input_row(ctx, task, payload)

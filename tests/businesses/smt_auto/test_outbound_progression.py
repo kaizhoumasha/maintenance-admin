@@ -120,6 +120,30 @@ async def test_pending_scan_reads_candidates_in_bounded_pages():
         await engine.dispose()
 
 
+async def test_material_decide_supplies_target_when_plan_has_no_target(decided_outbound):
+    host = decided_outbound
+    async with host.factory.begin() as session:
+        plan = await session.scalar(select(AutoTaskInput).where(AutoTaskInput.task_id == "t"))
+        plan.effective_request = {
+            "task_id": "t",
+            "plan_revision": 1,
+            "added_bin_source_racks": [{"rack_id": "BIN", "rack_face": ["A"]}],
+        }
+
+    await host.settle("outbound.bin.material.decide@v1", accepted_target())
+    async with host.factory.begin() as session:
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=60
+        )
+        assert plate.target_rack_job_id
+        jobs = await host.dispatch.jobs(
+            session, work_line_id=1, source_kinds=("AUTO_OUTBOUND_TARGET",)
+        )
+        job = next(job for job in jobs if job.id == plate.target_rack_job_id)
+        assert job.origin.rack_id == "target"
+        assert job.origin.source_kind == "AUTO_OUTBOUND_TARGET"
+
+
 @pytest.mark.parametrize(
     "decided_outbound",
     ["PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-197"],

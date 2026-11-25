@@ -272,13 +272,11 @@ def validate_task_branch(
             allowed |= {"target_rack", "added_direct_picks"}
         resources = fields - {"task_id", "plan_revision"}
         valid = resources <= allowed and bool(resources)
-        if "target_rack" in resources and payload.plan_revision != 1:
-            valid = False
         if (
             task_type == "AUTO"
             and business_type == "outbound"
             and payload.plan_revision == 1
-            and "target_rack" not in resources
+            and not resources
         ):
             valid = False
     elif isinstance(payload, Cancel):
