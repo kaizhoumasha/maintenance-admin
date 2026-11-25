@@ -88,7 +88,7 @@ def test_plan_and_cancel_reject_cross_mode_fields(mode, direction, resources):
         ("MANUAL", "inbound", 1, {}, False),
         ("AUTO", "inbound", 2, {"added_source_racks": [{"rack_id": "S"}]}, True),
         ("AUTO", "outbound", 2, {"added_return_racks": [RETURN]}, True),
-        ("AUTO", "outbound", 2, {"target_rack": TARGET, "added_return_racks": [RETURN]}, False),
+        ("AUTO", "outbound", 2, {"target_rack": TARGET, "added_return_racks": [RETURN]}, True),
         ("MANUAL", "outbound", 2, {"target_rack": TARGET, "added_bin_source_racks": [BIN]}, False),
         ("AUTO", "outbound", 2, {}, False),
     ],

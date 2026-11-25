@@ -273,6 +273,12 @@ def validate_task_branch(
         resources = fields - {"task_id", "plan_revision"}
         valid = resources <= allowed and bool(resources)
         if (
+            "target_rack" in resources
+            and payload.plan_revision != 1
+            and not (task_type == "AUTO" and business_type == "outbound")
+        ):
+            valid = False
+        if (
             task_type == "AUTO"
             and business_type == "outbound"
             and payload.plan_revision == 1

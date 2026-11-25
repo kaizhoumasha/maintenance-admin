@@ -197,6 +197,7 @@ async def test_arm01_picks_before_material_decide_supplies_target(decided_outbou
         )
         assert plate.target_rack_job_id == job.id
 
+
 @pytest.mark.parametrize(
     "decided_outbound",
     ["PART-EXAMPLE,Q10000,MODEL-EXAMPLE,D260505,LOT-EXAMPLE,SREEL-197"],

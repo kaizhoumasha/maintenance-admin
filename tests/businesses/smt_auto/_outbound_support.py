@@ -212,37 +212,37 @@ async def outbound_host(s5_roller, request, monkeypatch):
         else:
             auth = RackAuthorization("FIRST_TARGET", plan.id)
             job_origin = replace(
-            origin("AUTO_OUTBOUND_TARGET"),
-            work_line_id=1,
-            task_id="t",
-            source_ref=auth.source_ref,
-            initial_face=target_face,
-            rack_id=target_rack,
-            point=target_point,
-            resources=asdict(binding),
-        )
+                origin("AUTO_OUTBOUND_TARGET"),
+                work_line_id=1,
+                task_id="t",
+                source_ref=auth.source_ref,
+                initial_face=target_face,
+                rack_id=target_rack,
+                point=target_point,
+                resources=asdict(binding),
+            )
             ports = AutoRackPorts(host.dispatch)
             job = await ports.register(
-            session, job_origin, authorization=auth, original_binding=binding
-        )
+                session, job_origin, authorization=auth, original_binding=binding
+            )
             assert job
             action = await ports.prepare(
-            session,
-            job_id=job,
-            kind="ENTER",
-            authorization=auth,
-            face=target_face,
-            original_binding=binding,
-        )
+                session,
+                job_id=job,
+                kind="ENTER",
+                authorization=auth,
+                face=target_face,
+                original_binding=binding,
+            )
             progress = await host.dispatch.progress(session, job_id=job)
             await apply_outcome(
-            session,
-            progress.actions[-1],
-            "SUCCEEDED",
-            point=target_point,
-            rack_id=target_rack,
-            arrival_face=target_face,
-        )
+                session,
+                progress.actions[-1],
+                "SUCCEEDED",
+                point=target_point,
+                rack_id=target_rack,
+                arrival_face=target_face,
+            )
             await ports.advance(session, job_id=job, now_ms=10)
             assert action
     if len(request.param) < 3 or request.param[2] != "NO_BIN":
