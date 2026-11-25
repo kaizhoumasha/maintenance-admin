@@ -461,6 +461,35 @@ async def test_plan_member_writes_rollback_with_receiver_transaction(session, di
 
 
 @pytest.mark.asyncio
+async def test_outbound_can_add_target_rack_after_first_plan(session):
+    await issue(session, direction="outbound")
+    await prepared(session, "task")
+    service = AutoTaskService()
+
+    first = PlanDelta(
+        task_id="task",
+        plan_revision=1,
+        added_bin_source_racks=[{"rack_id": "BIN", "rack_face": ["A"]}],
+    )
+    await service.accept_task_plan_delta(ctx(session, "plan", "first", first), first)
+    second = PlanDelta(
+        task_id="task",
+        plan_revision=2,
+        target_rack={"rack_id": "TARGET", "rack_face": "A"},
+    )
+    await service.accept_task_plan_delta(ctx(session, "plan", "second", second), second)
+    assert (await session.get(AutoTask, "task")).plan_revision == 2
+
+    duplicate = PlanDelta(
+        task_id="task",
+        plan_revision=3,
+        target_rack={"rack_id": "OTHER", "rack_face": "B"},
+    )
+    with pytest.raises(Rejected):
+        await service.accept_task_plan_delta(ctx(session, "plan", "third", duplicate), duplicate)
+
+
+@pytest.mark.asyncio
 async def test_current_revision_alias_retains_identity_after_later_revision(session):
     await issue(session)
     await prepared(session, "task")

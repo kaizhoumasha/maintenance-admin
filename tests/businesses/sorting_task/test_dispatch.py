@@ -180,7 +180,7 @@ async def test_ambiguous_or_unavailable_owner_never_dispatches(task_flow, monkey
             "second",
             "outbound",
             dict(added_bin_source_racks=[dict(rack_id="R", rack_face=["A"])]),
-            False,
+            True,
         ),
         ("first", "inbound", dict(added_source_racks=[dict(rack_id="R")]), False),
         (

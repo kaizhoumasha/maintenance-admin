@@ -84,6 +84,7 @@ async def outbound_host(s5_roller, request, monkeypatch):
     target_rack, target_point, target_face = (
         request.param[3] if len(request.param) > 3 else ("target", "P", "A")
     )
+    no_target = len(request.param) > 2 and request.param[2] == "NO_TARGET"
     for name in (
         "outbound_bin_material_decide_v1",
         "outbound_rackslot_material_decide_v1",
@@ -194,46 +195,56 @@ async def outbound_host(s5_roller, request, monkeypatch):
             contract_version="v1",
             disposition="APPLIED",
             applied_plan_revision=1,
-            effective_request={"target_rack": {"rack_id": target_rack, "rack_face": target_face}},
+            effective_request=(
+                {}
+                if no_target
+                else {"target_rack": {"rack_id": target_rack, "rack_face": target_face}}
+            ),
         )
         session.add(plan)
         await session.flush()
-        binding = await resolve_binding(session, rack_arm)
-        auth = RackAuthorization("FIRST_TARGET", plan.id)
-        job_origin = replace(
-            origin("AUTO_OUTBOUND_TARGET"),
-            work_line_id=1,
-            task_id="t",
-            source_ref=auth.source_ref,
-            initial_face=target_face,
-            rack_id=target_rack,
-            point=target_point,
-            resources=asdict(binding),
-        )
-        ports = AutoRackPorts(host.dispatch)
-        job = await ports.register(
-            session, job_origin, authorization=auth, original_binding=binding
-        )
-        assert job
-        action = await ports.prepare(
-            session,
-            job_id=job,
-            kind="ENTER",
-            authorization=auth,
-            face=target_face,
-            original_binding=binding,
-        )
-        progress = await host.dispatch.progress(session, job_id=job)
-        await apply_outcome(
-            session,
-            progress.actions[-1],
-            "SUCCEEDED",
-            point=target_point,
-            rack_id=target_rack,
-            arrival_face=target_face,
-        )
-        await ports.advance(session, job_id=job, now_ms=10)
-        assert action
+        if no_target:
+            binding = None
+        else:
+            binding = await resolve_binding(session, rack_arm)
+        if no_target:
+            pass
+        else:
+            auth = RackAuthorization("FIRST_TARGET", plan.id)
+            job_origin = replace(
+                origin("AUTO_OUTBOUND_TARGET"),
+                work_line_id=1,
+                task_id="t",
+                source_ref=auth.source_ref,
+                initial_face=target_face,
+                rack_id=target_rack,
+                point=target_point,
+                resources=asdict(binding),
+            )
+            ports = AutoRackPorts(host.dispatch)
+            job = await ports.register(
+                session, job_origin, authorization=auth, original_binding=binding
+            )
+            assert job
+            action = await ports.prepare(
+                session,
+                job_id=job,
+                kind="ENTER",
+                authorization=auth,
+                face=target_face,
+                original_binding=binding,
+            )
+            progress = await host.dispatch.progress(session, job_id=job)
+            await apply_outcome(
+                session,
+                progress.actions[-1],
+                "SUCCEEDED",
+                point=target_point,
+                rack_id=target_rack,
+                arrival_face=target_face,
+            )
+            await ports.advance(session, job_id=job, now_ms=10)
+            assert action
     if len(request.param) < 3 or request.param[2] != "NO_BIN":
         work = await host.scan()
         host.work_id = work.id
