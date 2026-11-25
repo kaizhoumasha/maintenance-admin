@@ -266,29 +266,41 @@ async def test_snapshot_storage_failure_does_not_change_committed_ack(
     assert "snapshot unavailable" not in caplog.text
 
 
-async def test_snapshot_timeout_does_not_change_ack(
-    callback_client, callback_store, envelope, monkeypatch
+@pytest.mark.parametrize("invalid_body", [False, True])
+async def test_snapshot_timeout_rolls_back_diagnostics_without_changing_ack(
+    callback_client, callback_store, envelope, monkeypatch, caplog, invalid_body
 ):
-    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
 
-    calls = 0
+    from app.integrations import history
 
-    @asynccontextmanager
-    async def hanging():
-        await asyncio.Event().wait()
-        yield
+    deadline = asyncio.timeout(None)
+    original = history.write_record
 
-    def factory():
-        nonlocal calls
-        calls += 1
-        return hanging() if calls == 2 else callback_store()
+    async def blocked_write(*args, **kwargs):
+        record_id = await original(*args, **kwargs)
+        if kwargs["draft"].evidence_class == "DIAGNOSTIC":
+            # 在真实首条写入后触发截止，避免依赖数据库或主机的毫秒级时延。
+            deadline.reschedule(asyncio.get_running_loop().time())
+            await asyncio.Event().wait()
+        return record_id
 
-    monkeypatch.setattr(app.state, "callback_session_factory", factory)
-    monkeypatch.setattr(snapshots, "SNAPSHOT_TIMEOUT_S", 0.01)
-    response = await callback_client.post(PATH, json=envelope)
-    assert response.status_code == 422
-    assert len(await stored(callback_store, IntegrationExchange)) == 1
+    body = b"{}" if invalid_body else json.dumps(envelope).encode()
+    with monkeypatch.context() as patch:
+        patch.setattr(snapshots, "asyncio", SimpleNamespace(timeout=lambda _: deadline))
+        patch.setattr(history, "write_record", blocked_write)
+        response = await callback_client.post(PATH, content=body)
+    assert response.status_code == (400 if invalid_body else 422)
+    assert len(await stored(callback_store, IntegrationExchange)) == (0 if invalid_body else 1)
     assert await stored(callback_store, IntegrationRecord) == []
+    failures = [r for r in caplog.records if "callback snapshot failed" in r.getMessage()]
+    assert len(failures) == 1 and failures[0].error_type == "TimeoutError"
+
+    replay = await callback_client.post(PATH, content=body)
+    assert (replay.status_code, replay.content) == (response.status_code, response.content)
+    assert len(await stored(callback_store, IntegrationExchange)) == (0 if invalid_body else 1)
+    snapshot = (await stored(callback_store, IntegrationRecord))[0]
+    assert base64.b64decode(snapshot.body_b64) == body
 
 
 async def test_waiting_identity_can_take_over_after_winner_rolls_back(
