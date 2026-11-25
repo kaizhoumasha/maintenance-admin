@@ -399,10 +399,10 @@ async def test_random_same_intake_replays_across_workers_and_restart(
     apps = [make_peer(), make_peer()]
     barcode = "MOCK-REEL-001"
     original_id = str(uuid7())
-    draw = 9
+    draw = 19
 
     def choose(upper):
-        assert upper == 10
+        assert upper == 20
         return draw
 
     monkeypatch.setattr("app.businesses.xray.mock_wms.randbelow", choose)
