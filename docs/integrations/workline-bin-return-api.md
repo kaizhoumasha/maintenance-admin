@@ -32,7 +32,7 @@
 | C1 | ECS → WES | SCAN3 / SCAN_COMPLETED | 独立受理本点实际到位，保存原扫码并建立/识别当前回流；不向前追溯 |
 | C2 | WES → ECS | SCAN3 MOVE_FORWARD 或 MOVE_LEFT | 仅按本点条码/朝向规则分流，不检查上游任务、处置或命令结果，见[已确认 C02](#return-scan3) |
 | C3 | ECS → WES | SCAN4 / SCAN_COMPLETED | 首次有效到位即保存事件身份和时间；本点扫码/本次关联合法即可登记自身放行，不等 SCAN3 Result |
-| C4 | WES → ECS → WES | SCAN4 MOVE_FORWARD 或 MOVE_LEFT 及匹配 Result | 正常箱直行，异常箱左转到 NG。只有直行成功形成回架资格，NG 成功关闭原异常记录 |
+| C4 | WES → ECS → WES | SCAN4 MOVE_FORWARD 及匹配 Result；MOVE_LEFT 待现场准入 | 正常箱直行，异常箱左转到 NG 的能力须在现场准入后启用。只有直行成功形成回架资格，NG 成功关闭原异常记录 |
 | C5 | WES | 工作线 FIFO 候选冻结 | 按首次 SCAN4 到位顺序取物理队首的连续合格前缀；遇未决队头停止，不先筛 READY 跳箱，见[已确认 C01](#return-fifo) |
 | C6 | WES → WMS | [return_batch](#return-batch) | 当前面一段投料成功后的回箱机会、面末服务或纯回收面就绪；有合格候选且共享批次通道/本链前序允许 |
 | C7 | WMS → WES | READY / NO_BATCH | READY 冻结候选连续前缀和精确目标；NO_BATCH 确定当前面无法承接本次 FIFO 队首，结束本次回架服务，不定时重试 |
@@ -489,12 +489,12 @@ SCAN4 示例使用同线 STATION_SCAN12；KT18 对应 STATION_SCAN15/16。完整
 | SCAN3 无上游记录、上游决定未到或命令结果未知 | 按本点扫码照常处理，不等待上游补证 | 不将“没有上游授权”作为 HOLD 或 NG 的理由 |
 | SCAN3 重复事件/重新投入 | 按[已确认 C07](#return-rescan)区分原事件、同轮新尝试及新轮次 | 不向前追溯，不因重放反转方向或重复创建当前动作 |
 | SCAN4 合法首次到位，SCAN3 Result 未到 | 保存本点事实/首次顺序；本次关联及本点尝试合法则登记自身 MOVE_FORWARD | 无需等待 SCAN3 Result |
-| SCAN4 不可读、方向错误或缺少匹配的本轮 SCAN3 | 登记原 MOVE_LEFT 到 NG。匹配的 SUCCESS 关闭原异常记录，失败保留原结果 | 异常箱不进入回架分配，重报沿用原方向命令 |
+| SCAN4 不可读、方向错误或缺少匹配的本轮 SCAN3 | 现场准入前不激活 MOVE_LEFT。准入后的匹配 SUCCESS 关闭原异常记录，失败保留原结果 | 异常箱不进入回架分配，重报沿用原方向命令 |
 | SCAN4 本点扫码/本次关联及本点尝试合法 | 唯一 MOVE_FORWARD；本轮自身尝试匹配 SUCCESS 后具备批次资格 | 不表示已到最终取箱点；ACK、命令创建、其他轮次旧结果不构成当前资格 |
 | 本段原命令明确 FAILED 后本点真实重扫 | 满足 C07 全部门槛才建同轮新尝试，保留首次到位顺序 | 不自动重试，不修改原失败，不重复已有分配/搬运 |
 | 本段原命令超时或未知 | 保留原身份和证据，等待原事实；必要时人工搬离接管 | 不将超时当 FAILED，不因重扫自动重发 |
 
-Command 使用 `POST /api/v1/device/command`；Result 使用 `POST /api/v1/callback/result`，匹配原 command_code/device_code 并通过冻结附录。Result 与 Event 不互相替代。设备附录覆盖 SCAN3 和 SCAN4 的 MOVE_FORWARD/MOVE_LEFT 及对应 Event/Result。SCAN4 左转的 NG 到位和出口释放语义需要现场验收。对应 wire/空 params/Result 原关联基线采用用户确认已在联调服务器验证的 wes_backend manual-picking（见 [U04 源码映射](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#94-u04沿已验证-manual-picking-提取合同不重新设计)），不再把 params={} 笼统列为未确认；本项目按原字段适配，不照搬粗分 actual_qty 或旧业务授权门槛。具体提取/绑定清单已加入 [TODO](../../TODOS.md#公共回流设备附录与事件重报约定)，不重开 C07 已确认的业务边界。
+Command 使用 `POST /api/v1/device/command`；Result 使用 `POST /api/v1/callback/result`，匹配原 command_code/device_code 并通过冻结附录。Result 与 Event 不互相替代。设备附录当前覆盖 SCAN3 MOVE_LEFT 和 SCAN3/SCAN4 MOVE_FORWARD，SCAN4 MOVE_LEFT 待现场准入后再启用。SCAN4 左转的 NG 到位和出口释放语义需要现场验收。对应 wire/空 params/Result 原关联基线采用用户确认已在联调服务器验证的 wes_backend manual-picking（见 [U04 源码映射](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#94-u04沿已验证-manual-picking-提取合同不重新设计)），不再把 params={} 笼统列为未确认；本项目按原字段适配，不照搬粗分 actual_qty 或旧业务授权门槛。具体提取/绑定清单已加入 [TODO](../../TODOS.md#公共回流设备附录与事件重报约定)，不重开 C07 已确认的业务边界。
 
 <a id="return-rules"></a>
 ## 4. 公共规则与实现接缝

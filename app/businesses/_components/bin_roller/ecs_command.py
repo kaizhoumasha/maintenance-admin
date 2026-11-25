@@ -38,7 +38,7 @@ class MoveRight(BaseModel):
 
 @ecs_command(
     "MOVE_LEFT",
-    device_roles=("SCAN3", "SCAN4"),
+    device_roles=("SCAN3",),
     annex_id="bin_roller.move_left",
     annex_version="1",
     result=DirectionResult,

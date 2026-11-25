@@ -627,7 +627,7 @@ Transport 的 `CANCELLED` 是原搬运应用结果，不等于 `sorting.task.can
 
 公共结构见[交互索引](workline-business-api.md#ecs-消息信封)。Command 通过设备原冻结地址的 `POST /api/v1/device/command` 发送，Result 回到 `POST /api/v1/callback/result`。命令保存原 owner/call_key/command_code/device_code、参数、附录、timeout 和时间戳；重放取得原动作，不能换身份重做未知运动。
 
-公共方向动作 task_type 为 MOVE_FORWARD / MOVE_RIGHT / MOVE_LEFT，MOVE_LEFT 用于 SCAN3 和 SCAN4，priority 当前固定 1。HOLD、REQUEST_WMS、WORK_REQUIRED 只是本地分支，不注册成 ECS 命令。用户已确认 wes_backend manual-picking 的对应代码已在联调服务器验证：方向 params={}、原绑定冻结合同与 Result 信封/关联作为基线，见 [U04 源码映射](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#94-u04沿已验证-manual-picking-提取合同不重新设计)。BIN_Roller 已提取单份声明并合并，SMT 直接消费，不重新注册，也不新增未消费的扫码 Result 必填字段；正式业务绑定仍需独立验收。
+公共方向动作 task_type 为 MOVE_FORWARD / MOVE_RIGHT / MOVE_LEFT，MOVE_LEFT 当前只注册 SCAN3。SCAN4 MOVE_LEFT 保留为现场准入后的扩展，未通过现场验收前不激活。priority 当前固定 1。HOLD、REQUEST_WMS、WORK_REQUIRED 只是本地分支，不注册成 ECS 命令。用户已确认 wes_backend manual-picking 的对应代码已在联调服务器验证：方向 params={}、原绑定冻结合同与 Result 信封/关联作为基线，见 [U04 源码映射](../superpowers/specs/2026-10-30-bin-roller-capability-design.md#94-u04沿已验证-manual-picking-提取合同不重新设计)。BIN_Roller 已提取单份声明并合并，SMT 直接消费，不重新注册，也不新增未消费的扫码 Result 必填字段；正式业务绑定仍需独立验收。
 
 Result 必须匹配原 command_code、device_code 并通过原冻结合同验证。ACK 不表示物理完成；UNKNOWN/HELD、失败和超时不能合成为成功，也不复制原命令重发。业务读取公开结果，不按设备“最新命令”猜测关联。
 

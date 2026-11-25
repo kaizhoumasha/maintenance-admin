@@ -23,7 +23,6 @@ def test_roller_declares_one_scan_contract_and_exact_empty_directions():
         ("SCAN4", "MOVE_FORWARD"),
         ("SCAN1", "MOVE_RIGHT"),
         ("SCAN3", "MOVE_LEFT"),
-        ("SCAN4", "MOVE_LEFT"),
     }
     for command in (MoveForward, MoveLeft, MoveRight):
         assert command().model_dump() == {}
