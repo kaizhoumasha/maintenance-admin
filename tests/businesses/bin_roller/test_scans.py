@@ -23,6 +23,7 @@ def test_roller_declares_one_scan_contract_and_exact_empty_directions():
         ("SCAN4", "MOVE_FORWARD"),
         ("SCAN1", "MOVE_RIGHT"),
         ("SCAN3", "MOVE_LEFT"),
+        ("SCAN4", "MOVE_LEFT"),
     }
     for command in (MoveForward, MoveLeft, MoveRight):
         assert command().model_dump() == {}
@@ -39,6 +40,9 @@ def test_roller_declares_one_scan_contract_and_exact_empty_directions():
         ("SCAN3", "A000000001-B", False, "MOVE_FORWARD"),
         ("SCAN3", "A000000001-C", True, "MOVE_LEFT"),
         ("SCAN3", "NOREAD", True, "MOVE_LEFT"),
+        ("SCAN4", "A000000001-B", True, "MOVE_LEFT"),
+        ("SCAN4", "A000000001-C", True, "MOVE_LEFT"),
+        ("SCAN4", "NOREAD", True, "MOVE_LEFT"),
     ],
 )
 async def test_scan_direction_uses_only_local_suffix_and_current_task(
@@ -182,7 +186,8 @@ async def test_original_message_replay_keeps_receipt_owner_after_binding_change(
 
 
 @pytest.mark.parametrize("roller_store", ["postgres"], indirect=True)
-async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(roller_current):
+@pytest.mark.parametrize("point", ["SCAN2", "SCAN4"])
+async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(roller_current, point):
     import asyncio
 
     from sqlalchemy import select
@@ -205,7 +210,7 @@ async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(roller
                         await session.execute(select(flow.store.tables["bin_passage"]))
                         await asyncio.wait_for(barrier.wait(), 5)
                     attempts.append(attempt)
-                    await flow.scan("SCAN2", "A000000001-C", timestamp=timestamp, session=session)
+                    await flow.scan(point, "A000000001-C", timestamp=timestamp, session=session)
                 return
             except DBAPIError as error:
                 assert getattr(error.orig, "sqlstate", None) == "40001"
@@ -215,8 +220,18 @@ async def test_concurrent_equal_scans_with_distinct_digests_share_arrival(roller
     await asyncio.wait_for(asyncio.gather(receive(10), receive(20)), 15)
     async with flow.factory() as session:
         admitted = (await session.execute(select(flow.production_table))).all()
-        assert len(admitted) == 1
-        assert len([r for r in await flow.rows(session, "bin_passage") if r["scan2_event_id"]]) == 1
+        if point == "SCAN2":
+            assert len(admitted) == 1
+            assert (
+                len([r for r in await flow.rows(session, "bin_passage") if r["scan2_event_id"]])
+                == 1
+            )
+        else:
+            (diversion,) = await flow.rows(session, "bin_return")
+            assert (await flow.command(session, diversion["scan4_command_code"])).task_type == (
+                "MOVE_LEFT"
+            )
+            assert len(await flow.messages(session)) == 2
     assert 1 in attempts
 
 

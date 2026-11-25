@@ -33,11 +33,12 @@ async def candidates(flow):
         return await flow.roller.get_return_candidates(session, work_line_id=1)
 
 
-async def test_recorded_new_scan3_supersedes_old_unassociated_scan4_queue_shadow(roller_current):
+async def test_recorded_new_scan3_reentry_preserves_old_ng_diversion(roller_current):
     flow = roller_current
     raw = BAD["scan3_reentry"]["raw"]
     await flow.scan("SCAN4", raw, timestamp=1)
     orphan = (await flow.current_rows("bin_return"))[0]
+    await ready(flow, orphan)
     await flow.scan("SCAN3", raw, timestamp=10)
     other = await visit(flow, OTHER, 11)
     await ready(flow, other)
@@ -45,12 +46,13 @@ async def test_recorded_new_scan3_supersedes_old_unassociated_scan4_queue_shadow
     own = next(
         r
         for r in await flow.current_rows("bin_return")
-        if r["bin_code"] == raw[:-2] and r["is_current"]
+        if r["bin_code"] == raw[:-2] and r["is_current"] and r["closed_at"] is None
     )
     await ready(flow, own)
     assert [r["id"] for r in await candidates(flow)] == [other["id"], own["id"]]
     previous = next(r for r in await flow.current_rows("bin_return") if r["id"] == orphan["id"])
-    assert previous["close_reason"] == "SUPERSEDED" and previous["scan4_command_code"] is None
+    assert previous["close_reason"] == "NG_DIVERTED"
+    assert previous["scan4_command_code"] == orphan["scan4_command_code"]
     await flow.scan("SCAN4", raw, timestamp=1)
     assert (
         next(r for r in await flow.current_rows("bin_return") if r["id"] == orphan["id"])

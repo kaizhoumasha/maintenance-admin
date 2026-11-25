@@ -87,6 +87,10 @@ async def test_return_success_retires_original_scan4_position_atomically(roller_
         await flow.consume_return(session, face_id)
         assert (await flow.rows(session, "bin_return"))[0]["close_reason"] == "COMPLETED"
         assert await flow.roller.return_channel_empty(session, work_line_id=1)
+    await flow.scan("SCAN4", "A000000001-B", timestamp=100)
+    async with flow.factory() as session:
+        assert len(await flow.rows(session, "bin_return")) == 1
+        assert await flow.roller.return_channel_empty(session, work_line_id=1)
 
 
 async def test_partial_return_retires_only_known_departed_members(roller_return):

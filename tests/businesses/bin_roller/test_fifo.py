@@ -57,38 +57,37 @@ async def test_legacy_invalid_scan4_does_not_hold_back_candidates(roller_current
         ] == ["A000000001"]
 
 
-@pytest.mark.parametrize("existing_key", [False, True], ids=["new", "existing"])
-async def test_unmatched_valid_scan4_blocks_fifo_until_replaced(roller_current, existing_key):
+@pytest.mark.parametrize("status", ["SUCCESS", "FAILED"])
+async def test_unmatched_scan4_diverts_once_and_releases_fifo_only_after_success(
+    roller_current, status
+):
     flow = roller_current
-    await flow.scan("SCAN4", "A000000001-B", timestamp=1)
+    raw = "A000000001-B"
+    await flow.scan("SCAN4", raw, timestamp=1)
     observed = (await flow.current_rows("bin_return"))[0]
-    assert observed["return_state"] == "OBSERVED" and observed["scan4_command_code"] is None
-    if existing_key:
-        async with flow.factory.begin() as session:
-            await flow.roller.repository(1).update(
-                session,
-                "bin_return",
-                observed["id"],
-                first_scan4_event_id=observed["scan4_event_id"],
-                first_scan4_received_at=datetime.now(UTC),
-                fifo_visit_key=observed["scan4_visit_key"],
-            )
-    else:
-        assert observed["first_scan4_event_id"] == observed["scan4_event_id"]
+    code = observed["scan4_command_code"]
     async with flow.factory() as session:
+        assert (await flow.command(session, code)).task_type == "MOVE_LEFT"
         assert not await flow.roller.return_channel_empty(session, work_line_id=1)
-    await flow.current_bins(1, offset=1)
-    async with flow.factory() as session:
-        assert await flow.roller.get_return_candidates(session, work_line_id=1) == ()
 
-    await flow.scan("SCAN3", "A000000001-B", timestamp=30)
+    await flow.scan("SCAN4", raw, timestamp=2)
+    await flow.result(code, "SCAN4", status=status)
+    await flow.advance_current("RETURN", observed["id"])
+    await flow.scan("SCAN4", raw, timestamp=3)
     async with flow.factory() as session:
-        assert [
-            row["bin_code"]
-            for row in await flow.roller.get_return_candidates(session, work_line_id=1)
-        ] == ["A000000002"]
-        old = await flow.roller.original_record(session, "bin_return", observed["id"])
-        assert old["close_reason"] == "SUPERSEDED"
+        assert len(await flow.messages(session)) == 1
+        assert await flow.roller.return_channel_empty(session, work_line_id=1) == (
+            status == "SUCCESS"
+        )
+
+    await flow.current_bins(1, offset=1)
+    await flow.scan("SCAN4", raw, timestamp=1)
+    async with flow.factory() as session:
+        candidates = await flow.roller.get_return_candidates(session, work_line_id=1)
+        assert [row["bin_code"] for row in candidates] == (
+            ["A000000002"] if status == "SUCCESS" else []
+        )
+        assert len(await flow.messages(session)) == 3
 
 
 @pytest.mark.parametrize(

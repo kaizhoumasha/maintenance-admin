@@ -71,7 +71,9 @@ async def test_unassociated_scan4_keeps_fact_without_forcing_latest_round(roller
     rows = await flow.current_rows("bin_return")
     orphan = next(r for r in rows if r["bin_code"] == "A000000002")
     assert orphan["scan3_event_id"] is None and orphan["scan4_event_id"]
-    assert orphan["scan4_command_code"] is None and orphan["return_state"] == "OBSERVED"
+    assert orphan["return_state"] == "OBSERVED"
+    async with flow.factory() as session:
+        assert (await flow.command(session, orphan["scan4_command_code"])).task_type == "MOVE_LEFT"
 
 
 async def test_release_work_consumes_original_result_without_creating_a_command(roller_scans):
@@ -111,15 +113,25 @@ async def test_scan4_new_content_never_reexecutes_unresolved_or_successful_round
     )
 
 
-async def test_earlier_unassociated_scan4_does_not_bind_to_later_scan3_round(roller_current):
+@pytest.mark.parametrize("diverted", [False, True])
+async def test_new_scan3_starts_its_own_round_after_ng_result(roller_current, diverted):
     flow = roller_current
     await flow.scan("SCAN4", "A000000001-B", timestamp=10)
     orphan = (await flow.current_rows("bin_return"))[0]
+    if diverted:
+        await flow.result(orphan["scan4_command_code"], "SCAN4")
+        await flow.advance_current("RETURN", orphan["id"])
     await flow.scan("SCAN3", "A000000001-B", timestamp=20)
     await flow.scan("SCAN4", "A000000001-B", timestamp=30)
     unchanged = next(r for r in await flow.current_rows("bin_return") if r["id"] == orphan["id"])
-    assert unchanged["scan3_event_id"] is None and unchanged["scan4_command_code"] is None
+    assert unchanged["scan3_event_id"] is None
+    assert unchanged["scan4_command_code"] == orphan["scan4_command_code"]
     assert unchanged["first_scan4_event_id"] == orphan["scan4_event_id"]
     assert unchanged["fifo_visit_key"] == orphan["fifo_visit_key"]
     matching = next(r for r in await flow.current_rows("bin_return") if r["id"] != orphan["id"])
-    assert matching["scan4_command_code"] is None
+    if diverted:
+        async with flow.factory() as session:
+            command = await flow.command(session, matching["scan4_command_code"])
+            assert command.task_type == "MOVE_FORWARD"
+    else:
+        assert matching["scan4_command_code"] is None

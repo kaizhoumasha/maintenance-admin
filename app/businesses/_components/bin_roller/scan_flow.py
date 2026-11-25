@@ -163,11 +163,6 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
         return
     bin_code = bin_identity(payload.bin_code)
     task_scope = point in ("SCAN1", "SCAN2") and current.is_valid and current.task_id is not None
-    if task_scope:
-        scope = ScopeRef(repo.owner_domain, "TASK", current.task_id)
-    else:
-        line = await repo.line_state(ctx.session, start=True)
-        scope = ScopeRef(repo.owner_domain, "LINE", line["line_run_id"])
     row = None
     if point == "SCAN2" and task_scope and bin_code is not None:
         candidates = (
@@ -259,6 +254,18 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
                     )
                 )
                 return
+    if point == "SCAN4" and same and previous is not None and row is None:
+        # A terminal direction alone does not identify a new arrival at SCAN4.
+        ctx.bind_application(
+            EventApplicationRef(
+                key.upper(),
+                previous["id"],
+                previous_event.event_id,
+                previous_event.application_ref.predecessor_event_id,
+                previous_event.application_ref.separator_command_code,
+            )
+        )
+        return
     if point == "SCAN3" and valid_return:
         previous_rounds = (
             (
@@ -305,6 +312,11 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
                 fifo_visit_key=visit_key,
             )
     if row is None:
+        if task_scope:
+            scope = ScopeRef(repo.owner_domain, "TASK", current.task_id)
+        else:
+            line = await repo.line_state(ctx.session, start=True)
+            scope = ScopeRef(repo.owner_domain, "LINE", line["line_run_id"])
         values.update(id=str(uuid7()), **repo.scope, scope_id=scope.scope_id, bin_code=bin_code)
         if key == "bin_passage":
             values["scope_kind"] = scope.kind
@@ -345,10 +357,11 @@ async def accept_scan(roller, ctx: EcsEventContext, payload: ScanCompletedData):
             ctx.device_code,
             MoveForward() if valid_return else MoveLeft(),
         )
-    elif row["scan3_event_id"] is not None and valid_return:
-        await create_direction(
-            roller, ctx.session, repo, row, point, ctx.device_code, MoveForward()
+    else:
+        command = (
+            MoveForward() if row["scan3_event_id"] is not None and valid_return else MoveLeft()
         )
+        await create_direction(roller, ctx.session, repo, row, point, ctx.device_code, command)
     jobs = await roller.rack_dispatch.jobs(
         ctx.session,
         work_line_id=ctx.work_line_id,
@@ -444,11 +457,14 @@ async def consume_scan_result(roller, session, work):
         if (
             key == "bin_return"
             and point == "SCAN4"
+            and view.task_type == "MOVE_FORWARD"
             and row["return_state"] == "WAITING"
             and result.result == "SUCCESS"
         ):
             values["return_state"] = "READY"
         await repo.update(session, key, row["id"], **values)
+        if point == "SCAN4" and view.task_type == "MOVE_LEFT" and result.result == "SUCCESS":
+            await repo.close(session, key, row["id"], "NG_DIVERTED")
         status = result.result
     updated = await repo._one(session, repo.tables[key], repo.tables[key].c.id == row["id"])
     if (
