@@ -251,6 +251,8 @@ async def callback_effects(callback_db):
 @pytest.fixture
 async def callback_store(callback_db, monkeypatch, redis):
     monkeypatch.setattr(snapshots, "_windows", {})
+    # 内容合同不依赖 CI 调度速度；超时合同由受控截止时间的专项用例验证。
+    monkeypatch.setattr(snapshots, "SNAPSHOT_TIMEOUT_S", None)
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("callback must not access Redis rate limiting")
