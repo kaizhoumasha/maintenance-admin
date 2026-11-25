@@ -162,8 +162,13 @@ async def test_material_decide_supplies_target_when_plan_has_no_target(decided_o
         assert job.origin.source_kind == "AUTO_OUTBOUND_TARGET"
 
 
+@pytest.mark.parametrize(
+    "outbound_host", [("ARM02", "ARM01", "NO_TARGET", ("target", "NEW", "A"))], indirect=True
+)
 async def test_arm01_picks_before_material_decide_supplies_target(decided_outbound):
     host = decided_outbound
+    from app.businesses.smt_auto.outbound_racks import OutboundRacks
+
     async with host.factory.begin() as session:
         plan = await session.scalar(select(AutoTaskInput).where(AutoTaskInput.task_id == "t"))
         plan.effective_request = {
@@ -180,13 +185,17 @@ async def test_arm01_picks_before_material_decide_supplies_target(decided_outbou
         plate = await host.outbound.advance(
             session, work_line_id=1, plate_id=host.plate_id, now_ms=60
         )
-        assert plate.target_rack_job_id
+        await OutboundRacks(host.outbound, station_id="station").advance(
+            session, task_id="t", now_ms=61
+        )
         jobs = await host.dispatch.jobs(
             session, work_line_id=1, source_kinds=("AUTO_OUTBOUND_TARGET",)
         )
-        job = next(job for job in jobs if job.id == plate.target_rack_job_id)
-        assert job.origin.rack_id == "target"
-
+        job = next(job for job in jobs if job.origin.rack_id == "target")
+        plate = await host.outbound.advance(
+            session, work_line_id=1, plate_id=host.plate_id, now_ms=62
+        )
+        assert plate.target_rack_job_id == job.id
 
 @pytest.mark.parametrize(
     "decided_outbound",

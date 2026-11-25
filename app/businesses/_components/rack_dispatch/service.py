@@ -783,7 +783,13 @@ class RackDispatch:
         )
 
     async def point_vacant_for_entry(
-        self, session: AsyncSession, *, point: str, rack_id: str, exclude_job_id=None
+        self,
+        session: AsyncSession,
+        *,
+        point: str,
+        rack_id: str,
+        exclude_job_id=None,
+        allow_unobserved=False,
     ) -> bool:
         """An accepted departure alone does not prove the point is empty."""
         occupied = select(RackJob.id).where(
@@ -805,7 +811,7 @@ class RackDispatch:
             return False
         original = await self._latest_point_action(session, point)
         if original is None:
-            return False
+            return allow_unobserved
         job, action = original
         if (
             job.state != "COMPLETED"
