@@ -201,6 +201,18 @@ class OutboundRacks:
                 continue
             target = data["target_locator"]
             auth = RackAuthorization("PLATE_TARGET", plate.id)
+            earlier_plates = await session.scalars(
+                select(AutoOutboundPlate).where(
+                    AutoOutboundPlate.task_id == task_id,
+                    AutoOutboundPlate.id < plate.id,
+                )
+            )
+            if any(
+                earlier.report_message_id is not None
+                and earlier.report_consumed_at_ms is None
+                for earlier in earlier_plates
+            ):
+                continue
             target_jobs = [
                 job
                 for job in await self.dispatch.jobs(

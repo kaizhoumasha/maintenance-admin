@@ -549,7 +549,6 @@ class AutoRackPorts:
                         point=origin.point,
                         rack_id=origin.rack_id,
                         exclude_job_id=row.target_rack_job_id,
-                        allow_unobserved=True,
                     )
                 )
             ):
