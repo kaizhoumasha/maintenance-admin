@@ -208,8 +208,7 @@ class OutboundRacks:
                 )
             )
             if any(
-                earlier.report_message_id is not None
-                and earlier.report_consumed_at_ms is None
+                earlier.report_message_id is not None and earlier.report_consumed_at_ms is None
                 for earlier in earlier_plates
             ):
                 continue
