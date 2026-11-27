@@ -207,10 +207,16 @@ class OutboundRacks:
                     AutoOutboundPlate.id < plate.id,
                 )
             )
-            if any(
-                earlier.report_message_id is not None and earlier.report_consumed_at_ms is None
-                for earlier in earlier_plates
-            ):
+            wait_for_earlier = False
+            for earlier in earlier_plates:
+                if (
+                    earlier.report_message_id is not None
+                    and earlier.report_consumed_at_ms is None
+                    and not await self.outbound.closed(session, earlier)
+                ):
+                    wait_for_earlier = True
+                    break
+            if wait_for_earlier:
                 continue
             target_jobs = [
                 job
