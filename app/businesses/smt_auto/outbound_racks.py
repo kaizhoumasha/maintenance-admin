@@ -201,6 +201,36 @@ class OutboundRacks:
                 continue
             target = data["target_locator"]
             auth = RackAuthorization("PLATE_TARGET", plate.id)
+            earlier_plates = await session.scalars(
+                select(AutoOutboundPlate).where(
+                    AutoOutboundPlate.task_id == task_id,
+                    AutoOutboundPlate.id < plate.id,
+                )
+            )
+            wait_for_earlier = False
+            for earlier in earlier_plates:
+                if (
+                    earlier.report_message_id is not None
+                    and earlier.report_consumed_at_ms is None
+                    and not await self.outbound.closed(session, earlier)
+                ):
+                    wait_for_earlier = True
+                    break
+            if wait_for_earlier:
+                continue
+            target_jobs = [
+                job
+                for job in await self.dispatch.jobs(
+                    session,
+                    work_line_id=task.work_line_id,
+                    source_kinds=("AUTO_OUTBOUND_TARGET",),
+                )
+                if job.origin.task_id == task.task_id
+                and job.origin.point == points["TRANSFER_RACK"]
+                and job.origin.rack_id == target["rack_id"]
+                and job.state == "ACTIVE"
+                and job.pending
+            ]
             if (
                 preparation == "ROTATE"
                 and len(target_jobs) == 1
